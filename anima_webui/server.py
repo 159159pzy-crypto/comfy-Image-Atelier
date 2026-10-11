@@ -21,9 +21,17 @@ from .favorites import FavoritesService, favorite_key
 from .history import HistoryStore
 from .lora_triggers import LoraTriggerOverrideStore
 from .prompt_rules import PromptRuleStore
+from .prompt_pools import PromptPoolStore, parse_prompt_import
 from .runner import BatchConflict, BatchManager
 from .style_presets import StylePresetStore
 from .workflow import DEFAULT_SETTINGS, WorkflowError, WorkflowTemplates
+from .model_profiles import (
+    MODEL_PROFILE_IDS,
+    model_profile_defaults,
+    normalize_model_profile,
+    profile_public,
+)
+from .resource_profiles import RESOURCE_KINDS, ResourceProfileStore
 from .launcher import configure_resources
 
 
@@ -41,6 +49,8 @@ FAVORITES_KEY: web.AppKey[Any] = web.AppKey("favorites", object)
 STYLE_PRESETS_KEY: web.AppKey[Any] = web.AppKey("style_presets", object)
 LORA_TRIGGER_OVERRIDES_KEY: web.AppKey[Any] = web.AppKey("lora_trigger_overrides", object)
 PROMPT_RULES_KEY: web.AppKey[Any] = web.AppKey("prompt_rules", object)
+PROMPT_POOLS_KEY: web.AppKey[Any] = web.AppKey("prompt_pools", object)
+RESOURCE_PROFILES_KEY: web.AppKey[Any] = web.AppKey("resource_profiles", object)
 ALLOWED_HOSTNAMES_KEY: web.AppKey[frozenset[str]] = web.AppKey(
     "allowed_hostnames", frozenset
 )
@@ -55,6 +65,73 @@ def _hostname(value: str) -> str:
         return (urlsplit(target).hostname or "").lower()
     except ValueError:
         return ""
+
+
+def _find_inventory_model_match(requested: Any, candidates: list[str]) -> str | None:
+    """Resolve an exact model path or an unambiguous basename in an inventory."""
+    normalized = ResourceProfileStore.normalize_name(requested)
+    identity = normalized.casefold()
+    exact = [
+        candidate
+        for candidate in candidates
+        if ResourceProfileStore.normalize_name(candidate).casefold() == identity
+    ]
+    if exact:
+        return exact[0] if len(exact) == 1 else None
+    # A path-shaped request is an explicit path selection.  Do not silently
+    # redirect it to another directory; only legacy basename settings use the
+    # basename fallback.
+    if "/" in normalized:
+        return None
+    matches = [
+        candidate
+        for candidate in candidates
+        if ResourceProfileStore.normalize_name(candidate).rsplit("/", 1)[-1].casefold()
+        == identity
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _resolve_owned_model(
+    requested: Any,
+    model_names: list[str],
+    owners: dict[str, str | None],
+    profile: str,
+) -> str:
+    """Resolve and enforce the owner of the model selected by a request."""
+    normalized = ResourceProfileStore.normalize_name(requested)
+    identity = normalized.casefold()
+    exact = [
+        candidate
+        for candidate in model_names
+        if ResourceProfileStore.normalize_name(candidate).casefold() == identity
+    ]
+    if len(exact) > 1:
+        raise WorkflowError(f"主模型路径匹配不唯一: {normalized}")
+    if exact:
+        actual = exact[0]
+    elif "/" in normalized:
+        raise WorkflowError(f"主模型不存在于当前 ComfyUI 清单: {normalized}")
+    else:
+        basename_matches = [
+            candidate
+            for candidate in model_names
+            if ResourceProfileStore.normalize_name(candidate).rsplit("/", 1)[-1].casefold()
+            == identity
+        ]
+        if not basename_matches:
+            raise WorkflowError(f"主模型不存在于当前 ComfyUI 清单: {normalized}")
+        if len(basename_matches) != 1:
+            raise WorkflowError(f"主模型 basename 匹配不唯一: {normalized}")
+        actual = basename_matches[0]
+
+    assigned = owners.get(actual)
+    if assigned != profile:
+        owner_label = assigned if assigned is not None else "未分配"
+        raise WorkflowError(
+            f"主模型未归属 {profile} 档案 (当前归属 {owner_label}): {actual}"
+        )
+    return actual
 
 
 @web.middleware
@@ -120,6 +197,7 @@ def create_app(
     custom_prompts_path: str | Path | None = None,
     style_presets_path: str | Path | None = None,
     lora_trigger_overrides_path: str | Path | None = None,
+    resource_profiles_path: str | Path | None = None,
     prompt_replacements_path: str | Path | None = None,
     anima_tools_dir: str | Path | None = None,
     trusted_hostnames: set[str] | frozenset[str] | None = None,
@@ -145,9 +223,15 @@ def create_app(
     style_presets = StylePresetStore(
         style_presets_path or storage / "style_presets.json", prompt_rules
     )
+    prompt_pools = PromptPoolStore(storage / "prompt_pools.json")
+    resource_profiles = ResourceProfileStore(
+        resource_profiles_path or storage / "resource_profiles.json"
+    )
     templates = WorkflowTemplates.load(root / "templates")
     startup_defaults = configure_resources(templates, resource_paths)
-    manager = BatchManager(templates, history, client, catalog, prompt_rules)
+    manager = BatchManager(
+        templates, history, client, catalog, prompt_rules, prompt_pools
+    )
 
     startup_warnings = [
         *history.load_warnings,
@@ -155,6 +239,8 @@ def create_app(
         *style_presets.load_warnings,
         *lora_trigger_overrides.load_warnings,
         *prompt_rules.load_warnings,
+        *prompt_pools.load_warnings,
+        *resource_profiles.load_warnings,
     ]
 
     app = web.Application(middlewares=[error_middleware, local_only_middleware])
@@ -173,6 +259,8 @@ def create_app(
     app[STYLE_PRESETS_KEY] = style_presets
     app[LORA_TRIGGER_OVERRIDES_KEY] = lora_trigger_overrides
     app[PROMPT_RULES_KEY] = prompt_rules
+    app[PROMPT_POOLS_KEY] = prompt_pools
+    app[RESOURCE_PROFILES_KEY] = resource_profiles
 
     async def favorite_keys(section: str, collection: str = "") -> set[str] | None:
         if not collection:
@@ -216,6 +304,16 @@ def create_app(
     ) -> web.Response:
         """GET /api/pools 与 POST /api/pools/query 共用的参数归一化与搜索。"""
         try:
+            model_profile = normalize_model_profile(params.get("model_profile", "anima"))
+        except ValueError as error:
+            raise WorkflowError(str(error)) from error
+        if model_profile == "krea2":
+            # Krea 2 deliberately does not consume Anima's five taxonomy
+            # pools.  Returning their contents here would leak Anima entries
+            # into the profile namespace; callers should use
+            # /api/prompt-pools for Krea natural-language entries instead.
+            raise WorkflowError("Krea 2 使用独立自然语言提示词池")
+        try:
             page = int(params.get("page") or 1)
             limit = int(params.get("limit") or 48)
         except (TypeError, ValueError) as error:
@@ -252,6 +350,7 @@ def create_app(
         }
         params["page"] = request.query.get("page", "1")
         params["limit"] = request.query.get("limit", "48")
+        params["model_profile"] = request.query.get("model_profile", "anima")
         params["categories"] = request.query.getall("category", [])
         params["traits"] = request.query.getall("trait", [])
         return await _pool_response(request.match_info["section"], params, None)
@@ -259,6 +358,7 @@ def create_app(
     async def pool_query(request: web.Request) -> web.Response:
         body = await _json_body(request)
         params = dict(body)
+        params.setdefault("model_profile", "anima")
         params["categories"] = body.get("categories") if isinstance(body.get("categories"), list) else []
         params["traits"] = body.get("traits") if isinstance(body.get("traits"), list) else []
         selection = body.get("selection") if isinstance(body.get("selection"), dict) else None
@@ -440,12 +540,15 @@ def create_app(
             raise WorkflowError(f"LoRA 文件不存在: {target}")
         return matches[0], normalize_lora_path(matches[0]["filename"])
 
-    def _public_lora_item(item: dict[str, Any]) -> dict[str, Any]:
+    def _public_lora_item(
+        item: dict[str, Any], model_profile: str = "anima"
+    ) -> dict[str, Any]:
         value = dict(item)
         source_words = value.get("trigger_words") or []
         effective_words, overridden = lora_trigger_overrides.effective(
-            value["filename"], source_words
+            value["filename"], source_words, model_profile
         )
+        value["model_profile"] = model_profile
         value["source_trigger_words"] = source_words
         value["trigger_words"] = effective_words
         value["trigger_override"] = overridden
@@ -459,29 +562,65 @@ def create_app(
         )
         return value
 
-    async def loras(_: web.Request) -> web.Response:
+    async def loras(request: web.Request) -> web.Response:
+        model_profile = request.query.get("model_profile", "anima")
+        # Validation happens even when inventory is empty.
+        from .model_profiles import normalize_model_profile
+        try:
+            model_profile = normalize_model_profile(model_profile)
+        except ValueError as error:
+            raise WorkflowError(str(error)) from error
         inventory = await client.lora_inventory()
+        inventory_items = inventory.get("items") or []
+        # Keep the flat ComfyUI inventory private to the selected profile.  A
+        # one-time sync claims legacy files for Anima; files discovered later
+        # remain unassigned until the ownership endpoint is used.
+        lora_names = [item.get("filename") for item in inventory_items if item.get("filename")]
+        ownership = await resource_profiles.sync_inventory("loras", lora_names)
         public = {
             "items": [],
-            "count": inventory.get("count", 0),
+            "count": 0,
         }
-        for item in inventory.get("items") or []:
-            public["items"].append(_public_lora_item(item))
+        from .workflow import normalize_lora_path
+        for item in inventory_items:
+            filename = str(item.get("filename") or "")
+            canonical_filename = normalize_lora_path(filename)
+            if ownership.get(canonical_filename) != model_profile:
+                continue
+            public["items"].append(_public_lora_item(item, model_profile))
+        public["count"] = len(public["items"])
+        public["model_profile"] = model_profile
         return web.json_response(public)
 
     async def update_lora_triggers(request: web.Request) -> web.Response:
         body = await _json_body(request)
+        from .model_profiles import normalize_model_profile
+        try:
+            model_profile = normalize_model_profile(body.get("model_profile", "anima"))
+        except ValueError as error:
+            raise WorkflowError(str(error)) from error
         item, filename = await _lora_inventory_item(body.get("filename"))
-        words = await lora_trigger_overrides.set(filename, body.get("triggerWords"))
-        value = _public_lora_item({**item, "filename": filename})
+        words = await lora_trigger_overrides.set(
+            filename, body.get("triggerWords"), model_profile
+        )
+        value = _public_lora_item({**item, "filename": filename}, model_profile)
         value["trigger_words"] = words
         value["trigger_override"] = True
         return web.json_response(value)
 
     async def reset_lora_triggers(request: web.Request) -> web.Response:
+        from .model_profiles import normalize_model_profile
+        try:
+            model_profile = normalize_model_profile(
+                request.query.get("model_profile", "anima")
+            )
+        except ValueError as error:
+            raise WorkflowError(str(error)) from error
         item, filename = await _lora_inventory_item(request.query.get("filename"))
-        await lora_trigger_overrides.delete(filename)
-        return web.json_response(_public_lora_item({**item, "filename": filename}))
+        await lora_trigger_overrides.delete(filename, model_profile)
+        return web.json_response(
+            _public_lora_item({**item, "filename": filename}, model_profile)
+        )
 
     async def lora_preview(request: web.Request) -> web.Response:
         filename = request.query.get("filename")
@@ -494,11 +633,154 @@ def create_app(
             headers={"Cache-Control": cache_control},
         )
 
-    async def resources(_: web.Request) -> web.Response:
-        return web.json_response(await client.resource_inventory())
+    async def resources(request: web.Request) -> web.Response:
+        try:
+            selected_profile = normalize_model_profile(
+                request.query.get("model_profile", "anima")
+            )
+        except ValueError as error:
+            raise WorkflowError(str(error)) from error
+        inventory = await client.resource_inventory()
+        inventory.setdefault("clips", [])
+        inventory.setdefault("vaes", [])
+        inventory.setdefault("seedvr2_models", [])
+        inventory.setdefault("seedvr2_vaes", [])
+        inventory.setdefault("nodes", {})
+        inventory.setdefault("plugins", {})
+        model_names = [
+            resource_profiles.normalize_name(name)
+            for name in inventory.get("models") or []
+            if str(name).strip()
+        ]
+        full_inventory = dict(inventory)
+        full_inventory["models"] = model_names
+        model_ownership = await resource_profiles.sync_inventory("models", model_names)
+        inventory["model_assignments"] = {
+            name: model_ownership.get(name) for name in model_names
+        }
+        inventory["profile_models"] = {
+            profile_id: [
+                name for name in model_names if model_ownership.get(name) == profile_id
+            ]
+            for profile_id in MODEL_PROFILE_IDS
+        }
+        inventory["unassigned_models"] = [
+            name for name in model_names if model_ownership.get(name) is None
+        ]
+        # Preserve the existing compact inventory keys while making the
+        # profile-specific model dropdown safe by construction.
+        inventory["models"] = list(inventory["profile_models"].get(selected_profile, []))
+        inventory["model_profile"] = selected_profile
+        profile_details: dict[str, dict[str, Any]] = {}
+        for profile_id in MODEL_PROFILE_IDS:
+            profile_models = inventory["profile_models"][profile_id]
+            profile_inventory = {**full_inventory, "models": profile_models}
+            details = profile_public(profile_id, available=profile_inventory)
+            profile_model_name = details["model_name"]
+            resolved_model_name = _find_inventory_model_match(
+                profile_model_name, profile_models
+            )
+            if resolved_model_name is not None:
+                details["model_name"] = resolved_model_name
+            # profile_public's basename-aware resource check intentionally
+            # works for generic callers. Here ownership and ambiguity must be
+            # reflected too: only an exact or unique match in this profile's
+            # filtered list makes the default model available.
+            details["available"]["model"] = resolved_model_name is not None
+            if not details["available"]["model"] and profile_model_name not in details["missing"]:
+                details["missing"].append(profile_model_name)
+            profile_details[profile_id] = details
+        inventory["model_profiles"] = profile_details
+        return web.json_response(inventory)
 
-    async def list_style_presets(_: web.Request) -> web.Response:
-        return web.json_response(style_presets.list())
+    async def resource_ownership(request: web.Request) -> web.Response:
+        kind = request.query.get("kind", "models")
+        if kind not in RESOURCE_KINDS:
+            raise WorkflowError("kind 必须是 models 或 loras")
+        if kind == "models":
+            inventory = await client.resource_inventory()
+            names = [str(name) for name in inventory.get("models") or [] if str(name).strip()]
+        else:
+            inventory = await client.lora_inventory()
+            names = [
+                str(item.get("filename"))
+                for item in inventory.get("items") or []
+                if item.get("filename")
+            ]
+        await resource_profiles.sync_inventory(kind, names)
+        items = resource_profiles.ownership(kind, names)
+        return web.json_response(
+            {
+                "kind": kind,
+                "items": items,
+                "unassigned": [item for item in items if item["model_profile"] is None],
+                "assignments": {
+                    item["name"]: item["model_profile"] for item in items
+                },
+            }
+        )
+
+    async def update_resource_ownership(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        kind = resource_profiles.normalize_kind(body.get("kind", "models"))
+        if kind == "models":
+            inventory = await client.resource_inventory()
+            names = [str(name) for name in inventory.get("models") or [] if str(name).strip()]
+        else:
+            inventory = await client.lora_inventory()
+            names = [
+                str(value.get("filename"))
+                for value in inventory.get("items") or []
+                if value.get("filename")
+            ]
+        normalized_name = resource_profiles.normalize_name(body.get("name"))
+        if not any(
+            resource_profiles.normalize_name(name).casefold() == normalized_name.casefold()
+            for name in names
+        ):
+            raise WorkflowError(f"资源不存在于当前 ComfyUI 清单: {normalized_name}")
+        await resource_profiles.sync_inventory(kind, names)
+        item = await resource_profiles.assign(kind, normalized_name, body.get("model_profile"))
+        return web.json_response(item)
+
+    async def list_prompt_pool(request: web.Request) -> web.Response:
+        profile = request.query.get("model_profile", "krea2")
+        raw_selected = request.query.get("selected_ids", "")
+        selected_ids = [value for value in raw_selected.split(",") if value.strip()]
+        try:
+            page = int(request.query.get("page", "1"))
+            limit = int(request.query.get("limit", "48"))
+        except ValueError as error:
+            raise WorkflowError("提示词池分页参数无效") from error
+        return web.json_response(
+            prompt_pools.list(
+                profile,
+                query=request.query.get("q", ""),
+                page=page,
+                limit=limit,
+                selected_ids=selected_ids,
+            )
+        )
+
+    async def import_prompt_pool(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        unknown = set(body) - {"model_profile", "items", "content", "mode", "format"}
+        if unknown:
+            raise WorkflowError(f"提示词池导入包含未知字段: {', '.join(sorted(unknown))}")
+        profile = body.get("model_profile", "krea2")
+        raw = body.get("items", body.get("content", []))
+        items = parse_prompt_import(raw, str(body.get("format") or ""))
+        return web.json_response(
+            await prompt_pools.import_items(profile, items, mode=body.get("mode", "replace"))
+        )
+
+    async def delete_prompt_pool_item(request: web.Request) -> web.Response:
+        profile = request.query.get("model_profile", "krea2")
+        item_id = request.query.get("id")
+        return web.json_response(await prompt_pools.delete_item(profile, item_id))
+
+    async def list_style_presets(request: web.Request) -> web.Response:
+        return web.json_response(style_presets.list(request.query.get("model_profile")))
 
     async def create_style_preset(request: web.Request) -> web.Response:
         return web.json_response(await style_presets.create(await _json_body(request)), status=201)
@@ -536,14 +818,63 @@ def create_app(
 
     async def normalize_prompts(request: web.Request) -> web.Response:
         body = await _json_body(request)
-        unknown = set(body) - {"fields", "managedTriggers"}
+        unknown = set(body) - {"fields", "managedTriggers", "model_profile"}
         if unknown:
             raise WorkflowError(f"提示词规范请求包含未知参数: {', '.join(sorted(unknown))}")
-        return web.json_response(
-            prompt_rules.normalize_fields(
-                body.get("fields"), body.get("managedTriggers", [])
-            )
+        try:
+            profile = normalize_model_profile(body.get("model_profile", "anima"))
+        except ValueError as error:
+            raise WorkflowError(str(error)) from error
+        result = prompt_rules.normalize_fields(
+            body.get("fields"), body.get("managedTriggers", [])
         )
+        result["model_profile"] = profile
+        return web.json_response(result)
+
+    async def validate_resource_ownership(settings: dict[str, Any]) -> None:
+        """Reject stale or cross-profile model/LoRA selections at the API edge."""
+        try:
+            profile = normalize_model_profile(settings.get("model_profile", "anima"))
+        except ValueError as error:
+            raise WorkflowError(str(error)) from error
+        inventory = await client.resource_inventory()
+        model_names = [
+            resource_profiles.normalize_name(name)
+            for name in inventory.get("models") or []
+            if str(name).strip()
+        ]
+        model_owners = await resource_profiles.sync_inventory("models", model_names)
+        model_name = settings.get("model_name") or model_profile_defaults(profile)["model_name"]
+        settings["model_name"] = _resolve_owned_model(
+            model_name, model_names, model_owners, profile
+        )
+
+        lora_items = [
+            item
+            for item in (settings.get("loras") or [])
+            if isinstance(item, dict) and item.get("enabled")
+        ]
+        if not lora_items:
+            return
+        lora_inventory = await client.lora_inventory()
+        lora_names = [
+            str(item.get("filename"))
+            for item in lora_inventory.get("items") or []
+            if item.get("filename")
+        ]
+        lora_owners = await resource_profiles.sync_inventory("loras", lora_names)
+        for item in lora_items:
+            name = resource_profiles.normalize_name(item.get("filename"))
+            assigned = next(
+                (
+                    value
+                    for filename, value in lora_owners.items()
+                    if filename.casefold() == name.casefold()
+                ),
+                None,
+            )
+            if assigned != profile:
+                raise WorkflowError(f"LoRA 未归属 {profile} 档案: {name}")
 
     async def start_batch(request: web.Request) -> web.Response:
         await client.status()
@@ -551,6 +882,7 @@ def create_app(
         seeds = body.pop("seeds", None)  # 复现历史图片时携带固定种子,不属于 settings
         if resource_paths is not None:
             body = {**startup_defaults, **body}
+        await validate_resource_ownership(body)
         state = await manager.start(body, seeds=seeds)
         return web.json_response(state, status=201)
 
@@ -776,6 +1108,7 @@ def create_app(
                     "fixed_selection": fixed_selection,
                     "original_selection": context["selected"],
                 }
+        await validate_resource_ownership(settings)
         state = await manager.start(settings, seeds=seeds, regeneration=regeneration)
         return web.json_response(state, status=201)
 
@@ -828,6 +1161,11 @@ def create_app(
     app.router.add_put("/api/loras/triggers", update_lora_triggers)
     app.router.add_delete("/api/loras/triggers", reset_lora_triggers)
     app.router.add_get("/api/resources", resources)
+    app.router.add_get("/api/resource-ownership", resource_ownership)
+    app.router.add_put("/api/resource-ownership", update_resource_ownership)
+    app.router.add_get("/api/prompt-pools", list_prompt_pool)
+    app.router.add_post("/api/prompt-pools/import", import_prompt_pool)
+    app.router.add_delete("/api/prompt-pools/items", delete_prompt_pool_item)
     app.router.add_get("/api/style-presets", list_style_presets)
     app.router.add_post("/api/style-presets", create_style_preset)
     app.router.add_put("/api/style-presets/{preset_id}", update_style_preset)

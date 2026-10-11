@@ -128,7 +128,12 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
                 await Ready(config.ComfyUrl + "/system_stats", process, ct);
             }
             var nodes = await Json(config.ComfyUrl + "/object_info", ct) ?? throw new IOException("ComfyUI 节点清单不可读取。");
-            string[] core = ["UNETLoader", "CLIPLoader", "VAELoader", "KSampler", "SaveImage", "VAEDecode", "ImageScaleBy", "ImageUpscaleWithModel", "UpscaleModelLoader"];
+            // The v2 graph keeps SeedVR2, RTX and face refinement in optional
+            // groups.  Do not make their plugin classes (or the removed v1
+            // pixel-upscale/detailer classes) a startup prerequisite: the
+            // WebUI removes a disabled group before submission and reports an
+            // actionable resource issue only when the stage is enabled.
+            string[] core = ["UNETLoader", "CLIPLoader", "VAELoader", "KSampler", "KSamplerAdvanced", "VAEDecodeTiled", "EmptyLatentImage"];
             var missing = manifest.Nodes.SelectMany(n => n.RequiredClasses).Concat(core).Where(n => !nodes.TryGetProperty(n, out _)).ToArray();
             if (missing.Length > 0) throw new InvalidOperationException("缺少节点或导入失败：" + string.Join("、", missing));
             var bindings = ResourceBindings(nodes);
@@ -195,7 +200,15 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
     private static Dictionary<string, string> ResourceBindings(JsonElement nodes)
     {
         var bindings = new Dictionary<string, string>();
-        (string Node, string Input, string Name)[] required = [("UNETLoader", "unet_name", "miaomiaoHarem_anima14.safetensors"), ("CLIPLoader", "clip_name", "qwen_3_06b_base.safetensors"), ("VAELoader", "vae_name", "qwen_image_vae.safetensors"), ("UpscaleModelLoader", "model_name", "4x_foolhardy_Remacri.pth"), ("SAMLoader", "model_name", "sam_vit_b_01ec64.pth"), ("UltralyticsDetectorProvider", "model_name", "bbox/hand_yolov9c.pt"), ("UltralyticsDetectorProvider", "model_name", "bbox/face_yolov9c.pt"), ("UltralyticsDetectorProvider", "model_name", "bbox/Eyeful_v2-Individual.pt"), ("UltralyticsDetectorProvider", "model_name", "segm/ntd11_anime_nsfw_segm_v5-variant1.pt")];
+        (string Node, string Input, string Name, bool Required)[] required = [
+            ("UNETLoader", "unet_name", "anima-base-v1.0.safetensors", true),
+            ("UNETLoader", "unet_name", "krea2_turbo_int8_convrot.safetensors", false),
+            ("CLIPLoader", "clip_name", "qwen_3_06b_base.safetensors", true),
+            ("CLIPLoader", "clip_name", "qwen3vl_4b_fp8_scaled.safetensors", false),
+            ("VAELoader", "vae_name", "qwen_image_vae.safetensors", true),
+            ("UNETLoader", "unet_name", "seedvr2_3b_int8_convrot.safetensors", false),
+            ("VAELoader", "vae_name", "ema_vae_fp16.safetensors", false)
+        ];
         foreach (var item in required)
         {
             string[] values = [];
@@ -208,7 +221,7 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
             var matches = values.Where(x => Path.GetFileName(x.Replace('\\', '/')) == Path.GetFileName(item.Name)).ToArray();
             if (exact is not null) bindings[item.Name] = exact;
             else if (matches.Length == 1) bindings[item.Name] = matches[0].Replace('\\', '/');
-            else if (item.Node is "UNETLoader" or "CLIPLoader" or "VAELoader") throw new InvalidOperationException($"ComfyUI 未识别基础模型或存在同名歧义：{item.Name}，请刷新/重启后再试。");
+            else if (item.Required) throw new InvalidOperationException($"ComfyUI 未识别基础模型或存在同名歧义：{item.Name}，请刷新/重启后再试。");
         }
         return bindings;
     }

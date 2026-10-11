@@ -1,0 +1,2342 @@
+{
+  "72": {
+    "inputs": {
+      "__lm_autocomplete_meta_text": {
+        "version": 1,
+        "textWidgetName": "text"
+      },
+      "text": "",
+      "loras": {
+        "__value__": []
+      },
+      "model": [
+        "167:56",
+        0
+      ],
+      "clip": [
+        "167:57",
+        0
+      ]
+    },
+    "class_type": "Lora Loader (LoraManager)",
+    "_meta": {
+      "title": "Lora堆_1"
+    }
+  },
+  "76": {
+    "inputs": {
+      "resolution_json": "{\"version\":1,\"width\":1024,\"height\":1536}"
+    },
+    "class_type": "ResolutionPreset",
+    "_meta": {
+      "title": "📐 分辨率预设"
+    }
+  },
+  "168": {
+    "inputs": {
+      "value": "original, 1girl, blue_eyes, bow, capelet, closed_mouth, cowboy_shot, crossed_bangs, dress, frilled_capelet, frilled_hairband, frills, hair_between_eyes, hair_bow, hair_ornament, hairband, lace_background, lolita_fashion, lolita_hairband, long_hair, looking_ahead, multiple_hair_bows, signature, solo, white_background, white_bow, white_capelet, white_dress, white_hair, white_hairband, x_hair_ornament"
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "正面提示词（文本框右下角✨图标可展开进行提示词翻译和扩写以及打开标签工具）"
+    }
+  },
+  "207": {
+    "inputs": {
+      "value": 1
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "批量大小"
+    }
+  },
+  "224": {
+    "inputs": {},
+    "class_type": "QuickGroupManager",
+    "_meta": {
+      "title": "⚡ 快速组管理器-🎨文生图"
+    }
+  },
+  "243": {
+    "inputs": {
+      "__lm_autocomplete_meta_text": {
+        "version": 1,
+        "textWidgetName": "text"
+      },
+      "text": "",
+      "loras": {
+        "__value__": []
+      },
+      "model": [
+        "167:56",
+        0
+      ],
+      "clip": [
+        "167:57",
+        0
+      ]
+    },
+    "class_type": "Lora Loader (LoraManager)",
+    "_meta": {
+      "title": "Lora堆_2"
+    }
+  },
+  "250": {
+    "inputs": {
+      "value": "worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, sepia"
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "负面提示词"
+    }
+  },
+  "279": {
+    "inputs": {
+      "source": [
+        "276:271",
+        0
+      ]
+    },
+    "class_type": "PreviewAny",
+    "_meta": {
+      "title": "最终正面提示词（不含Lora触发词）"
+    }
+  },
+  "689": {
+    "inputs": {},
+    "class_type": "QuickGroupManager",
+    "_meta": {
+      "title": "⚡ 快速组管理器-📦可选"
+    }
+  },
+  "724": {
+    "inputs": {
+      "selection_payload_json": "{\"version\":1,\"separator\":\", \",\"selections\":[]}"
+    },
+    "class_type": "PromptSelector",
+    "_meta": {
+      "title": "📚 提示词选择器（固定前方）"
+    }
+  },
+  "725": {
+    "inputs": {
+      "selection_payload_json": "{\"version\":1,\"separator\":\", \",\"selections\":[]}"
+    },
+    "class_type": "PromptSelector",
+    "_meta": {
+      "title": "📚 提示词选择器（固定后方）"
+    }
+  },
+  "1059": {
+    "inputs": {
+      "images": [
+        "863:860",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "预览图像"
+    }
+  },
+  "1069": {
+    "inputs": {
+      "group_mode": true,
+      "default_active": true,
+      "allow_strength_adjustment": false,
+      "toggle_trigger_words": {
+        "__value__": []
+      },
+      "orinalMessage": "",
+      "trigger_words": [
+        "72",
+        2
+      ]
+    },
+    "class_type": "TriggerWord Toggle (LoraManager)",
+    "_meta": {
+      "title": "Lora堆_1 触发词管理"
+    }
+  },
+  "1071": {
+    "inputs": {
+      "group_mode": true,
+      "default_active": true,
+      "allow_strength_adjustment": false,
+      "toggle_trigger_words": {
+        "__value__": []
+      },
+      "orinalMessage": "",
+      "trigger_words": [
+        "243",
+        2
+      ]
+    },
+    "class_type": "TriggerWord Toggle (LoraManager)",
+    "_meta": {
+      "title": "Lora堆_2 触发词管理"
+    }
+  },
+  "1194": {
+    "inputs": {
+      "selection_payload_json": "{\"version\":1,\"separator\":\", \",\"selections\":[]}"
+    },
+    "class_type": "PromptSelector",
+    "_meta": {
+      "title": "📚 提示词选择器（OC）"
+    }
+  },
+  "167:56": {
+    "inputs": {
+      "unet_name": "anima-base-v1.0.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器"
+    }
+  },
+  "167:57": {
+    "inputs": {
+      "clip_name": "qwen_3_06b_base.safetensors",
+      "type": "stable_diffusion",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP"
+    }
+  },
+  "167:58": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "702:353": {
+    "inputs": {
+      "any_01": [
+        "701:1414",
+        1
+      ],
+      "any_02": [
+        "691:1413",
+        1
+      ],
+      "any_03": [
+        "702:835",
+        0
+      ]
+    },
+    "class_type": "Any Switch (rgthree)",
+    "_meta": {
+      "title": "Any Switch (rgthree)"
+    }
+  },
+  "702:835": {
+    "inputs": {
+      "image": "Aaalice_example.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "710:388": {
+    "inputs": {
+      "any_01": [
+        "1253:1416",
+        1
+      ],
+      "any_02": [
+        "704:1415",
+        1
+      ],
+      "any_03": [
+        "701:1414",
+        1
+      ],
+      "any_04": [
+        "691:1413",
+        1
+      ],
+      "any_05": [
+        "710:837",
+        0
+      ]
+    },
+    "class_type": "Any Switch (rgthree)",
+    "_meta": {
+      "title": "Any Switch (rgthree)"
+    }
+  },
+  "710:837": {
+    "inputs": {
+      "image": "Aaalice_example.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "863:859": {
+    "inputs": {
+      "signal": [
+        "701:1414",
+        1
+      ],
+      "any_input": [
+        "701:1414",
+        1
+      ]
+    },
+    "class_type": "ImpactIfNone",
+    "_meta": {
+      "title": "ImpactIfNone"
+    }
+  },
+  "863:860": {
+    "inputs": {
+      "switch": [
+        "863:859",
+        1
+      ],
+      "on_false": [
+        "863:862",
+        0
+      ],
+      "on_true": [
+        "863:859",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "切换"
+    }
+  },
+  "863:862": {
+    "inputs": {
+      "image": "Aaalice_example.jpg",
+      "upload": "image"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "1010:995": {
+    "inputs": {
+      "text": [
+        "1010:1083",
+        0
+      ],
+      "clip": [
+        "1010:1009",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码"
+    }
+  },
+  "1010:996": {
+    "inputs": {
+      "conditioning": [
+        "1010:1004",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "条件零化"
+    }
+  },
+  "1010:1002": {
+    "inputs": {
+      "switch": false,
+      "on_false": [
+        "1010:1004",
+        0
+      ],
+      "on_true": [
+        "1010:996",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "是否零化负面条件"
+    }
+  },
+  "1010:1004": {
+    "inputs": {
+      "text": [
+        "276:421",
+        0
+      ],
+      "clip": [
+        "1010:1009",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码"
+    }
+  },
+  "1010:1005": {
+    "inputs": {
+      "model": [
+        "1010:1008",
+        0
+      ]
+    },
+    "class_type": "ModelPassThrough",
+    "_meta": {
+      "title": "ModelPass"
+    }
+  },
+  "1010:1007": {
+    "inputs": {
+      "value": false
+    },
+    "class_type": "PrimitiveBoolean",
+    "_meta": {
+      "title": "使用Lora堆_2"
+    }
+  },
+  "1010:1008": {
+    "inputs": {
+      "switch": [
+        "1010:1007",
+        0
+      ],
+      "on_false": [
+        "72",
+        0
+      ],
+      "on_true": [
+        "243",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "切换"
+    }
+  },
+  "1010:1009": {
+    "inputs": {
+      "switch": [
+        "1010:1007",
+        0
+      ],
+      "on_false": [
+        "72",
+        1
+      ],
+      "on_true": [
+        "243",
+        1
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "切换"
+    }
+  },
+  "1010:1080": {
+    "inputs": {
+      "switch": [
+        "1010:1007",
+        0
+      ],
+      "on_false": [
+        "1069",
+        0
+      ],
+      "on_true": [
+        "1071",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "切换"
+    }
+  },
+  "1010:1083": {
+    "inputs": {
+      "string_a": [
+        "1010:1080",
+        0
+      ],
+      "string_b": [
+        "279",
+        0
+      ],
+      "delimiter": ", "
+    },
+    "class_type": "StringConcatenate",
+    "_meta": {
+      "title": "连接"
+    }
+  },
+  "1026:1011": {
+    "inputs": {
+      "text": [
+        "1026:1088",
+        0
+      ],
+      "clip": [
+        "1026:1025",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码"
+    }
+  },
+  "1026:1012": {
+    "inputs": {
+      "conditioning": [
+        "1026:1020",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "条件零化"
+    }
+  },
+  "1026:1018": {
+    "inputs": {
+      "switch": false,
+      "on_false": [
+        "1026:1020",
+        0
+      ],
+      "on_true": [
+        "1026:1012",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "是否零化负面条件"
+    }
+  },
+  "1026:1020": {
+    "inputs": {
+      "text": [
+        "276:421",
+        0
+      ],
+      "clip": [
+        "1026:1025",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码"
+    }
+  },
+  "1026:1021": {
+    "inputs": {
+      "model": [
+        "1026:1024",
+        0
+      ]
+    },
+    "class_type": "ModelPassThrough",
+    "_meta": {
+      "title": "ModelPass"
+    }
+  },
+  "1026:1023": {
+    "inputs": {
+      "value": false
+    },
+    "class_type": "PrimitiveBoolean",
+    "_meta": {
+      "title": "使用Lora堆_2"
+    }
+  },
+  "1026:1024": {
+    "inputs": {
+      "switch": [
+        "1026:1023",
+        0
+      ],
+      "on_false": [
+        "72",
+        0
+      ],
+      "on_true": [
+        "243",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "切换"
+    }
+  },
+  "1026:1025": {
+    "inputs": {
+      "switch": [
+        "1026:1023",
+        0
+      ],
+      "on_false": [
+        "72",
+        1
+      ],
+      "on_true": [
+        "243",
+        1
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "切换"
+    }
+  },
+  "1026:1085": {
+    "inputs": {
+      "switch": [
+        "1026:1023",
+        0
+      ],
+      "on_false": [
+        "1069",
+        0
+      ],
+      "on_true": [
+        "1071",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "切换"
+    }
+  },
+  "1026:1088": {
+    "inputs": {
+      "string_a": [
+        "1026:1085",
+        0
+      ],
+      "string_b": [
+        "279",
+        0
+      ],
+      "delimiter": ", "
+    },
+    "class_type": "StringConcatenate",
+    "_meta": {
+      "title": "连接"
+    }
+  },
+  "1214:1209": {
+    "inputs": {
+      "any_01": [
+        "704:1415",
+        1
+      ],
+      "any_02": [
+        "701:1414",
+        1
+      ],
+      "any_03": [
+        "691:1413",
+        1
+      ],
+      "any_04": [
+        "1214:1213",
+        0
+      ]
+    },
+    "class_type": "Any Switch (rgthree)",
+    "_meta": {
+      "title": "Any Switch (rgthree)"
+    }
+  },
+  "1214:1213": {
+    "inputs": {
+      "image": "Aaalice_example.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "1425:1419": {
+    "inputs": {
+      "any_01": [
+        "712:1417",
+        1
+      ],
+      "any_02": [
+        "1253:1416",
+        1
+      ],
+      "any_03": [
+        "704:1415",
+        1
+      ],
+      "any_04": [
+        "701:1414",
+        1
+      ],
+      "any_05": [
+        "691:1413",
+        1
+      ],
+      "any_06": [
+        "1425:1423",
+        0
+      ]
+    },
+    "class_type": "Any Switch (rgthree)",
+    "_meta": {
+      "title": "Any Switch (rgthree)"
+    }
+  },
+  "1425:1423": {
+    "inputs": {
+      "image": "Aaalice_example.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "712:394": {
+    "inputs": {
+      "width": [
+        "712:395",
+        0
+      ],
+      "height": [
+        "712:395",
+        1
+      ],
+      "batch_size": [
+        "712:395",
+        2
+      ],
+      "color": 0
+    },
+    "class_type": "EmptyImage",
+    "_meta": {
+      "title": "空图像"
+    }
+  },
+  "712:395": {
+    "inputs": {
+      "image": [
+        "710:388",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "获取图像尺寸"
+    }
+  },
+  "712:396": {
+    "inputs": {
+      "channel": "red",
+      "image": [
+        "712:394",
+        0
+      ]
+    },
+    "class_type": "ImageToMask",
+    "_meta": {
+      "title": "图像转换为遮罩"
+    }
+  },
+  "712:434": {
+    "inputs": {
+      "message": "SeedVR2放大完毕喵~",
+      "desktop_notification": true,
+      "sound": true,
+      "volume": 0.5,
+      "value": [
+        "712:1176",
+        0
+      ]
+    },
+    "class_type": "SimpleNotify",
+    "_meta": {
+      "title": "🔔 简易通知"
+    }
+  },
+  "712:714": {
+    "inputs": {
+      "image": [
+        "710:388",
+        0
+      ],
+      "alpha": [
+        "712:396",
+        0
+      ]
+    },
+    "class_type": "JoinImageWithAlpha",
+    "_meta": {
+      "title": "合并图像Alpha"
+    }
+  },
+  "712:715": {
+    "inputs": {
+      "vae_name": "ema_vae_fp16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "712:718": {
+    "inputs": {
+      "tile_size": 512,
+      "overlap": 128,
+      "temporal_size": 4096,
+      "temporal_overlap": 8,
+      "samples": [
+        "712:1208",
+        0
+      ],
+      "vae": [
+        "712:715",
+        0
+      ]
+    },
+    "class_type": "VAEDecodeTiled",
+    "_meta": {
+      "title": "VAE解码（分块）"
+    }
+  },
+  "712:720": {
+    "inputs": {
+      "resized_images": [
+        "712:1175",
+        0
+      ]
+    },
+    "class_type": "SeedVR2Preprocess",
+    "_meta": {
+      "title": "Pre-Process SeedVR2 Input"
+    }
+  },
+  "712:721": {
+    "inputs": {
+      "color_correction_method": "lab",
+      "images": [
+        "712:718",
+        0
+      ],
+      "original_resized_images": [
+        "712:720",
+        0
+      ]
+    },
+    "class_type": "SeedVR2PostProcessing",
+    "_meta": {
+      "title": "Post-Process SeedVR2 Output"
+    }
+  },
+  "712:722": {
+    "inputs": {
+      "model": [
+        "712:716",
+        0
+      ],
+      "vae_conditioning": [
+        "712:1177",
+        0
+      ]
+    },
+    "class_type": "SeedVR2Conditioning",
+    "_meta": {
+      "title": "Apply SeedVR2 Conditioning"
+    }
+  },
+  "712:907": {
+    "inputs": {
+      "value": 2
+    },
+    "class_type": "FloatConstant",
+    "_meta": {
+      "title": "放大倍数"
+    }
+  },
+  "712:1176": {
+    "inputs": {
+      "batch_size": 4096,
+      "images": [
+        "712:721",
+        0
+      ]
+    },
+    "class_type": "RebatchImages",
+    "_meta": {
+      "title": "重设图像批次"
+    }
+  },
+  "712:1177": {
+    "inputs": {
+      "tile_size": 512,
+      "overlap": 64,
+      "temporal_size": 64,
+      "temporal_overlap": 8,
+      "pixels": [
+        "712:720",
+        0
+      ],
+      "vae": [
+        "712:715",
+        0
+      ]
+    },
+    "class_type": "VAEEncodeTiled",
+    "_meta": {
+      "title": "VAE编码（分块）"
+    }
+  },
+  "712:1208": {
+    "inputs": {
+      "seed": 86360034436543,
+      "steps": 1,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "712:716",
+        0
+      ],
+      "positive": [
+        "712:722",
+        0
+      ],
+      "negative": [
+        "712:722",
+        1
+      ],
+      "latent_image": [
+        "712:1177",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器"
+    }
+  },
+  "712:716": {
+    "inputs": {
+      "unet_name": "seedvr2_3b_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器"
+    }
+  },
+  "712:1373": {
+    "inputs": {
+      "resize_type": "scale to multiple",
+      "resize_type.multiple": 16,
+      "scale_method": "lanczos",
+      "input": [
+        "712:719",
+        0
+      ]
+    },
+    "class_type": "ResizeImageMaskNode",
+    "_meta": {
+      "title": "调整图像/掩码大小"
+    }
+  },
+  "712:719": {
+    "inputs": {
+      "resize_type": "scale by multiplier",
+      "resize_type.multiplier": [
+        "712:907",
+        0
+      ],
+      "scale_method": "lanczos",
+      "input": [
+        "712:714",
+        0
+      ]
+    },
+    "class_type": "ResizeImageMaskNode",
+    "_meta": {
+      "title": "调整图像/掩码大小"
+    }
+  },
+  "712:1175": {
+    "inputs": {
+      "batch_size": 1,
+      "images": [
+        "712:1373",
+        0
+      ]
+    },
+    "class_type": "RebatchImages",
+    "_meta": {
+      "title": "重设图像批次"
+    }
+  },
+  "712:1112": {
+    "inputs": {
+      "enabled": true,
+      "filename_prefix": "ComfyUI",
+      "file_format": "png",
+      "lossless_webp": false,
+      "quality": 100,
+      "webp_method": 6,
+      "jpeg_subsampling": 0,
+      "embed_workflow": false,
+      "save_with_metadata": true,
+      "add_loras_to_prompt": true,
+      "add_counter_to_filename": true,
+      "save_as_recipe": false,
+      "images": [
+        "712:434",
+        0
+      ]
+    },
+    "class_type": "ConditionalSaveImage",
+    "_meta": {
+      "title": "💾 条件保存图像"
+    }
+  },
+  "712:1417": {
+    "inputs": {
+      "empty_cache": true,
+      "gc_collect": true,
+      "unload_all_models": false,
+      "image_pass": [
+        "712:1112",
+        0
+      ]
+    },
+    "class_type": "VRAM_Debug",
+    "_meta": {
+      "title": "VRAM Debug"
+    }
+  },
+  "701:537": {
+    "inputs": {
+      "randomize_percent": 50,
+      "auto_strength_factor": 1,
+      "strength": 20,
+      "noise_insert": "noise on beginning steps",
+      "steps_switchover_percent": 25,
+      "seed": [
+        "701:1242",
+        1
+      ],
+      "mask_starts_at": "beginning",
+      "mask_percent": 0,
+      "log_to_console": false,
+      "noise_distribution": "uniform",
+      "granularity": "values",
+      "conditioning": [
+        "1010:995",
+        0
+      ]
+    },
+    "class_type": "KreaSeedVarianceEnhancer",
+    "_meta": {
+      "title": "Seed Variance Enhancer - Krea 2 Turbo"
+    }
+  },
+  "701:538": {
+    "inputs": {
+      "switch": false,
+      "on_false": [
+        "1010:995",
+        0
+      ],
+      "on_true": [
+        "701:537",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "是否K2多样性增强"
+    }
+  },
+  "701:539": {
+    "inputs": {
+      "tile_size": 512,
+      "overlap": 64,
+      "temporal_size": 64,
+      "temporal_overlap": 8,
+      "samples": [
+        "701:1246",
+        0
+      ],
+      "vae": [
+        "167:58",
+        0
+      ]
+    },
+    "class_type": "VAEDecodeTiled",
+    "_meta": {
+      "title": "VAE解码（分块）"
+    }
+  },
+  "701:1242": {
+    "inputs": {
+      "expression": "a // 2",
+      "values.a": 0
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "数学表达式"
+    }
+  },
+  "701:1108": {
+    "inputs": {
+      "enabled": true,
+      "filename_prefix": "ComfyUI",
+      "file_format": "png",
+      "lossless_webp": false,
+      "quality": 100,
+      "webp_method": 6,
+      "jpeg_subsampling": 0,
+      "embed_workflow": false,
+      "save_with_metadata": true,
+      "add_loras_to_prompt": true,
+      "add_counter_to_filename": true,
+      "save_as_recipe": false,
+      "images": [
+        "701:697",
+        0
+      ]
+    },
+    "class_type": "ConditionalSaveImage",
+    "_meta": {
+      "title": "💾 条件保存图像"
+    }
+  },
+  "701:1414": {
+    "inputs": {
+      "empty_cache": true,
+      "gc_collect": true,
+      "unload_all_models": false,
+      "image_pass": [
+        "701:1108",
+        0
+      ]
+    },
+    "class_type": "VRAM_Debug",
+    "_meta": {
+      "title": "VRAM Debug"
+    }
+  },
+  "701:496": {
+    "inputs": {
+      "width": [
+        "76",
+        0
+      ],
+      "height": [
+        "76",
+        1
+      ],
+      "batch_size": [
+        "207",
+        0
+      ]
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "空Latent图像"
+    }
+  },
+  "701:697": {
+    "inputs": {
+      "switch": true,
+      "on_false": [
+        "701:543",
+        0
+      ],
+      "on_true": [
+        "701:1463",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "是否底图确认"
+    }
+  },
+  "701:1450": {
+    "inputs": {
+      "samples": [
+        "701:1245",
+        0
+      ],
+      "upscale_method": "bilinear",
+      "scale_by": 1.0
+    },
+    "class_type": "LatentUpscaleBy",
+    "_meta": {
+      "title": "潜空间放大（双采样底图）"
+    }
+  },
+  "701:1245": {
+    "inputs": {
+      "add_noise": "enable",
+      "noise_seed": 0,
+      "steps": [
+        "701:801",
+        0
+      ],
+      "cfg": 8,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "start_at_step": 0,
+      "end_at_step": [
+        "701:801",
+        0
+      ],
+      "return_with_leftover_noise": "enable",
+      "model": [
+        "1010:1005",
+        0
+      ],
+      "positive": [
+        "701:538",
+        0
+      ],
+      "negative": [
+        "1010:1002",
+        0
+      ],
+      "latent_image": [
+        "701:496",
+        0
+      ]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": {
+      "title": "K采样器（高级）"
+    }
+  },
+  "701:1246": {
+    "inputs": {
+      "add_noise": "enable",
+      "noise_seed": 0,
+      "steps": [
+        "701:801",
+        0
+      ],
+      "cfg": 8,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "start_at_step": [
+        "701:802",
+        0
+      ],
+      "end_at_step": [
+        "701:801",
+        0
+      ],
+      "return_with_leftover_noise": "disable",
+      "model": [
+        "1026:1021",
+        0
+      ],
+      "positive": [
+        "1026:1011",
+        0
+      ],
+      "negative": [
+        "1026:1018",
+        0
+      ],
+      "latent_image": [
+        "701:1450",
+        0
+      ]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": {
+      "title": "K采样器（高级）"
+    }
+  },
+  "701:801": {
+    "inputs": {
+      "value": 30
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "总步数"
+    }
+  },
+  "701:802": {
+    "inputs": {
+      "value": 15
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "采样器切换步数"
+    }
+  },
+  "701:543": {
+    "inputs": {
+      "message": "底图（双采样）生成完毕喵~",
+      "desktop_notification": true,
+      "sound": true,
+      "volume": 0.5,
+      "value": [
+        "701:539",
+        0
+      ]
+    },
+    "class_type": "SimpleNotify",
+    "_meta": {
+      "title": "🔔 简易通知"
+    }
+  },
+  "701:1463": {
+    "inputs": {
+      "selection_mode": "multiple",
+      "timeout": 300,
+      "timeout_action": "submit_all",
+      "images": [
+        "701:543",
+        0
+      ],
+      "instructions": [
+        "701:1462",
+        0
+      ]
+    },
+    "class_type": "AaaliceImagePicker",
+    "_meta": {
+      "title": "🖼️ Aaalice 图像选择器"
+    }
+  },
+  "701:1462": {
+    "inputs": {
+      "value": "# 选择你满意的图像👉\n\n- 通过调整“批次大小”参数，可以一次生成多张图像\n- 批次大小越大，越吃配置\n- 图像确认阶段可以通过参数关闭"
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "字符串（多行）"
+    }
+  },
+  "704:359": {
+    "inputs": {
+      "tile_size": 512,
+      "overlap": 64,
+      "temporal_size": 64,
+      "temporal_overlap": 8,
+      "samples": [
+        "704:1248",
+        0
+      ]
+    },
+    "class_type": "VAEDecodeTiled",
+    "_meta": {
+      "title": "VAE解码（分块）"
+    }
+  },
+  "704:427": {
+    "inputs": {
+      "message": "潜空间放大完毕喵~",
+      "desktop_notification": true,
+      "sound": true,
+      "volume": 0.5,
+      "value": [
+        "704:1183",
+        0
+      ]
+    },
+    "class_type": "SimpleNotify",
+    "_meta": {
+      "title": "🔔 简易通知"
+    }
+  },
+  "704:1181": {
+    "inputs": {
+      "batch_size": 1,
+      "images": [
+        "702:353",
+        0
+      ]
+    },
+    "class_type": "RebatchImages",
+    "_meta": {
+      "title": "重设图像批次"
+    }
+  },
+  "704:1183": {
+    "inputs": {
+      "batch_size": 4096,
+      "images": [
+        "704:359",
+        0
+      ]
+    },
+    "class_type": "RebatchImages",
+    "_meta": {
+      "title": "重设图像批次"
+    }
+  },
+  "704:1248": {
+    "inputs": {
+      "seed": 0,
+      "steps": 20,
+      "cfg": 8,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "latent_image": [
+        "704:1064",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器"
+    }
+  },
+  "704:1182": {
+    "inputs": {
+      "tile_size": 512,
+      "overlap": 64,
+      "temporal_size": 64,
+      "temporal_overlap": 8,
+      "pixels": [
+        "704:1181",
+        0
+      ]
+    },
+    "class_type": "VAEEncodeTiled",
+    "_meta": {
+      "title": "VAE编码（分块）"
+    }
+  },
+  "704:1064": {
+    "inputs": {
+      "samples": [
+        "704:1182",
+        0
+      ],
+      "upscale_method": "bilinear",
+      "scale_by": 1.0
+    },
+    "class_type": "LatentUpscaleBy",
+    "_meta": {
+      "title": "潜空间放大"
+    }
+  },
+  "704:1415": {
+    "inputs": {
+      "empty_cache": true,
+      "gc_collect": true,
+      "unload_all_models": false,
+      "image_pass": [
+        "704:1109",
+        0
+      ]
+    },
+    "class_type": "VRAM_Debug",
+    "_meta": {
+      "title": "VRAM Debug"
+    }
+  },
+  "704:1109": {
+    "inputs": {
+      "enabled": true,
+      "filename_prefix": "ComfyUI",
+      "file_format": "png",
+      "lossless_webp": false,
+      "quality": 100,
+      "webp_method": 6,
+      "jpeg_subsampling": 0,
+      "embed_workflow": false,
+      "save_with_metadata": true,
+      "add_loras_to_prompt": true,
+      "add_counter_to_filename": true,
+      "save_as_recipe": false,
+      "images": [
+        "704:427",
+        0
+      ]
+    },
+    "class_type": "ConditionalSaveImage",
+    "_meta": {
+      "title": "💾 条件保存图像"
+    }
+  },
+  "276:164": {
+    "inputs": {
+      "rule": "扩写-通用",
+      "custom_rule": false,
+      "custom_rule_content": "",
+      "user_prompt": "",
+      "llm_service": "智谱/glm-4.5-flash",
+      "ollama_auto_unload": true,
+      "seed": 1717233,
+      "source_text": [
+        "276:1198",
+        0
+      ]
+    },
+    "class_type": "PromptExpand",
+    "_meta": {
+      "title": "✨提示词优化"
+    }
+  },
+  "276:265": {
+    "inputs": {
+      "any_03": [
+        "168",
+        0
+      ]
+    },
+    "class_type": "Any Switch (rgthree)",
+    "_meta": {
+      "title": "Any Switch (rgthree)"
+    }
+  },
+  "276:271": {
+    "inputs": {
+      "switch": false,
+      "on_false": [
+        "276:1198",
+        0
+      ],
+      "on_true": [
+        "276:164",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "是否优化提示词"
+    }
+  },
+  "276:416": {
+    "inputs": {
+      "source": [
+        "276:729",
+        0
+      ]
+    },
+    "class_type": "PreviewAny",
+    "_meta": {
+      "title": "基础正面"
+    }
+  },
+  "276:421": {
+    "inputs": {
+      "source": [
+        "250",
+        0
+      ]
+    },
+    "class_type": "PreviewAny",
+    "_meta": {
+      "title": "预览任意"
+    }
+  },
+  "276:728": {
+    "inputs": {
+      "string_a": [
+        "724",
+        0
+      ],
+      "string_b": [
+        "276:265",
+        0
+      ],
+      "delimiter": ", "
+    },
+    "class_type": "StringConcatenate",
+    "_meta": {
+      "title": "连接"
+    }
+  },
+  "276:729": {
+    "inputs": {
+      "string_a": [
+        "276:728",
+        0
+      ],
+      "string_b": [
+        "725",
+        0
+      ],
+      "delimiter": ", "
+    },
+    "class_type": "StringConcatenate",
+    "_meta": {
+      "title": "连接"
+    }
+  },
+  "276:1195": {
+    "inputs": {
+      "rule": "扩写-通用",
+      "custom_rule": true,
+      "custom_rule_content": "你是一位专业的 AI 绘图提示词角色替换专家，专门负责把别人的角色提示词一键替换成用户的 OC。\n\n### 你的任务\n用户会给你一段文本，里面包含三部分信息：\n1. 原始绘图提示词（别人的串串）\n2. 用户的 OC 设定（完整人物描述）\n3. 需要替换的内容（例如：眼睛、发型发色、身高、体型、衣服、配饰等）\n\n你需要精准地把原始提示词里的人物特征，替换成用户 OC 对应的特征，同时保留原始提示词中的构图、姿势、表情、场景、光影、画风、质量词等所有非人物本体的部分。\n\n### 执行规则（必须严格遵守）\n1. **只替换人物本体相关描述**，包括但不限于：\n   - 外貌（脸型、眼睛、瞳色、发型、发色、发长、皮肤、身高、体型、胸部、腿部等）\n   - 服装与配饰\n   - 标志性特征（疤痕、纹身、角、耳朵、尾巴等）\n   - 年龄感、气质相关描述（如果用户指定了要替换）\n\n2. **绝对保留**以下内容，不要改动：\n   - 姿势、动作、表情\n   - 构图、视角、镜头\n   - 场景、背景、环境\n   - 光影、氛围、色调\n   - 画风、画师、质量标签（masterpiece, best quality, highly detailed 等）\n   - 其他与人物本体无关的修饰词\n\n3. 替换时要自然融合，使新提示词读起来流畅，不要生硬堆砌。优先使用 OC 设定里更精确、更完整的描述覆盖原描述。\n\n4. 如果用户指定了“要替换的内容”，则只替换这些部分；如果用户没有明确指定，则默认替换所有人物外貌与服装相关描述。\n\n5. **输出格式强制要求（最高优先级）**：\n   - 只输出最终替换后的完整提示词\n   - 必须是纯英文\n   - 禁止输出任何中文\n   - 禁止添加任何解释、备注、前后缀、标题、思考过程或额外文字\n   - 直接输出一行或多行纯英文提示词即可，不要用代码块包裹\n\n### 输入示例结构（用户可能这样给你）\n原始提示词：\n1girl, long blonde hair, blue eyes, white dress, standing in forest, looking at viewer, masterpiece, best quality\n\nOC设定：\n黑长直，红色眼睛，冷白皮，高挑身材，穿着黑色高领毛衣和百褶裙，左耳有银色耳钉\n\n要替换的内容：\n发型发色、眼睛、衣服",
+      "user_prompt": [
+        "276:1201",
+        0
+      ],
+      "llm_service": "智谱/glm-4.5-flash",
+      "ollama_auto_unload": true,
+      "seed": 1717233,
+      "source_text": [
+        "276:416",
+        0
+      ]
+    },
+    "class_type": "PromptExpand",
+    "_meta": {
+      "title": "✨提示词优化（OC替换）"
+    }
+  },
+  "276:1196": {
+    "inputs": {
+      "value": [
+        "1194",
+        0
+      ]
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "OC"
+    }
+  },
+  "276:1197": {
+    "inputs": {
+      "value": ""
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "要替换的特征类型"
+    }
+  },
+  "276:1198": {
+    "inputs": {
+      "switch": false,
+      "on_false": [
+        "276:416",
+        0
+      ],
+      "on_true": [
+        "276:1195",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "是否替换OC"
+    }
+  },
+  "276:1199": {
+    "inputs": {
+      "string_a": "## 用户的OC角色设定：",
+      "string_b": [
+        "276:1196",
+        0
+      ],
+      "delimiter": ""
+    },
+    "class_type": "StringConcatenate",
+    "_meta": {
+      "title": "连接"
+    }
+  },
+  "276:1200": {
+    "inputs": {
+      "string_a": "## 需要使用OC替换原始提示词的特征类型：",
+      "string_b": [
+        "276:1197",
+        0
+      ],
+      "delimiter": ""
+    },
+    "class_type": "StringConcatenate",
+    "_meta": {
+      "title": "连接"
+    }
+  },
+  "276:1201": {
+    "inputs": {
+      "string_a": [
+        "276:1199",
+        0
+      ],
+      "string_b": [
+        "276:1200",
+        0
+      ],
+      "delimiter": ""
+    },
+    "class_type": "StringConcatenate",
+    "_meta": {
+      "title": "连接"
+    }
+  },
+  "1253:1259": {
+    "inputs": {
+      "batch_size": 1,
+      "images": [
+        "1214:1209",
+        0
+      ]
+    },
+    "class_type": "RebatchImages",
+    "_meta": {
+      "title": "重设图像批次"
+    }
+  },
+  "1253:1260": {
+    "inputs": {
+      "batch_size": 4096,
+      "images": [
+        "1253:1215",
+        0
+      ]
+    },
+    "class_type": "RebatchImages",
+    "_meta": {
+      "title": "重设图像批次"
+    }
+  },
+  "1253:1261": {
+    "inputs": {
+      "message": "潜空间放大完毕喵~",
+      "desktop_notification": true,
+      "sound": true,
+      "volume": 0.5,
+      "value": [
+        "1253:1260",
+        0
+      ]
+    },
+    "class_type": "SimpleNotify",
+    "_meta": {
+      "title": "🔔 简易通知"
+    }
+  },
+  "1253:1215": {
+    "inputs": {
+      "steps": 8,
+      "cfg_scale": 1,
+      "sampler": "res_2m_ode",
+      "scheduler": "beta57",
+      "denoise_strength": 0.3,
+      "seed": 926298146903999,
+      "face_selection": 0,
+      "detection_confidence": 0.75,
+      "manual_rotation": "None",
+      "processing_resolution": 1024,
+      "enable_pre_upscale": true,
+      "upscaler_model": "Fast 4x (Lanczos)",
+      "crop_padding": 1.6,
+      "face_positive_prompt": "",
+      "replace_positive_prompt": false,
+      "face_negative_prompt": "",
+      "replace_negative_prompt": false,
+      "exclusions": "",
+      "blend_softness": 8,
+      "mask_expansion": 2,
+      "sampling_mask_blur_size": 21,
+      "sampling_mask_blur_strength": 1,
+      "enable_color_correction": true,
+      "enable_segmentation": true,
+      "enable_differential_diffusion": true,
+      "enable_lightness_rescue": true,
+      "enable_final_refinement": true,
+      "offload_models_to_cpu": true,
+      "image": [
+        "1253:1259",
+        0
+      ]
+    },
+    "class_type": "ForbiddenVisionFaceProcessorIntegrated",
+    "_meta": {
+      "title": "Forbidden Vision 🎯 Fixer"
+    }
+  },
+  "1253:1357": {
+    "inputs": {
+      "prefix": "",
+      "suffix": "",
+      "input": "beta57"
+    },
+    "class_type": "SomethingToString",
+    "_meta": {
+      "title": "Something To String"
+    }
+  },
+  "1253:1250": {
+    "inputs": {
+      "mask": [
+        "1253:1215",
+        3
+      ]
+    },
+    "class_type": "MaskPreview",
+    "_meta": {
+      "title": "预览遮罩"
+    }
+  },
+  "1253:1364": {
+    "inputs": {
+      "prefix": "",
+      "suffix": "",
+      "input": [
+        "1253:1363",
+        0
+      ]
+    },
+    "class_type": "SomethingToString",
+    "_meta": {
+      "title": "Something To String"
+    }
+  },
+  "1253:1366": {
+    "inputs": {
+      "prefix": "",
+      "suffix": "",
+      "input": [
+        "1253:1363",
+        1
+      ]
+    },
+    "class_type": "SomethingToString",
+    "_meta": {
+      "title": "Something To String"
+    }
+  },
+  "1253:1363": {
+    "inputs": {
+      "image": [
+        "1253:1261",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "获取图像尺寸"
+    }
+  },
+  "1253:1355": {
+    "inputs": {
+      "switch": false,
+      "on_false": [
+        "1069",
+        0
+      ],
+      "on_true": [
+        "1069",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "切换"
+    }
+  },
+  "1253:1353": {
+    "inputs": {
+      "string_a": [
+        "1253:1355",
+        0
+      ],
+      "string_b": [
+        "279",
+        0
+      ],
+      "delimiter": ", "
+    },
+    "class_type": "StringConcatenate",
+    "_meta": {
+      "title": "连接"
+    }
+  },
+  "1253:1365": {
+    "inputs": {
+      "delimiter": "x",
+      "string1": [
+        "1253:1364",
+        0
+      ],
+      "string2": [
+        "1253:1366",
+        0
+      ]
+    },
+    "class_type": "JoinStrings",
+    "_meta": {
+      "title": "Join Strings"
+    }
+  },
+  "1253:1350": {
+    "inputs": {
+      "prompt": [
+        "1253:1353",
+        0
+      ],
+      "negative_prompt": [
+        "276:421",
+        0
+      ],
+      "seed": 926298146903999,
+      "steps": 8,
+      "cfg_scale": 1,
+      "sampler": "res_2m_ode",
+      "scheduler": [
+        "1253:1357",
+        0
+      ],
+      "model": [
+        "1253:1371",
+        0
+      ],
+      "loras": [
+        "1253:1360",
+        0
+      ],
+      "size": [
+        "1253:1365",
+        0
+      ],
+      "clip_skip": 1,
+      "additional_data": ""
+    },
+    "class_type": "Metadata Overwrite (LoraManager)",
+    "_meta": {
+      "title": "Metadata Overwrite (LoraManager)"
+    }
+  },
+  "1253:1371": {
+    "inputs": {},
+    "class_type": "ModelPassThrough",
+    "_meta": {
+      "title": "ModelPass"
+    }
+  },
+  "1253:1360": {
+    "inputs": {
+      "switch": false,
+      "on_false": [
+        "72",
+        3
+      ],
+      "on_true": [
+        "243",
+        3
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "切换"
+    }
+  },
+  "1253:1262": {
+    "inputs": {
+      "enabled": true,
+      "filename_prefix": "ComfyUI",
+      "file_format": "png",
+      "lossless_webp": false,
+      "quality": 100,
+      "webp_method": 6,
+      "jpeg_subsampling": 0,
+      "embed_workflow": false,
+      "save_with_metadata": true,
+      "add_loras_to_prompt": true,
+      "add_counter_to_filename": true,
+      "save_as_recipe": false,
+      "images": [
+        "1253:1261",
+        0
+      ],
+      "metadata": [
+        "1253:1350",
+        0
+      ]
+    },
+    "class_type": "ConditionalSaveImage",
+    "_meta": {
+      "title": "💾 条件保存图像"
+    }
+  },
+  "1253:1416": {
+    "inputs": {
+      "empty_cache": true,
+      "gc_collect": true,
+      "unload_all_models": false,
+      "image_pass": [
+        "1253:1262",
+        0
+      ]
+    },
+    "class_type": "VRAM_Debug",
+    "_meta": {
+      "title": "VRAM Debug"
+    }
+  },
+  "1432:1444": {
+    "inputs": {
+      "message": "SeedVR2放大完毕喵~",
+      "desktop_notification": true,
+      "sound": true,
+      "volume": 0.5,
+      "value": [
+        "1432:1445",
+        0
+      ]
+    },
+    "class_type": "SimpleNotify",
+    "_meta": {
+      "title": "🔔 简易通知"
+    }
+  },
+  "1432:1446": {
+    "inputs": {
+      "enabled": true,
+      "filename_prefix": "ComfyUI",
+      "file_format": "png",
+      "lossless_webp": false,
+      "quality": 100,
+      "webp_method": 6,
+      "jpeg_subsampling": 0,
+      "embed_workflow": false,
+      "save_with_metadata": true,
+      "add_loras_to_prompt": true,
+      "add_counter_to_filename": true,
+      "save_as_recipe": false,
+      "images": [
+        "1432:1444",
+        0
+      ]
+    },
+    "class_type": "ConditionalSaveImage",
+    "_meta": {
+      "title": "💾 条件保存图像"
+    }
+  },
+  "1432:1448": {
+    "inputs": {
+      "batch_size": 1,
+      "images": [
+        "1425:1419",
+        0
+      ]
+    },
+    "class_type": "RebatchImages",
+    "_meta": {
+      "title": "重设图像批次"
+    }
+  },
+  "1432:1447": {
+    "inputs": {
+      "empty_cache": true,
+      "gc_collect": true,
+      "unload_all_models": false,
+      "image_pass": [
+        "1432:1446",
+        0
+      ]
+    },
+    "class_type": "VRAM_Debug",
+    "_meta": {
+      "title": "VRAM Debug"
+    }
+  },
+  "1432:1445": {
+    "inputs": {
+      "batch_size": 4096,
+      "images": [
+        "1432:1492",
+        0
+      ]
+    },
+    "class_type": "RebatchImages",
+    "_meta": {
+      "title": "重设图像批次"
+    }
+  },
+  "1432:1418": {
+    "inputs": {
+      "resize_type": "scale by multiplier",
+      "resize_type.scale": 2,
+      "quality": "ULTRA",
+      "images": [
+        "1432:1448",
+        0
+      ]
+    },
+    "class_type": "RTXVideoSuperResolution",
+    "_meta": {
+      "title": "RTX Video Super Resolution"
+    }
+  },
+  "1432:1492": {
+    "inputs": {
+      "image": [
+        "1432:1418",
+        0
+      ],
+      "upscale_method": "lanczos",
+      "scale_by": 1.0
+    },
+    "class_type": "ImageScaleBy",
+    "_meta": {
+      "title": "N卡放大输出"
+    }
+  },
+  "691:158": {
+    "inputs": {
+      "randomize_percent": 50,
+      "auto_strength_factor": 1,
+      "strength": 20,
+      "noise_insert": "noise on beginning steps",
+      "steps_switchover_percent": 25,
+      "seed": [
+        "691:1241",
+        1
+      ],
+      "mask_starts_at": "beginning",
+      "mask_percent": 0,
+      "log_to_console": false,
+      "noise_distribution": "uniform",
+      "granularity": "values"
+    },
+    "class_type": "KreaSeedVarianceEnhancer",
+    "_meta": {
+      "title": "Seed Variance Enhancer - Krea 2 Turbo"
+    }
+  },
+  "691:213": {
+    "inputs": {
+      "switch": false,
+      "on_true": [
+        "691:158",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "是否K2多样性增强"
+    }
+  },
+  "691:239": {
+    "inputs": {
+      "tile_size": 512,
+      "overlap": 64,
+      "temporal_size": 64,
+      "temporal_overlap": 8,
+      "samples": [
+        "691:1240",
+        0
+      ]
+    },
+    "class_type": "VAEDecodeTiled",
+    "_meta": {
+      "title": "VAE解码（分块）"
+    }
+  },
+  "691:688": {
+    "inputs": {
+      "switch": true,
+      "on_false": [
+        "691:422",
+        0
+      ],
+      "on_true": [
+        "691:1460",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "是否底图确认"
+    }
+  },
+  "691:1240": {
+    "inputs": {
+      "seed": 0,
+      "steps": 20,
+      "cfg": 8,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "positive": [
+        "691:213",
+        0
+      ],
+      "latent_image": [
+        "691:1577",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器"
+    }
+  },
+  "691:1241": {
+    "inputs": {
+      "expression": "a // 2",
+      "values.a": 20
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "数学表达式"
+    }
+  },
+  "691:1107": {
+    "inputs": {
+      "enabled": true,
+      "filename_prefix": "ComfyUI",
+      "file_format": "png",
+      "lossless_webp": false,
+      "quality": 100,
+      "webp_method": 6,
+      "jpeg_subsampling": 0,
+      "embed_workflow": false,
+      "save_with_metadata": true,
+      "add_loras_to_prompt": true,
+      "add_counter_to_filename": true,
+      "save_as_recipe": false,
+      "images": [
+        "691:688",
+        0
+      ]
+    },
+    "class_type": "ConditionalSaveImage",
+    "_meta": {
+      "title": "💾 条件保存图像"
+    }
+  },
+  "691:1413": {
+    "inputs": {
+      "empty_cache": true,
+      "gc_collect": true,
+      "unload_all_models": false,
+      "image_pass": [
+        "691:1107",
+        0
+      ]
+    },
+    "class_type": "VRAM_Debug",
+    "_meta": {
+      "title": "VRAM Debug"
+    }
+  },
+  "691:422": {
+    "inputs": {
+      "message": "底图生成完毕喵~",
+      "desktop_notification": true,
+      "sound": true,
+      "volume": 0.5,
+      "value": [
+        "691:239",
+        0
+      ]
+    },
+    "class_type": "SimpleNotify",
+    "_meta": {
+      "title": "🔔 简易通知"
+    }
+  },
+  "691:1460": {
+    "inputs": {
+      "selection_mode": "multiple",
+      "timeout": 300,
+      "timeout_action": "submit_all",
+      "images": [
+        "691:422",
+        0
+      ],
+      "instructions": [
+        "691:1461",
+        0
+      ]
+    },
+    "class_type": "AaaliceImagePicker",
+    "_meta": {
+      "title": "🖼️ Aaalice 图像选择器"
+    }
+  },
+  "691:1461": {
+    "inputs": {
+      "value": "# 选择你满意的图像👉\n\n- 通过调整“批次大小”参数，可以一次生成多张图像\n- 批次大小越大，越吃配置\n- 图像确认阶段可以通过参数关闭"
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "字符串（多行）"
+    }
+  },
+  "691:53": {
+    "inputs": {
+      "width": [
+        "76",
+        0
+      ],
+      "height": [
+        "76",
+        1
+      ],
+      "batch_size": [
+        "207",
+        0
+      ]
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "空Latent图像"
+    }
+  },
+  "691:1578": {
+    "inputs": {},
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE编码"
+    }
+  },
+  "691:1577": {
+    "inputs": {
+      "switch": false,
+      "on_false": [
+        "691:53",
+        0
+      ],
+      "on_true": [
+        "691:1578",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "是否图生图"
+    }
+  }
+}

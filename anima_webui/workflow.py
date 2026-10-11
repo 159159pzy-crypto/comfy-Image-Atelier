@@ -7,6 +7,15 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .model_profiles import (
+    DEFAULT_MODEL_PROFILE,
+    ModelProfileError,
+    MODEL_PROFILES,
+    get_model_profile,
+    model_profile_defaults,
+    normalize_model_profile,
+)
+
 
 DEFAULT_QUALITY = "masterpiece, best quality, score_9, score_8, highres, year 2025, newest, safe"
 DEFAULT_NEGATIVE = (
@@ -14,7 +23,7 @@ DEFAULT_NEGATIVE = (
     "jpeg artifacts, bad anatomy, watermark, artist name,"
 )
 DEFAULT_LORAS: list[dict[str, Any]] = []
-DEFAULT_MODEL = "miaomiaoHarem_anima14.safetensors"
+DEFAULT_MODEL = MODEL_PROFILES[DEFAULT_MODEL_PROFILE]["model_name"]
 DEFAULT_SAMPLER = "er_sde"
 DEFAULT_SCHEDULER = "simple"
 DEFAULT_SECOND_SAMPLER = {
@@ -68,10 +77,14 @@ DEFAULT_SETTINGS = {
     "female_count": 1,
     "male_count": 0,
     "model_name": DEFAULT_MODEL,
+    # v2 profile/resource contract.  Legacy fields below remain accepted at
+    # the validation boundary so saved v1 settings can be migrated safely.
+    "model_profile": DEFAULT_MODEL_PROFILE,
+    "clip_name": MODEL_PROFILES[DEFAULT_MODEL_PROFILE]["clip_name"],
+    "vae_name": MODEL_PROFILES[DEFAULT_MODEL_PROFILE]["vae_name"],
+    "clip_type": MODEL_PROFILES[DEFAULT_MODEL_PROFILE]["clip_type"],
     "loras": DEFAULT_LORAS,
     "lora_managed_triggers": [],
-    "hires": DEFAULT_HIRES,
-    "detailers": DEFAULT_DETAILERS,
     "pools": {
         "character": {"mode": "include", "ids": [], "excluded_ids": []},
         "clothing": {"mode": "include", "ids": [], "excluded_ids": []},
@@ -79,6 +92,10 @@ DEFAULT_SETTINGS = {
         "background": {"mode": "include", "ids": [], "excluded_ids": []},
         "expression": {"mode": "include", "ids": [], "excluded_ids": []},
     },
+    # Krea 2 uses natural-language entries instead of the five Anima
+    # taxonomy pools.  Entries are persisted by profile and selected with the
+    # prompt seed by the batch runner.
+    "krea_prompt_pool": {"enabled": False, "ids": []},
     "character_detail": "trigger_tags",
     "manual_artist": "",
     "quality_prompt": DEFAULT_QUALITY,
@@ -86,12 +103,100 @@ DEFAULT_SETTINGS = {
     "negative_prompt": DEFAULT_NEGATIVE,
     "width": 832,
     "height": 1216,
-    "steps": 30,
-    "cfg": 4.0,
-    "sampler_name": DEFAULT_SAMPLER,
-    "scheduler": DEFAULT_SCHEDULER,
+    "steps": MODEL_PROFILES[DEFAULT_MODEL_PROFILE]["defaults"]["steps"],
+    "cfg": MODEL_PROFILES[DEFAULT_MODEL_PROFILE]["defaults"]["cfg"],
+    "sampler_name": MODEL_PROFILES[DEFAULT_MODEL_PROFILE]["defaults"]["sampler_name"],
+    "scheduler": MODEL_PROFILES[DEFAULT_MODEL_PROFILE]["defaults"]["scheduler"],
+    # Compatibility-only aliases remain available to v1 embedded callers and
+    # old test/integration adapters.  ``migrate_settings`` strips them before
+    # a v2 batch/history payload is persisted, and the v2 renderer never
+    # appends the corresponding nodes.
+    "hires": DEFAULT_HIRES,
+    "detailers": DEFAULT_DETAILERS,
     "cfg_zero_star": False,
     "second_sampler": DEFAULT_SECOND_SAMPLER,
+    "base_mode": MODEL_PROFILES[DEFAULT_MODEL_PROFILE]["defaults"]["base_mode"],
+    "upscalers": {
+        "latent": {
+            "enabled": False,
+            "scale_by": 1.5,
+            "upscale_method": "bilinear",
+            # The attached v2 workflow has always sampled after the latent
+            # resize. Keep that behavior when users enable the latent stage;
+            # the sampler now has an independent switch and full parameters.
+            "second_sampler": {
+                "enabled": True,
+                "steps": 20,
+                "cfg": 4.0,
+                "sampler_name": DEFAULT_SAMPLER,
+                "scheduler": DEFAULT_SCHEDULER,
+                "denoise": 1.0,
+            },
+        },
+        "seedvr2": {
+            "enabled": False,
+            "model_name": MODEL_PROFILES[DEFAULT_MODEL_PROFILE]["seedvr2_model"],
+            "vae_name": MODEL_PROFILES[DEFAULT_MODEL_PROFILE]["seedvr2_vae"],
+            "scale_by": 2.0,
+            "weight_dtype": "default",
+            "color_correction_method": "lab",
+            "sampler": {
+                "steps": 1,
+                "cfg": 1.0,
+                "sampler_name": "euler",
+                "scheduler": "simple",
+                "denoise": 1.0,
+            },
+            "encode": {
+                "tile_size": 512,
+                "overlap": 64,
+                "temporal_size": 64,
+                "temporal_overlap": 8,
+            },
+            "decode": {
+                "tile_size": 512,
+                "overlap": 128,
+                "temporal_size": 4096,
+                "temporal_overlap": 8,
+            },
+        },
+        "nvidia": {
+            "enabled": False,
+            "resize_type": "scale by multiplier",
+            "scale": 2.0,
+            "quality": "ULTRA",
+        },
+        "face_refine": {
+            "enabled": False,
+            "steps": 8,
+            "cfg_scale": 1.0,
+            "sampler": DEFAULT_SAMPLER,
+            "scheduler": DEFAULT_SCHEDULER,
+            "denoise_strength": 0.3,
+            "face_selection": 0,
+            "detection_confidence": 0.75,
+            "manual_rotation": "None",
+            "processing_resolution": 1024,
+            "enable_pre_upscale": True,
+            "upscaler_model": "Fast 4x (Lanczos)",
+            "crop_padding": 1.6,
+            "face_positive_prompt": "",
+            "replace_positive_prompt": False,
+            "face_negative_prompt": "",
+            "replace_negative_prompt": False,
+            "exclusions": "",
+            "blend_softness": 8,
+            "mask_expansion": 2,
+            "sampling_mask_blur_size": 21,
+            "sampling_mask_blur_strength": 1,
+            "enable_color_correction": True,
+            "enable_segmentation": True,
+            "enable_differential_diffusion": True,
+            "enable_lightness_rescue": True,
+            "enable_final_refinement": True,
+            "offload_models_to_cpu": True,
+        },
+    },
 }
 
 MAX_SAMPLE_SEED = 1125899906842624
@@ -141,6 +246,53 @@ for _detailer_name, _detailer_nodes in DETAILER_NODES.items():
 
 def validate_template_nodes(api: dict[str, Any], ui: dict[str, Any]) -> None:
     """校验两份模板包含全部必需节点,缺失时给出可行动的错误信息。"""
+
+    # ComfyUI's API Format export uses namespaced ids (``group:node``) and
+    # contains the optional v2 branches.  It has a different contract from
+    # the hand-numbered v1 template, so do not apply the legacy integer table
+    # to it.
+    if any(":" in str(node_id) for node_id in api):
+        problems: list[str] = []
+        for node_id, node in api.items():
+            if not isinstance(node, dict) or not isinstance(node.get("class_type"), str) or not node["class_type"]:
+                problems.append(f"{node_id}(class_type)")
+                continue
+            if node.get("class_type") in V2_REMOVED_CLASSES:
+                problems.append(f"{node_id}({node['class_type']})")
+            for input_name, value in (node.get("inputs") or {}).items():
+                if (
+                    isinstance(value, list)
+                    and len(value) == 2
+                    and isinstance(value[0], str)
+                    and isinstance(value[1], int)
+                    and value[0] not in api
+                ):
+                    problems.append(f"{node_id}.{input_name}->{value[0]}")
+        required_v2 = {
+            "167:56": "UNETLoader 主模型",
+            "167:57": "CLIPLoader",
+            "167:58": "VAELoader",
+            "72": "LoRA 堆 1",
+            "243": "LoRA 堆 2",
+            "691:1413": "普通底图",
+            "701:1414": "双采样底图",
+            "704:1415": "潜空间放大",
+            "712:1417": "SeedVR2",
+            "1432:1447": "N 卡放大",
+            "1253:1416": "脸部细化",
+        }
+        problems.extend(
+            f"{node_id}({label})"
+            for node_id, label in required_v2.items()
+            if node_id not in api
+        )
+        if problems:
+            raise WorkflowError("v2 工作流 API 模板契约不完整: " + "; ".join(problems))
+        ui_ids = {str(node.get("id")) for node in ui.get("nodes") or []}
+        missing_ui = [str(node_id) for node_id in (167, 691, 701, 704, 712, 1253, 1432) if str(node_id) not in ui_ids]
+        if missing_ui:
+            raise WorkflowError("v2 可视化模板缺少组节点: " + ", ".join(missing_ui))
+        return
     missing_api = [
         f"{node_id}({label})"
         for node_id, label in sorted(REQUIRED_API_NODES.items())
@@ -379,15 +531,460 @@ def _validate_second_sampler(value: Any) -> dict[str, Any]:
     }
 
 
+def _validate_post_sampler(value: Any, field_prefix: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise WorkflowError(f"{field_prefix} 必须是对象")
+    allowed = {"enabled", "steps", "cfg", "sampler_name", "scheduler", "denoise"}
+    unknown = set(value) - allowed
+    if unknown:
+        raise WorkflowError(f"未知 {field_prefix} 参数: {', '.join(sorted(unknown))}")
+    defaults = {
+        "enabled": True,
+        "steps": 20,
+        "cfg": 4.0,
+        "sampler_name": DEFAULT_SAMPLER,
+        "scheduler": DEFAULT_SCHEDULER,
+        "denoise": 1.0,
+    }
+    merged = {**defaults, **value}
+    enabled = _boolean(f"{field_prefix}.enabled", merged["enabled"])
+    steps = _integer(f"{field_prefix}.steps", merged["steps"], 1, 150)
+    cfg = merged["cfg"]
+    if isinstance(cfg, bool) or not isinstance(cfg, (int, float)):
+        raise WorkflowError(f"{field_prefix}.cfg 必须是数字")
+    cfg = float(cfg)
+    if not math.isfinite(cfg) or not 0.1 <= cfg <= 30:
+        raise WorkflowError(f"{field_prefix}.cfg 必须在 0.1-30 之间")
+    sampler_name = _text(f"{field_prefix}.sampler_name", merged["sampler_name"])
+    scheduler = _text(f"{field_prefix}.scheduler", merged["scheduler"])
+    if not sampler_name or not scheduler:
+        raise WorkflowError(f"{field_prefix} 的 sampler_name 和 scheduler 不能为空")
+    denoise = merged["denoise"]
+    if isinstance(denoise, bool) or not isinstance(denoise, (int, float)):
+        raise WorkflowError(f"{field_prefix}.denoise 必须是数字")
+    denoise = float(denoise)
+    if not math.isfinite(denoise) or not 0 <= denoise <= 1:
+        raise WorkflowError(f"{field_prefix}.denoise 必须在 0-1 之间")
+    return {
+        "enabled": enabled,
+        "steps": steps,
+        "cfg": cfg,
+        "sampler_name": sampler_name,
+        "scheduler": scheduler,
+        "denoise": denoise,
+    }
+
+
+def _validate_upscalers(value: Any, profile_id: str = DEFAULT_MODEL_PROFILE) -> dict[str, Any]:
+    """Validate the v2 post-processing chain.
+
+    Each stage is independent; the renderer decides whether an installed
+    optional node can be connected.  Validation deliberately only checks the
+    persisted shape and numeric bounds so a missing optional ComfyUI plugin is
+    reported by the resource preflight instead of corrupting settings.
+    """
+
+    if not isinstance(value, dict):
+        raise WorkflowError("upscalers 必须是对象")
+    allowed = {"latent", "seedvr2", "nvidia", "face_refine"}
+    unknown = set(value) - allowed
+    if unknown:
+        raise WorkflowError(f"未知放大修复模块: {', '.join(sorted(unknown))}")
+    merged = copy.deepcopy(DEFAULT_SETTINGS["upscalers"])
+    for key, item in value.items():
+        if not isinstance(item, dict):
+            raise WorkflowError(f"upscalers.{key} 必须是对象")
+        merged[key].update(copy.deepcopy(item))
+    latent = merged["latent"]
+    if set(latent) - {"enabled", "scale_by", "upscale_method", "second_sampler"}:
+        raise WorkflowError("未知潜空间放大参数")
+    enabled = _boolean("upscalers.latent.enabled", latent["enabled"])
+    scale_by = latent["scale_by"]
+    if isinstance(scale_by, bool) or not isinstance(scale_by, (int, float)):
+        raise WorkflowError("upscalers.latent.scale_by 必须是数字")
+    if not math.isfinite(float(scale_by)) or not 0.01 <= float(scale_by) <= 64:
+        raise WorkflowError("upscalers.latent.scale_by 必须在 0.01-64 之间")
+    upscale_method = _text("upscalers.latent.upscale_method", latent["upscale_method"])
+    if upscale_method not in {"nearest-exact", "bilinear", "area", "bicubic", "bislerp"}:
+        raise WorkflowError("upscalers.latent.upscale_method 无效")
+    second_sampler = _validate_post_sampler(
+        latent["second_sampler"], "upscalers.latent.second_sampler"
+    )
+    result: dict[str, Any] = {
+        "latent": {
+            "enabled": enabled,
+            "scale_by": float(scale_by),
+            "upscale_method": upscale_method,
+            "second_sampler": second_sampler,
+        }
+    }
+
+    seedvr2 = merged["seedvr2"]
+    seedvr2_allowed = {
+        "enabled", "model_name", "vae_name", "scale_by", "weight_dtype",
+        "color_correction_method", "sampler", "encode", "decode",
+    }
+    if set(seedvr2) - seedvr2_allowed:
+        raise WorkflowError("未知 upscalers.seedvr2 参数")
+    profile = get_model_profile(profile_id)
+    seedvr2_model = _text("upscalers.seedvr2.model_name", seedvr2.get("model_name") or profile["seedvr2_model"])
+    seedvr2_vae = _text("upscalers.seedvr2.vae_name", seedvr2.get("vae_name") or profile["seedvr2_vae"])
+    seedvr2_scale = seedvr2.get("scale_by")
+    if isinstance(seedvr2_scale, bool) or not isinstance(seedvr2_scale, (int, float)):
+        raise WorkflowError("upscalers.seedvr2.scale_by 必须是数字")
+    seedvr2_scale = float(seedvr2_scale)
+    if not math.isfinite(seedvr2_scale) or not 0.01 <= seedvr2_scale <= 64:
+        raise WorkflowError("upscalers.seedvr2.scale_by 必须在 0.01-64 之间")
+    weight_dtype = _text("upscalers.seedvr2.weight_dtype", seedvr2["weight_dtype"])
+    color_correction = _text(
+        "upscalers.seedvr2.color_correction_method", seedvr2["color_correction_method"]
+    )
+    seed_sampler = seedvr2["sampler"]
+    if not isinstance(seed_sampler, dict):
+        raise WorkflowError("upscalers.seedvr2.sampler 必须是对象")
+    seed_sampler = {
+        **DEFAULT_SETTINGS["upscalers"]["seedvr2"]["sampler"],
+        **seed_sampler,
+    }
+    seed_sampler = _validate_post_sampler(
+        {"enabled": True, **seed_sampler}, "upscalers.seedvr2.sampler"
+    )
+    seed_sampler.pop("enabled", None)
+
+    def validate_tiles(name: str, item: Any) -> dict[str, int]:
+        defaults = DEFAULT_SETTINGS["upscalers"]["seedvr2"][name]
+        if not isinstance(item, dict):
+            raise WorkflowError(f"upscalers.seedvr2.{name} 必须是对象")
+        unknown = set(item) - set(defaults)
+        if unknown:
+            raise WorkflowError(f"未知 upscalers.seedvr2.{name} 参数: {', '.join(sorted(unknown))}")
+        values = {**defaults, **item}
+        return {
+            "tile_size": _integer(f"upscalers.seedvr2.{name}.tile_size", values["tile_size"], 64, 16384),
+            "overlap": _integer(f"upscalers.seedvr2.{name}.overlap", values["overlap"], 0, 4096),
+            "temporal_size": _integer(f"upscalers.seedvr2.{name}.temporal_size", values["temporal_size"], 1, 16384),
+            "temporal_overlap": _integer(f"upscalers.seedvr2.{name}.temporal_overlap", values["temporal_overlap"], 0, 4096),
+        }
+
+    result["seedvr2"] = {
+        "enabled": _boolean("upscalers.seedvr2.enabled", seedvr2["enabled"]),
+        "model_name": seedvr2_model,
+        "vae_name": seedvr2_vae,
+        "scale_by": seedvr2_scale,
+        "weight_dtype": weight_dtype,
+        "color_correction_method": color_correction,
+        "sampler": seed_sampler,
+        "encode": validate_tiles("encode", seedvr2["encode"]),
+        "decode": validate_tiles("decode", seedvr2["decode"]),
+    }
+
+    nvidia = merged["nvidia"]
+    if set(nvidia) - {"enabled", "resize_type", "scale", "quality", "model_name"}:
+        raise WorkflowError("未知 upscalers.nvidia 参数")
+    scale = nvidia["scale"]
+    if isinstance(scale, bool) or not isinstance(scale, (int, float)):
+        raise WorkflowError("upscalers.nvidia.scale 必须是数字")
+    scale = float(scale)
+    if not math.isfinite(scale) or not 0.01 <= scale <= 64:
+        raise WorkflowError("upscalers.nvidia.scale 必须在 0.01-64 之间")
+    resize_type = _text("upscalers.nvidia.resize_type", nvidia["resize_type"])
+    quality = _text("upscalers.nvidia.quality", nvidia["quality"])
+    if not resize_type or not quality:
+        raise WorkflowError("upscalers.nvidia.resize_type 和 quality 不能为空")
+    result["nvidia"] = {
+        "enabled": _boolean("upscalers.nvidia.enabled", nvidia["enabled"]),
+        "resize_type": resize_type,
+        "scale": scale,
+        "quality": quality,
+    }
+
+    face = merged["face_refine"]
+    face_defaults = DEFAULT_SETTINGS["upscalers"]["face_refine"]
+    if set(face) - set(face_defaults):
+        raise WorkflowError("未知 upscalers.face_refine 参数")
+    face_values = {**face_defaults, **face}
+    face_float_ranges = {
+        "cfg_scale": (0.1, 30.0),
+        "denoise_strength": (0.0, 1.0),
+        "detection_confidence": (0.0, 1.0),
+        "crop_padding": (0.0, 16.0),
+        "sampling_mask_blur_strength": (0.0, 1.0),
+    }
+    face_int_ranges = {
+        "steps": (1, 150),
+        "face_selection": (0, 1000000),
+        "processing_resolution": (64, 8192),
+        "blend_softness": (0, 4096),
+        "mask_expansion": (0, 4096),
+        "sampling_mask_blur_size": (0, 4096),
+    }
+    validated_face: dict[str, Any] = {
+        "enabled": _boolean("upscalers.face_refine.enabled", face_values["enabled"])
+    }
+    for name, bounds in face_float_ranges.items():
+        number = face_values[name]
+        if isinstance(number, bool) or not isinstance(number, (int, float)):
+            raise WorkflowError(f"upscalers.face_refine.{name} 必须是数字")
+        number = float(number)
+        if not math.isfinite(number) or not bounds[0] <= number <= bounds[1]:
+            raise WorkflowError(f"upscalers.face_refine.{name} 超出允许范围")
+        validated_face[name] = number
+    for name, bounds in face_int_ranges.items():
+        validated_face[name] = _integer(
+            f"upscalers.face_refine.{name}", face_values[name], bounds[0], bounds[1]
+        )
+    for name in (
+        "sampler", "scheduler", "manual_rotation", "upscaler_model",
+        "face_positive_prompt", "face_negative_prompt", "exclusions",
+    ):
+        validated_face[name] = _text(f"upscalers.face_refine.{name}", face_values[name])
+    if not validated_face["sampler"] or not validated_face["scheduler"]:
+        raise WorkflowError("脸部细化 sampler 和 scheduler 不能为空")
+    for name in (
+        "enable_pre_upscale", "replace_positive_prompt", "replace_negative_prompt",
+        "enable_color_correction", "enable_segmentation", "enable_differential_diffusion",
+        "enable_lightness_rescue", "enable_final_refinement", "offload_models_to_cpu",
+    ):
+        validated_face[name] = _boolean(f"upscalers.face_refine.{name}", face_values[name])
+    result["face_refine"] = validated_face
+    return result
+
+
+def _validate_krea_prompt_pool(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise WorkflowError("krea_prompt_pool 必须是对象")
+    unknown = set(value) - {"enabled", "ids"}
+    if unknown:
+        raise WorkflowError(f"未知 krea_prompt_pool 参数: {', '.join(sorted(unknown))}")
+    enabled = _boolean("krea_prompt_pool.enabled", value.get("enabled", False))
+    ids = value.get("ids", [])
+    if not isinstance(ids, list):
+        raise WorkflowError("krea_prompt_pool.ids 必须是数组")
+    if len(ids) > 50000:
+        raise WorkflowError("krea_prompt_pool 条目过多")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for index, item in enumerate(ids):
+        text = _text(f"krea_prompt_pool.ids[{index}]", item)
+        identity = text.casefold()
+        if text and identity not in seen:
+            normalized.append(text)
+            seen.add(identity)
+    return {"enabled": enabled, "ids": normalized}
+
+
+_LEGACY_SETTING_KEYS = {"hires", "detailers", "cfg_zero_star", "second_sampler"}
+
+
+def migrate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Migrate v1 persisted settings to the v2 model/profile contract.
+
+    The input is never modified. The returned object omits the old standalone
+    detailer, CFGZeroStar and second-sampler keys; legacy second-sampler values
+    move into ``upscalers.latent.second_sampler``. A v1 ``hires`` block becomes
+    the latent stage (percent is converted to a scale factor). Explicit main
+    model selections are preserved for the resource-ownership preflight.
+    """
+
+    if overrides is None:
+        source: dict[str, Any] = {}
+    elif isinstance(overrides, dict):
+        source = copy.deepcopy(overrides)
+    else:
+        raise WorkflowError("设置必须是对象")
+    allowed = set(DEFAULT_SETTINGS) | _LEGACY_SETTING_KEYS
+    unknown = set(source) - allowed
+    if unknown:
+        raise WorkflowError(f"未知参数: {', '.join(sorted(unknown))}")
+
+    raw_profile = source.get("model_profile")
+    if raw_profile is None:
+        old_model = str(source.get("model_name") or "").casefold()
+        krea_name = MODEL_PROFILES["krea2"]["model_name"].casefold()
+        raw_profile = "krea2" if old_model == krea_name else DEFAULT_MODEL_PROFILE
+    try:
+        profile_id = normalize_model_profile(raw_profile)
+    except ModelProfileError as error:
+        raise WorkflowError(str(error)) from error
+    profile = get_model_profile(profile_id)
+    result = copy.deepcopy(source)
+    result["model_profile"] = profile_id
+    # A profile switch is authoritative for CLIP/VAE and encoder type.
+    result["clip_name"] = profile["clip_name"]
+    result["vae_name"] = profile["vae_name"]
+    result["clip_type"] = profile["clip_type"]
+    # Switching profiles should reset a previous profile's canonical UNet,
+    # while a custom explicitly assigned UNet remains selected. Ownership is
+    # enforced at the request/resource boundary where the live inventory is
+    # available; CLIP/VAE and encoder type are always profile-bound.
+    raw_model_name = str(source.get("model_name") or "")
+    other_profile_defaults = {
+        str(value["model_name"]).casefold()
+        for key, value in MODEL_PROFILES.items()
+        if key != profile_id
+    }
+    if raw_model_name and raw_model_name.casefold() not in other_profile_defaults:
+        # The profile owns its CLIP/VAE and prompt namespace, while users may
+        # choose any UNet explicitly assigned to that profile. Ownership is
+        # enforced at the request/resource boundary where the live inventory
+        # is available; this normalization layer only validates the shape.
+        result["model_name"] = raw_model_name
+    else:
+        result["model_name"] = profile["model_name"]
+    for key in ("steps", "cfg", "sampler_name", "scheduler"):
+        if key not in result:
+            result[key] = profile["defaults"][key]
+
+    raw_base = result.get("base_mode")
+    if raw_base is None:
+        legacy_second = source.get("second_sampler")
+        if isinstance(legacy_second, dict) and legacy_second.get("enabled"):
+            raw_base = "dual_sampler"
+        else:
+            raw_base = profile["defaults"]["base_mode"]
+    if raw_base not in {"normal", "dual_sampler"}:
+        raise WorkflowError("base_mode 必须是 normal 或 dual_sampler")
+    result["base_mode"] = raw_base
+
+    upscalers = copy.deepcopy(DEFAULT_SETTINGS["upscalers"])
+    if isinstance(result.get("upscalers"), dict):
+        for key, item in result["upscalers"].items():
+            if isinstance(item, dict) and key in upscalers:
+                upscalers[key].update(item)
+    # An explicit v2 ``upscalers`` block wins over a legacy ``hires`` key.
+    # DEFAULT_SETTINGS still carries the legacy fields for v1 compatibility,
+    # so applying both unconditionally would silently turn every disabled
+    # latent stage back on during validation.
+    legacy_hires = source.get("hires") if "upscalers" not in source else None
+    if isinstance(legacy_hires, dict):
+        # Reuse v1 validation before translating it; invalid persisted values
+        # should fail with the same actionable error as a v1 request.
+        legacy_hires = _validate_hires(legacy_hires)
+        if "enabled" in legacy_hires:
+            upscalers["latent"]["enabled"] = legacy_hires["enabled"]
+        if "percent" in legacy_hires:
+            # v1 applied the percentage to a 4x pixel upscaler.  Preserve the
+            # resulting geometry when moving to the direct latent scale.
+            upscalers["latent"]["scale_by"] = float(legacy_hires["percent"]) / 100 * 4
+    # Keep old v1 second-sampler settings executable by moving them into the
+    # new latent-stage contract. A unit latent scale avoids adding a resize to
+    # old settings which had no latent-upscale stage.
+    legacy_second = source.get("second_sampler")
+    # A new v2 payload may carry DEFAULT_SETTINGS' disabled compatibility
+    # alias alongside a partial ``upscalers`` block. In that case its nested
+    # sampler default is authoritative; only copy a disabled legacy sampler
+    # when migrating a v1 payload that has no v2 upscalers block.
+    if isinstance(legacy_second, dict) and (
+        legacy_second.get("enabled") or "upscalers" not in source
+    ):
+        latent_settings = upscalers["latent"]
+        raw_upscalers = source.get("upscalers")
+        explicit_latent = (
+            raw_upscalers.get("latent", {}) if isinstance(raw_upscalers, dict) else {}
+        )
+        if not isinstance(explicit_latent, dict):
+            explicit_latent = {}
+        if "second_sampler" not in explicit_latent:
+            if legacy_second.get("enabled"):
+                latent_settings["enabled"] = True
+                if (
+                    "hires" not in source
+                    and latent_settings.get("scale_by")
+                    == DEFAULT_SETTINGS["upscalers"]["latent"]["scale_by"]
+                ):
+                    latent_settings["scale_by"] = 1.0
+            latent_settings["second_sampler"] = {
+                **copy.deepcopy(DEFAULT_SETTINGS["upscalers"]["latent"]["second_sampler"]),
+                **{
+                    key: legacy_second[key]
+                    for key in ("enabled", "steps", "cfg", "sampler_name", "scheduler", "denoise")
+                    if key in legacy_second
+                },
+            }
+    # Loader names use profile defaults only when no explicit selection was
+    # persisted. The selected resources are checked against live inventories
+    # by BatchManager and can be restored on profile switches by the UI.
+    seed_defaults = copy.deepcopy(DEFAULT_SETTINGS["upscalers"]["seedvr2"])
+    seed_defaults.update(
+        {
+            "model_name": profile["seedvr2_model"],
+            "vae_name": profile["seedvr2_vae"],
+        }
+    )
+    seed_defaults.update(upscalers.get("seedvr2", {}))
+    upscalers["seedvr2"] = seed_defaults
+    result["upscalers"] = upscalers
+    for key in _LEGACY_SETTING_KEYS:
+        result.pop(key, None)
+    return result
+
+
 def validate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
-    overrides = overrides or {}
+    raw_overrides = copy.deepcopy(overrides or {})
+    overrides = migrate_settings(raw_overrides)
     unknown = set(overrides) - set(DEFAULT_SETTINGS)
     if unknown:
         raise WorkflowError(f"未知参数: {', '.join(sorted(unknown))}")
 
     legacy_pools = "pools" not in overrides and any(overrides.get(f"random_{section}") for section in PROMPT_SECTIONS)
     settings = copy.deepcopy(DEFAULT_SETTINGS)
+    for legacy_key in _LEGACY_SETTING_KEYS:
+        settings.pop(legacy_key, None)
     settings.update(overrides)
+
+    # Preserve the validated aliases for callers that explicitly target the
+    # legacy hand-numbered template.  A v2 caller is migrated at the runner
+    # boundary (and build_submission removes these keys from v2 metadata), so
+    # they never become part of a v2 batch/history snapshot.
+    if set(raw_overrides) & _LEGACY_SETTING_KEYS:
+        settings["hires"] = _validate_hires(
+            raw_overrides.get("hires", DEFAULT_HIRES)
+        )
+        settings["detailers"] = _validate_detailers(
+            raw_overrides.get("detailers", DEFAULT_DETAILERS)
+        )
+        settings["cfg_zero_star"] = _boolean(
+            "cfg_zero_star", raw_overrides.get("cfg_zero_star", False)
+        )
+        settings["second_sampler"] = _validate_second_sampler(
+            raw_overrides.get("second_sampler", DEFAULT_SECOND_SAMPLER)
+        )
+
+    # Resolve the model profile before validating fields controlled by it.
+    try:
+        # ``migrate_settings`` adds a canonical profile to every payload.  A
+        # profile is explicit only when the caller actually selected it.  An
+        # untagged v1 payload can retain its custom Anima UNet, while an
+        # explicit profile switch is authoritative for every bound loader.
+        explicit_profile = "model_profile" in raw_overrides
+        profile_id = normalize_model_profile(
+            overrides.get("model_profile", settings.get("model_profile", DEFAULT_MODEL_PROFILE))
+        )
+    except ModelProfileError as error:
+        raise WorkflowError(str(error)) from error
+    profile = get_model_profile(profile_id)
+    if explicit_profile:
+        settings.update(
+            {
+                "model_profile": profile_id,
+                "model_name": overrides.get("model_name", profile["model_name"]),
+                "clip_name": profile["clip_name"],
+                "vae_name": profile["vae_name"],
+                "clip_type": profile["clip_type"],
+            }
+        )
+        # Sampling defaults are profile controlled only when the caller did
+        # not provide an explicit value for that field.
+        for key in ("steps", "cfg", "sampler_name", "scheduler"):
+            if key not in overrides:
+                settings[key] = profile["defaults"][key]
+        if "base_mode" not in overrides:
+            settings["base_mode"] = profile["defaults"]["base_mode"]
+    else:
+        settings["model_profile"] = profile_id
+        settings.setdefault("clip_name", profile["clip_name"])
+        settings.setdefault("vae_name", profile["vae_name"])
+        settings.setdefault("clip_type", profile["clip_type"])
     settings["count"] = _integer("生成数量", settings["count"], 1, 1000)
     for name in tuple(f"random_{section}" for section in PROMPT_SECTIONS):
         settings[name] = _boolean(name, settings[name])
@@ -431,17 +1028,24 @@ def validate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]
             "excluded_ids": list(dict.fromkeys(_text(f"{section} 排除条目", value) for value in excluded_ids)),
         }
     settings["pools"] = normalized_pools
+    settings["krea_prompt_pool"] = _validate_krea_prompt_pool(
+        settings.get("krea_prompt_pool", DEFAULT_SETTINGS["krea_prompt_pool"])
+    )
     settings["model_name"] = _text("model_name", settings["model_name"])
     if not settings["model_name"]:
         raise WorkflowError("model_name 不能为空")
+    for name in ("clip_name", "vae_name", "clip_type"):
+        settings[name] = _text(name, settings[name])
+        if not settings[name]:
+            raise WorkflowError(f"{name} 不能为空")
+    base_mode = settings.get("base_mode")
+    if base_mode not in {"normal", "dual_sampler"}:
+        raise WorkflowError("base_mode 必须是 normal 或 dual_sampler")
+    settings["upscalers"] = _validate_upscalers(settings.get("upscalers"), profile_id)
     settings["loras"] = validate_loras(settings)
     settings["lora_managed_triggers"] = _normalize_managed_triggers(
         settings["lora_managed_triggers"]
     )
-    settings["hires"] = _validate_hires(settings["hires"])
-    settings["detailers"] = _validate_detailers(settings["detailers"])
-    settings["cfg_zero_star"] = _boolean("cfg_zero_star", settings["cfg_zero_star"])
-    settings["second_sampler"] = _validate_second_sampler(settings["second_sampler"])
 
     if settings["character_detail"] not in {"trigger", "trigger_tags"}:
         raise WorkflowError("character_detail 必须是 trigger 或 trigger_tags")
@@ -858,6 +1462,707 @@ def _detailer_nodes(
     }, [str(detailer_id), 0]
 
 
+# The v2 export uses the ids allocated by ComfyUI's graphToPrompt exporter
+# (for example ``167:56``) instead of the hand-maintained ids from the v1
+# Anima template.  Keep the adapter here, next to the renderer, so callers can
+# still submit v1 templates while new installs use the attached graph without
+# having to rewrite the runner or history code.
+V2_UNET_ID = "167:56"
+V2_CLIP_ID = "167:57"
+V2_VAE_ID = "167:58"
+V2_LORA_IDS = ("72", "243")
+V2_BASE_GROUPS = {"normal": "691:", "dual_sampler": "701:"}
+V2_BASE_ENDPOINTS = {
+    "normal": ("691:1413", 1),
+    "dual_sampler": ("701:1414", 1),
+}
+V2_STAGE_GROUPS = {
+    "latent": "704:",
+    "seedvr2": "712:",
+    "nvidia": "1432:",
+    "face_refine": "1253:",
+}
+V2_STAGE_ENDPOINTS = {
+    "latent": ("704:1415", 1),
+    "seedvr2": ("712:1417", 1),
+    "nvidia": ("1432:1447", 1),
+    "face_refine": ("1253:1416", 1),
+}
+# The attachment's ConditionalSaveImage nodes are pass-through nodes rather
+# than ComfyUI output nodes.  A rendered API prompt therefore needs one final
+# core SaveImage sink; otherwise ComfyUI can report execution_success while
+# never scheduling the image branch and the runner has no image metadata to
+# persist.  This synthetic id is namespaced so it cannot collide with an
+# attachment node or a legacy integer id.
+V2_OUTPUT_ID = "v2:output"
+V2_REMOVED_CLASSES = {
+    "CFGZeroStar",
+    "UpscaleModelLoader",
+    "ImageUpscaleWithModel",
+    "FaceDetailerPipe",
+}
+
+
+def _is_v2_api_template(api: dict[str, Any]) -> bool:
+    """Return whether *api* is the graphToPrompt v2 export.
+
+    A colon in a node id is the stable signal; checking the loader as well
+    makes this work with small contract fixtures which only retain the shared
+    loader nodes.
+    """
+
+    return V2_UNET_ID in api or any(":" in str(key) for key in api)
+
+
+def _v2_node(api: dict[str, Any], node_id: str) -> dict[str, Any] | None:
+    value = api.get(str(node_id))
+    return value if isinstance(value, dict) else None
+
+
+def _v2_inputs(api: dict[str, Any], node_id: str) -> dict[str, Any] | None:
+    node = _v2_node(api, node_id)
+    inputs = node.get("inputs") if node else None
+    return inputs if isinstance(inputs, dict) else None
+
+
+def _v2_set_input(api: dict[str, Any], node_id: str, name: str, value: Any) -> bool:
+    inputs = _v2_inputs(api, node_id)
+    if inputs is None:
+        return False
+    inputs[name] = value
+    return True
+
+
+def _mapped_resource_name(
+    value: str, resource_paths: dict[str, str] | None = None
+) -> str:
+    """Apply launcher-resolved relative paths to a profile resource name."""
+
+    if not resource_paths:
+        return value
+    identity = str(value).replace("\\", "/").casefold()
+    for source, target in resource_paths.items():
+        if str(source).replace("\\", "/").casefold() == identity:
+            return str(target).replace("\\", "/")
+    return value
+
+
+def _v2_replace_refs(
+    api: dict[str, Any], old_prefix: str, replacement: list[Any]
+) -> None:
+    """Replace links into a removed optional subgraph with a bypass link."""
+
+    for node in api.values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        for name, value in list(inputs.items()):
+            if (
+                isinstance(value, list)
+                and len(value) == 2
+                and isinstance(value[0], str)
+                and value[0].startswith(old_prefix)
+            ):
+                inputs[name] = list(replacement)
+
+
+def _v2_remove_group(api: dict[str, Any], prefix: str, bypass: list[Any]) -> None:
+    """Drop a disabled v2 subgraph and repair all links pointing into it."""
+
+    _v2_replace_refs(api, prefix, bypass)
+    for node_id in list(api):
+        if str(node_id).startswith(prefix):
+            api.pop(node_id, None)
+
+
+def _v2_repair_missing_refs(api: dict[str, Any], fallback: list[Any]) -> None:
+    """Ensure an optional branch cannot leave dangling API links behind."""
+
+    for node in api.values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        for name, value in list(inputs.items()):
+            if not (
+                isinstance(value, list)
+                and len(value) == 2
+                and isinstance(value[0], str)
+                and value[0] not in api
+            ):
+                continue
+            # Scalar links are optional on most switch nodes.  For fixtures
+            # with a single surviving branch, routing them to the known image
+            # endpoint is more useful than submitting a broken graph.
+            if fallback and fallback[0] in api:
+                inputs[name] = list(fallback)
+            else:
+                inputs.pop(name, None)
+
+
+def _v2_set_ui_mode(ui: dict[str, Any], node_id: int, enabled: bool) -> None:
+    """Set a v2 group mode when a visual workflow accompanies the API graph."""
+
+    for node in ui.get("nodes") or []:
+        try:
+            if int(node.get("id")) == int(node_id):
+                node["mode"] = 0 if enabled else 4
+                return
+        except (TypeError, ValueError):
+            continue
+
+
+def _v2_set_ui_loras(ui: dict[str, Any], node_id: str, loras: list[dict[str, Any]]) -> None:
+    for node in ui.get("nodes") or []:
+        if str(node.get("id")) != str(node_id):
+            continue
+        values = list(node.get("widgets_values") or [])
+        # Lora Manager's first widget is metadata, second is free-form text,
+        # and the third stores its structured stack.
+        while len(values) < 3:
+            values.append({} if len(values) == 0 else "" if len(values) == 1 else [])
+        values[2] = copy.deepcopy(loras)
+        node["widgets_values"] = values
+        return
+
+
+def _v2_prompt(settings: dict[str, Any], resolved_prompt: str, resolved_prompt_full: str) -> str:
+    """Build a deterministic prompt for the graph's plain CLIPTextEncode."""
+
+    if resolved_prompt_full.strip():
+        return resolved_prompt_full
+    if resolved_prompt.strip():
+        return resolved_prompt
+    parts: list[str] = []
+    for key in ("quality_prompt", "manual_artist"):
+        value = str(settings.get(key) or "").strip()
+        if value:
+            parts.append(value)
+    for section in PROMPT_SECTIONS:
+        if not settings.get(f"random_{section}"):
+            value = str(settings.get(f"fixed_{section}") or "").strip()
+            if value:
+                parts.append(value)
+    extra = str(settings.get("extra_prompt") or "").strip()
+    if extra:
+        parts.append(extra)
+    return ", ".join(parts)
+
+
+def _v2_set_sampler(api: dict[str, Any], node_id: str, settings: dict[str, Any], seed: int) -> None:
+    inputs = _v2_inputs(api, node_id)
+    if inputs is None:
+        return
+    # The two base samplers and latent sampler use the same public sampling
+    # controls.  Only overwrite fields that exist in a particular export so a
+    # reduced contract fixture remains valid.
+    for name, value in (
+        ("seed", seed),
+        ("noise_seed", seed),
+        ("steps", settings["steps"]),
+        ("cfg", settings["cfg"]),
+        ("sampler_name", settings["sampler_name"]),
+        ("scheduler", settings["scheduler"]),
+    ):
+        if name in inputs:
+            inputs[name] = value
+    if "denoise" in inputs:
+        inputs["denoise"] = 1.0
+
+
+def _v2_add_legacy_compatibility_nodes(
+    api: dict[str, Any],
+    settings: dict[str, Any],
+    *,
+    sample_seed: int,
+    prompt_seed: int,
+    resolved_prompt: str,
+    resolved_prompt_full: str,
+    frozen_positive_prompt: str,
+    frozen_negative_prompt: str,
+) -> None:
+    """Expose a small detached v1 readback view for embedded clients.
+
+    The browser's v2 payload never contains these keys.  They are only added
+    when a caller supplied one of the deprecated v1 controls (the in-memory
+    ``DEFAULT_SETTINGS`` keeps those aliases for old integrations).  The
+    nodes are disconnected from the v2 output graph and use current node
+    classes, so they do not re-enable CFGZeroStar, ADetailer, or the removed
+    pixel-upscale chain.  Existing history/PNG readers can therefore inspect
+    the familiar seed and prompt fields while all real execution follows the
+    v2 graph.
+    """
+
+    if not any(key in settings for key in _LEGACY_SETTING_KEYS):
+        return
+
+    # Keep the legacy readback node aligned with the historical composer-only
+    # value.  The v2 graph itself still receives ``resolved_prompt_full`` so
+    # quality and fixed tags are preserved in the actual conditioning path.
+    positive = frozen_positive_prompt or resolved_prompt or resolved_prompt_full
+    negative = frozen_negative_prompt or settings["negative_prompt"]
+    api["60"] = {
+        "inputs": {"seed": prompt_seed, "resolved_prompt": positive},
+        "class_type": "AnimaPromptComposer",
+        "_meta": {"title": "Legacy prompt readback"},
+    }
+    api["42"] = {
+        "inputs": {
+            "clip": [V2_CLIP_ID, 0],
+            "quality_prompt": "" if frozen_positive_prompt else settings["quality_prompt"],
+            "artist_tags": "",
+            "character_tags": "",
+            "clothing_tags": "",
+            "pose_tags": "",
+            "background_tags": "",
+            "extra_prompt": ["60", 0],
+            "separator": ", ",
+        },
+        "class_type": "AnimaPromptPlusClipEncode",
+        "_meta": {"title": "Legacy prompt readback"},
+    }
+    api["45"] = {
+        "inputs": {"text": negative, "clip": [V2_CLIP_ID, 0]},
+        "class_type": "CLIPTextEncode",
+        "_meta": {"title": "Legacy negative prompt readback"},
+    }
+    api["37"] = {
+        "inputs": {"seed": sample_seed},
+        "class_type": "PrimitiveInt",
+        "_meta": {"title": "Legacy seed readback"},
+    }
+
+    second = settings.get("second_sampler") or {}
+    cfg_zero_star = bool(settings.get("cfg_zero_star"))
+    model_ref: list[Any] = ["49", 0] if cfg_zero_star else [V2_UNET_ID, 0]
+    if cfg_zero_star:
+        api["49"] = {
+            "inputs": {"model": [V2_UNET_ID, 0]},
+            "class_type": "ModelPassThrough",
+            "_meta": {"title": "Legacy model readback"},
+        }
+    api["5"] = {
+        "inputs": {
+            "seed": ["37", 0],
+            "steps": settings["steps"],
+            "cfg": settings["cfg"],
+            "sampler_name": settings["sampler_name"],
+            "scheduler": settings["scheduler"],
+            "denoise": 1.0,
+            "model": model_ref,
+            "positive": ["42", 0],
+            "negative": ["45", 0],
+        },
+        "class_type": "KSampler",
+        "_meta": {"title": "Legacy sampler readback"},
+    }
+    if second.get("enabled"):
+        api["25"] = {
+            "inputs": {
+                "seed": ["37", 0],
+                "steps": second["steps"],
+                "cfg": second["cfg"],
+                "sampler_name": second["sampler_name"],
+                "scheduler": second["scheduler"],
+                "denoise": second["denoise"],
+                "model": model_ref,
+                "positive": ["42", 0],
+                "negative": ["45", 0],
+                "latent_image": ["5", 0],
+            },
+            "class_type": "KSampler",
+            "_meta": {"title": "Legacy second sampler readback"},
+        }
+        api["48"] = {
+            "inputs": {"samples": ["25", 0]},
+            "class_type": "ModelPassThrough",
+            "_meta": {"title": "Legacy latent readback"},
+        }
+    else:
+        api["48"] = {
+            "inputs": {"samples": ["5", 0]},
+            "class_type": "ModelPassThrough",
+            "_meta": {"title": "Legacy latent readback"},
+        }
+
+
+def _render_v2_workflows(
+    api_template: dict[str, Any],
+    ui_template: dict[str, Any],
+    settings: dict[str, Any],
+    sample_seed: int,
+    prompt_seed: int,
+    filename_prefix: str,
+    resolved_prompt: str,
+    resolved_prompt_full: str,
+    frozen_positive_prompt: str,
+    frozen_negative_prompt: str,
+    resource_paths: dict[str, str] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Render the attached graphToPrompt workflow.
+
+    The attachment contains several optional subgraphs.  Their flattened ids
+    are intentionally treated as an API contract: changing a profile only
+    changes loader/widget inputs, while disabling a stage removes its complete
+    subgraph and rewires selectors to the previous stage endpoint.
+    """
+
+    api = copy.deepcopy(api_template)
+    ui = copy.deepcopy(ui_template)
+    profile = get_model_profile(settings["model_profile"])
+
+    # Profile-bound resources are authoritative.  This prevents a stale Anima
+    # CLIP/VAE surviving a Krea switch in browser drafts or history replay.
+    _v2_set_input(
+        api,
+        V2_UNET_ID,
+        "unet_name",
+        _mapped_resource_name(settings["model_name"], resource_paths),
+    )
+    _v2_set_input(
+        api,
+        V2_CLIP_ID,
+        "clip_name",
+        _mapped_resource_name(profile["clip_name"], resource_paths),
+    )
+    _v2_set_input(api, V2_CLIP_ID, "type", profile["clip_type"])
+    _v2_set_input(
+        api,
+        V2_VAE_ID,
+        "vae_name",
+        _mapped_resource_name(profile["vae_name"], resource_paths),
+    )
+    # SeedVR2 resources are selectable from their live node inventories;
+    # migration/validation use the current profile's canonical files only as
+    # defaults. Main-model ownership is checked before this renderer runs.
+    seedvr2 = settings["upscalers"]["seedvr2"]
+    _v2_set_input(
+        api,
+        "712:716",
+        "unet_name",
+        _mapped_resource_name(seedvr2["model_name"], resource_paths),
+    )
+    _v2_set_input(
+        api,
+        "712:715",
+        "vae_name",
+        _mapped_resource_name(seedvr2["vae_name"], resource_paths),
+    )
+    _v2_set_input(api, "712:716", "weight_dtype", seedvr2["weight_dtype"])
+    _v2_set_input(api, "712:721", "color_correction_method", seedvr2["color_correction_method"])
+
+    # Prompt and negative prompt.  Keep the graph's Lora trigger concatenation
+    # nodes intact for visual editing, but put the resolved strings directly on
+    # the encode nodes so API submissions are deterministic even when a custom
+    # prompt plugin is unavailable.
+    positive_text = frozen_positive_prompt or _v2_prompt(settings, resolved_prompt, resolved_prompt_full)
+    negative_text = frozen_negative_prompt or settings["negative_prompt"]
+    _v2_set_input(api, "168", "value", positive_text)
+    _v2_set_input(api, "250", "value", negative_text)
+    for node_id in ("1010:995", "1026:1011"):
+        inputs = _v2_inputs(api, node_id)
+        if inputs is not None and "text" in inputs:
+            inputs["text"] = positive_text
+    for node_id in ("1010:1004", "1026:1020"):
+        inputs = _v2_inputs(api, node_id)
+        if inputs is not None and "text" in inputs:
+            inputs["text"] = negative_text
+    for node_id in ("1010:1083", "1026:1088"):
+        inputs = _v2_inputs(api, node_id)
+        if inputs is not None:
+            if "string_a" in inputs:
+                inputs["string_a"] = positive_text
+            if "string_b" in inputs:
+                inputs["string_b"] = ""
+            if "delimiter" in inputs:
+                inputs["delimiter"] = ""
+
+    lora_values = [
+        {
+            "on": bool(item["enabled"]),
+            "lora": item["filename"],
+            "strength": item["strength"],
+            "strengthTwo": None,
+        }
+        for item in settings["loras"]
+    ]
+    trigger_text = ", ".join(settings.get("lora_managed_triggers") or [])
+    for node_id in V2_LORA_IDS:
+        inputs = _v2_inputs(api, node_id)
+        if inputs is None:
+            continue
+        if "loras" in inputs:
+            inputs["loras"] = {"__value__": copy.deepcopy(lora_values)}
+        if "text" in inputs:
+            inputs["text"] = trigger_text
+    _v2_set_ui_loras(ui, "72", lora_values)
+    _v2_set_ui_loras(ui, "243", lora_values)
+
+    # Shared dimensions, batch and deterministic seeds.
+    resolution = json.dumps(
+        {"version": 1, "width": settings["width"], "height": settings["height"]},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    _v2_set_input(api, "76", "resolution_json", resolution)
+    _v2_set_input(api, "207", "value", 1)
+    # Each mutually exclusive base graph owns a prompt-seed expression node;
+    # write both before the inactive graph is pruned so either mode preserves
+    # deterministic pool selection.
+    _v2_set_input(api, "691:1241", "values.a", prompt_seed)
+    _v2_set_input(api, "701:1242", "values.a", prompt_seed)
+    for sampler_id in ("691:1240", "701:1245", "701:1246", "704:1248"):
+        _v2_set_sampler(api, sampler_id, settings, sample_seed)
+    # SeedVR2 and face processing have their own seeds but inherit the public
+    # batch seed so replay remains reproducible.
+    _v2_set_input(api, "712:1208", "seed", sample_seed)
+    _v2_set_input(api, "1253:1215", "seed", sample_seed)
+
+    # The ComfyUI API export flattens the attachment's subgraphs but drops
+    # several edges that cross a subgraph boundary. Restore those links from
+    # the attached graph contract so the selected base path and repair stages
+    # remain valid executable graphs. The normal base's model/conditioning
+    # routes are the same profile-aware LoRA and CLIP routes used by the dual
+    # sampler group. Its VAE boundary was also omitted by graphToPrompt.
+    _v2_set_input(api, "691:1240", "model", ["1010:1005", 0])
+    _v2_set_input(api, "691:1240", "negative", ["1010:1002", 0])
+    _v2_set_input(api, "691:158", "conditioning", ["1010:995", 0])
+    _v2_set_input(api, "691:213", "on_false", ["1010:995", 0])
+    _v2_set_input(api, "691:239", "vae", [V2_VAE_ID, 0])
+
+    # The latent-upscale subgraph has the same missing boundary connections:
+    # image -> VAE encode -> latent scale -> sampler -> VAE decode. Bind the
+    # profile-selected LoRA/conditioning route and shared VAE explicitly.
+    _v2_set_input(api, "704:1182", "vae", [V2_VAE_ID, 0])
+    _v2_set_input(api, "704:1248", "model", ["1026:1021", 0])
+    _v2_set_input(api, "704:1248", "positive", ["1026:1011", 0])
+    _v2_set_input(api, "704:1248", "negative", ["1026:1018", 0])
+    _v2_set_input(api, "704:359", "vae", [V2_VAE_ID, 0])
+
+    latent = settings["upscalers"]["latent"]
+    latent_sampler = latent["second_sampler"]
+    if latent_sampler["enabled"]:
+        _v2_set_input(api, "704:1248", "seed", sample_seed)
+        for name in ("steps", "cfg", "sampler_name", "scheduler"):
+            _v2_set_input(api, "704:1248", name, latent_sampler[name])
+        _v2_set_input(api, "704:1248", "denoise", latent_sampler["denoise"])
+    else:
+        # Latent resizing remains useful on its own. Remove the sampler node
+        # and connect the scaled latent directly to the VAE decoder.
+        _v2_replace_refs(api, "704:1248", ["704:1064", 0])
+        api.pop("704:1248", None)
+
+    seed_sampler = seedvr2["sampler"]
+    for name in ("steps", "cfg", "sampler_name", "scheduler", "denoise"):
+        _v2_set_input(api, "712:1208", name, seed_sampler[name])
+    _v2_set_input(api, "712:907", "value", seedvr2["scale_by"])
+    for group_name, node_id in (("encode", "712:1177"), ("decode", "712:718")):
+        for name, value in seedvr2[group_name].items():
+            _v2_set_input(api, node_id, name, value)
+
+    # Face refinement is another flattened subgraph whose model, VAE,
+    # conditioning, and CLIP boundary edges are absent from the API export.
+    # Keep it on the same profile-bound resources as the selected base path.
+    _v2_set_input(api, "1253:1215", "model", ["1026:1021", 0])
+    _v2_set_input(api, "1253:1215", "vae", [V2_VAE_ID, 0])
+    _v2_set_input(api, "1253:1215", "positive", ["1026:1011", 0])
+    _v2_set_input(api, "1253:1215", "negative", ["1026:1018", 0])
+    _v2_set_input(api, "1253:1215", "clip", ["1026:1025", 0])
+    face = settings["upscalers"]["face_refine"]
+    for name, value in face.items():
+        if name != "enabled":
+            _v2_set_input(api, "1253:1215", name, value)
+
+    # Krea's variance enhancer is a model-specific path, never an Anima path.
+    # Krea's variance enhancer exists in the dual-sampler branch, while the
+    # normal branch exposes the same switch as 691:213.  Configure both
+    # before pruning the inactive base graph.
+    _v2_set_input(api, "701:538", "switch", settings["model_profile"] == "krea2")
+    _v2_set_input(api, "691:213", "switch", settings["model_profile"] == "krea2")
+    # The attached workflow includes an interactive image-picker branch for
+    # manual reference selection.  Random Studio submissions must remain
+    # unattended: route both base modes through their generated-image branch
+    # and leave the picker as an opt-in visual-workflow feature.
+    _v2_set_input(api, "691:688", "switch", False)
+    _v2_set_input(api, "701:697", "switch", False)
+
+    for node in api.values():
+        if isinstance(node, dict) and node.get("class_type") in V2_REMOVED_CLASSES:
+            # This protects callers that mixed a v1 node into the v2 export.
+            node["_v2_removed"] = True
+    for node_id in [node_id for node_id, node in api.items() if isinstance(node, dict) and node.get("_v2_removed")]:
+        api.pop(node_id, None)
+
+    base_mode = settings["base_mode"]
+    base_endpoint = list(V2_BASE_ENDPOINTS[base_mode])
+    inactive_base = V2_BASE_GROUPS["dual_sampler" if base_mode == "normal" else "normal"]
+    _v2_remove_group(api, inactive_base, base_endpoint)
+    active_base = V2_BASE_GROUPS[base_mode]
+    raw_base_image = {
+        "normal": ["691:239", 0],
+        "dual_sampler": ["701:539", 0],
+    }[base_mode]
+
+    # The visual workflow exposes an optional image picker and desktop
+    # notification after the base sampler.  They are useful when a person is
+    # driving ComfyUI directly, but the Random Studio API path is unattended.
+    # Bypass those nodes in both switch arms before removing them; ComfyUI
+    # validates lazy switch inputs even when the other arm is selected.
+    interactive_ids = {
+        node_id
+        for node_id, node in api.items()
+        if node_id.startswith(active_base)
+        and isinstance(node, dict)
+        and node.get("class_type") in {"SimpleNotify", "AaaliceImagePicker"}
+    }
+    for node_id, node in api.items():
+        if not node_id.startswith(active_base) or not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        for name in ("on_false", "on_true"):
+            value = inputs.get(name)
+            if (
+                isinstance(value, list)
+                and len(value) == 2
+                and value[0] in interactive_ids
+            ):
+                inputs[name] = list(raw_base_image)
+    for node_id in interactive_ids:
+        _v2_replace_refs(api, node_id, raw_base_image)
+        api.pop(node_id, None)
+
+    # The normal base subgraph carries an unused image-to-latent branch for
+    # manual img2img.  Its VAEEncode widget has no image in an unattended
+    # text-to-image submission, and ComfyUI validates both lazy switch arms.
+    # Route that arm to the already-rendered empty latent and keep the visual
+    # UI template untouched for direct interactive use.
+    for node_id, node in list(api.items()):
+        if (
+            node_id.startswith(active_base)
+            and isinstance(node, dict)
+            and node.get("class_type") == "VAEEncode"
+        ):
+            _v2_replace_refs(api, node_id, ["691:53", 0])
+            api.pop(node_id, None)
+
+    _v2_set_ui_mode(ui, 691, base_mode == "normal")
+    _v2_set_ui_mode(ui, 701, base_mode == "dual_sampler")
+
+    # The selectors in the export are AnySwitch nodes.  Set every candidate
+    # to the current endpoint before enabling a stage; this makes the chain
+    # deterministic and also bypasses stale links left by a disabled group.
+    def set_selector(node_id: str, endpoint: list[Any]) -> None:
+        inputs = _v2_inputs(api, node_id)
+        if inputs is None:
+            return
+        for name in list(inputs):
+            if name.startswith("any_") or name in {"on_false", "on_true"}:
+                inputs[name] = list(endpoint)
+
+    set_selector("702:353", base_endpoint)
+    current = base_endpoint
+    stage_enabled = {key: bool(settings["upscalers"][key]["enabled"]) for key in V2_STAGE_GROUPS}
+    # Configure each optional group in the requested order.  A group's input
+    # selector is pointed at the previous endpoint; disabling it removes the
+    # flattened nodes and all references to them.
+    stage_selector = {
+        "latent": "702:353",
+        "seedvr2": "710:388",
+        "nvidia": "1425:1419",
+        "face_refine": "1214:1209",
+    }
+    for stage, prefix in V2_STAGE_GROUPS.items():
+        selector_id = stage_selector[stage]
+        set_selector(selector_id, current)
+        if not stage_enabled[stage]:
+            _v2_remove_group(api, prefix, current)
+            _v2_set_ui_mode(ui, {"latent": 704, "seedvr2": 712, "nvidia": 1432, "face_refine": 1253}[stage], False)
+            continue
+        _v2_set_ui_mode(ui, {"latent": 704, "seedvr2": 712, "nvidia": 1432, "face_refine": 1253}[stage], True)
+        current = list(V2_STAGE_ENDPOINTS[stage])
+
+    # Route the visual preview to the final surviving image and discard its
+    # optional example-image fallback.  The frontend workflow retains the
+    # original picker graph; the submitted API graph stays deterministic.
+    for node_id, node in list(api.items()):
+        if isinstance(node, dict) and node.get("class_type") == "PreviewImage":
+            api.pop(node_id, None)
+    _v2_remove_group(api, "863:", current)
+
+    # Desktop notifications and interactive save helpers belong to the visual
+    # workflow, not the unattended API graph. The notification plugin marks
+    # these helpers as output nodes, and the save plugin's widget signature
+    # changes across releases. Bypass both node types to their image input and
+    # let the core SaveImage sink below own persistence.
+    for node_id, node in list(api.items()):
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs") or {}
+        if node.get("class_type") == "SimpleNotify":
+            endpoint = inputs.get("value")
+        elif node.get("class_type") == "ConditionalSaveImage":
+            endpoint = inputs.get("images")
+        else:
+            continue
+        if isinstance(endpoint, list) and len(endpoint) == 2:
+            _v2_replace_refs(api, node_id, list(endpoint))
+        api.pop(node_id, None)
+
+    # Stage-specific model/settings controls not represented by a common
+    # sampler node.
+    latent = settings["upscalers"]["latent"]
+    # The latent upscale node lives inside the 704: group.  Earlier drafts
+    # targeted the group id (``701``), which is not a node in the API export,
+    # so the requested scale was silently ignored by ComfyUI.  Write the
+    # actual ``LatentUpscaleBy.scale_by`` widget and keep reduced fixtures
+    # tolerant through _v2_set_input's no-op behavior when the node is absent.
+    _v2_set_input(api, "704:1064", "scale_by", float(latent["scale_by"]))
+    _v2_set_input(api, "704:1064", "upscale_method", latent["upscale_method"])
+    _v2_set_input(api, "701:1450", "scale_by", float(latent["scale_by"]))
+    _v2_set_input(api, "701:1450", "upscale_method", latent["upscale_method"])
+    nvidia = settings["upscalers"]["nvidia"]
+    _v2_set_input(api, "1432:1418", "resize_type", nvidia["resize_type"])
+    _v2_set_input(api, "1432:1418", "resize_type.scale", nvidia["scale"])
+    _v2_set_input(api, "1432:1418", "quality", nvidia["quality"])
+
+    # Every surviving save node receives the same prefix.  Intermediate saves
+    # are part of the attached graph and are harmless when a stage is absent.
+    for node in api.values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs")
+        if isinstance(inputs, dict) and "filename_prefix" in inputs:
+            inputs["filename_prefix"] = filename_prefix
+    _v2_repair_missing_refs(api, current)
+    # v2 submissions stay on the attached namespaced graph.  Do not append
+    # the old integer-id readback nodes here: they reintroduce the removed
+    # CFGZeroStar/second-sampler/detailer surface to otherwise clean v2
+    # payloads.  Legacy settings are migrated at the request/history boundary
+    # and are rendered through the v1 template only when that template is
+    # explicitly selected.
+    # ``ConditionalSaveImage`` in the attachment is intentionally a
+    # pass-through helper (``output_node: false`` in /object_info).  Connect a
+    # single standard SaveImage sink to the last surviving image endpoint so
+    # every unattended Random Studio submission produces an image that the
+    # runner can discover through ComfyUI history.  The branch-local save
+    # nodes remain in the graph for visual/manual use; this sink is the only
+    # node whose filename prefix is authoritative for the submitted batch.
+    api[V2_OUTPUT_ID] = {
+        "inputs": {
+            "filename_prefix": filename_prefix,
+            "images": list(current),
+        },
+        "class_type": "SaveImage",
+        "_meta": {"title": "Anima Random Studio 输出"},
+    }
+    return api, ui
+
+
 def render_workflows(
     api_template: dict[str, Any],
     ui_template: dict[str, Any],
@@ -870,12 +2175,57 @@ def render_workflows(
     resolved_prompt_full: str = "",
     frozen_positive_prompt: str = "",
     frozen_negative_prompt: str = "",
+    resource_paths: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    raw_settings = copy.deepcopy(settings)
     settings = validate_settings(settings)
     if not 0 <= sample_seed <= MAX_SAMPLE_SEED:
         raise WorkflowError("sample_seed 超出范围")
     if not 0 <= prompt_seed <= 2**31 - 1:
         raise WorkflowError("prompt_seed 超出范围")
+
+    # graphToPrompt exports from the v2 attachment use namespaced ids and a
+    # different node contract.  Keep the mature v1 renderer below intact for
+    # old embedded workflows and route only the new export through its adapter.
+    if _is_v2_api_template(api_template):
+        return _render_v2_workflows(
+            api_template,
+            ui_template,
+            settings,
+            sample_seed,
+            prompt_seed,
+            filename_prefix,
+            resolved_prompt,
+            resolved_prompt_full,
+            frozen_positive_prompt,
+            frozen_negative_prompt,
+            resource_paths,
+        )
+
+    # Embedded v1 workflows still need their compatibility-only controls while
+    # they are being replayed.  Keep those aliases local to this legacy render
+    # call; v2 settings/history remain free of the removed controls.
+    settings["hires"] = _validate_hires(raw_settings.get("hires", DEFAULT_HIRES))
+    settings["detailers"] = _validate_detailers(
+        raw_settings.get("detailers", DEFAULT_DETAILERS)
+    )
+    settings["cfg_zero_star"] = _boolean(
+        "cfg_zero_star", raw_settings.get("cfg_zero_star", False)
+    )
+    settings["second_sampler"] = _validate_second_sampler(
+        raw_settings.get("second_sampler", DEFAULT_SECOND_SAMPLER)
+    )
+    # Legacy embedded workflows may send a full v1 settings snapshot with the
+    # newly added default ``model_profile=anima`` field.  Their custom Anima
+    # UNet remains valid for the v1 renderer; explicit v2 profile requests are
+    # handled above and stay authoritative in ``validate_settings``.
+    if (
+        "model_profile" in raw_settings
+        and str(raw_settings.get("model_profile")) == DEFAULT_MODEL_PROFILE
+        and isinstance(raw_settings.get("model_name"), str)
+        and raw_settings["model_name"] != DEFAULT_SETTINGS.get("model_name")
+    ):
+        settings["model_name"] = raw_settings["model_name"]
 
     api = copy.deepcopy(api_template)
     ui = copy.deepcopy(ui_template)
@@ -1101,6 +2451,7 @@ def build_submission(
     resolved_prompt_full: str = "",
     frozen_positive_prompt: str = "",
     frozen_negative_prompt: str = "",
+    resource_paths: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     api, ui = render_workflows(
         api_template,
@@ -1114,9 +2465,14 @@ def build_submission(
         resolved_prompt_full,
         frozen_positive_prompt,
         frozen_negative_prompt,
+        resource_paths,
     )
+    metadata_settings = validate_settings(settings)
+    if _is_v2_api_template(api_template):
+        for legacy_key in _LEGACY_SETTING_KEYS:
+            metadata_settings.pop(legacy_key, None)
     metadata = {
-        "settings": validate_settings(settings),
+        "settings": metadata_settings,
         "sample_seed": sample_seed,
         "prompt_seed": prompt_seed,
         "sequence": sequence,
@@ -1137,10 +2493,22 @@ class WorkflowTemplates:
         validate_template_nodes(api_template, ui_template)
         self.api = api_template
         self.ui = ui_template
+        # Launcher mappings are attached after construction by
+        # ``configure_resources`` so dynamic v2 profile switches can resolve
+        # every loader (including SeedVR2) to its actual ComfyUI-relative path.
+        self.resource_paths: dict[str, str] = {}
+        # Expose the contract version to queue/history owners without making
+        # them inspect private renderer details.  The v2 graph uses namespaced
+        # graphToPrompt ids; v1 keeps the hand-numbered template contract.
+        self.is_v2 = _is_v2_api_template(api_template)
 
     @classmethod
     def load(cls, template_dir: str | Path) -> "WorkflowTemplates":
         directory = Path(template_dir)
+        v2_api = directory / "workflow_api_v2.json"
+        v2_ui = directory / "workflow_ui_v2.json"
+        if v2_api.is_file() and v2_ui.is_file():
+            return cls(read_json(v2_api), read_json(v2_ui))
         return cls(read_json(directory / "workflow_api.json"), read_json(directory / "workflow_ui.json"))
 
     def submission(
@@ -1171,4 +2539,5 @@ class WorkflowTemplates:
             resolved_prompt_full,
             frozen_positive_prompt,
             frozen_negative_prompt,
+            self.resource_paths,
         )

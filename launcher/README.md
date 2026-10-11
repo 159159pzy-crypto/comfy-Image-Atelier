@@ -1,6 +1,6 @@
 # Windows 安装启动器
 
-Windows 10/11 x64，**WinUI 3（Windows App SDK，C#）**，非打包（unpackaged）+ 自包含文件夹分发。用户无需安装 .NET 或 Windows App Runtime，也不需要从源码启动 WebUI。模型、ComfyUI 和第三方节点按需从各自来源下载，不随启动器再分发。
+Windows 10/11 x64，**WinUI 3（Windows App SDK，C#）**，非打包（unpackaged）+ 自包含文件夹分发。用户无需安装 .NET 或 Windows App Runtime，也不需要从源码启动 WebUI。模型、ComfyUI 和第三方节点按需从各自来源下载，不随启动器再分发。v2 工作台支持 Anima 与 Krea 2 两个模型档案；档案资源、SeedVR2、N 卡放大和 Forbidden Vision 脸部细化插件状态由 WebUI `/api/resources` 统一检查。
 
 > 说明：WinUI 3 不支持单文件发布。启动器输出为 `dist\launcher` 文件夹（`AnimaRandomStudio.exe` 与其依赖 DLL），请将**整个目录**一并分发。
 
@@ -10,15 +10,24 @@ Windows 10/11 x64，**WinUI 3（Windows App SDK，C#）**，非打包（unpackag
    - 默认进入「服务」主页，可独立查看并控制 ComfyUI 与工作台的启动/停止（外部实例只检测不停止），也可一键全部启动/停止。
 2. 导入可选择包含 `main.py` 的目录，或便携版上级目录。自动识别 `.venv`、`venv`、`python_embeded`；其他环境手动选择 `python.exe`。点击“检查 / 导入目录”。
 3. 新建请选择空目录、来源，点击“安装环境 / 补齐缺失节点”。新安装仅支持 NVIDIA，需已安装支持 CUDA 12.8 的 NVIDIA 驱动；AMD/Intel 用户导入已经可用的 ComfyUI。安装过程记录阶段，失败后可在同一目录重试。
-4. 模型页面按基础生成、高清修复、Detailer 分组。检查来源、大小、目标、SHA-256 和授权后勾选下载。**只有基础生成的三个模型必需**，其他模块按需安装。未安装高清模型时，首次默认关闭高清修复。
+4. 模型页面按 Anima / Krea 2 基础生成和 SeedVR2 资源分组。检查来源、大小、目标、SHA-256 和授权后勾选下载。当前清单中没有可验证来源的 v2 模型只做本地检测，需从模型作者合法来源手动安装；不会用未知 URL 自动下载或替换文件。v2 所需的 AAAlice Nodes、Prompt Assistant、Krea seed enhancer 等节点会按锁定提交安装；N 卡放大和 Forbidden Vision 脸部细化属于可选插件，需从其来源另行安装。
 5. 点击“启动并打开工作台”。检查 ComfyUI `/system_stats`、`/object_info`、必需节点和 WebUI `/api/status` 后打开浏览器。以后双击自动启动并驻留托盘。
-6. 如需验证生成，主动点击“生成一张测试图”：生成一张 512×512、4 步、无 LoRA/高清/Detailer 的测试图片。存在其他生成任务时拒绝提交。
+6. 如需验证生成，主动点击“生成一张测试图”：先使用 Anima 普通底图、关闭全部可选修复，生成一张最小批次；再在工作台切换双采样底图、Krea 2 和各修复阶段。存在其他生成任务时拒绝提交。
 
 安装建议在环境盘预留至少 20 GiB；模型另需约 6 GiB。安装工具、Python 和下载缓存还会占用启动器状态目录所在盘。模型下载前按目标磁盘核算剩余空间；下载完成验证大小和 SHA-256 后才原子发布。暂停保留 `.part`，重试或更换镜像继续；取消只删除所选下载的临时文件。已存在但校验不符的文件不会覆盖，请先手动备份。安装记录最后一个阶段，中断后重试会自动续跑幂等步骤；克隆残留的 `.anima-installing` 临时目录也会被识别，完成的克隆直接接管、未完成的继续拉取，无需手动清理。
 
+## v2 工作流与模型档案
+
+工作台以附件 `D:\loud\workflow (1).json` 的 ComfyUI 前端工作流为可视化基线，并使用仓库 `templates\workflow_api_v2.json` 的 API Format 版本提交。启动器不会覆盖用户的原始 ComfyUI 工作流；升级时请把附件留作回滚和手工核对基线。
+
+- **Anima**：`anima-base-v1.0.safetensors` + `qwen_3_06b_base.safetensors` + `qwen_image_vae.safetensors`，编码类型 `stable_diffusion`，默认底图－双采样器。
+- **Krea 2**：`krea2_turbo_int8_convrot.safetensors` + `qwen3vl_4b_fp8_scaled.safetensors` + `qwen_image_vae.safetensors`，编码类型 `krea2`，默认普通底图。
+- SeedVR2 默认资源为 `seedvr2_3b_int8_convrot.safetensors` 与 `ema_vae_fp16.safetensors`；N 卡与脸部细化只检查插件/节点状态，不包含在模型下载清单中。
+- 修复阶段按潜空间 → SeedVR2 → N 卡 → Forbidden Vision 脸部细化串联；关闭阶段会旁路，不会提交孤立节点。旧 CFGZeroStar、旧高清模型链和独立 ADetailer 不属于 v2 工作流。
+
 ## 模型路径与来源
 
-`manifests/model-manifest.json` 是唯一自动下载清单。条目只有 HTTPS URL、确定大小和完整 SHA-256 同时存在才可自动安装。不按文件名猜地址。眼部和 NSFW 检测模型目前为仅检测 / 手动导入；界面列出规定目录。LoRA 只扫描本地文件，具体选择留在工作台。
+`manifests/model-manifest.json` 是唯一自动下载清单。条目只有 HTTPS URL、确定大小和完整 SHA-256 同时存在才可自动安装。不按文件名猜地址。v2 的 Anima、Krea 2 和 SeedVR2 条目在来源未锁定时标为仅检测 / 手动导入；启动器不会猜测下载地址。LoRA 只扫描本地文件，具体选择留在工作台。
 
 通过 ComfyUI 自己的 `folder_paths` 与 `load_extra_path_config` 解析 `extra_model_paths.yaml`，支持 `models/clip`、`models/unet`、安全子目录及 Impact 的 `ultralytics_bbox` / `ultralytics_segm`。新下载遵循配置的默认搜索目录。启动时从 `/object_info` 取得实际模型相对名称，映射到工作流；同名歧义会报错。启动后新增模型可能需要重启 ComfyUI。
 

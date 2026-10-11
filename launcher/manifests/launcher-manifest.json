@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "version": "0.3.0",
-  "validation": "Windows 11 x64 RTX 4060 Laptop: fresh isolated Python install, all required node classes, service health and 512x512 GPU generation verified 2026-09-18; shared preexisting model files",
+  "version": "0.4.0",
+  "validation": "Windows 11 x64 RTX 4060 Laptop: existing ComfyUI v2 Anima/Krea 2 workflows and full repair chain GPU verified 2026-10-11; clean install of the added v2 node set has not been run; model files were preinstalled",
   "comfy": {
     "id": "ComfyUI",
     "url": "https://github.com/Comfy-Org/ComfyUI.git",
@@ -34,18 +34,14 @@
       "id": "Comfyui-Anima-Tools",
       "url": "https://github.com/nregret/Comfyui-Anima-Tools.git",
       "commit": "d71fce225b1cb7486461759b41ed6c254b92e5a8",
-      "requiredClasses": [
-        "AnimaPromptComposer",
-        "AnimaPromptPlusClipEncode"
-      ]
+      "requiredClasses": []
     },
     {
       "id": "rgthree-comfy",
       "url": "https://github.com/rgthree/rgthree-comfy.git",
       "commit": "27b4f4cdcf3b127c29d5d8135ac1536ecbd4c383",
       "requiredClasses": [
-        "Power Lora Loader (rgthree)",
-        "Seed (rgthree)"
+        "Any Switch (rgthree)"
       ]
     },
     {
@@ -53,27 +49,21 @@
       "url": "https://github.com/ltdrdata/ComfyUI-Impact-Pack.git",
       "commit": "429d0159ad429e64d2b3916e6e7be9c22d025c3c",
       "requiredClasses": [
-        "ToDetailerPipe",
-        "ImpactSwitch",
-        "SAMLoader",
-        "FaceDetailerPipe",
-        "EditDetailerPipe"
+        "ImpactIfNone"
       ]
     },
     {
       "id": "comfyui-impact-subpack",
       "url": "https://github.com/ltdrdata/ComfyUI-Impact-Subpack.git",
       "commit": "50c7b71a6a224734cc9b21963c6d1926816a97f1",
-      "requiredClasses": [
-        "UltralyticsDetectorProvider"
-      ]
+      "requiredClasses": []
     },
     {
       "id": "comfyui-easy-use",
       "url": "https://github.com/yolain/ComfyUI-Easy-Use.git",
       "commit": "b5e31ef12ad9d0b187b545c2707735cc7d581c52",
       "requiredClasses": [
-        "easy int"
+        "ComfyMathExpression"
       ]
     },
     {
@@ -81,7 +71,9 @@
       "url": "https://github.com/kijai/ComfyUI-KJNodes.git",
       "commit": "e27a505b3ba6ce42687fe00500deda103d9d6071",
       "requiredClasses": [
-        "ImageResizeKJv2"
+        "ResizeImageMaskNode",
+        "ModelPassThrough",
+        "VRAM_Debug"
       ]
     },
     {
@@ -89,7 +81,35 @@
       "url": "https://github.com/willmiao/ComfyUI-Lora-Manager.git",
       "commit": "186ef4da786a039ee2a429508c93f5bffaedf1e3",
       "requiredClasses": [
-        "Lora Loader (LoraManager)"
+        "Lora Loader (LoraManager)",
+        "TriggerWord Toggle (LoraManager)",
+        "Metadata Overwrite (LoraManager)"
+      ]
+    },
+    {
+      "id": "comfyui-aaalice-nodes",
+      "url": "https://github.com/Aaalice233/ComfyUI-Aaalice-Nodes.git",
+      "commit": "2395128e6f02d60ccc4c2b514201533cd8fd3f92",
+      "requiredClasses": [
+        "PromptSelector",
+        "QuickGroupManager",
+        "ResolutionPreset"
+      ]
+    },
+    {
+      "id": "prompt-assistant",
+      "url": "https://github.com/yawiii/ComfyUI-Prompt-Assistant.git",
+      "commit": "e0587e6d50939ae05e92922f1ed2fce008c7f622",
+      "requiredClasses": [
+        "PromptExpand"
+      ]
+    },
+    {
+      "id": "krea-seed-variance-enhancer",
+      "url": "https://github.com/harukimix/KreaSeedVarianceEnhancer.git",
+      "commit": "1515d23a5b399a44ccd97482e1105a43937268ae",
+      "requiredClasses": [
+        "KreaSeedVarianceEnhancer"
       ]
     }
   ],
@@ -177,6 +197,7 @@
     "hydra-core==1.3.7",
     "idna==3.20",
     "ImageIO==2.37.4",
+    "imageio-ffmpeg==0.6.0",
     "importlib_metadata==9.0.1",
     "iopath==0.1.10",
     "Jinja2==3.1.6",

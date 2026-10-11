@@ -21,13 +21,19 @@ class ResourceMappingTests(unittest.TestCase):
             "qwen_3_06b_base.safetensors": "Anima/qwen_3_06b_base.safetensors",
         })
         self.assertEqual(defaults["model_name"], "Anima/miaomiaoHarem_anima14.safetensors")
-        self.assertEqual(templates.api["17"]["inputs"]["clip_name"], "Anima/qwen_3_06b_base.safetensors")
-        self.assertFalse(defaults["hires"]["enabled"])
+        self.assertEqual(templates.api["167:57"]["inputs"]["clip_name"], "Anima/qwen_3_06b_base.safetensors")
+        self.assertFalse(defaults["upscalers"]["latent"]["enabled"])
+        for removed in ("hires", "detailers", "cfg_zero_star", "second_sampler"):
+            self.assertNotIn(removed, defaults)
         self.assertEqual(DEFAULT_SETTINGS, original)
 
     def test_legacy_launch_preserves_defaults(self):
         templates = WorkflowTemplates.load(ROOT / "templates")
-        self.assertEqual(configure_resources(templates, None), DEFAULT_SETTINGS)
+        defaults = configure_resources(templates, None)
+        expected = copy.deepcopy(DEFAULT_SETTINGS)
+        for removed in ("hires", "detailers", "cfg_zero_star", "second_sampler"):
+            expected.pop(removed)
+        self.assertEqual(defaults, expected)
 
     def test_mapping_rejects_unsafe_paths(self):
         templates = WorkflowTemplates.load(ROOT / "templates")

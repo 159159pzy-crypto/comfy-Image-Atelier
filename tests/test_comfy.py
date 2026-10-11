@@ -9,7 +9,7 @@ from aiohttp.test_utils import TestServer
 APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_DIR))
 
-from anima_webui.comfy import ComfyAborted, ComfyClient, ComfyError, extract_positive_prompt, validate_comfy_url  # noqa: E402
+from anima_webui.comfy import ComfyAborted, ComfyClient, ComfyError, extract_images, extract_positive_prompt, validate_comfy_url  # noqa: E402
 from anima_webui.workflow import WorkflowError  # noqa: E402
 
 
@@ -334,6 +334,21 @@ class PositivePromptTests(unittest.TestCase):
         self.assertEqual(
             extract_positive_prompt(entry),
             "quality, hero, red coat, standing, city, lighting, ",
+        )
+
+
+class ImageExtractionTests(unittest.TestCase):
+    def test_ignores_temporary_preview_images(self):
+        entry = {
+            "outputs": {
+                "save": {"images": [{"filename": "final.png", "type": "output"}]},
+                "preview": {"images": [{"filename": "preview.png", "type": "temp"}]},
+                "legacy": {"images": [{"filename": "legacy.png"}]},
+            }
+        }
+        self.assertEqual(
+            [image["filename"] for image in extract_images(entry)],
+            ["final.png", "legacy.png"],
         )
 
 

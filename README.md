@@ -28,26 +28,20 @@
 - 批量生成、批次队列(运行中再开批次自动排队接续)、停止任务和生成历史。
 - 单张采样进度与实时预览(经由 ComfyUI websocket,断连不影响批次本身)。
 - 历史详情支持可靠回放与三类变体：按原双种子重跑、冻结最终提示词仅更换图像种子、按角色/服装/姿势/背景/表情选择性重抽，以及按原配置全部再抽。同提示词变体仍是文生图，不是 Img2Img。
-- 角色、服装、姿势、背景、表情五类提示词池。
-- 每个池支持随机、固定、关闭、搜索、分类/特征筛选、手动选择和排除项。
+- 公共模型选择器只有 **Anima** 与 **Krea 2** 两个档案。切换档案会一起切换 UNet、CLIP、VAE、编码类型、采样默认值、SeedVR2 默认资源和数据命名空间。
+- Anima 保留角色、服装、姿势、背景、表情五类确定性随机池；`prompt_seed` 控制池抽取，`sample_seed` 控制 ComfyUI 噪声。Krea 2 使用独立的自然语言池，初始为空，可导入 JSON 或 CSV 后再抽取。
+- 每个 Anima 池支持随机、固定、关闭、搜索、分类/特征筛选、手动选择和排除项。LoRA、触发词、风格预设和池数据均按模型档案隔离；升级时旧全局数据迁移到 Anima 并先备份。
 - 女性人数、男性人数、每类抽取数量、宽高、步数、CFG、Sampler、Scheduler、正负提示词和画师均可独立设置。
-- 采样参数支持独立启用 CFGZeroStar；可选的 2ndSampler 抽屉支持步数、CFG、Sampler、Scheduler 和 Denoise，第二次采样复用当前图片的主 seed。
-- 全部提示词字段支持安全的 Anima Tag 自动规范：整理分隔符、大小写、下划线、`score_*`、年份、画师前缀与重复项，同时保留自然语言、权重语法和原有顺序。
-- 支持本地维护精确的“原词 → 规范词”替换规则，并按正向、负向、LoRA 三种范围启停；字段失焦时自动应用并可撤销。
-- 生成链保持现有模型、LoRA、采样器、CLIP、VAE、Detailer 和 SaveImage 结构。
+- 全部提示词字段支持安全的 Anima Tag 自动规范；支持本地“原词 → 规范词”替换规则，并按正向、负向、LoRA 三种范围启停。
 
 ### 模型、LoRA 与修复
 
-- 主模型从 ComfyUI `UNETLoader` 实时读取，不可用时不会静默替换。
-- LoRA 支持 `models/loras` 下的任意安全子目录；界面优先显示 `文件夹 / 文件名`，搜索支持完整相对路径。
-- LoRA 选择器读取 ComfyUI-Lora-Manager 已缓存的名称、预览图和触发词，并以响应式缩略图卡片展示；不会自动联网抓取 Civitai。
-- LoRA 默认列表为空，用户可以按顺序添加并调整强度。启用带触发词的 LoRA 时会追加到“额外提示词”，关闭或移除时只清理 WebUI 自动加入的词。
-- 每个 LoRA 的触发词可以在 WebUI 中新增、修改、清空或恢复管理器原值；覆盖按完整相对路径全局保存在本机，不会修改 LoRA Manager 缓存。
-- 高清修复支持开关、放大模型和高清输出比例（1–1000%，默认 45%）；该比例控制放大模型输出的最终缩放。
-- 手部、NSFW、面部、眼睛四个 Detailer 独立开关；关闭的模块不会进入提交到 ComfyUI 的 API 工作流。
-- Use SAM Loader 随 Detailer 自动联动：任一 Detailer 开启时保留 SAMLoader，全部关闭时自动移除 SAMLoader。
-- 批次启动前校验主模型、高清模型和 LoRA。缺失资源会显示具体文件名和原因。
-- 主 Sampler 与 Scheduler 从当前 ComfyUI 的 KSampler 动态读取，默认保持工作流原值 `er_sde` 与 `simple`；它们只控制主生成链，不覆盖 Detailer 的独立采样参数。
+- 默认 Anima 绑定 `anima-base-v1.0.safetensors`、`qwen_3_06b_base.safetensors`、`qwen_image_vae.safetensors` 和 `stable_diffusion` 编码类型；Krea 2 绑定 `krea2_turbo_int8_convrot.safetensors`、`qwen3vl_4b_fp8_scaled.safetensors`、`qwen_image_vae.safetensors` 和 `krea2` 编码类型。
+- LoRA 支持 `models/loras` 下的任意安全子目录；选择器按当前模型档案读取清单、预览、触发词和覆盖值，不会把另一档案的配置带入当前提交。
+- 高清链按顺序独立旁路：底图 → 潜空间放大 → SeedVR2 修复放大 → N 卡放大 → ForbiddenVision 脸部细化。旧 `UpscaleModelLoader` / `ImageUpscaleWithModel` 链、CFGZeroStar 和四类独立 ADetailer 不再进入 v2 提交。
+- 底图模式严格二选一：普通底图或底图－双采样器；默认值由模型档案提供。关闭的修复阶段会清除提交中的孤立节点和连接。
+- 批次启动前校验当前档案的 UNet、CLIP、VAE、采样器、启用的 LoRA、SeedVR2 资源及可选处理节点；N 卡放大和脸部细化预检检查节点/插件可用性，不承诺独立模型文件扫描。
+- `GET /api/resources` 同时返回两个档案的绑定资源、节点状态和可选插件状态，便于启动器与前端显示可用性。
 
 ### 收藏与提示词分组
 
@@ -64,7 +58,7 @@
 
 ### 风格预设与界面
 
-- 风格预设保存主模型、LoRA、尺寸、步数、CFG、高清修复、四个 Detailer、高级提示词和画师。
+- 风格预设按模型档案保存 UNet、CLIP、VAE 绑定、LoRA、尺寸、步数、CFG、底图模式、潜空间 / SeedVR2 / N 卡 / 脸部细化开关、高级提示词和画师。
 - 支持创建、覆盖、重命名、删除和星标收藏；列表按收藏优先、最近更新排序。
 - 应用预设会整体替换上述字段，之后可以继续逐项调整，不会自动回写预设。
 - 预设不包含批次数量、人物数量或五类提示词池选择。
@@ -85,48 +79,36 @@
 
 ## ComfyUI 自定义节点
 
-建议通过 ComfyUI Manager 安装并重启 ComfyUI。模板中实际使用的节点如下：
+建议通过 ComfyUI Manager 安装并重启 ComfyUI。启动器清单会锁定 v2 提交所需的第三方包；下表列出模板实际使用的节点来源：
 
 | 节点包 | 用途 |
 | --- | --- |
 | [Comfyui-Anima-Tools](https://github.com/nregret/Comfyui-Anima-Tools) | Anima 提示词池、画师/条目收藏、`AnimaPromptComposer` 和 `AnimaPromptPlusClipEncode` |
 | [rgthree-comfy](https://github.com/rgthree/rgthree-comfy) | Power LoRA Loader、Seed 和分组控制 |
-| [ComfyUI-Impact-Pack](https://github.com/ltdrdata/ComfyUI-Impact-Pack) | `FaceDetailerPipe`、`EditDetailerPipe`、Detailer 管线 |
-| [ComfyUI-Impact-Subpack](https://github.com/ltdrdata/ComfyUI-Impact-Subpack) | `UltralyticsDetectorProvider` 检测器加载 |
-| [ComfyUI-Easy-Use](https://github.com/yolain/ComfyUI-Easy-Use) | `easy hiresFix`、基础整数/尺寸节点 |
-| [ComfyUI-KJNodes](https://github.com/kijai/ComfyUI-KJNodes) | `ImageResizeKJv2` 等可视化工作流兼容节点 |
+| [ComfyUI-Aaalice-Nodes](https://github.com/Aaalice233/ComfyUI-Aaalice-Nodes) | `PromptSelector`、`QuickGroupManager`、`ResolutionPreset` |
+| [ComfyUI-Prompt-Assistant](https://github.com/yawiii/ComfyUI-Prompt-Assistant) | `PromptExpand` 提示词后处理 |
+| [KreaSeedVarianceEnhancer](https://github.com/harukimix/KreaSeedVarianceEnhancer) | Krea 2 自然语言条件随机增强 |
+| [ComfyUI-KJNodes](https://github.com/kijai/ComfyUI-KJNodes) | `ModelPassThrough`、`VRAM_Debug`、图像/潜空间辅助节点 |
+| [ComfyUI-Lora-Manager](https://github.com/willmiao/ComfyUI-Lora-Manager) | 两组 LoRA、触发词和元数据节点 |
+| [ComfyUI-Impact-Pack](https://github.com/ltdrdata/ComfyUI-Impact-Pack) / Subpack | 可选检测与图像处理节点 |
+| ComfyUI 内置 SeedVR2 | `SeedVR2Preprocess`、`SeedVR2Conditioning`、`SeedVR2PostProcessing` |
+| [ComfyUI-NVIDIA-RTX-VSR-Pro](https://github.com/whmc76/ComfyUI-NVIDIA-RTX-VSR-Pro) | `RTXVideoSuperResolution` N 卡放大（可选） |
+| [ComfyUI-Forbidden-Vision](https://github.com/luxdelux7/ComfyUI-Forbidden-Vision) | `ForbiddenVisionFaceProcessorIntegrated` 脸部细化（可选） |
 
-ComfyUI 核心节点（UNETLoader、CLIPLoader、VAELoader、KSampler、CFGZeroStar、VAEDecode、SaveImage、UpscaleModelLoader）无需额外安装。若 `/object_info` 中缺少上述自定义节点，WebUI 可以启动，但对应工作流无法执行。
+ComfyUI 核心节点（包括逻辑开关、采样、VAE 和 `SaveImage`）以及 SeedVR2 节点随 ComfyUI 提供；N 卡放大和脸部细化需要另行安装对应插件。开启可选阶段前，先在 `/api/resources` 确认节点和插件状态；这两个阶段的预检不虚构独立放大模型或脸部检测模型文件。v2 提交不包含 CFGZeroStar、旧 `UpscaleModelLoader` / `ImageUpscaleWithModel` 或独立 ADetailer。
 
 ## 模型与文件放置
 
-下面是当前模板的默认文件名。路径均相对于 ComfyUI 根目录的 `models`：
+模型档案由 `anima_webui/model_profiles.py` 定义，文件名必须和 ComfyUI `/object_info` 返回的名称一致。路径均相对于 ComfyUI 的 `models` 目录：
 
-| 类型 | 文件名 | 放置目录 | 是否需要 |
-| --- | --- | --- | --- |
-| Anima 主模型 | `miaomiaoHarem_anima14.safetensors` | `diffusion_models/` | 必需；也可以在 WebUI 中选择其他 UNET |
-| Qwen 文本编码器 | `qwen_3_06b_base.safetensors` | `text_encoders/` | 必需；模板下载信息指向 [Anima 模型页](https://huggingface.co/circlestone-labs/Anima) |
-| Qwen VAE | `qwen_image_vae.safetensors` | `vae/` | 必需 |
-| 高清放大模型 | `4x_foolhardy_Remacri.pth` | `upscale_models/` | 高清修复开启时必需；可选择其他放大模型 |
-| SAM | `sam_vit_b_01ec64.pth` | `sams/` | 启用 Detailer 时必需 |
-| 手部检测器 | `bbox/hand_yolov9c.pt` | `ultralytics/` | 手部 Detailer 开启时必需 |
-| NSFW 分割器 | `segm/ntd11_anime_nsfw_segm_v5-variant1.pt` | `ultralytics/` | NSFW Detailer 开启时必需 |
-| 面部检测器 | `bbox/face_yolov9c.pt` | `ultralytics/` | 面部 Detailer 开启时必需 |
-| 眼睛检测器 | `bbox/Eyeful_v2-Individual.pt` | `ultralytics/` | 眼睛 Detailer 开启时必需 |
-
-完整路径示例：
-
-```text
-F:\comfyui\models\diffusion_models\miaomiaoHarem_anima14.safetensors
-F:\comfyui\models\text_encoders\qwen_3_06b_base.safetensors
-F:\comfyui\models\vae\qwen_image_vae.safetensors
-F:\comfyui\models\upscale_models\4x_foolhardy_Remacri.pth
-F:\comfyui\models\sams\sam_vit_b_01ec64.pth
-F:\comfyui\models\ultralytics\bbox\hand_yolov9c.pt
-F:\comfyui\models\ultralytics\segm\ntd11_anime_nsfw_segm_v5-variant1.pt
-F:\comfyui\models\ultralytics\bbox\face_yolov9c.pt
-F:\comfyui\models\ultralytics\bbox\Eyeful_v2-Individual.pt
-```
+| 模型档案 | 类型 | 文件名 | 放置目录 | 是否需要 |
+| --- | --- | --- | --- | --- |
+| Anima | UNet | `anima-base-v1.0.safetensors` | `diffusion_models/` 或 `unet/` | Anima 必需 |
+| Anima / Krea 2 | CLIP | `qwen_3_06b_base.safetensors` / `qwen3vl_4b_fp8_scaled.safetensors` | `text_encoders/` 或 `clip/` | 对应档案必需 |
+| Anima / Krea 2 | VAE | `qwen_image_vae.safetensors` | `vae/` | 两个档案共用 |
+| SeedVR2 | 修复模型 | `seedvr2_3b_int8_convrot.safetensors` | SeedVR2 节点要求的模型目录 | 启用 SeedVR2 时必需 |
+| SeedVR2 | VAE | `ema_vae_fp16.safetensors` | SeedVR2 节点要求的 VAE 目录 | 启用 SeedVR2 时必需 |
+| N 卡放大 | 节点与 GPU 能力 | `RTXVideoSuperResolution` / `NvidiaUpscale` | 节点包配置目录 | 启用 N 卡放大时必需；不使用独立放大模型文件 |
 
 LoRA 放在 `F:\comfyui\models\loras\`，可以继续分目录，例如：
 
@@ -135,7 +117,7 @@ F:\comfyui\models\loras\artist-a\style.safetensors
 F:\comfyui\models\loras\character\blue_archive\kazusa.safetensors
 ```
 
-重启 ComfyUI 或刷新其模型列表后，WebUI 才能读取新资源。旧的无目录 LoRA 配置只有在文件名全局唯一时才会自动迁移；同名文件会要求重新选择明确路径。
+重启 ComfyUI 或刷新其模型列表后，WebUI 才能读取新资源。启动器和 `/api/resources` 会按档案分别报告 UNet、CLIP、VAE、SeedVR2、节点及插件状态；缺失资源不会静默替换。
 
 ## 安装与启动
 
@@ -147,7 +129,7 @@ F:\comfyui\models\loras\character\blue_archive\kazusa.safetensors
 http://127.0.0.1:8188
 ```
 
-可以先把仓库根目录的 `AnimaBasicV7-Random-WebUI.json` 拖入 ComfyUI，确认工作流节点和模型均可执行。
+先将附件基线 `D:\loud\workflow (1).json` 导入 ComfyUI，确认节点包已加载；仓库保留该前端工作流基线，并使用 `templates/workflow_api_v2.json` 作为 API Format 提交模板。仓库根目录的 `AnimaBasicV7-Random-WebUI.json` 仍用于旧版可视化工作流兼容，不会自动覆盖你的 ComfyUI 工作流。
 
 ### 2. 获取仓库
 
@@ -212,10 +194,11 @@ python run.py --comfy-url http://127.0.0.1:8188 --port 8193 --no-browser
 
 打开 WebUI 后依次确认：
 
-1. “模型与修复”区域的主模型下拉框不再显示“正在读取模型”。
-2. LoRA 列表能看到完整的 `文件夹 / 文件名`，且默认没有预先添加 LoRA。
-3. 暂时关闭高清修复和所有 Detailer，先生成一张最小批次。
-4. 再逐项打开高清修复或 Detailer；缺失资源会在提交前明确提示。
+1. `/api/resources` 返回 Anima 与 Krea 2 两个档案，并确认当前档案的 UNet、CLIP、VAE 名称可用。
+2. 在模型选择器切换 Anima / Krea 2，检查绑定资源、编码类型、默认底图模式和 SeedVR2 资源随档案改变。
+3. Anima 先关闭所有可选修复生成一张最小批次；再按潜空间、SeedVR2、N 卡、脸部细化顺序逐项开启。
+4. 切换 Krea 2 后先导入自然语言 JSON/CSV 词池，再启用随机抽取；空池会在提交前明确提示。
+5. 普通底图与底图－双采样器只能二选一；资源或插件缺失时应先修复环境，不要手动改 API payload 绕过检查。
 
 ## 使用说明
 
@@ -265,7 +248,7 @@ data/style_presets.json
 ```text
 anima_webui/       Python 后端、ComfyUI 客户端、工作流和持久化
 static/            WebUI HTML、CSS、JavaScript
-templates/         workflow_api.json 与 workflow_ui.json
+templates/         workflow_api_v2.json、兼容 API/UI 模板
 sources/           原始工作流副本
 tests/             Python 测试
 run.py             启动入口
@@ -279,13 +262,15 @@ output/            生成图片（默认不提交）
 | --- | --- |
 | `data/history.sqlite3` | 批次、图片、种子、提示词和工作流元数据 |
 | `data/custom_prompts.json` | v4 自定义条目、导入大项和树形分组 |
-| `data/style_presets.json` | 用户自建风格预设 |
-| `data/lora_trigger_overrides.json` | 按 LoRA 文件保存的全局有效触发词覆盖，空列表表示禁用自动触发词 |
+| `data/style_presets.json` | 按模型档案保存的用户自建风格预设（升级前自动备份） |
+| `data/lora_trigger_overrides.json` | 按模型档案和 LoRA 文件保存的有效触发词覆盖，旧平面文件迁移到 Anima 前自动备份 |
+| `data/prompt_pools.json` | Krea 2 自然语言池及其他档案的隔离数据 |
 | `data/prompt_replacements.json` | 内置规范规则停用状态和用户自定义精确替换规则 |
 | `output/AnimaRandom/<日期>/<批次>/` | 生成图片 |
-| `templates/workflow_api.json` | 提交给 ComfyUI 的 API 模板 |
-| `templates/workflow_ui.json` | 可视化工作流模板 |
-| `AnimaBasicV7-Random-WebUI.json` | 根目录可拖入 ComfyUI 的工作流 |
+| `templates/workflow_api_v2.json` | 以附件工作流导出的 API Format 基线，提交前由渲染器按档案和开关绑定 |
+| `templates/workflow_api.json` | 旧 Anima API 兼容模板，供历史回放和升级路径使用 |
+| `templates/workflow_ui.json` | 旧可视化工作流兼容模板；附件前端基线另保存于 `D:\loud\workflow (1).json` |
+| `AnimaBasicV7-Random-WebUI.json` | 旧版可视化工作流兼容文件 |
 
 收藏条目、收藏画师和收藏分组由 Anima Tools 的本地接口保存；不会写入本项目的 Git 工作区。`data/`、`output/`、缓存和日志默认由 `.gitignore` 排除。
 
@@ -295,8 +280,10 @@ WebUI 前端使用以下本地接口：
 
 | 方法 | 路径 | 作用 |
 | --- | --- | --- |
-| `GET` | `/api/resources` | ComfyUI 当前主模型、放大模型、Sampler 和 Scheduler |
-| `GET` | `/api/loras` | LoRA 清单、同源预览地址及触发词元数据 |
+| `GET` | `/api/resources` | 当前清单及 Anima / Krea 2 的模型、CLIP、VAE、SeedVR2、节点和插件状态 |
+| `GET` | `/api/loras?model_profile=anima|krea2` | 按模型档案过滤 LoRA 清单、预览地址及触发词元数据 |
+| `GET` | `/api/prompt-pools?model_profile=krea2` | 读取模型隔离的自然语言池 |
+| `POST` | `/api/prompt-pools/import` | 以 JSON/CSV 导入 Krea 2 或指定档案的自然语言池（`replace` / `append`） |
 | `GET` | `/api/loras/preview?filename=...` | 代理已入库 LoRA 的本地预览资源 |
 | `PUT/DELETE` | `/api/loras/triggers` | 保存全局有效触发词覆盖，或按 `filename` 查询参数恢复管理器原值 |
 | `GET/POST` | `/api/prompt-rules` | 列出规则或创建自定义精确替换规则 |
@@ -327,19 +314,23 @@ WebUI 前端使用以下本地接口：
 
 先确认 ComfyUI 正在运行，并直接打开 `http://127.0.0.1:8188/object_info`。检查对应 Loader 是否存在，以及模型是否放在正确目录；移动模型后重启 ComfyUI 再刷新 WebUI。
 
-### 提交时报“主模型不存在”或“高清修复模型不存在”
+### 提交时报“主模型不存在”或修复资源不可用
 
-这是批次启动前的真实资源校验。请在 ComfyUI 当前模型列表中确认文件名完全一致，包含子目录、大小写和扩展名；WebUI 不会自动替换。
+这是批次启动前的真实资源校验。请在 `/api/resources` 或 ComfyUI `/object_info` 中确认当前档案的 UNet、CLIP、VAE、SeedVR2 模型和节点完全可用，包含子目录、大小写和扩展名；N 卡放大与脸部细化检查插件/节点状态；WebUI 不会自动替换模型。
 
 ### LoRA 看不到或数量不对
 
 确认文件位于 `models/loras`，并检查 `/object_info` 的 `LoraLoader` 列表。预览图和触发词来自 ComfyUI-Lora-Manager 已扫描的本地缓存；没有元数据时仍可选择和生成，只显示占位图且不会自动填写触发词。子目录使用 `/` 作为规范化分隔符；同名 LoRA 不会按 basename 猜测，旧配置需要重新选择明确路径。
 
-### Detailer 执行失败
+### SeedVR2、N 卡放大或脸部细化执行失败
 
-确认 Impact Pack、Impact Subpack、SAM 文件和对应的四个 Ultralytics 文件都已安装。Detailer 默认关闭，建议先关闭所有修复生成一张图片，再逐个开启定位缺失资源。
+先确认 `/api/resources` 中对应插件节点为可用状态，并安装该档案要求的模型。建议先关闭全部可选修复生成一张图片，再按潜空间、SeedVR2、N 卡、脸部细化顺序逐项开启；关闭阶段会从 API payload 旁路并清除连接。
 
-### WebUI 能打开但提示池为空
+### Krea 2 提示词池为空
+
+Krea 2 不复用 Anima 的五类 Tag 池。打开 Krea 2 面板，导入 JSON 字符串数组、`{"items": [...]}` 或每行一条的 CSV；导入成功后再启用随机抽取。`prompt_seed` 相同会选择相同自然语言条目。
+
+### WebUI 能打开但 Anima 提示池为空
 
 确认 `Comfyui-Anima-Tools` 路径可被探测。默认探测位置包括项目同级 `comfyui/custom_nodes/Comfyui-Anima-Tools` 和 `F:/comfyui/custom_nodes/Comfyui-Anima-Tools`；其他位置使用 `--anima-tools-dir`。
 
@@ -357,14 +348,16 @@ python -m pytest -q
 node --check static\app.js
 python -m compileall -q anima_webui tests run.py
 Get-Content templates\workflow_api.json | ConvertFrom-Json | Out-Null
+Get-Content templates\workflow_api_v2.json | ConvertFrom-Json | Out-Null
 Get-Content templates\workflow_ui.json | ConvertFrom-Json | Out-Null
 git diff --check
 ```
 
-工作流源文件变化后，先重新生成模板，再重启 WebUI：
+工作流源文件变化后，先重新生成兼容模板，再重启 WebUI。附件 v2 前端工作流保存在外部路径时，使用 ComfyUI 的 API Format 导出更新 `templates/workflow_api_v2.json`，同时保留原始前端 JSON 作为可视化基线：
 
 ```powershell
 python generate_templates.py
+# 之后在 ComfyUI 导出 D:\loud\workflow (1).json 的 API Format，覆盖 templates/workflow_api_v2.json
 ```
 
 测试覆盖资源枚举、LoRA 子目录和路径安全、动态修复链、画师 `@` 规范化、风格预设、收藏树、分组快照导入、安全删除、自定义项、历史记录和批量导入。

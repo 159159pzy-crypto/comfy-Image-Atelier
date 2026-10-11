@@ -68,6 +68,7 @@
 
         <section class="control-section">
           <div class="section-heading"><h2>提示词池</h2><span id="poolOverview">0 项已选</span></div>
+          <div id="animaPromptPoolControls">
           <div id="dimensionList" class="dimension-list"></div>
           <label class="field"><span>角色标签</span><select id="character_detail"><option value="trigger_tags">触发词 + 特征</option><option value="trigger">仅触发词</option></select></label>
           <label class="field"><span>固定画师</span><input id="manual_artist" type="text" placeholder="例如 @anmi, @rella" autocomplete="off" spellcheck="false"></label>
@@ -78,6 +79,12 @@
               <button id="manageArtists" class="button ghost compact" type="button">管理收藏</button>
             </div>
           </details>
+          </div>
+          <div id="kreaPromptPoolControls" class="krea-prompt-pool" hidden>
+            <div class="section-heading"><h3>Krea 2 自然语言池</h3><span id="kreaPromptPoolCount">0 项</span></div>
+            <label class="switch-row"><span><strong>随机抽取自然语言提示词</strong><small>使用 prompt seed 从 Krea 2 独立词池抽取</small></span><input id="krea_prompt_pool_enabled" type="checkbox"></label>
+            <button id="openKreaPromptPool" class="button ghost" type="button">管理自然语言池 <span aria-hidden="true">→</span></button>
+          </div>
         </section>
 
         <details class="control-section advanced-section">
@@ -106,25 +113,17 @@
           </div>
         </details>
 
-        <details class="control-section advanced-section model-repair-section">
-          <summary><span>模型与修复</span><span id="repairSummary" class="summary-value">高清开启 · 0 项细修</span><i>+</i></summary>
+        <details class="control-section advanced-section model-repair-section" open>
+          <summary><span>模型选择</span><span id="repairSummary" class="summary-value">Anima</span><i>+</i></summary>
           <div class="details-content">
-            <label class="field"><span>主模型</span><select id="model_name"><option value="">正在读取模型...</option></select></label>
+            <label class="field"><span>模型档案</span><select id="model_profile">
+              <option value="anima">Anima</option>
+              <option value="krea2">Krea 2</option>
+            </select></label>
+            <p id="modelProfileHint" class="field-hint">档案会自动切换 UNet、CLIP、VAE、编码方式与采样参数。</p>
+            <label class="field"><span>主模型</span><select id="model_name"><option value="">正在读取模型...</option></select><small class="field-hint">只显示归属当前档案的模型；CLIP 与 VAE 随档案绑定。</small></label>
+            <button id="manageResourceOwnership" class="button ghost compact" type="button">管理模型 / LoRA 归属</button>
             <div id="resourceWarning" class="resource-warning" hidden></div>
-            <div class="switch-list repair-toggle-list">
-              <label class="switch-row"><span><strong>高清修复</strong><small>使用放大模型增强细节</small></span><input id="hires_enabled" type="checkbox"></label>
-            </div>
-            <div id="hiresFields" class="repair-parameters">
-              <label class="field"><span>放大模型</span><select id="hires_model_name"><option value="">正在读取放大模型...</option></select></label>
-              <label class="field"><span>高清输出比例 (%)</span><input id="hires_percent" type="number" min="1" max="1000" step="1" value="45" required><small class="field-hint">控制放大模型输出的最终缩放比例，不是相对原图的直接放大比例。</small></label>
-            </div>
-            <div class="detailer-heading"><span>独立细节修复</span></div>
-            <div class="switch-list detailer-switches">
-              <label class="switch-row"><span><strong>手部</strong><small>Hand ADetailer</small></span><input id="detailer_hand" type="checkbox"></label>
-              <label class="switch-row"><span><strong>NSFW</strong><small>NSFW ADetailer</small></span><input id="detailer_nsfw" type="checkbox"></label>
-              <label class="switch-row"><span><strong>面部</strong><small>Face ADetailer</small></span><input id="detailer_face" type="checkbox"></label>
-              <label class="switch-row"><span><strong>眼睛</strong><small>Eyes ADetailer</small></span><input id="detailer_eyes" type="checkbox"></label>
-            </div>
           </div>
         </details>
 
@@ -137,18 +136,89 @@
             <label class="field"><span>CFG</span><input id="cfg" type="number" min="0.1" max="30" step="0.1"></label>
             <label class="field"><span>Sampler</span><select id="sampler_name"><option value="">正在读取 Sampler...</option></select></label>
             <label class="field"><span>Scheduler</span><select id="scheduler"><option value="">正在读取 Scheduler...</option></select></label>
-            <div class="sampling-switches">
-              <label class="switch-row"><span><strong>CFGZeroStar</strong><small>使用 CFGZeroStar 模型修补</small></span><input id="cfg_zero_star" type="checkbox"></label>
-              <label class="switch-row"><span><strong>2ndSampler</strong><small>主采样后再执行一次采样</small></span><input id="second_sampler_enabled" type="checkbox"></label>
+            <label class="field"><span>底图模式</span><select id="base_mode"><option value="normal">普通底图</option><option value="dual_sampler">底图－双采样器</option></select><small class="field-hint">两种模式二选一。</small></label>
+            <div class="sampling-stage sampling-stage-latent">
+              <label class="switch-row"><span><strong>潜空间放大</strong><small>放大底图后可选择跟随主模型/LoRA 的二次采样</small></span><input id="latent_upscale_enabled" type="checkbox"></label>
+              <div id="latentUpscaleFields" class="repair-parameters">
+                <label class="field"><span>放大倍率</span><input id="latent_upscale_scale" type="number" min="0.01" max="64" step="0.05"></label>
+                <label class="field"><span>放大算法</span><select id="latent_upscale_method"><option value="nearest-exact">nearest-exact</option><option value="bilinear">bilinear</option><option value="area">area</option><option value="bicubic">bicubic</option><option value="bislerp">bislerp</option></select></label>
+                <label class="switch-row"><span><strong>后二次采样</strong><small>使用当前主模型及 LoRA</small></span><input id="latent_second_sampler_enabled" type="checkbox"></label>
+                <div id="latentSecondSamplerFields" class="parameter-grid compact-parameter-grid">
+                  <label class="field"><span>步数</span><input id="latent_second_sampler_steps" type="number" min="1" max="150" step="1"></label>
+                  <label class="field"><span>CFG</span><input id="latent_second_sampler_cfg" type="number" min="0.1" max="30" step="0.1"></label>
+                  <label class="field"><span>Sampler</span><select id="latent_second_sampler_name"><option value="">读取中...</option></select></label>
+                  <label class="field"><span>Scheduler</span><select id="latent_second_scheduler"><option value="">读取中...</option></select></label>
+                  <label class="field"><span>Denoise</span><input id="latent_second_sampler_denoise" type="number" min="0" max="1" step="0.01"></label>
+                </div>
+              </div>
             </div>
-            <div id="secondSamplerDrawer" class="second-sampler-drawer" hidden>
-              <div class="second-sampler-heading"><span>2ndSampler 参数</span><small>第二次采样复用主 seed</small></div>
-              <div class="parameter-grid compact-parameter-grid">
-                <label class="field"><span>步数</span><input id="second_sampler_steps" type="number" min="1" max="150" step="1"></label>
-                <label class="field"><span>CFG</span><input id="second_sampler_cfg" type="number" min="0.1" max="30" step="0.1"></label>
-                <label class="field"><span>Sampler</span><select id="second_sampler_name"><option value="">正在读取 Sampler...</option></select></label>
-                <label class="field"><span>Scheduler</span><select id="second_scheduler"><option value="">正在读取 Scheduler...</option></select></label>
-                <label class="field"><span>Denoise</span><input id="second_sampler_denoise" type="number" min="0" max="1" step="0.01"></label>
+            <div class="sampling-stage sampling-stage-seedvr2">
+              <label class="switch-row"><span><strong>SeedVR2 放大与修复</strong><small>选择实际安装的模型与节点参数</small></span><input id="seedvr2_enabled" type="checkbox"></label>
+              <div id="seedvr2Fields" class="repair-parameters parameter-grid">
+                <label class="field"><span>SeedVR2 模型</span><select id="seedvr2_model_name"><option value="">读取中...</option></select></label>
+                <label class="field"><span>SeedVR2 VAE</span><select id="seedvr2_vae_name"><option value="">读取中...</option></select></label>
+                <label class="field"><span>权重类型</span><select id="seedvr2_weight_dtype"><option value="default">default</option><option value="fp8_e4m3fn">fp8_e4m3fn</option><option value="fp8_e4m3fn_fast">fp8_e4m3fn_fast</option></select></label>
+                <label class="field"><span>放大倍率</span><input id="seedvr2_scale_by" type="number" min="0.01" max="64" step="0.05"></label>
+                <label class="field"><span>色彩校正</span><select id="seedvr2_color_correction_method"><option value="lab">lab</option><option value="wavelet">wavelet</option><option value="disabled">disabled</option></select></label>
+                <label class="field"><span>采样步数</span><input id="seedvr2_sampler_steps" type="number" min="1" max="150" step="1"></label>
+                <label class="field"><span>采样 CFG</span><input id="seedvr2_sampler_cfg" type="number" min="0.1" max="30" step="0.1"></label>
+                <label class="field"><span>Sampler</span><select id="seedvr2_sampler_name"><option value="">读取中...</option></select></label>
+                <label class="field"><span>Scheduler</span><select id="seedvr2_scheduler"><option value="">读取中...</option></select></label>
+                <label class="field"><span>Denoise</span><input id="seedvr2_sampler_denoise" type="number" min="0" max="1" step="0.01"></label>
+                <fieldset class="sampling-fieldset"><legend>编码分块</legend>
+                  <label class="field"><span>Tile size</span><input id="seedvr2_encode_tile_size" type="number" min="64" step="1"></label>
+                  <label class="field"><span>Overlap</span><input id="seedvr2_encode_overlap" type="number" min="0" step="1"></label>
+                  <label class="field"><span>Temporal size</span><input id="seedvr2_encode_temporal_size" type="number" min="1" step="1"></label>
+                  <label class="field"><span>Temporal overlap</span><input id="seedvr2_encode_temporal_overlap" type="number" min="0" step="1"></label>
+                </fieldset>
+                <fieldset class="sampling-fieldset"><legend>解码分块</legend>
+                  <label class="field"><span>Tile size</span><input id="seedvr2_decode_tile_size" type="number" min="64" step="1"></label>
+                  <label class="field"><span>Overlap</span><input id="seedvr2_decode_overlap" type="number" min="0" step="1"></label>
+                  <label class="field"><span>Temporal size</span><input id="seedvr2_decode_temporal_size" type="number" min="1" step="1"></label>
+                  <label class="field"><span>Temporal overlap</span><input id="seedvr2_decode_temporal_overlap" type="number" min="0" step="1"></label>
+                </fieldset>
+              </div>
+            </div>
+            <div class="sampling-stage sampling-stage-nvidia">
+              <label class="switch-row"><span><strong>N 卡放大</strong><small>当前节点没有独立模型输入，不显示虚构的模型项</small></span><input id="nvidia_upscale_enabled" type="checkbox"></label>
+              <div id="nvidiaUpscaleFields" class="repair-parameters parameter-grid">
+                <label class="field"><span>缩放方式</span><select id="nvidia_resize_type"><option value="scale by multiplier">scale by multiplier</option></select></label>
+                <label class="field"><span>倍率</span><input id="nvidia_scale" type="number" min="0.01" max="64" step="0.05"></label>
+                <label class="field"><span>质量</span><select id="nvidia_quality"><option value="ULTRA">ULTRA</option></select></label>
+              </div>
+            </div>
+            <div class="sampling-stage sampling-stage-face">
+              <label class="switch-row"><span><strong>脸部细化</strong><small>ForbiddenVisionFaceProcessorIntegrated 具体参数</small></span><input id="face_refine_enabled" type="checkbox"></label>
+              <div id="faceRefineFields" class="repair-parameters parameter-grid">
+                <label class="field"><span>步数</span><input id="face_steps" type="number" min="1" max="150" step="1"></label>
+                <label class="field"><span>CFG</span><input id="face_cfg_scale" type="number" min="0.1" max="30" step="0.1"></label>
+                <label class="field"><span>Sampler</span><select id="face_sampler"><option value="">读取中...</option></select></label>
+                <label class="field"><span>Scheduler</span><select id="face_scheduler"><option value="">读取中...</option></select></label>
+                <label class="field"><span>Denoise</span><input id="face_denoise_strength" type="number" min="0" max="1" step="0.01"></label>
+                <label class="field"><span>人脸选择</span><input id="face_selection" type="number" min="0" step="1"></label>
+                <label class="field"><span>检测置信度</span><input id="face_detection_confidence" type="number" min="0" max="1" step="0.01"></label>
+                <label class="field"><span>手动旋转</span><select id="face_manual_rotation"><option value="None">None</option><option value="0">0°</option><option value="90">90°</option><option value="180">180°</option><option value="270">270°</option></select></label>
+                <label class="field"><span>处理分辨率</span><input id="face_processing_resolution" type="number" min="64" step="8"></label>
+                <label class="field"><span>放大模型</span><select id="face_upscaler_model"><option value="Fast 4x (Lanczos)">Fast 4x (Lanczos)</option></select></label>
+                <label class="field"><span>裁切留白</span><input id="face_crop_padding" type="number" min="0" max="16" step="0.1"></label>
+                <label class="field"><span>混合柔化</span><input id="face_blend_softness" type="number" min="0" step="1"></label>
+                <label class="field"><span>遮罩扩展</span><input id="face_mask_expansion" type="number" min="0" step="1"></label>
+                <label class="field"><span>采样遮罩模糊尺寸</span><input id="face_sampling_mask_blur_size" type="number" min="0" step="1"></label>
+                <label class="field"><span>采样遮罩模糊强度</span><input id="face_sampling_mask_blur_strength" type="number" min="0" step="0.01"></label>
+                <label class="field"><span>正向提示词</span><textarea id="face_positive_prompt" rows="2"></textarea></label>
+                <label class="field"><span>负向提示词</span><textarea id="face_negative_prompt" rows="2"></textarea></label>
+                <label class="field"><span>排除区域</span><textarea id="face_exclusions" rows="2"></textarea></label>
+                <div class="switch-list sampling-switch-list">
+                  <label class="switch-row"><span>启用预放大</span><input id="face_enable_pre_upscale" type="checkbox"></label>
+                  <label class="switch-row"><span>替换正向提示词</span><input id="face_replace_positive_prompt" type="checkbox"></label>
+                  <label class="switch-row"><span>替换负向提示词</span><input id="face_replace_negative_prompt" type="checkbox"></label>
+                  <label class="switch-row"><span>色彩校正</span><input id="face_enable_color_correction" type="checkbox"></label>
+                  <label class="switch-row"><span>分割</span><input id="face_enable_segmentation" type="checkbox"></label>
+                  <label class="switch-row"><span>差异扩散</span><input id="face_enable_differential_diffusion" type="checkbox"></label>
+                  <label class="switch-row"><span>亮度修复</span><input id="face_enable_lightness_rescue" type="checkbox"></label>
+                  <label class="switch-row"><span>最终细化</span><input id="face_enable_final_refinement" type="checkbox"></label>
+                  <label class="switch-row"><span>卸载至 CPU</span><input id="face_offload_models_to_cpu" type="checkbox"></label>
+                </div>
               </div>
             </div>
           </div>
@@ -219,6 +289,50 @@
     </footer>
   </aside>
   <div id="drawerBackdrop" class="drawer-backdrop" hidden></div>
+
+  <aside id="kreaPoolDrawer" class="pool-drawer glass krea-pool-drawer" aria-hidden="true" aria-labelledby="kreaPoolTitle" inert>
+    <header class="drawer-header">
+      <div><span class="kicker">KREA 2 · NATURAL LANGUAGE</span><h2 id="kreaPoolTitle">自然语言提示词池</h2><p id="kreaPoolMeta">0 项可用 · 0 项已选</p></div>
+      <button id="closeKreaPool" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button>
+    </header>
+    <div class="pool-toolbar krea-pool-toolbar">
+      <label class="search-field"><span aria-hidden="true">⌕</span><input id="kreaPoolSearch" type="search" placeholder="搜索自然语言提示词"></label>
+      <label class="compact-check"><input id="kreaPoolSelectedOnly" type="checkbox"><span>仅看已选</span></label>
+    </div>
+    <div class="pool-actions">
+      <button id="selectAllKreaPool" class="button ghost" type="button">全选词库</button>
+      <button id="clearKreaPoolSelection" class="button ghost" type="button">清空选择</button>
+      <details class="krea-pool-import">
+        <summary class="button ghost compact">导入 / 编辑词池</summary>
+        <div class="krea-pool-import-content">
+          <label class="field"><span>JSON / CSV 文件</span><input id="kreaPromptPoolFile" type="file" accept=".json,.csv,text/csv,application/json"></label>
+          <label class="field"><span>每行一条自然语言提示词</span><textarea id="kreaPromptPoolText" rows="5" placeholder="输入提示词，或粘贴 JSON / CSV 内容"></textarea></label>
+          <div class="krea-prompt-pool-actions"><button id="kreaPromptPoolAppend" class="button ghost compact" type="button">追加</button><button id="kreaPromptPoolReplace" class="button primary compact" type="button">替换词池</button></div>
+        </div>
+      </details>
+    </div>
+    <div class="pool-browser krea-pool-browser"><section class="pool-results"><div id="kreaPromptPoolList" class="pool-grid" aria-live="polite"></div></section></div>
+    <footer class="drawer-footer">
+      <span id="kreaPoolSelectionLabel">已选择 0 项</span>
+      <button id="confirmKreaPool" class="button primary" type="button">完成</button>
+    </footer>
+  </aside>
+  <div id="kreaPoolBackdrop" class="drawer-backdrop" hidden></div>
+
+  <dialog id="resourceOwnershipDialog" class="resource-ownership-dialog">
+    <form method="dialog" class="resource-ownership-form">
+      <div class="dialog-heading"><div><span class="kicker">RESOURCE OWNERSHIP</span><h2>模型 / LoRA 归属</h2></div><button id="closeResourceOwnership" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
+      <p class="field-hint">新发现的资源默认未归属。只有归入当前档案的模型和 LoRA 会出现在相应下拉框。</p>
+      <div class="ownership-toolbar">
+        <label class="field"><span>资源类型</span><select id="ownershipKind"><option value="models">主模型</option><option value="loras">LoRA</option></select></label>
+        <label class="field"><span>搜索</span><input id="ownershipSearch" type="search" placeholder="按文件名或文件夹搜索"></label>
+      </div>
+      <p id="ownershipSummary" class="ownership-summary" aria-live="polite">读取中…</p>
+      <div id="ownershipList" class="ownership-list" aria-live="polite"></div>
+      <p id="ownershipError" class="resource-warning" hidden></p>
+      <div class="dialog-actions"><button id="closeResourceOwnershipFooter" class="button primary" type="button">完成</button></div>
+    </form>
+  </dialog>
 
   <dialog id="customDialog" class="compact-dialog">
     <form id="customForm" method="dialog">

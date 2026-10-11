@@ -1,5 +1,23 @@
 # 更新日志
 
+## 0.5.0 - 2026-10-11
+
+### 工作流 v2
+
+- 以 `D:\loud\workflow (1).json` 为前端工作流基线，新增 `templates/workflow_api_v2.json` API Format 模板；原始前端 JSON 保留用于可视化核对和回滚。
+- 新增 Anima / Krea 2 模型档案，档案统一绑定 UNet、CLIP、VAE、编码类型、采样默认值、底图默认值和 SeedVR2 资源。
+- LoRA、触发词、风格预设、自然语言提示词池按模型档案隔离；旧全局数据迁移到 Anima，迁移前自动备份。
+- Anima 保留五类确定性随机池；Krea 2 新增独立自然语言池及 JSON/CSV 导入，首版空池会在提交前提示导入。
+- 底图改为普通底图 / 底图－双采样器二选一；修复链按潜空间放大 → SeedVR2 → N 卡 → Forbidden Vision 脸部细化串联并可逐项旁路。
+- 删除 v2 提交中的 CFGZeroStar、旧 `UpscaleModelLoader` / `ImageUpscaleWithModel` 高清链和独立 ADetailer；保留局部重绘等其他工作流能力。
+- `/api/resources` 增加档案资源、节点和插件状态；LoRA、风格预设和词池接口增加 `model_profile` 过滤。
+- 新增设置迁移、历史档案与资源快照字段，并补充工作流安装说明：`docs/工作流安装与升级-v2.md`。
+
+### 升级提示
+
+- v2 资源清单中的新模型在来源和哈希未锁定时只做本地检测，不会自动猜测下载地址。
+- 运行完整测试前请确认 ComfyUI 节点清单与本机模型文件已刷新；本 changelog 不把本机 GPU 实跑结果视为自动验收。
+
 ## 0.4.0 - 2026-10-03
 
 ### 新增

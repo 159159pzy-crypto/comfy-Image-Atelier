@@ -423,7 +423,15 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("render failed", result["error"])
 
     async def test_history_uses_actual_comfy_prompt_when_catalog_is_present(self):
-        manager = BatchManager(FakeTemplates(), self.history, self.comfy, FakeCatalog())
+        templates = FakeTemplates()
+        templates.resource_paths = {
+            "anima-base-v1.0.safetensors": "Anima/anima-base-v1.0.safetensors",
+            "qwen_3_06b_base.safetensors": "TextEncoders/qwen_3_06b_base.safetensors",
+            "qwen_image_vae.safetensors": "VAE/qwen_image_vae.safetensors",
+            "seedvr2_3b_int8_convrot.safetensors": "SeedVR2/seedvr2_3b_int8_convrot.safetensors",
+            "ema_vae_fp16.safetensors": "SeedVR2/ema_vae_fp16.safetensors",
+        }
+        manager = BatchManager(templates, self.history, self.comfy, FakeCatalog())
 
         await manager.start({**DEFAULT_SETTINGS, "count": 1})
         await manager.wait()
@@ -431,6 +439,18 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
         image = (await self.history.list_images())["items"][0]
         self.assertEqual(image["positive_prompt"], "prompt 1")
         self.assertEqual(image["resolved_prompt"], "prompt 1")
+        self.assertEqual(
+            image["bound_resources"],
+            {
+                "model_profile": "anima",
+                "unet": "Anima/anima-base-v1.0.safetensors",
+                "clip": "TextEncoders/qwen_3_06b_base.safetensors",
+                "vae": "VAE/qwen_image_vae.safetensors",
+                "seedvr2_model": "SeedVR2/seedvr2_3b_int8_convrot.safetensors",
+                "seedvr2_vae": "SeedVR2/ema_vae_fp16.safetensors",
+                "loras": [],
+            },
+        )
 
     async def test_missing_lora_is_rejected_before_batch_creation(self):
         settings = {
@@ -455,6 +475,104 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "高清修复模型不存在"):
             await self.manager.start(DEFAULT_SETTINGS)
         self.assertIsNone(self.manager.state)
+
+    def test_nvidia_preflight_requires_node_or_plugin_but_no_model_file(self):
+        settings = {
+            **DEFAULT_SETTINGS,
+            "upscalers": {
+                **DEFAULT_SETTINGS["upscalers"],
+                "nvidia": {"enabled": True},
+            },
+        }
+        resources = {
+            "models": [DEFAULT_SETTINGS["model_name"]],
+            "samplers": [DEFAULT_SETTINGS["sampler_name"]],
+            "schedulers": [DEFAULT_SETTINGS["scheduler"]],
+            "nodes": {"RTXVideoSuperResolution": True},
+            "plugins": {},
+            # An RTXVideoSuperResolution node has no upscale model input.
+            "upscale_models": [],
+        }
+        self.assertEqual(BatchManager._resource_inventory_issues(settings, resources), [])
+
+        resources["nodes"] = {"RTXVideoSuperResolution": False}
+        resources["plugins"] = {"nvidia_upscale": True}
+        self.assertEqual(BatchManager._resource_inventory_issues(settings, resources), [])
+
+        resources["plugins"] = {"nvidia_upscale": False}
+        issues = BatchManager._resource_inventory_issues(settings, resources)
+        self.assertEqual(
+            [(item["type"], item["name"]) for item in issues],
+            [("nvidia_node", "RTXVideoSuperResolution")],
+        )
+
+    def test_v2_preflight_checks_selected_models_and_each_enabled_sampler(self):
+        from anima_webui.workflow import validate_settings
+
+        settings = validate_settings(
+            {
+                "model_profile": "anima",
+                "model_name": "Anima/custom.safetensors",
+                "upscalers": {
+                    "latent": {
+                        "enabled": True,
+                        "second_sampler": {
+                            "enabled": True,
+                            "sampler_name": "euler",
+                            "scheduler": "karras",
+                        },
+                    },
+                    "seedvr2": {
+                        "enabled": True,
+                        "model_name": "SeedVR2/custom.safetensors",
+                        "vae_name": "SeedVR2/custom-vae.safetensors",
+                        "sampler": {"sampler_name": "heun", "scheduler": "normal"},
+                    },
+                    "face_refine": {
+                        "enabled": True,
+                        "sampler": "heun",
+                        "scheduler": "normal",
+                    },
+                },
+            }
+        )
+        resources = {
+            "models": ["Anima/custom.safetensors"],
+            "clips": None,
+            "vaes": None,
+            "seedvr2_models": ["SeedVR2/custom.safetensors"],
+            "seedvr2_vaes": ["SeedVR2/custom-vae.safetensors"],
+            "samplers": [settings["sampler_name"]],
+            "schedulers": [settings["scheduler"]],
+            "nodes": {
+                "SeedVR2": True,
+                "RTXVideoSuperResolution": True,
+                "ForbiddenVisionFaceProcessorIntegrated": True,
+            },
+            "plugins": {},
+        }
+        issues = BatchManager._resource_inventory_issues(settings, resources)
+        self.assertEqual(
+            {(item["type"], item["name"]) for item in issues},
+            {
+                ("second_sampler", "euler"),
+                ("second_scheduler", "karras"),
+                ("seedvr2_sampler", "heun"),
+                ("seedvr2_scheduler", "normal"),
+                ("face_refine_sampler", "heun"),
+                ("face_refine_scheduler", "normal"),
+            },
+        )
+
+        resources["samplers"].extend(["euler", "heun"])
+        resources["schedulers"].extend(["karras", "normal"])
+        self.assertEqual(BatchManager._resource_inventory_issues(settings, resources), [])
+
+        resources["seedvr2_models"] = []
+        issues = BatchManager._resource_inventory_issues(settings, resources)
+        self.assertIn(("seedvr2", "SeedVR2/custom.safetensors"), {
+            (item["type"], item["name"]) for item in issues
+        })
 
     async def test_second_sampler_resources_are_checked_when_enabled(self):
         settings = {

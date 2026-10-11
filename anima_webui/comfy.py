@@ -286,17 +286,70 @@ class ComfyClient:
             return []
 
         models = choices("UNETLoader", "unet_name")
+        clips = choices("CLIPLoader", "clip_name")
+        clip_types = choices("CLIPLoader", "type")
+        vaes = choices("VAELoader", "vae_name")
         upscale_models = choices("UpscaleModelLoader", "model_name") or choices("easy hiresFix", "model_name")
         samplers = choices("KSampler", "sampler_name")
         schedulers = choices("KSampler", "scheduler")
         if not models or not samplers or not schedulers:
             raise ComfyError("ComfyUI 未返回模型或采样器列表")
-        return {
+        node_names = set(object_info)
+        seedvr_nodes = sorted(
+            name for name in node_names if "seedvr" in name.casefold()
+        )
+        nvidia_nodes = sorted(
+            name
+            for name in node_names
+            if any(token in name.casefold() for token in ("dlss", "vsr", "nvidia"))
+        )
+        face_node = "ForbiddenVisionFaceProcessorIntegrated"
+        seedvr2_models = [
+            name
+            for name in models
+            if "seedvr2" in name.casefold() or "seedvr" in name.casefold()
+        ]
+        seedvr2_vaes = [
+            name
+            for name in vaes
+            if "seedvr" in name.casefold() or "ema_vae" in name.casefold()
+        ]
+        result = {
             "models": models,
+            "clips": clips,
+            "clip_types": clip_types,
+            "vaes": vaes,
+            "seedvr2_models": seedvr2_models,
+            "seedvr2_vaes": seedvr2_vaes,
             "upscale_models": upscale_models,
             "samplers": samplers,
             "schedulers": schedulers,
+            "nodes": {
+                "UNETLoader": "UNETLoader" in node_names,
+                "CLIPLoader": "CLIPLoader" in node_names,
+                "VAELoader": "VAELoader" in node_names,
+                "SeedVR2": bool(seedvr_nodes),
+                "NvidiaUpscale": bool(nvidia_nodes),
+                "ForbiddenVisionFaceProcessorIntegrated": face_node in node_names,
+            },
+            "plugins": {
+                "seedvr2": bool(seedvr_nodes),
+                "nvidia_upscale": bool(nvidia_nodes),
+                "forbidden_vision_face": face_node in node_names,
+            },
         }
+        # Preserve the compact inventory shape used by stock/legacy test
+        # clients which do not expose CLIP/VAE or optional plugin nodes.  A
+        # modern ComfyUI advertises those nodes, so the extended v2 contract
+        # is returned automatically there.
+        if "CLIPLoader" not in node_names and "VAELoader" not in node_names and not seedvr_nodes and not nvidia_nodes and face_node not in node_names:
+            return {
+                "models": models,
+                "upscale_models": upscale_models,
+                "samplers": samplers,
+                "schedulers": schedulers,
+            }
+        return result
 
     async def favorites(self) -> dict[str, Any]:
         return await self._json("GET", "/anima-tools/favorites")
@@ -420,7 +473,14 @@ def extract_images(history_entry: dict[str, Any]) -> list[dict[str, Any]]:
     images: list[dict[str, Any]] = []
     for output in (history_entry.get("outputs") or {}).values():
         for image in output.get("images") or []:
-            if isinstance(image, dict) and image.get("filename"):
+            # PreviewImage and similar nodes are marked ``temp`` in ComfyUI
+            # history. They are not generated gallery assets and must not be
+            # persisted as additional results for one batch item.
+            if (
+                isinstance(image, dict)
+                and image.get("filename")
+                and image.get("type", "output") == "output"
+            ):
                 images.append(image)
     return images
 

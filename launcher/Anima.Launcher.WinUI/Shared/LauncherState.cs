@@ -548,10 +548,26 @@ internal sealed class LauncherState : IDisposable
         var active = await ServiceManager.Json(Config.WebUrl + "/api/batches/current", ct) ?? throw new IOException("请先启动工作台。");
         if (active.TryGetProperty("batch", out var batch) && batch.ValueKind == JsonValueKind.Object && batch.TryGetProperty("status", out var s) && s.GetString() is "running" or "stopping") throw new IOException("工作台有正在执行的批次，请等待完成。");
         using var client = new HttpClient(new HttpClientHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(30) };
-        var body = JsonSerializer.Serialize(new { count = 1, width = 512, height = 512, steps = 4, extra_prompt = "1girl, portrait, gentle smile, simple background, safe", hires = new { enabled = false }, detailers = new { hand = false, face = false, eyes = false, nsfw = false } });
+        var body = JsonSerializer.Serialize(new
+        {
+            count = 1,
+            width = 512,
+            height = 512,
+            steps = 4,
+            model_profile = "anima",
+            base_mode = "normal",
+            extra_prompt = "1girl, portrait, gentle smile, simple background, safe",
+            upscalers = new
+            {
+                latent = new { enabled = false, scale_by = 1.5 },
+                seedvr2 = new { enabled = false, model_name = "" },
+                nvidia = new { enabled = false, model_name = "" },
+                face_refine = new { enabled = false },
+            },
+        });
         using var response = await client.PostAsync(Config.WebUrl + "/api/batches", new StringContent(body, System.Text.Encoding.UTF8, "application/json"), ct);
         response.EnsureSuccessStatusCode();
-        SetStatus("已提交一张 512 × 512 测试图（4 步、无高清/Detailer），可在工作台查看进度。");
+        SetStatus("已提交一张 512 × 512 测试图（4 步、无可选修复阶段），可在工作台查看进度。");
         Program.Open(Config.WebUrl);
     }
 

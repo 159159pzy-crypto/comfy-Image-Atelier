@@ -28,6 +28,9 @@ var count = 0;
 void Check(bool condition, string label) { if (!condition) throw new Exception("FAIL: " + label); count++; Console.WriteLine("PASS: " + label); }
 async Task Throws(Func<Task> operation, string label) { try { await operation(); } catch { Check(true, label); return; } throw new Exception("Expected failure: " + label); }
 Safety.Validate(manifest, models); Check(true, "shipped manifests validate");
+var requiredV2Classes = new[] { "PromptSelector", "QuickGroupManager", "ResolutionPreset", "PromptExpand", "KreaSeedVarianceEnhancer", "ModelPassThrough", "VRAM_Debug", "Lora Loader (LoraManager)", "Any Switch (rgthree)", "ComfyMathExpression" };
+var installedNodeClasses = manifest.Nodes.SelectMany(node => node.RequiredClasses).ToHashSet(StringComparer.Ordinal);
+Check(requiredV2Classes.All(installedNodeClasses.Contains), "v2 graph dependencies are pinned and startup-checked");
 await Throws(() => Task.FromResult(Safety.Under(work, "../outside")), "path traversal rejected");
 await Throws(() => Task.FromResult(Safety.Under(work, @"C:\outside")), "absolute destination rejected");
 await Throws(() => Task.FromResult(Safety.Https("http://example.com/model")), "HTTP rejected");

@@ -12,8 +12,9 @@ const NATIVE_FACET_LABELS = {
   expression: { categories: "表情分类", traits: "表情特征" },
 };
 const SECTIONS = Object.keys(SECTION_META);
-const DRAFT_KEY = "anima-random-studio:draft:v3";
-const LEGACY_DRAFT_KEYS = ["anima-random-studio:draft:v2", "anima-random-studio:draft:v1"];
+const DRAFT_KEY = "anima-random-studio:draft:v4";
+const LEGACY_DRAFT_KEYS = ["anima-random-studio:draft:v3", "anima-random-studio:draft:v2", "anima-random-studio:draft:v1"];
+const DRAFT_BACKUP_KEY_PREFIX = "anima-random-studio:draft:backup:v";
 const VIEW_KEY = "anima-random-studio:pool-view:v1";
 const THEME_KEY = "anima-random-studio:theme:v1";
 const GROUP_TREE_KEY = "anima-random-studio:favorite-tree:v1";
@@ -59,6 +60,26 @@ const ui = Object.fromEntries(
     "male_count",
     "peopleTotal",
     "dimensionList",
+    "animaPromptPoolControls",
+    "kreaPromptPoolControls",
+    "krea_prompt_pool_enabled",
+    "kreaPromptPoolFile",
+    "kreaPromptPoolText",
+    "kreaPromptPoolAppend",
+    "kreaPromptPoolReplace",
+    "kreaPromptPoolCount",
+    "kreaPromptPoolList",
+    "openKreaPromptPool",
+    "kreaPoolDrawer",
+    "kreaPoolBackdrop",
+    "closeKreaPool",
+    "confirmKreaPool",
+    "kreaPoolMeta",
+    "kreaPoolSearch",
+    "kreaPoolSelectedOnly",
+    "selectAllKreaPool",
+    "clearKreaPoolSelection",
+    "kreaPoolSelectionLabel",
     "poolOverview",
     "character_detail",
     "manual_artist",
@@ -71,14 +92,6 @@ const ui = Object.fromEntries(
     "height",
     "steps",
     "cfg",
-    "cfg_zero_star",
-    "second_sampler_enabled",
-    "secondSamplerDrawer",
-    "second_sampler_steps",
-    "second_sampler_cfg",
-    "second_sampler_name",
-    "second_scheduler",
-    "second_sampler_denoise",
     "gallery",
     "emptyState",
     "historyCount",
@@ -287,18 +300,87 @@ const ui = Object.fromEntries(
     "presetList",
     "presetEmpty",
     "model_name",
+    "model_profile",
+    "modelProfileHint",
+    "manageResourceOwnership",
+    "resourceOwnershipDialog",
+    "closeResourceOwnership",
+    "closeResourceOwnershipFooter",
+    "ownershipKind",
+    "ownershipSearch",
+    "ownershipSummary",
+    "ownershipList",
+    "ownershipError",
+    "base_mode",
     "sampler_name",
     "scheduler",
-    "hires_enabled",
-    "hires_model_name",
-    "hires_percent",
-    "hiresFields",
+    "latent_upscale_enabled",
+    "latent_upscale_scale",
+    "latent_upscale_method",
+    "latentUpscaleFields",
+    "latent_second_sampler_enabled",
+    "latentSecondSamplerFields",
+    "latent_second_sampler_steps",
+    "latent_second_sampler_cfg",
+    "latent_second_sampler_name",
+    "latent_second_scheduler",
+    "latent_second_sampler_denoise",
+    "seedvr2_enabled",
+    "seedvr2_model_name",
+    "seedvr2_vae_name",
+    "seedvr2_weight_dtype",
+    "seedvr2_scale_by",
+    "seedvr2_color_correction_method",
+    "seedvr2_sampler_steps",
+    "seedvr2_sampler_cfg",
+    "seedvr2_sampler_name",
+    "seedvr2_scheduler",
+    "seedvr2_sampler_denoise",
+    "seedvr2_encode_tile_size",
+    "seedvr2_encode_overlap",
+    "seedvr2_encode_temporal_size",
+    "seedvr2_encode_temporal_overlap",
+    "seedvr2_decode_tile_size",
+    "seedvr2_decode_overlap",
+    "seedvr2_decode_temporal_size",
+    "seedvr2_decode_temporal_overlap",
+    "seedvr2Fields",
+    "nvidia_upscale_enabled",
+    "nvidia_resize_type",
+    "nvidia_scale",
+    "nvidia_quality",
+    "nvidiaUpscaleFields",
+    "face_refine_enabled",
+    "faceRefineFields",
+    "face_steps",
+    "face_cfg_scale",
+    "face_sampler",
+    "face_scheduler",
+    "face_denoise_strength",
+    "face_selection",
+    "face_detection_confidence",
+    "face_manual_rotation",
+    "face_processing_resolution",
+    "face_upscaler_model",
+    "face_crop_padding",
+    "face_blend_softness",
+    "face_mask_expansion",
+    "face_sampling_mask_blur_size",
+    "face_sampling_mask_blur_strength",
+    "face_positive_prompt",
+    "face_negative_prompt",
+    "face_exclusions",
+    "face_enable_pre_upscale",
+    "face_replace_positive_prompt",
+    "face_replace_negative_prompt",
+    "face_enable_color_correction",
+    "face_enable_segmentation",
+    "face_enable_differential_diffusion",
+    "face_enable_lightness_rescue",
+    "face_enable_final_refinement",
+    "face_offload_models_to_cpu",
     "repairSummary",
     "resourceWarning",
-    "detailer_hand",
-    "detailer_nsfw",
-    "detailer_face",
-    "detailer_eyes",
     "themeToggle",
     "appError",
   ].map((id) => [id, document.getElementById(id)]),
@@ -361,6 +443,12 @@ let toastTimer = null;
 let persistTimer = null;
 let initialized = false;
 let draft = { modes: {}, counts: {}, fixed: {}, pools: {}, loras: [], managedTriggers: [] };
+// 模型档案分别保存随机池、LoRA 与触发词草稿；仅写入浏览器草稿，不发送给后端。
+let profileDrafts = {};
+let profileResources = {};
+let activeProfileId = "anima";
+let kreaPromptPool = { model_profile: "krea2", items: [], count: 0 };
+let kreaPromptPoolSelection = [];
 let activeSection = "character";
 let poolPage = 1;
 let poolPages = 1;
@@ -382,9 +470,17 @@ let favoritesAvailable = false;
 let customGroups = [];
 let artistFavoritesData = { groups: [], items: [] };
 let stylePresets = [];
-let resources = { models: [], upscale_models: [], samplers: [], schedulers: [] };
+let stylePresetRequest = 0;
+let stylePresetProfile = "";
+let resources = { models: [], seedvr2_models: [], upscale_models: [], samplers: [], schedulers: [], model_profiles: {}, nodes: {}, plugins: {} };
+let resourceRequest = 0;
 let resourceError = "";
 let resourcesLoaded = false;
+let loraInventoryRequest = 0;
+let loraInventoryProfile = "";
+let kreaPromptPoolRequest = 0;
+let customGroupsRequest = 0;
+let kreaPoolBackdropTimer = null;
 let importPreview = null;
 let editingGroup = null;
 let childGroupParent = null;
@@ -520,7 +616,7 @@ function clearNormalizationUndo(message = "编辑结束后自动按 Anima Tag �
 async function normalizePromptFields(fields, { apply = true, recordUndo = true } = {}) {
   const payload = await request("/api/prompts/normalize", {
     method: "POST",
-    body: JSON.stringify({ fields, managedTriggers: clone(draft.managedTriggers || []) }),
+    body: JSON.stringify({ fields, managedTriggers: clone(draft.managedTriggers || []), model_profile: currentProfile() }),
   });
   if (apply) {
     for (const [field, value] of Object.entries(payload.fields || {})) applyPromptField(field, value);
@@ -545,7 +641,7 @@ async function normalizeSettingsPayload(settings) {
   );
   const payload = await request("/api/prompts/normalize", {
     method: "POST",
-    body: JSON.stringify({ fields, managedTriggers: settings.lora_managed_triggers || [] }),
+    body: JSON.stringify({ fields, managedTriggers: settings.lora_managed_triggers || [], model_profile: settings.model_profile || currentProfile() }),
   });
   return { ...settings, ...(payload.fields || {}) };
 }
@@ -573,8 +669,194 @@ function initialTheme() {
   return matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
+function normalizeProfileId(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return normalized === "krea2" || normalized.includes("krea2") ? "krea2" : "anima";
+}
+function defaultUpscalers() {
+  return {
+    latent: { enabled: false, scale_by: 1.5, upscale_method: "bilinear", second_sampler: { enabled: true, steps: 20, cfg: 4, sampler_name: "er_sde", scheduler: "simple", denoise: 1 } },
+    seedvr2: { enabled: false, model_name: "", vae_name: "", scale_by: 2, weight_dtype: "default", color_correction_method: "lab", sampler: { steps: 1, cfg: 1, sampler_name: "euler", scheduler: "simple", denoise: 1 }, encode: { tile_size: 512, overlap: 64, temporal_size: 64, temporal_overlap: 8 }, decode: { tile_size: 512, overlap: 128, temporal_size: 4096, temporal_overlap: 8 } },
+    nvidia: { enabled: false, resize_type: "scale by multiplier", scale: 2, quality: "ULTRA" },
+    face_refine: { enabled: false, steps: 8, cfg_scale: 1, sampler: "res_2m_ode", scheduler: "beta57", denoise_strength: 0.3, face_selection: 0, detection_confidence: 0.75, manual_rotation: "None", processing_resolution: 1024, enable_pre_upscale: true, upscaler_model: "Fast 4x (Lanczos)", crop_padding: 1.6, face_positive_prompt: "", replace_positive_prompt: false, face_negative_prompt: "", replace_negative_prompt: false, exclusions: "", blend_softness: 8, mask_expansion: 2, sampling_mask_blur_size: 21, sampling_mask_blur_strength: 1, enable_color_correction: true, enable_segmentation: true, enable_differential_diffusion: true, enable_lightness_rescue: true, enable_final_refinement: true, offload_models_to_cpu: true },
+  };
+}
+function normalizeUpscalers(value, fallback = null) {
+  const base = clone(fallback || defaultUpscalers());
+  const raw = value && typeof value === "object" ? value : {};
+  for (const key of Object.keys(base)) {
+    if (raw[key] && typeof raw[key] === "object") {
+      base[key] = { ...base[key], ...raw[key] };
+      for (const nested of ["second_sampler", "sampler", "encode", "decode"]) {
+        if (base[key][nested] && typeof base[key][nested] === "object" && raw[key][nested] && typeof raw[key][nested] === "object")
+          base[key][nested] = { ...base[key][nested], ...raw[key][nested] };
+      }
+    }
+  }
+  base.latent.enabled = Boolean(base.latent.enabled);
+  base.latent.scale_by = Number.isFinite(Number(base.latent.scale_by))
+    ? Math.max(0.01, Math.min(64, Number(base.latent.scale_by)))
+    : 1.5;
+  base.seedvr2.enabled = Boolean(base.seedvr2.enabled);
+  base.seedvr2.model_name = String(base.seedvr2.model_name || "");
+  base.seedvr2.vae_name = String(base.seedvr2.vae_name || "");
+  base.seedvr2.scale_by = Number.isFinite(Number(base.seedvr2.scale_by)) ? Math.max(0.01, Math.min(64, Number(base.seedvr2.scale_by))) : 2;
+  base.nvidia.enabled = Boolean(base.nvidia.enabled);
+  // Ignore the deprecated v1 upscale-model choice. RTXVideoSuperResolution
+  // uses the installed GPU/plugin directly and has no model-file input.
+  delete base.nvidia.model_name;
+  base.face_refine.enabled = Boolean(base.face_refine.enabled);
+  return base;
+}
+function profileDefaults(profile) {
+  const id = normalizeProfileId(profile);
+  const value = resources.model_profiles?.[id] || resources.profiles?.[id] || profileResources?.[id];
+  return value?.defaults && typeof value.defaults === "object" ? value.defaults : {};
+}
+function profileSettingsDefaults(profile) {
+  const id = normalizeProfileId(profile);
+  return defaults?.profile_settings?.[id] || defaults?.profiles?.[id]?.settings || (id === "krea2" ? { ...defaults, loras: [], pools: defaultPools() } : defaults || {});
+}
+function defaultLorasForProfile(profile) {
+  return clone(profileSettingsDefaults(profile)?.loras || []);
+}
+function profileConfig(profile) {
+  const id = normalizeProfileId(profile);
+  return resources.model_profiles?.[id] || resources.profiles?.[id] || profileResources?.[id] || { id };
+}
+function profileLabel(profile) {
+  const value = profileConfig(profile);
+  return value.label || (normalizeProfileId(profile) === "krea2" ? "Krea 2" : "Anima");
+}
+function profileStateFrom(settings) {
+  return {
+    modes: Object.fromEntries(SECTIONS.map((section) => [section, settings[`random_${section}`] ? "pool" : settings[`fixed_${section}`] ? "fixed" : "off"])),
+    counts: Object.fromEntries(SECTIONS.map((section) => [section, Number(settings[`random_${section}_count`] || 1)])),
+    fixed: Object.fromEntries(SECTIONS.map((section) => [section, settings[`fixed_${section}`] || ""])),
+    pools: clone(settings.pools || defaultPools()),
+    loras: clone(settings.loras || []),
+    managedTriggers: clone(settings.lora_managed_triggers || []),
+  };
+}
+function currentProfile() {
+  return normalizeProfileId(activeProfileId || ui.model_profile?.value || defaults?.model_profile || "anima");
+}
+function saveCurrentProfileDraft() {
+  if (!ui.model_profile) return;
+  profileDrafts[currentProfile()] = {
+    ...clone(profileDraftFromDraft()),
+    kreaPromptPoolEnabled: Boolean(currentProfile() === "krea2" && ui.krea_prompt_pool_enabled?.checked),
+    kreaPromptPoolSelection: [...kreaPromptPoolSelection],
+    extra_prompt: ui.extra_prompt?.value || "",
+    ...profileSamplingState(),
+  };
+}
+function profileSamplingState() {
+  return {
+    model_name: ui.model_name?.value || "",
+    base_mode: ui.base_mode?.value || "normal",
+    steps: Number(ui.steps?.value || 0),
+    cfg: Number(ui.cfg?.value || 0),
+    sampler_name: ui.sampler_name?.value || "",
+    scheduler: ui.scheduler?.value || "",
+    upscalers: readUpscalerControls(),
+  };
+}
+function profileDraftFromDraft() {
+  return {
+    modes: draft.modes || {}, counts: draft.counts || {}, fixed: draft.fixed || {}, pools: draft.pools || defaultPools(),
+    loras: draft.loras || [], managedTriggers: draft.managedTriggers || [],
+  };
+}
+function restoreProfileDraft(profile, settings = {}, { preferStored = true } = {}) {
+  const stored = profileDrafts[normalizeProfileId(profile)];
+  const targetProfile = normalizeProfileId(profile);
+  const sourceProfile = normalizeProfileId(settings?.model_profile || targetProfile);
+  const profileDefault = profileSettingsDefaults(profile);
+  const source = (preferStored ? stored : null) || (settings && settings.modes ? settings : profileStateFrom(profileDefault || settings));
+  draft = {
+    modes: clone(source.modes || {}), counts: clone(source.counts || {}), fixed: clone(source.fixed || {}),
+    pools: clone(source.pools || defaultPools()), loras: clone(source.loras || []), managedTriggers: clone(source.managedTriggers || []),
+  };
+  if (!stored && normalizeProfileId(profile) === "krea2" && !defaults?.profile_settings?.krea2 && !defaults?.profiles?.krea2?.settings) {
+    draft.pools = defaultPools();
+    draft.loras = [];
+    draft.managedTriggers = [];
+    draft.modes = Object.fromEntries(SECTIONS.map((section) => [section, "off"]));
+  }
+  profileDrafts[normalizeProfileId(profile)] = {
+    ...clone(profileDraftFromDraft()),
+    kreaPromptPoolEnabled: Boolean((preferStored ? stored?.kreaPromptPoolEnabled : undefined) ?? settings.krea_prompt_pool?.enabled),
+    kreaPromptPoolSelection: [...((preferStored ? stored?.kreaPromptPoolSelection : null) || settings.krea_prompt_pool?.ids || [])],
+    extra_prompt: (preferStored ? stored?.extra_prompt : undefined) ?? settings.extra_prompt ?? "",
+    model_name: (preferStored ? stored?.model_name : undefined) ?? (sourceProfile === targetProfile ? settings.model_name : null) ?? profileConfig(profile).model_name ?? "",
+    base_mode: (preferStored ? stored?.base_mode : undefined) ?? settings.base_mode,
+    steps: (preferStored ? stored?.steps : undefined) ?? settings.steps,
+    cfg: (preferStored ? stored?.cfg : undefined) ?? settings.cfg,
+    sampler_name: (preferStored ? stored?.sampler_name : undefined) ?? settings.sampler_name,
+    scheduler: (preferStored ? stored?.scheduler : undefined) ?? settings.scheduler,
+    upscalers: clone((preferStored ? stored?.upscalers : null) || settings.upscalers || defaults?.upscalers || defaultUpscalers()),
+  };
+}
+function switchProfileDraft(nextProfile, { applyDefaults = true } = {}) {
+  const next = normalizeProfileId(nextProfile);
+  const previous = currentProfile();
+  if (previous !== next) saveCurrentProfileDraft();
+  activeProfileId = next;
+  if (ui.model_profile) ui.model_profile.value = next;
+  const state = profileDrafts[next];
+  if (state) {
+    restoreProfileDraft(next, state);
+    kreaPromptPoolSelection = [...(state.kreaPromptPoolSelection || [])];
+    ui.krea_prompt_pool_enabled.checked = Boolean(state.kreaPromptPoolEnabled);
+    if (typeof state.extra_prompt === "string") ui.extra_prompt.value = state.extra_prompt;
+  } else {
+    const source = profileSettingsDefaults(next);
+    restoreProfileDraft(next, source);
+    ui.extra_prompt.value = source.extra_prompt || "";
+  }
+  const selectedState = profileDrafts[next] || profileSettingsDefaults(next);
+  ensureSelectValue(ui.model_name, selectedState.model_name || profileConfig(next).model_name || "");
+  if (applyDefaults) {
+    const values = profileDefaults(next);
+    const profileSettings = selectedState;
+    ui.base_mode.value = profileSettings.base_mode || values.base_mode || "normal";
+    for (const field of ["steps", "cfg", "sampler_name", "scheduler"]) {
+      const value = profileSettings[field] ?? values[field];
+      if (value !== undefined && ui[field]) setControl(field, value);
+    }
+    const repair = profileSettings.upscalers || profileSettingsDefaults(next).upscalers || defaults?.upscalers || defaultUpscalers();
+    const normalized = normalizeUpscalers(repair);
+    normalized.seedvr2.model_name = normalized.seedvr2.model_name || profileConfig(next).seedvr2_model || "";
+    normalized.seedvr2.vae_name = normalized.seedvr2.vae_name || profileConfig(next).seedvr2_vae || "";
+    setUpscalerControls(normalized);
+  }
+  updateProfileResources();
+  renderDimensions();
+  renderLoras();
+  updatePoolOverview();
+  renderKreaPromptPool();
+  updateRepairControls();
+  schedulePersist();
+}
 function normalizeSettings(raw) {
   const merged = { ...defaults, ...raw };
+  const legacyModelProfile = /krea2/i.test(String(raw?.model_name || "")) ? "krea2" : null;
+  merged.model_profile = normalizeProfileId(raw?.model_profile ?? legacyModelProfile ?? defaults?.model_profile ?? "anima");
+  const settingsProfile = normalizeProfileId(raw?.model_profile ?? defaults?.model_profile ?? "anima");
+  merged.model_name = String(raw?.model_name ?? (settingsProfile === merged.model_profile ? defaults?.model_name : null) ?? profileConfig(merged.model_profile).model_name ?? "");
+  const kreaRaw = raw?.krea_prompt_pool || defaults?.krea_prompt_pool || {};
+  merged.krea_prompt_pool = {
+    enabled: Boolean(kreaRaw.enabled),
+    ids: Array.isArray(kreaRaw.ids) ? [...new Set(kreaRaw.ids.map((value) => String(value)))] : [],
+  };
+  merged.base_mode = raw?.base_mode === "dual_sampler"
+    ? "dual_sampler"
+    : raw?.base_mode === "normal"
+      ? "normal"
+      : raw?.second_sampler?.enabled
+        ? "dual_sampler"
+        : (defaults?.base_mode === "dual_sampler" ? "dual_sampler" : "normal");
   const hasPools = raw && raw.pools && typeof raw.pools === "object";
   merged.pools = hasPools ? clone(raw.pools) : defaultPools();
   for (const section of SECTIONS) {
@@ -582,120 +864,140 @@ function normalizeSettings(raw) {
     if (!hasPools && raw?.[`random_${section}`]) merged.pools[section].mode = "all";
   }
   const hasLoras = raw && Object.prototype.hasOwnProperty.call(raw, "loras");
-  merged.loras = clone(hasLoras ? raw.loras || [] : defaults?.loras || []);
-  merged.lora_managed_triggers = normalizeTriggerWords(
-    raw?.lora_managed_triggers || defaults?.lora_managed_triggers || [],
-  );
-  merged.hires = {
-    ...(defaults?.hires || { enabled: true, model_name: "", percent: INTERNAL_HIRES_PERCENT }),
-    ...(raw?.hires || {}),
-  };
-  merged.detailers = {
-    ...(defaults?.detailers || { hand: false, nsfw: false, face: false, eyes: false }),
-    ...(raw?.detailers || {}),
-  };
-  merged.cfg_zero_star = Boolean(raw?.cfg_zero_star ?? defaults?.cfg_zero_star ?? false);
-  merged.second_sampler = {
-    ...(defaults?.second_sampler || {
-      enabled: false,
-      steps: 16,
-      cfg: 4,
-      sampler_name: defaults?.sampler_name || "",
-      scheduler: defaults?.scheduler || "",
-      denoise: 0.2,
-    }),
-    ...(raw?.second_sampler || {}),
-  };
+  merged.loras = clone(hasLoras ? raw.loras || [] : defaultLorasForProfile(merged.model_profile));
+  merged.lora_managed_triggers = normalizeTriggerWords(raw?.lora_managed_triggers || defaults?.lora_managed_triggers || []);
+  // 旧设置仅用于读取迁移；提交时 readSettings 只会序列化 upscalers。
+  const oldHires = raw?.hires || null;
+  const defaultRepair = normalizeUpscalers(defaults?.upscalers, defaultUpscalers());
+  const migratedRepair = oldHires
+    // v1 applied the percentage after a nominal 4x pixel model.  A direct
+    // latent multiplier therefore preserves the resulting geometry as
+    // percent / 100 * 4, matching the server migration contract.
+    ? { ...defaultRepair, latent: { ...defaultRepair.latent, enabled: Boolean(oldHires.enabled), scale_by: Number(oldHires.percent || 45) / 100 * 4 } }
+    : defaultRepair;
+  merged.upscalers = normalizeUpscalers(raw?.upscalers, migratedRepair);
+  if (raw?.detailers?.face && !raw?.upscalers?.face_refine) merged.upscalers.face_refine.enabled = true;
+  const profile = profileConfig(merged.model_profile);
+  if (!merged.upscalers.seedvr2.model_name) merged.upscalers.seedvr2.model_name = profile.seedvr2_model || "";
+  if (!merged.upscalers.seedvr2.vae_name) merged.upscalers.seedvr2.vae_name = profile.seedvr2_vae || "";
   merged.manual_artist = canonicalArtists(merged.manual_artist);
   return merged;
 }
 
-function applySettings(raw) {
+const UPSCALER_CONTROL_FIELDS = {
+  latent: ["enabled", "scale_by", "upscale_method"],
+  seedvr2: ["enabled", "model_name", "vae_name", "weight_dtype", "scale_by", "color_correction_method"],
+  nvidia: ["enabled", "resize_type", "scale", "quality"],
+  face_refine: ["enabled", "steps", "cfg_scale", "sampler", "scheduler", "denoise_strength", "face_selection", "detection_confidence", "manual_rotation", "processing_resolution", "upscaler_model", "crop_padding", "blend_softness", "mask_expansion", "sampling_mask_blur_size", "sampling_mask_blur_strength", "face_positive_prompt", "replace_positive_prompt", "face_negative_prompt", "replace_negative_prompt", "exclusions", "enable_pre_upscale", "enable_color_correction", "enable_segmentation", "enable_differential_diffusion", "enable_lightness_rescue", "enable_final_refinement", "offload_models_to_cpu"],
+};
+const UPSCALER_CONTROL_IDS = {
+  latent: { enabled: "latent_upscale_enabled", scale_by: "latent_upscale_scale", upscale_method: "latent_upscale_method" },
+  seedvr2: { enabled: "seedvr2_enabled", model_name: "seedvr2_model_name", vae_name: "seedvr2_vae_name", weight_dtype: "seedvr2_weight_dtype", scale_by: "seedvr2_scale_by", color_correction_method: "seedvr2_color_correction_method" },
+  nvidia: { enabled: "nvidia_upscale_enabled", resize_type: "nvidia_resize_type", scale: "nvidia_scale", quality: "nvidia_quality" },
+  face_refine: { enabled: "face_refine_enabled", steps: "face_steps", cfg_scale: "face_cfg_scale", sampler: "face_sampler", scheduler: "face_scheduler", denoise_strength: "face_denoise_strength", face_selection: "face_selection", detection_confidence: "face_detection_confidence", manual_rotation: "face_manual_rotation", processing_resolution: "face_processing_resolution", upscaler_model: "face_upscaler_model", crop_padding: "face_crop_padding", blend_softness: "face_blend_softness", mask_expansion: "face_mask_expansion", sampling_mask_blur_size: "face_sampling_mask_blur_size", sampling_mask_blur_strength: "face_sampling_mask_blur_strength", face_positive_prompt: "face_positive_prompt", replace_positive_prompt: "face_replace_positive_prompt", face_negative_prompt: "face_negative_prompt", replace_negative_prompt: "face_replace_negative_prompt", exclusions: "face_exclusions", enable_pre_upscale: "face_enable_pre_upscale", enable_color_correction: "face_enable_color_correction", enable_segmentation: "face_enable_segmentation", enable_differential_diffusion: "face_enable_differential_diffusion", enable_lightness_rescue: "face_enable_lightness_rescue", enable_final_refinement: "face_enable_final_refinement", offload_models_to_cpu: "face_offload_models_to_cpu" },
+};
+const POST_SAMPLER_IDS = { steps: "latent_second_sampler_steps", cfg: "latent_second_sampler_cfg", sampler_name: "latent_second_sampler_name", scheduler: "latent_second_scheduler", denoise: "latent_second_sampler_denoise" };
+const SEED_SAMPLER_IDS = { steps: "seedvr2_sampler_steps", cfg: "seedvr2_sampler_cfg", sampler_name: "seedvr2_sampler_name", scheduler: "seedvr2_scheduler", denoise: "seedvr2_sampler_denoise" };
+const SEED_TILE_IDS = { encode: { tile_size: "seedvr2_encode_tile_size", overlap: "seedvr2_encode_overlap", temporal_size: "seedvr2_encode_temporal_size", temporal_overlap: "seedvr2_encode_temporal_overlap" }, decode: { tile_size: "seedvr2_decode_tile_size", overlap: "seedvr2_decode_overlap", temporal_size: "seedvr2_decode_temporal_size", temporal_overlap: "seedvr2_decode_temporal_overlap" } };
+
+function controlValue(id, fallback = "") {
+  const element = ui[id];
+  if (!element) return fallback;
+  if (element.type === "checkbox") return Boolean(element.checked);
+  if (element.type === "number") return Number(element.value);
+  return element.value;
+}
+function setControl(id, value) {
+  const element = ui[id];
+  if (!element || value === undefined || value === null) return;
+  if (element.type === "checkbox") element.checked = Boolean(value);
+  else if (element.tagName === "SELECT") ensureSelectValue(element, String(value));
+  else element.value = value;
+}
+function setSamplerValues(ids, values) { for (const [key, id] of Object.entries(ids)) setControl(id, values?.[key]); }
+function readSamplerValues(ids) { return Object.fromEntries(Object.entries(ids).map(([key, id]) => [key, controlValue(id)])); }
+function setTileValues(values) { for (const [group, ids] of Object.entries(SEED_TILE_IDS)) for (const [key, id] of Object.entries(ids)) setControl(id, values?.[group]?.[key]); }
+function readTileValues() { return Object.fromEntries(Object.entries(SEED_TILE_IDS).map(([group, ids]) => [group, Object.fromEntries(Object.entries(ids).map(([key, id]) => [key, controlValue(id)]))])); }
+function setUpscalerControls(upscalers) {
+  for (const [stage, fields] of Object.entries(UPSCALER_CONTROL_FIELDS)) for (const field of fields) setControl(UPSCALER_CONTROL_IDS[stage][field], upscalers?.[stage]?.[field]);
+  setSamplerValues(POST_SAMPLER_IDS, upscalers?.latent?.second_sampler);
+  setControl("latent_second_sampler_enabled", upscalers?.latent?.second_sampler?.enabled);
+  setSamplerValues(SEED_SAMPLER_IDS, upscalers?.seedvr2?.sampler);
+  setTileValues(upscalers?.seedvr2);
+}
+function readUpscalerControls() {
+  const result = {};
+  for (const [stage, fields] of Object.entries(UPSCALER_CONTROL_FIELDS)) result[stage] = Object.fromEntries(fields.map((field) => [field, controlValue(UPSCALER_CONTROL_IDS[stage][field])]));
+  result.latent.second_sampler = { enabled: controlValue("latent_second_sampler_enabled"), ...readSamplerValues(POST_SAMPLER_IDS) };
+  result.seedvr2.sampler = readSamplerValues(SEED_SAMPLER_IDS);
+  Object.assign(result.seedvr2, readTileValues());
+  return result;
+}
+
+function refreshProfileData() {
+  const section = activeSection;
+  ++poolRequest;
+  return Promise.allSettled([
+    loadResources(),
+    loadLoraInventory(),
+    loadStylePresets(),
+    loadCustomGroups(section).then(() => loadPool()),
+  ]);
+}
+
+function applySettings(raw, { useProfileDraft = false } = {}) {
   const settings = normalizeSettings(raw || defaults || {});
+  const previousProfile = currentProfile();
+  activeProfileId = settings.model_profile;
+  if (ui.model_profile) ui.model_profile.value = settings.model_profile;
+  ui.krea_prompt_pool_enabled.checked = Boolean(settings.krea_prompt_pool?.enabled);
+  kreaPromptPoolSelection = [...(settings.krea_prompt_pool?.ids || [])];
+  ensureSelectValue(ui.model_name, settings.model_name);
+  ensureSelectValue(ui.base_mode, settings.base_mode);
   for (const [name, value] of Object.entries(settings)) {
     const element = ui[name];
     if (element && !["object", "undefined"].includes(typeof value)) element.value = value;
   }
-  ensureSelectValue(ui.model_name, settings.model_name);
   ensureSelectValue(ui.sampler_name, settings.sampler_name);
   ensureSelectValue(ui.scheduler, settings.scheduler);
-  ui.cfg_zero_star.checked = Boolean(settings.cfg_zero_star);
-  ui.second_sampler_enabled.checked = Boolean(settings.second_sampler.enabled);
-  ui.second_sampler_steps.value = Number(settings.second_sampler.steps) || 16;
-  ui.second_sampler_cfg.value = Number(settings.second_sampler.cfg) || 4;
-  ensureSelectValue(ui.second_sampler_name, settings.second_sampler.sampler_name);
-  ensureSelectValue(ui.second_scheduler, settings.second_sampler.scheduler);
-  ui.second_sampler_denoise.value = Number.isFinite(Number(settings.second_sampler.denoise))
-    ? Number(settings.second_sampler.denoise)
-    : 0.2;
-  ensureSelectValue(ui.hires_model_name, settings.hires.model_name);
-  ui.hires_enabled.checked = Boolean(settings.hires.enabled);
-  ui.hires_percent.value = Number(settings.hires.percent) || INTERNAL_HIRES_PERCENT;
-  for (const name of ["hand", "nsfw", "face", "eyes"])
-    ui[`detailer_${name}`].checked = Boolean(settings.detailers[name]);
-  draft = {
-    modes: Object.fromEntries(
-      SECTIONS.map((section) => [
-        section,
-        settings[`random_${section}`] ? "pool" : settings[`fixed_${section}`] ? "fixed" : "off",
-      ]),
-    ),
-    counts: Object.fromEntries(SECTIONS.map((section) => [section, Number(settings[`random_${section}_count`] || 1)])),
-    fixed: Object.fromEntries(SECTIONS.map((section) => [section, settings[`fixed_${section}`] || ""])),
-    pools: clone(settings.pools || defaultPools()),
-    loras: clone(settings.loras || []),
-    managedTriggers: clone(settings.lora_managed_triggers || []),
-  };
+  const upscalers = normalizeUpscalers(settings.upscalers);
+  setUpscalerControls(upscalers);
+  restoreProfileDraft(settings.model_profile, useProfileDraft ? (profileDrafts[settings.model_profile] || settings) : settings, { preferStored: useProfileDraft });
+  const storedProfileState = profileDrafts[settings.model_profile];
+  if (useProfileDraft && storedProfileState) {
+    ui.krea_prompt_pool_enabled.checked = Boolean(storedProfileState.kreaPromptPoolEnabled);
+    kreaPromptPoolSelection = [...(storedProfileState.kreaPromptPoolSelection || [])];
+  }
+  const storedExtraPrompt = useProfileDraft ? storedProfileState?.extra_prompt : null;
+  if (typeof storedExtraPrompt === "string") ui.extra_prompt.value = storedExtraPrompt;
+  else if (typeof settings.extra_prompt === "string") ui.extra_prompt.value = settings.extra_prompt;
   if (loraInventoryLoaded) reconcileLoraTriggers(draft.loras.filter((item) => item.enabled));
   renderDimensions();
   renderLoras();
+  renderKreaPromptPool();
   updatePeopleTotal();
   updatePoolOverview();
   updateRepairControls();
+  if (initialized && previousProfile !== settings.model_profile) void refreshProfileData();
 }
 
 function readSettings() {
+  saveCurrentProfileDraft();
   const normalizedArtist = canonicalArtists(ui.manual_artist.value);
   if (ui.manual_artist.value !== normalizedArtist) ui.manual_artist.value = normalizedArtist;
   const settings = {
-    count: Number(ui.count.value),
-    female_count: Number(ui.female_count.value),
-    male_count: Number(ui.male_count.value),
-    character_detail: ui.character_detail.value,
-    manual_artist: normalizedArtist,
-    quality_prompt: ui.quality_prompt.value,
-    extra_prompt: ui.extra_prompt.value,
-    negative_prompt: ui.negative_prompt.value,
-    width: Number(ui.width.value),
-    height: Number(ui.height.value),
-    steps: Number(ui.steps.value),
-    cfg: Number(ui.cfg.value),
-    sampler_name: ui.sampler_name.value,
-    scheduler: ui.scheduler.value,
-    cfg_zero_star: ui.cfg_zero_star.checked,
-    second_sampler: {
-      enabled: ui.second_sampler_enabled.checked,
-      steps: Number(ui.second_sampler_steps.value),
-      cfg: Number(ui.second_sampler_cfg.value),
-      sampler_name: ui.second_sampler_name.value,
-      scheduler: ui.second_scheduler.value,
-      denoise: Number(ui.second_sampler_denoise.value),
+    count: Number(ui.count.value), female_count: Number(ui.female_count.value), male_count: Number(ui.male_count.value),
+    character_detail: ui.character_detail.value, manual_artist: normalizedArtist, quality_prompt: ui.quality_prompt.value,
+    extra_prompt: ui.extra_prompt.value, negative_prompt: ui.negative_prompt.value, width: Number(ui.width.value), height: Number(ui.height.value),
+    steps: Number(ui.steps.value), cfg: Number(ui.cfg.value), sampler_name: ui.sampler_name.value, scheduler: ui.scheduler.value,
+    model_profile: currentProfile(), model_name: ui.model_name.value,
+    krea_prompt_pool: {
+      enabled: currentProfile() === "krea2" && ui.krea_prompt_pool_enabled.checked,
+      ids: currentProfile() === "krea2" ? [...(readKreaPoolSelection().ids || [])] : [],
     },
-    pools: clone(draft.pools),
-    loras: clone(draft.loras),
-    lora_managed_triggers: clone(draft.managedTriggers || []),
-    model_name: ui.model_name.value,
-    hires: {
-      enabled: ui.hires_enabled.checked,
-      model_name: ui.hires_model_name.value,
-      percent: Number(ui.hires_percent.value) || INTERNAL_HIRES_PERCENT,
-    },
-    detailers: {
-      hand: ui.detailer_hand.checked,
-      nsfw: ui.detailer_nsfw.checked,
-      face: ui.detailer_face.checked,
-      eyes: ui.detailer_eyes.checked,
-    },
+    base_mode: ui.base_mode.value === "dual_sampler" ? "dual_sampler" : "normal",
+    pools: clone(draft.pools), loras: clone(draft.loras), lora_managed_triggers: clone(draft.managedTriggers || []),
+    upscalers: readUpscalerControls(),
   };
   for (const section of SECTIONS) {
     settings[`random_${section}`] = draft.modes[section] === "pool";
@@ -719,7 +1021,7 @@ function persistNow() {
   if (!initialized) return;
   const savedAt = new Date().toISOString();
   try {
-    localStorage.setItem(DRAFT_KEY, JSON.stringify({ version: 3, savedAt, settings: readSettings() }));
+    localStorage.setItem(DRAFT_KEY, JSON.stringify({ version: 4, savedAt, settings: readSettings(), profileDrafts: clone(profileDrafts) }));
     for (const key of LEGACY_DRAFT_KEYS) localStorage.removeItem(key);
     localStorage.setItem(VIEW_KEY, JSON.stringify({ version: 1, activeSection, views: poolViews }));
     ui.draftStatus.textContent = `本地草稿已保存 ${formatSavedTime(savedAt)}`;
@@ -756,12 +1058,20 @@ function loadStoredDraft() {
       ? null
       : LEGACY_DRAFT_KEYS.map((key) => JSON.parse(localStorage.getItem(key) || "null")).find(Boolean);
     const payload = current || legacy;
-    if (![1, 2, 3].includes(payload?.version) || !payload.settings || typeof payload.settings !== "object") return false;
+    if (![1, 2, 3, 4].includes(payload?.version) || !payload.settings || typeof payload.settings !== "object") return false;
     const settings = clone(payload.settings);
+    if (payload.version < 4) {
+      try {
+        localStorage.setItem(`${DRAFT_BACKUP_KEY_PREFIX}${payload.version}`, JSON.stringify(payload));
+      } catch {
+        // Keep startup available if browser storage is full; the old source key remains until migration writes.
+      }
+    }
     if (payload.version === 1 && isLegacyDefaultLoras(settings.loras)) settings.loras = [];
-    applySettings(settings);
-    if (payload.version !== 3) {
-      localStorage.setItem(DRAFT_KEY, JSON.stringify({ version: 3, savedAt: payload.savedAt, settings }));
+    profileDrafts = payload.profileDrafts && typeof payload.profileDrafts === "object" ? clone(payload.profileDrafts) : {};
+    applySettings(settings, { useProfileDraft: true });
+    if (payload.version !== 4) {
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({ version: 4, savedAt: payload.savedAt, settings, profileDrafts: clone(profileDrafts) }));
       for (const key of LEGACY_DRAFT_KEYS) localStorage.removeItem(key);
     }
     ui.draftStatus.textContent = `已恢复草稿 ${formatSavedTime(payload.savedAt)}`;
@@ -835,7 +1145,9 @@ function updatePeopleTotal() {
   ui.peopleTotal.textContent = total ? `共 ${total} 人` : "不限人数";
 }
 function updatePoolOverview() {
-  ui.poolOverview.textContent = `${SECTIONS.reduce((sum, section) => sum + selectedCount(section), 0)} 项已选`;
+  ui.poolOverview.textContent = currentProfile() === "krea2"
+    ? `${kreaPromptPool.items.length} 项词条 · ${kreaPromptPoolSelection.length} 项已选`
+    : `${SECTIONS.reduce((sum, section) => sum + selectedCount(section), 0)} 项已选`;
 }
 
 function normalizedPath(value) {
@@ -996,8 +1308,19 @@ function moveLora(index, delta) {
   schedulePersist();
 }
 async function loadLoraInventory() {
+  const requestedProfile = currentProfile();
+  const requestId = ++loraInventoryRequest;
+  if (loraInventoryProfile !== requestedProfile) {
+    loraInventoryProfile = requestedProfile;
+    loraInventory = [];
+    loraInventoryLoaded = false;
+    loraInventoryError = "";
+    renderLoras();
+    renderLoraCatalog();
+  }
   try {
-    const data = await request("/api/loras");
+    const data = await request(`/api/loras?model_profile=${encodeURIComponent(requestedProfile)}`);
+    if (requestId !== loraInventoryRequest || requestedProfile !== currentProfile()) return;
     loraInventory = data.items || [];
     loraInventoryLoaded = true;
     loraInventoryError = "";
@@ -1005,8 +1328,11 @@ async function loadLoraInventory() {
     renderLoras();
     renderLoraCatalog();
   } catch (error) {
+    if (requestId !== loraInventoryRequest || requestedProfile !== currentProfile()) return;
+    loraInventory = [];
     loraInventoryLoaded = false;
     loraInventoryError = error.message;
+    renderLoras();
     renderLoraCatalog();
   }
   updateRepairControls();
@@ -1095,6 +1421,7 @@ async function saveLoraTriggers(event) {
       method: "PUT",
       body: JSON.stringify({
         filename: ui.loraTriggerFilename.value,
+        model_profile: currentProfile(),
         triggerWords: parseLoraTriggerInput(ui.loraTriggerWords.value),
       }),
     });
@@ -1113,7 +1440,7 @@ async function resetLoraTriggers() {
   if (!editingLoraTrigger) return;
   try {
     const filename = encodeURIComponent(ui.loraTriggerFilename.value);
-    const value = await request(`/api/loras/triggers?filename=${filename}`, { method: "DELETE" });
+    const value = await request(`/api/loras/triggers?filename=${filename}&model_profile=${encodeURIComponent(currentProfile())}`, { method: "DELETE" });
     replaceLoraInventoryItem(value);
     reconcileLoraTriggers(editingLoraTrigger.enabled ? [editingLoraTrigger] : []);
     renderLoras();
@@ -2140,8 +2467,12 @@ async function loadFavorites(section = activeSection) {
   updateFavoriteSelectionButton();
 }
 async function loadCustomGroups(section = activeSection) {
+  const requestedProfile = currentProfile();
+  const requestId = ++customGroupsRequest;
   try {
-    customGroups = (await request(`/api/custom-groups/${section}`)).groups || [];
+    const payload = await request(`/api/custom-groups/${section}?model_profile=${encodeURIComponent(requestedProfile)}`);
+    if (requestId !== customGroupsRequest || requestedProfile !== currentProfile() || section !== activeSection) return;
+    customGroups = payload.groups || [];
     if (!customTreeInitialized.has(section)) {
       collapsedCustomGroups[section] = new Set(
         customGroups.filter((group) => group.kind !== "group").map((group) => group.id),
@@ -2159,6 +2490,7 @@ async function loadCustomGroups(section = activeSection) {
       ancestor = ancestor.parentId ? customGroup(ancestor.parentId) : null;
     }
   } catch (error) {
+    if (requestId !== customGroupsRequest || requestedProfile !== currentProfile() || section !== activeSection) return;
     customGroups = [];
     toast(`自定义分组不可用：${error.message}`);
   }
@@ -2216,9 +2548,187 @@ function setPoolSidebarOpen(open) {
   ui.togglePoolSidebar.setAttribute("aria-label", ui.togglePoolSidebar.title);
 }
 
+function readKreaPoolSelection() {
+  return { ids: [...kreaPromptPoolSelection] };
+}
+function openKreaPromptPool() {
+  if (currentProfile() !== "krea2") return;
+  clearTimeout(kreaPoolBackdropTimer);
+  kreaPoolBackdropTimer = null;
+  ui.kreaPoolDrawer.removeAttribute("inert");
+  ui.kreaPoolDrawer.classList.add("open");
+  ui.kreaPoolDrawer.setAttribute("aria-hidden", "false");
+  ui.kreaPoolBackdrop.classList.remove("closing");
+  ui.kreaPoolBackdrop.hidden = false;
+  ui.kreaPoolSearch.focus({ preventScroll: true });
+}
+function closeKreaPromptPool() {
+  ui.kreaPoolDrawer.classList.remove("open");
+  ui.kreaPoolDrawer.setAttribute("aria-hidden", "true");
+  ui.kreaPoolDrawer.setAttribute("inert", "");
+  clearTimeout(kreaPoolBackdropTimer);
+  ui.kreaPoolBackdrop.classList.add("closing");
+  kreaPoolBackdropTimer = setTimeout(() => {
+    kreaPoolBackdropTimer = null;
+    if (ui.kreaPoolDrawer.classList.contains("open")) return;
+    ui.kreaPoolBackdrop.hidden = true;
+    ui.kreaPoolBackdrop.classList.remove("closing");
+  }, 220);
+  ui.openKreaPromptPool.focus({ preventScroll: true });
+}
+function renderKreaPromptPool() {
+  const enabled = currentProfile() === "krea2";
+  ui.kreaPromptPoolControls.hidden = !enabled;
+  ui.animaPromptPoolControls.hidden = enabled;
+  const items = Array.isArray(kreaPromptPool.items) ? kreaPromptPool.items : [];
+  ui.krea_prompt_pool_enabled.checked = enabled && ui.krea_prompt_pool_enabled.checked;
+  ui.krea_prompt_pool_enabled.disabled = !enabled || items.length === 0 || kreaPromptPoolSelection.length === 0;
+  const selected = new Set(readKreaPoolSelection().ids);
+  ui.kreaPromptPoolCount.textContent = `${items.length} 项 · 已选 ${selected.size}`;
+  const query = ui.kreaPoolSearch.value.trim().toLocaleLowerCase();
+  const visible = items.filter((item) => {
+    const matches = String(item.text || item.prompt || "").toLocaleLowerCase().includes(query);
+    return matches && (!ui.kreaPoolSelectedOnly.checked || selected.has(String(item.id)));
+  });
+  ui.kreaPoolMeta.textContent = `${items.length} 项可用 · ${selected.size} 项已选`;
+  ui.kreaPoolSelectionLabel.textContent = `已选择 ${selected.size} 项`;
+  ui.kreaPromptPoolList.replaceChildren(...visible.map((item) => {
+    const row = document.createElement("article");
+    row.className = `krea-prompt-row${selected.has(String(item.id)) ? " selected" : ""}`;
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = selected.has(String(item.id));
+    checkbox.setAttribute("aria-label", "选择自然语言提示词");
+    checkbox.addEventListener("change", () => {
+      const id = String(item.id);
+      if (checkbox.checked) kreaPromptPoolSelection = [...new Set([...kreaPromptPoolSelection, id])];
+      else kreaPromptPoolSelection = kreaPromptPoolSelection.filter((value) => value !== id);
+      renderKreaPromptPool();
+      schedulePersist();
+    });
+    const text = document.createElement("span");
+    text.textContent = item.text || item.prompt || "";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "icon-button dark krea-prompt-remove";
+    remove.title = "从词池删除";
+    remove.setAttribute("aria-label", "从词池删除");
+    remove.textContent = "×";
+    remove.addEventListener("click", () => deleteKreaPromptPoolItem(item));
+    row.append(checkbox, text, remove);
+    return row;
+  }));
+  if (!visible.length) ui.kreaPromptPoolList.innerHTML = `<div class="inline-empty">${items.length ? "没有匹配的提示词。" : "Krea 2 词池为空，请导入自然语言提示词。"}</div>`;
+  updatePoolOverview();
+}
+async function deleteKreaPromptPoolItem(item) {
+  try {
+    await request(`/api/prompt-pools/items?model_profile=krea2&id=${encodeURIComponent(item.id)}`, { method: "DELETE" });
+    const id = String(item.id);
+    kreaPromptPool.items = kreaPromptPool.items.filter((value) => String(value.id) !== id);
+    kreaPromptPoolSelection = kreaPromptPoolSelection.filter((value) => value !== id);
+    if (!kreaPromptPoolSelection.length) ui.krea_prompt_pool_enabled.checked = false;
+    renderKreaPromptPool();
+    schedulePersist();
+  } catch (error) { toast(error.message); }
+}
+async function loadKreaPromptPool() {
+  if (currentProfile() !== "krea2") {
+    renderKreaPromptPool();
+    return;
+  }
+  const requestId = ++kreaPromptPoolRequest;
+  try {
+    const payload = await request("/api/prompt-pools?model_profile=krea2");
+    if (requestId !== kreaPromptPoolRequest || currentProfile() !== "krea2") return;
+    kreaPromptPool = { model_profile: "krea2", items: Array.isArray(payload.items) ? payload.items : [], count: Number(payload.count || payload.items?.length || 0) };
+    const validIds = new Set(kreaPromptPool.items.map((item) => String(item.id)));
+    kreaPromptPoolSelection = kreaPromptPoolSelection.filter((id) => validIds.has(String(id)));
+    renderKreaPromptPool();
+  } catch (error) {
+    if (requestId !== kreaPromptPoolRequest || currentProfile() !== "krea2") return;
+    kreaPromptPool = { model_profile: "krea2", items: [], count: 0 };
+    renderKreaPromptPool();
+    toast(`Krea 2 提示词池读取失败：${error.message}`);
+  }
+}
+function parseKreaCsv(text) {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let quoted = false;
+  const source = String(text || "").replace(/^\uFEFF/, "");
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index];
+    if (quoted) {
+      if (char === '"' && source[index + 1] === '"') { cell += '"'; index++; }
+      else if (char === '"') quoted = false;
+      else cell += char;
+    } else if (char === '"' && !cell) quoted = true;
+    else if (char === ",") { row.push(cell.trim()); cell = ""; }
+    else if (char === "\n" || char === "\r") {
+      if (char === "\r" && source[index + 1] === "\n") index++;
+      row.push(cell.trim());
+      if (row.some(Boolean)) rows.push(row);
+      row = []; cell = "";
+    } else cell += char;
+  }
+  row.push(cell.trim());
+  if (row.some(Boolean)) rows.push(row);
+  if (!rows.length) return [];
+  const headerIndex = rows[0].findIndex((value) => /^(text|prompt|提示词|自然语言)$/i.test(value));
+  const column = headerIndex >= 0 ? headerIndex : 0;
+  const start = headerIndex >= 0 ? 1 : 0;
+  return rows.slice(start).map((values) => values[column] || "").map((value) => value.trim()).filter(Boolean);
+}
+function parseKreaPromptText(text, format = "") {
+  const source = String(text || "").trim();
+  if (!source) return [];
+  if (format === "csv") return parseKreaCsv(source);
+  if (source.startsWith("[") || source.startsWith("{")) {
+    try {
+      const value = JSON.parse(source);
+      const values = Array.isArray(value) ? value : Array.isArray(value.items) ? value.items : Array.isArray(value.prompts) ? value.prompts : [];
+      return values.map((item) => typeof item === "string" ? item : item?.text || item?.prompt || "").map((item) => String(item).trim()).filter(Boolean);
+    } catch {
+      // 解析失败时按纯文本行导入。
+    }
+  }
+  return source.replaceAll("\r", "").split("\n").map((line) => line.trim()).filter(Boolean);
+}
+async function importKreaPromptPool(mode) {
+  if (currentProfile() !== "krea2") return;
+  let text = ui.kreaPromptPoolText.value;
+  const file = ui.kreaPromptPoolFile.files?.[0];
+  if (file) text = await file.text();
+  const items = parseKreaPromptText(text, file?.name.toLowerCase().endsWith(".csv") ? "csv" : file?.name.toLowerCase().endsWith(".json") ? "json" : "");
+  if (!items.length) {
+    toast("请输入或选择至少一条自然语言提示词");
+    return;
+  }
+  try {
+    const payload = await request("/api/prompt-pools/import", {
+      method: "POST",
+      body: JSON.stringify({ model_profile: "krea2", items, mode }),
+    });
+    kreaPromptPool = { model_profile: "krea2", items: Array.isArray(payload.items) ? payload.items : [], count: Number(payload.count || payload.items?.length || 0) };
+    const allIds = new Set(kreaPromptPool.items.map((item) => String(item.id)));
+    kreaPromptPoolSelection = mode === "replace" ? [...allIds] : [...new Set([...kreaPromptPoolSelection, ...allIds])];
+    ui.krea_prompt_pool_enabled.checked = allIds.size > 0;
+    ui.kreaPromptPoolText.value = "";
+    ui.kreaPromptPoolFile.value = "";
+    renderKreaPromptPool();
+    schedulePersist();
+    toast(mode === "replace" ? "Krea 2 词池已替换" : "Krea 2 词池已追加");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
 function poolQueryBody() {
   const view = currentView();
   return {
+    model_profile: currentProfile(),
     page: poolPage,
     limit: 48,
     q: view.query,
@@ -2234,7 +2744,12 @@ function poolQueryBody() {
   };
 }
 async function loadPool() {
+  const requestedProfile = currentProfile();
   const requestId = ++poolRequest;
+  if (requestedProfile === "krea2") {
+    await loadKreaPromptPool();
+    return;
+  }
   const view = currentView();
   try {
     const query = poolQueryBody();
@@ -2246,6 +2761,7 @@ async function loadPool() {
       });
     else {
       const params = new URLSearchParams({
+        model_profile: query.model_profile,
         page: query.page,
         limit: query.limit,
         q: query.q,
@@ -2261,7 +2777,7 @@ async function loadPool() {
       query.traits.forEach((value) => params.append("trait", value));
       data = await request(`/api/pools/${activeSection}?${params}`);
     }
-    if (requestId !== poolRequest) return;
+    if (requestId !== poolRequest || requestedProfile !== currentProfile()) return;
     poolItems = data.items || [];
     poolFacets = data.facets || {};
     poolPages = data.pages;
@@ -2281,6 +2797,7 @@ async function loadPool() {
       }
     });
   } catch (error) {
+    if (requestId !== poolRequest) return;
     toast(error.message);
   }
 }
@@ -3165,7 +3682,7 @@ async function confirmGroupDelete(event) {
       );
     } else {
       const payload = await request(
-        `/api/custom-groups/${activeSection}/${encodeURIComponent(group.id)}?deleteMode=${deleteMode}`,
+        `/api/custom-groups/${activeSection}/${encodeURIComponent(group.id)}?deleteMode=${deleteMode}&model_profile=${encodeURIComponent(currentProfile())}`,
         { method: "DELETE" },
       );
       customGroups = payload.groups || [];
@@ -3263,6 +3780,7 @@ async function saveCustom(event) {
     await normalizePromptFields({ custom_prompt: ui.customPrompt.value });
     const payload = {
       section: activeSection,
+      model_profile: currentProfile(),
       title: ui.customTitle.value,
       subtitle: ui.customSubtitle.value,
       prompt: ui.customPrompt.value,
@@ -3278,7 +3796,7 @@ async function saveCustom(event) {
       groupIds: [...ui.customGroupChecks.querySelectorAll("input:checked")].map((input) => input.value),
     };
     const item = editingCustom
-      ? await request(`/api/custom-prompts/${editingCustom.id}`, { method: "PUT", body: JSON.stringify(payload) })
+      ? await request(`/api/custom-prompts/${editingCustom.id}?model_profile=${encodeURIComponent(currentProfile())}`, { method: "PUT", body: JSON.stringify(payload) })
       : await request("/api/custom-prompts", { method: "POST", body: JSON.stringify(payload) });
     if (!selectionHas(activeSection, item.id)) toggleSelection(activeSection, item.id, true);
     ui.customDialog.close();
@@ -3292,7 +3810,7 @@ async function saveCustom(event) {
 async function deleteCustomItem() {
   if (!editingCustom || !confirm("删除这个自定义项？")) return;
   try {
-    await request(`/api/custom-prompts/${editingCustom.id}`, { method: "DELETE" });
+    await request(`/api/custom-prompts/${editingCustom.id}?model_profile=${encodeURIComponent(currentProfile())}`, { method: "DELETE" });
     const selection = draft.pools[activeSection];
     selection.ids = selection.ids.filter((id) => id !== editingCustom.id);
     selection.excluded_ids = selection.excluded_ids.filter((id) => id !== editingCustom.id);
@@ -3324,8 +3842,8 @@ async function saveCustomGroup(event) {
   const id = ui.customGroupId.value;
   try {
     const payload = await request(
-      id ? `/api/custom-groups/${activeSection}/${encodeURIComponent(id)}` : `/api/custom-groups/${activeSection}`,
-      { method: id ? "PUT" : "POST", body: JSON.stringify({ name: ui.customGroupName.value }) },
+      id ? `/api/custom-groups/${activeSection}/${encodeURIComponent(id)}?model_profile=${encodeURIComponent(currentProfile())}` : `/api/custom-groups/${activeSection}?model_profile=${encodeURIComponent(currentProfile())}`,
+      { method: id ? "PUT" : "POST", body: JSON.stringify({ name: ui.customGroupName.value, model_profile: currentProfile() }) },
     );
     customGroups = payload.groups || [];
     ui.customGroupDialog.close();
@@ -3369,9 +3887,9 @@ function openImportDialog() {
   importPreview = null;
   const label = SECTION_META[activeSection].label;
   ui.importDialogTitle.textContent = `${label}池批量导入`;
-  ui.importJsonTemplate.href = `/api/custom-prompts/templates/${activeSection}/json`;
+  ui.importJsonTemplate.href = `/api/custom-prompts/templates/${activeSection}/json?model_profile=${encodeURIComponent(currentProfile())}`;
   ui.importJsonTemplate.textContent = `${label} JSON 模板`;
-  ui.importCsvTemplate.href = `/api/custom-prompts/templates/${activeSection}/csv`;
+  ui.importCsvTemplate.href = `/api/custom-prompts/templates/${activeSection}/csv?model_profile=${encodeURIComponent(currentProfile())}`;
   ui.importCsvTemplate.textContent = `${label} CSV 模板`;
   ui.importFile.value = "";
   ui.importBundleName.value = "";
@@ -3403,6 +3921,7 @@ async function previewImportFile() {
         format,
         content: await file.text(),
         section: activeSection,
+        model_profile: currentProfile(),
         bundleName: ui.importBundleName.value,
       }),
     });
@@ -3455,6 +3974,7 @@ async function commitCustomImport() {
       body: JSON.stringify({
         rows: importPreview.rows,
         section: activeSection,
+        model_profile: currentProfile(),
         targetGroupIds: selectedImportGroupIds(),
         bundleName: ui.importBundleName.value,
       }),
@@ -3490,6 +4010,42 @@ function populateResourceSelect(select, values, selected, emptyText) {
   select.replaceChildren(...options);
   select.value = selected && [...select.options].some((option) => option.value === selected) ? selected : "";
 }
+function resolveInventoryPath(selected, values) {
+  const requested = String(selected || "").trim().replaceAll("\\", "/");
+  if (!requested) return "";
+  const lower = requested.toLocaleLowerCase();
+  const exact = values.find((value) => String(value).replaceAll("\\", "/").toLocaleLowerCase() === lower);
+  if (exact) return exact;
+  const basename = requested.split("/").pop().toLocaleLowerCase();
+  const matches = values.filter((value) => String(value).replaceAll("\\", "/").split("/").pop().toLocaleLowerCase() === basename);
+  return matches.length === 1 ? matches[0] : requested;
+}
+function populateModelSelect(select, values, selected) {
+  const groups = new Map();
+  for (const raw of values) {
+    const value = String(raw || "").replaceAll("\\", "/");
+    if (!value) continue;
+    const slash = value.lastIndexOf("/");
+    const folder = slash >= 0 ? value.slice(0, slash) : "根目录";
+    if (!groups.has(folder)) groups.set(folder, []);
+    groups.get(folder).push({ value, label: slash >= 0 ? value.slice(slash + 1) : value });
+  }
+  const options = [];
+  for (const [folder, items] of groups) {
+    const optgroup = document.createElement("optgroup");
+    optgroup.label = folder;
+    for (const item of items) optgroup.append(new Option(item.label, item.value));
+    options.push(optgroup);
+  }
+  if (selected && !values.includes(selected)) {
+    const missing = new Option(`当前缺失 · ${selected}`, selected);
+    missing.dataset.missing = "true";
+    options.unshift(missing);
+  }
+  if (!options.length) options.push(new Option("没有归属当前档案的主模型", ""));
+  select.replaceChildren(...options);
+  select.value = selected && [...select.options].some((option) => option.value === selected) ? selected : "";
+}
 function modelLabel(value) {
   const filename = String(value || "未选择模型")
     .replaceAll("\\", "/")
@@ -3497,110 +4053,247 @@ function modelLabel(value) {
     .pop();
   return filename.replace(/\.(safetensors|ckpt|pth)$/i, "");
 }
+function profileEntries() {
+  const source = resources.model_profiles || resources.profiles || {};
+  return Object.entries(source).filter(([id, value]) => value && typeof value === "object").map(([id, value]) => ({ id: normalizeProfileId(id), ...value }));
+}
+function updateProfileResources() {
+  const profile = profileConfig(currentProfile());
+  const available = profile.available || {};
+  const missing = [
+    ...(available.clip === false ? [profile.clip_name || "CLIP"] : []),
+    ...(available.vae === false ? [profile.vae_name || "VAE"] : []),
+  ];
+  ui.modelProfileHint.textContent = missing.length
+    ? `${profileLabel(currentProfile())}：缺少 ${missing.join("、")}`
+    : `${profileLabel(currentProfile())} 会自动切换绑定模型、编码方式与采样参数。`;
+  const boundSeed = resolveInventoryPath(profile.seedvr2_model || "", resources.seedvr2_models || []);
+  if (boundSeed && resources.seedvr2_models?.includes(boundSeed) && !ui.seedvr2_model_name.value) ensureSelectValue(ui.seedvr2_model_name, boundSeed);
+  ui.seedvr2_model_name.title = profile.seedvr2_model ? `档案默认：${profile.seedvr2_model}` : "请选择 SeedVR2 模型";
+  ui.modelProfileHint.dataset.profileReady = String(!missing.length && available.model !== false);
+  ui.model_name.title = `${profileLabel(currentProfile())} 主模型`;
+}
+function profileOptionsFromResources() {
+  const entries = profileEntries();
+  if (entries.length) return entries;
+  return [
+    { id: "anima", label: "Anima" },
+    { id: "krea2", label: "Krea 2" },
+  ];
+}
 async function loadResources() {
-  const selectedModel = ui.model_name.value || defaults?.model_name || "";
-  const selectedUpscaler = ui.hires_model_name.value || defaults?.hires?.model_name || "";
-  const selectedSampler = ui.sampler_name.value || defaults?.sampler_name || "";
-  const selectedScheduler = ui.scheduler.value || defaults?.scheduler || "";
-  const selectedSecondSampler = ui.second_sampler_name.value || defaults?.second_sampler?.sampler_name || selectedSampler;
-  const selectedSecondScheduler = ui.second_scheduler.value || defaults?.second_sampler?.scheduler || selectedScheduler;
+  const requestId = ++resourceRequest;
+  const selectedProfile = currentProfile();
+  const selectedSeed = ui.seedvr2_model_name.value || profileConfig(selectedProfile).seedvr2_model || "";
+  const selectedSeedVae = ui.seedvr2_vae_name.value || profileConfig(selectedProfile).seedvr2_vae || "";
+  const selectedSampler = ui.sampler_name.value || profileDefaults(selectedProfile).sampler_name || defaults?.sampler_name || "";
+  const selectedScheduler = ui.scheduler.value || profileDefaults(selectedProfile).scheduler || defaults?.scheduler || "";
   resourcesLoaded = false;
   resourceError = "";
-  ui.model_name.disabled = true;
-  ui.hires_model_name.disabled = true;
+  ui.model_profile.disabled = true;
+  ui.base_mode.disabled = false;
   ui.sampler_name.disabled = true;
   ui.scheduler.disabled = true;
-  ui.second_sampler_name.disabled = true;
-  ui.second_scheduler.disabled = true;
-  ui.model_name.replaceChildren(new Option("正在读取模型...", ""));
-  ui.hires_model_name.replaceChildren(new Option("正在读取放大模型...", ""));
-  ui.sampler_name.replaceChildren(new Option("正在读取 Sampler...", ""));
-  ui.scheduler.replaceChildren(new Option("正在读取 Scheduler...", ""));
-  ui.second_sampler_name.replaceChildren(new Option("正在读取 Sampler...", ""));
-  ui.second_scheduler.replaceChildren(new Option("正在读取 Scheduler...", ""));
-  updateRepairControls();
+  ui.seedvr2_model_name.disabled = true;
+  ui.seedvr2_vae_name.disabled = true;
+  for (const id of ["latent_second_sampler_name", "latent_second_scheduler", "seedvr2_sampler_name", "seedvr2_scheduler", "face_sampler", "face_scheduler"]) ui[id].disabled = true;
+  ui.sampler_name.replaceChildren(new Option("正在读取 Sampler…", ""));
+  ui.scheduler.replaceChildren(new Option("正在读取 Scheduler…", ""));
+  ui.seedvr2_model_name.replaceChildren(new Option("跟随模型档案", ""));
+  ui.seedvr2_vae_name.replaceChildren(new Option("跟随模型档案", ""));
   try {
-    const payload = await request("/api/resources");
+    const payload = await request(`/api/resources?model_profile=${encodeURIComponent(selectedProfile)}`);
+    if (requestId !== resourceRequest || selectedProfile !== currentProfile()) return;
+    const modelProfiles = payload.model_profiles || payload.profiles || {};
     resources = {
       models: Array.isArray(payload.models) ? payload.models : [],
+      profile_models: payload.profile_models && typeof payload.profile_models === "object" ? payload.profile_models : {},
+      model_assignments: payload.model_assignments || {},
+      seedvr2_models: Array.isArray(payload.seedvr2_models) ? payload.seedvr2_models : [],
+      seedvr2_vaes: Array.isArray(payload.seedvr2_vaes) ? payload.seedvr2_vaes : [],
       upscale_models: Array.isArray(payload.upscale_models) ? payload.upscale_models : [],
+      clips: Array.isArray(payload.clips) ? payload.clips : [],
+      vaes: Array.isArray(payload.vaes) ? payload.vaes : [],
+      clip_types: Array.isArray(payload.clip_types) ? payload.clip_types : [],
       samplers: Array.isArray(payload.samplers) ? payload.samplers : [],
       schedulers: Array.isArray(payload.schedulers) ? payload.schedulers : [],
+      model_profiles: modelProfiles,
+      profiles: modelProfiles,
+      nodes: payload.nodes && typeof payload.nodes === "object" ? payload.nodes : {},
+      plugins: payload.plugins && typeof payload.plugins === "object" ? payload.plugins : {},
     };
-    resourcesLoaded = true;
-    populateResourceSelect(ui.model_name, resources.models, selectedModel, "没有可用主模型");
-    populateResourceSelect(ui.hires_model_name, resources.upscale_models, selectedUpscaler, "没有可用放大模型");
+    profileResources = modelProfiles;
+    const profileOptions = profileOptionsFromResources();
+    ui.model_profile.replaceChildren(...profileOptions.map((item) => new Option(item.label || item.name || item.id, item.id)));
+    ensureSelectValue(ui.model_profile, selectedProfile);
+    activeProfileId = currentProfile();
+    const modelValues = resources.models.length ? resources.models : (resources.profile_models[selectedProfile] || []);
+    const selectedModel = resolveInventoryPath(profileDrafts[selectedProfile]?.model_name || ui.model_name.value || profileConfig(selectedProfile).model_name || "", modelValues);
+    populateModelSelect(ui.model_name, modelValues, selectedModel);
     populateResourceSelect(ui.sampler_name, resources.samplers, selectedSampler, "没有可用 Sampler");
     populateResourceSelect(ui.scheduler, resources.schedulers, selectedScheduler, "没有可用 Scheduler");
-    populateResourceSelect(ui.second_sampler_name, resources.samplers, selectedSecondSampler, "没有可用 Sampler");
-    populateResourceSelect(ui.second_scheduler, resources.schedulers, selectedSecondScheduler, "没有可用 Scheduler");
-    ui.model_name.disabled = resources.models.length === 0;
+    const seedValues = resources.seedvr2_models;
+    populateResourceSelect(ui.seedvr2_model_name, seedValues, resolveInventoryPath(selectedSeed, resources.seedvr2_models), "没有可用 SeedVR2 模型");
+    const seedVaeValues = resources.seedvr2_vaes;
+    populateResourceSelect(ui.seedvr2_vae_name, seedVaeValues, resolveInventoryPath(selectedSeedVae, resources.seedvr2_vaes), "没有可用 SeedVR2 VAE");
+    populateResourceSelect(ui.face_upscaler_model, resources.upscale_models, resolveInventoryPath(ui.face_upscaler_model.value, resources.upscale_models), "没有可用脸部放大模型");
+    for (const id of ["latent_second_sampler_name", "seedvr2_sampler_name", "face_sampler"]) populateResourceSelect(ui[id], resources.samplers, controlValue(id), "没有可用 Sampler");
+    for (const id of ["latent_second_scheduler", "seedvr2_scheduler", "face_scheduler"]) populateResourceSelect(ui[id], resources.schedulers, controlValue(id), "没有可用 Scheduler");
+    resourcesLoaded = true;
+    ui.model_profile.disabled = profileOptions.length < 2;
+    ui.model_name.disabled = modelValues.length === 0;
     ui.sampler_name.disabled = resources.samplers.length === 0;
     ui.scheduler.disabled = resources.schedulers.length === 0;
+    ui.seedvr2_vae_name.disabled = resources.seedvr2_vaes.length === 0;
+    for (const id of ["latent_second_sampler_name", "seedvr2_sampler_name", "face_sampler"]) ui[id].disabled = resources.samplers.length === 0;
+    for (const id of ["latent_second_scheduler", "seedvr2_scheduler", "face_scheduler"]) ui[id].disabled = resources.schedulers.length === 0;
   } catch (error) {
-    resources = { models: [], upscale_models: [], samplers: [], schedulers: [] };
+    if (requestId !== resourceRequest || selectedProfile !== currentProfile()) return;
+    resources = { models: [], profile_models: {}, model_assignments: {}, seedvr2_models: [], seedvr2_vaes: [], upscale_models: [], samplers: [], schedulers: [], model_profiles: {}, profiles: {}, nodes: {}, plugins: {} };
+    profileResources = {};
     resourceError = `模型资源读取失败：${error.message}`;
-    populateResourceSelect(ui.model_name, [], selectedModel, "模型资源离线");
-    populateResourceSelect(ui.hires_model_name, [], selectedUpscaler, "放大模型资源离线");
+    ui.model_profile.disabled = false;
     populateResourceSelect(ui.sampler_name, [], selectedSampler, "Sampler 资源离线");
     populateResourceSelect(ui.scheduler, [], selectedScheduler, "Scheduler 资源离线");
-    populateResourceSelect(ui.second_sampler_name, [], selectedSecondSampler, "Sampler 资源离线");
-    populateResourceSelect(ui.second_scheduler, [], selectedSecondScheduler, "Scheduler 资源离线");
-    ui.model_name.disabled = true;
+    populateResourceSelect(ui.seedvr2_model_name, [], selectedSeed, "SeedVR2 资源离线");
+    populateResourceSelect(ui.seedvr2_vae_name, [], selectedSeedVae, "SeedVR2 VAE 资源离线");
+    populateResourceSelect(ui.face_upscaler_model, [], ui.face_upscaler_model.value, "脸部放大模型资源离线");
   }
+  updateProfileResources();
   updateRepairControls();
 }
-function updateSecondSamplerControls() {
-  const enabled = ui.second_sampler_enabled.checked;
-  ui.secondSamplerDrawer.hidden = !enabled;
-  for (const control of [
-    ui.second_sampler_steps,
-    ui.second_sampler_cfg,
-    ui.second_sampler_name,
-    ui.second_scheduler,
-    ui.second_sampler_denoise,
-  ]) control.disabled = !enabled || (control.tagName === "SELECT" && !resourcesLoaded);
-}
 function updateRepairControls() {
-  const detailerCount = [ui.detailer_hand, ui.detailer_nsfw, ui.detailer_face, ui.detailer_eyes].filter(
-    (input) => input.checked,
-  ).length;
-  ui.repairSummary.textContent = `${modelLabel(ui.model_name.value || defaults?.model_name)} · ${ui.hires_enabled.checked ? "高清开启" : "高清关闭"} · ${detailerCount} 项细修`;
-  ui.hiresFields.classList.toggle("disabled", !ui.hires_enabled.checked);
-  ui.hires_model_name.disabled = !ui.hires_enabled.checked || !resourcesLoaded;
-  ui.hires_percent.disabled = !ui.hires_enabled.checked;
-  updateSecondSamplerControls();
+  const upscalers = {
+    latent: ui.latent_upscale_enabled.checked,
+    seedvr2: ui.seedvr2_enabled.checked,
+    nvidia: ui.nvidia_upscale_enabled.checked,
+    face: ui.face_refine_enabled.checked,
+  };
+  const activeCount = Object.values(upscalers).filter(Boolean).length;
+  const baseLabel = ui.base_mode.value === "dual_sampler" ? "底图－双采样器" : "普通底图";
+  ui.repairSummary.textContent = `${profileLabel(currentProfile())} · ${baseLabel} · ${activeCount} 项后处理`;
+  ui.latentUpscaleFields.classList.toggle("disabled", !upscalers.latent);
+  ui.seedvr2Fields.classList.toggle("disabled", !upscalers.seedvr2);
+  ui.nvidiaUpscaleFields.classList.toggle("disabled", !upscalers.nvidia);
+  ui.faceRefineFields.classList.toggle("disabled", !upscalers.face);
+  ui.latentSecondSamplerFields.classList.toggle("disabled", !upscalers.latent || !ui.latent_second_sampler_enabled.checked);
+  ui.latent_upscale_scale.disabled = !upscalers.latent;
+  ui.latent_upscale_method.disabled = !upscalers.latent;
+  ui.latent_second_sampler_enabled.disabled = !upscalers.latent;
+  ui.seedvr2_model_name.disabled = !upscalers.seedvr2 || !resourcesLoaded;
+  ui.seedvr2_vae_name.disabled = !upscalers.seedvr2 || !resourcesLoaded;
+  for (const id of ["seedvr2_weight_dtype", "seedvr2_scale_by", "seedvr2_color_correction_method", ...Object.values(SEED_SAMPLER_IDS), ...Object.values(SEED_TILE_IDS.encode), ...Object.values(SEED_TILE_IDS.decode)]) ui[id].disabled = !upscalers.seedvr2;
+  for (const id of ["nvidia_resize_type", "nvidia_scale", "nvidia_quality"]) ui[id].disabled = !upscalers.nvidia;
+  for (const id of Object.values(UPSCALER_CONTROL_IDS.face_refine).filter((id) => id !== "face_refine_enabled")) ui[id].disabled = !upscalers.face;
   const settings = readSettings();
+  const profile = profileConfig(currentProfile());
   const warnings = [];
   if (resourceError) warnings.push(resourceError);
-  if (resourcesLoaded && !resources.models.length) warnings.push("ComfyUI 当前没有可用主模型");
-  if (resourcesLoaded && !resources.upscale_models.length) warnings.push("ComfyUI 当前没有可用放大模型");
+  if (resourcesLoaded && profile.missing?.length) warnings.push(`${profileLabel(currentProfile())} 缺少资源：${profile.missing.join("、")}`);
+  if (resourcesLoaded && (!settings.model_name || !resources.models.includes(settings.model_name))) warnings.push(`${profileLabel(currentProfile())} 主模型不可用或未归属：${settings.model_name || "无可用模型"}`);
+  if (resourcesLoaded && upscalers.seedvr2 && settings.upscalers.seedvr2.model_name && resources.seedvr2_models.length && !resources.seedvr2_models.includes(settings.upscalers.seedvr2.model_name)) warnings.push(`SeedVR2 模型不可用：${settings.upscalers.seedvr2.model_name}`);
+  if (resourcesLoaded && upscalers.face && settings.upscalers.face_refine.upscaler_model && !resources.upscale_models.includes(settings.upscalers.face_refine.upscaler_model)) warnings.push(`脸部放大模型不可用：${settings.upscalers.face_refine.upscaler_model}`);
+  const advertisedAvailability = (inventory, names) => {
+    if (inventory == null) return null;
+    if (Array.isArray(inventory)) {
+      const available = new Set(inventory.map((item) => String(item).toLowerCase()));
+      return names.some((name) => available.has(name.toLowerCase()));
+    }
+    if (typeof inventory !== "object") return false;
+    const advertised = names.filter((name) => Object.prototype.hasOwnProperty.call(inventory, name));
+    if (!advertised.length) return null;
+    return advertised.some((name) => inventory[name] === true);
+  };
+  if (resourcesLoaded && upscalers.nvidia) {
+    const nvidiaNode = advertisedAvailability(resources.nodes, ["NvidiaUpscale", "RTXVideoSuperResolution"]);
+    const nvidiaPlugin = advertisedAvailability(resources.plugins, ["nvidia_upscale"]);
+    if ((nvidiaNode !== null || nvidiaPlugin !== null) && nvidiaNode !== true && nvidiaPlugin !== true) {
+      warnings.push("N 卡放大节点不可用：RTXVideoSuperResolution");
+    }
+  }
   if (resourcesLoaded && !resources.samplers.length) warnings.push("ComfyUI 当前没有可用 Sampler");
   if (resourcesLoaded && !resources.schedulers.length) warnings.push("ComfyUI 当前没有可用 Scheduler");
-  if (resourcesLoaded && !resources.models.includes(settings.model_name))
-    warnings.push(`主模型不可用：${settings.model_name}`);
-  if (resourcesLoaded && settings.hires.enabled && !resources.upscale_models.includes(settings.hires.model_name))
-    warnings.push(`高清模型不可用：${settings.hires.model_name}`);
-  if (resourcesLoaded && !resources.samplers.includes(settings.sampler_name))
-    warnings.push(`Sampler 不可用：${settings.sampler_name}`);
-  if (resourcesLoaded && !resources.schedulers.includes(settings.scheduler))
-    warnings.push(`Scheduler 不可用：${settings.scheduler}`);
-  if (resourcesLoaded && settings.second_sampler.enabled && !resources.samplers.includes(settings.second_sampler.sampler_name))
-    warnings.push(`2ndSampler Sampler 不可用：${settings.second_sampler.sampler_name}`);
-  if (resourcesLoaded && settings.second_sampler.enabled && !resources.schedulers.includes(settings.second_sampler.scheduler))
-    warnings.push(`2ndSampler Scheduler 不可用：${settings.second_sampler.scheduler}`);
+  if (resourcesLoaded && !resources.samplers.includes(settings.sampler_name)) warnings.push(`Sampler 不可用：${settings.sampler_name}`);
+  if (resourcesLoaded && !resources.schedulers.includes(settings.scheduler)) warnings.push(`Scheduler 不可用：${settings.scheduler}`);
   const missingLoras = settings.loras.filter((item) => !loraItem(item.filename)).map((item) => item.filename);
   if (loraInventoryLoaded && missingLoras.length) warnings.push(`LoRA 不可用：${missingLoras.join("、")}`);
   ui.resourceWarning.hidden = warnings.length === 0;
   ui.resourceWarning.textContent = warnings.join("；");
+  updateProfileResources();
+}
+
+let ownershipItems = [];
+function renderResourceOwnership() {
+  const query = ui.ownershipSearch.value.trim().toLocaleLowerCase();
+  const filtered = ownershipItems.filter((item) => `${item.name || ""} ${item.folder || ""} ${item.basename || ""}`.toLocaleLowerCase().includes(query));
+  ui.ownershipSummary.textContent = `${ownershipItems.length} 项资源 · ${ownershipItems.filter((item) => !item.model_profile).length} 项未归属`;
+  ui.ownershipList.replaceChildren(...filtered.map((item) => {
+    const row = document.createElement("article");
+    row.className = "ownership-row";
+    const copy = document.createElement("div");
+    copy.className = "ownership-row-copy";
+    const name = document.createElement("strong");
+    name.textContent = item.basename || item.name;
+    const folder = document.createElement("small");
+    folder.textContent = item.folder || item.name;
+    folder.title = item.name;
+    copy.append(name, folder);
+    const select = document.createElement("select");
+    select.setAttribute("aria-label", `${item.name} 档案归属`);
+    select.append(new Option("未归属", ""), new Option("Anima", "anima"), new Option("Krea 2", "krea2"));
+    select.value = item.model_profile || "";
+    select.addEventListener("change", () => updateResourceOwnership(item, select.value || null, select));
+    row.append(copy, select);
+    return row;
+  }));
+  if (!filtered.length) ui.ownershipList.innerHTML = '<div class="inline-empty">没有匹配的资源。</div>';
+}
+async function loadResourceOwnership() {
+  const kind = ui.ownershipKind.value;
+  ui.ownershipError.hidden = true;
+  ui.ownershipSummary.textContent = "正在读取资源清单…";
+  ui.ownershipList.replaceChildren();
+  try {
+    const payload = await request(`/api/resource-ownership?kind=${encodeURIComponent(kind)}`);
+    ownershipItems = Array.isArray(payload.items) ? payload.items : [];
+    renderResourceOwnership();
+  } catch (error) {
+    ownershipItems = [];
+    ui.ownershipSummary.textContent = "资源清单读取失败";
+    ui.ownershipError.textContent = error.message;
+    ui.ownershipError.hidden = false;
+  }
+}
+async function updateResourceOwnership(item, modelProfile, select) {
+  select.disabled = true;
+  ui.ownershipError.hidden = true;
+  try {
+    const updated = await request("/api/resource-ownership", {
+      method: "PUT",
+      body: JSON.stringify({ kind: ui.ownershipKind.value, name: item.name, model_profile: modelProfile }),
+    });
+    ownershipItems = ownershipItems.map((value) => value.name === item.name ? updated : value);
+    renderResourceOwnership();
+    if (ui.ownershipKind.value === "models") await loadResources();
+    else await loadLoraInventory();
+    toast(`${item.basename || item.name} 已归入 ${modelProfile || "未归属"}`);
+  } catch (error) {
+    select.value = item.model_profile || "";
+    ui.ownershipError.textContent = error.message;
+    ui.ownershipError.hidden = false;
+  } finally {
+    select.disabled = false;
+  }
 }
 
 const PRESET_SETTING_KEYS = [
+  "model_profile",
   "model_name",
+  "krea_prompt_pool",
+  "base_mode",
+  "upscalers",
   "loras",
   "lora_managed_triggers",
-  "hires",
-  "detailers",
   "manual_artist",
   "quality_prompt",
   "extra_prompt",
@@ -3611,19 +4304,26 @@ const PRESET_SETTING_KEYS = [
   "cfg",
   "sampler_name",
   "scheduler",
-  "cfg_zero_star",
-  "second_sampler",
 ];
 function presetSnapshot() {
   const settings = readSettings();
   return Object.fromEntries(PRESET_SETTING_KEYS.map((key) => [key, clone(settings[key])]));
 }
 async function loadStylePresets() {
+  const requestedProfile = currentProfile();
+  const requestId = ++stylePresetRequest;
+  if (stylePresetProfile && stylePresetProfile !== requestedProfile) {
+    stylePresets = [];
+    renderStylePresets();
+  }
+  stylePresetProfile = requestedProfile;
   try {
-    const data = await request("/api/style-presets");
+    const data = await request(`/api/style-presets?model_profile=${encodeURIComponent(requestedProfile)}`);
+    if (requestId !== stylePresetRequest || requestedProfile !== currentProfile()) return;
     stylePresets = data.items || [];
     renderStylePresets();
   } catch (error) {
+    if (requestId !== stylePresetRequest || requestedProfile !== currentProfile()) return;
     toast(error.message);
   }
 }
@@ -3642,18 +4342,16 @@ function renderStylePresets() {
       row.className = `preset-row${item.favorite ? " favorite" : ""}`;
       const activeLoras = (item.settings?.loras || []).filter((lora) => lora.enabled).length;
       const settings = item.settings || {};
-      const modelShort = String(settings.model_name || "未指定模型")
-        .replace(/\.(safetensors|ckpt|pt|gguf)$/i, "")
-        .split("_")
-        .pop();
+      const modelShort = profileLabel(settings.model_profile || "anima");
       const metaParts = [
         modelShort,
         `${settings.width || "?"}×${settings.height || "?"}`,
         `${settings.steps || "?"} 步`,
-        settings.hires?.enabled ? "高清开启" : "无修复",
+        settings.base_mode === "dual_sampler" ? "双采样底图" : "普通底图",
+        settings.upscalers?.latent?.enabled ? "潜空间放大" : "无潜空间放大",
       ];
       if (activeLoras) metaParts.push(`${activeLoras} LoRA`);
-      row.innerHTML = `<button class="preset-apply" type="button" title="${escapeHtml(settings.model_name || "")}"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(metaParts.join(" · "))}</small></button><div class="preset-actions"><button type="button" data-preset-favorite title="${item.favorite ? "取消收藏" : "收藏"}" aria-label="${item.favorite ? "取消收藏" : "收藏"}">${item.favorite ? "★" : "☆"}</button><button type="button" data-preset-update title="用当前设置覆盖" aria-label="用当前设置覆盖">↻</button><button type="button" data-preset-rename title="重命名" aria-label="重命名">✎</button><button type="button" data-preset-delete title="删除" aria-label="删除">×</button></div>`;
+      row.innerHTML = `<button class="preset-apply" type="button" title="${escapeHtml(settings.model_profile || "anima")}"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(metaParts.join(" · "))}</small></button><div class="preset-actions"><button type="button" data-preset-favorite title="${item.favorite ? "取消收藏" : "收藏"}" aria-label="${item.favorite ? "取消收藏" : "收藏"}">${item.favorite ? "★" : "☆"}</button><button type="button" data-preset-update title="用当前设置覆盖" aria-label="用当前设置覆盖">↻</button><button type="button" data-preset-rename title="重命名" aria-label="重命名">✎</button><button type="button" data-preset-delete title="删除" aria-label="删除">×</button></div>`;
       row.querySelector(".preset-apply").addEventListener("click", () => {
         applySettings({ ...readSettings(), ...item.settings });
         schedulePersist();
@@ -3694,7 +4392,7 @@ async function createStylePreset() {
   try {
     const created = await request("/api/style-presets", {
       method: "POST",
-      body: JSON.stringify({ name, favorite: false, settings: presetSnapshot() }),
+      body: JSON.stringify({ name, favorite: false, model_profile: currentProfile(), settings: presetSnapshot() }),
     });
     const favoriteCount = stylePresets.findIndex((item) => !item.favorite);
     stylePresets.splice(favoriteCount < 0 ? stylePresets.length : favoriteCount, 0, created);
@@ -3714,7 +4412,7 @@ async function updateStylePreset(item, changes) {
   try {
     await request(`/api/style-presets/${encodeURIComponent(item.id)}`, {
       method: "PUT",
-      body: JSON.stringify(changes),
+      body: JSON.stringify({ ...changes, model_profile: currentProfile() }),
     });
     await loadStylePresets();
   } catch (error) {
@@ -3724,7 +4422,7 @@ async function updateStylePreset(item, changes) {
 async function deleteStylePreset(item) {
   if (!confirm(`删除预设“${item.name}”？`)) return;
   try {
-    await request(`/api/style-presets/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+    await request(`/api/style-presets/${encodeURIComponent(item.id)}?model_profile=${encodeURIComponent(currentProfile())}`, { method: "DELETE" });
     await loadStylePresets();
     toast("风格预设已删除");
   } catch (error) {
@@ -3827,7 +4525,7 @@ async function savePromptRule(event) {
       : "/api/prompt-rules";
     await request(path, {
       method: editingPromptRule ? "PUT" : "POST",
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ ...payload, model_profile: currentProfile() }),
     });
     clearPromptRuleEditor();
     await loadPromptRules();
@@ -4354,26 +5052,84 @@ ui.clearPromptRule.addEventListener("click", clearPromptRuleEditor);
 ui.deletePromptRule.addEventListener("click", deletePromptRule);
 ui.closePromptRules.addEventListener("click", () => ui.promptRuleDialog.close());
 ui.cancelPromptRules.addEventListener("click", () => ui.promptRuleDialog.close());
+ui.model_profile.addEventListener("change", () => {
+  const next = normalizeProfileId(ui.model_profile.value);
+  switchProfileDraft(next);
+  updateProfileResources();
+  updateRepairControls();
+  schedulePersist();
+  void refreshProfileData();
+});
+ui.model_name.addEventListener("change", () => {
+  saveCurrentProfileDraft();
+  updateRepairControls();
+  schedulePersist();
+});
+ui.manageResourceOwnership.addEventListener("click", async () => {
+  ui.resourceOwnershipDialog.showModal();
+  await loadResourceOwnership();
+});
+ui.closeResourceOwnership.addEventListener("click", () => ui.resourceOwnershipDialog.close());
+ui.closeResourceOwnershipFooter.addEventListener("click", () => ui.resourceOwnershipDialog.close());
+ui.ownershipKind.addEventListener("change", loadResourceOwnership);
+ui.ownershipSearch.addEventListener("input", renderResourceOwnership);
+ui.openKreaPromptPool.addEventListener("click", openKreaPromptPool);
+ui.closeKreaPool.addEventListener("click", closeKreaPromptPool);
+ui.confirmKreaPool.addEventListener("click", closeKreaPromptPool);
+ui.kreaPoolBackdrop.addEventListener("click", closeKreaPromptPool);
+ui.kreaPoolSearch.addEventListener("input", renderKreaPromptPool);
+ui.kreaPoolSelectedOnly.addEventListener("change", renderKreaPromptPool);
+ui.selectAllKreaPool.addEventListener("click", () => {
+  kreaPromptPoolSelection = [...new Set(kreaPromptPool.items.map((item) => String(item.id)))];
+  if (kreaPromptPoolSelection.length) ui.krea_prompt_pool_enabled.checked = true;
+  renderKreaPromptPool();
+  schedulePersist();
+});
+ui.clearKreaPoolSelection.addEventListener("click", () => {
+  kreaPromptPoolSelection = [];
+  ui.krea_prompt_pool_enabled.checked = false;
+  renderKreaPromptPool();
+  schedulePersist();
+});
+ui.krea_prompt_pool_enabled.addEventListener("change", () => {
+  if (currentProfile() !== "krea2") ui.krea_prompt_pool_enabled.checked = false;
+  schedulePersist();
+});
+ui.kreaPromptPoolAppend.addEventListener("click", () => importKreaPromptPool("append"));
+ui.kreaPromptPoolReplace.addEventListener("click", () => importKreaPromptPool("replace"));
+ui.kreaPromptPoolFile.addEventListener("change", async () => {
+  const file = ui.kreaPromptPoolFile.files?.[0];
+  if (!file) return;
+  ui.kreaPromptPoolText.value = await file.text();
+});
 for (const control of [
-  ui.model_name,
-  ui.hires_enabled,
-  ui.hires_model_name,
-  ui.detailer_hand,
-  ui.detailer_nsfw,
-  ui.detailer_face,
-  ui.detailer_eyes,
-  ui.cfg_zero_star,
-  ui.second_sampler_enabled,
-  ui.second_sampler_steps,
-  ui.second_sampler_cfg,
-  ui.second_sampler_name,
-  ui.second_scheduler,
-  ui.second_sampler_denoise,
-])
+  ui.latent_second_sampler_enabled,
+  ui.base_mode,
+  ui.latent_upscale_enabled,
+  ui.latent_upscale_scale,
+  ui.latent_upscale_method,
+  ...Object.values(POST_SAMPLER_IDS).map((id) => ui[id]),
+  ui.seedvr2_enabled,
+  ui.seedvr2_model_name,
+  ui.seedvr2_vae_name,
+  ui.seedvr2_weight_dtype,
+  ui.seedvr2_scale_by,
+  ui.seedvr2_color_correction_method,
+  ...Object.values(SEED_SAMPLER_IDS).map((id) => ui[id]),
+  ...Object.values(SEED_TILE_IDS.encode).map((id) => ui[id]),
+  ...Object.values(SEED_TILE_IDS.decode).map((id) => ui[id]),
+  ui.nvidia_upscale_enabled,
+  ui.nvidia_resize_type,
+  ui.nvidia_scale,
+  ui.nvidia_quality,
+  ui.face_refine_enabled,
+  ...Object.values(UPSCALER_CONTROL_IDS.face_refine).map((id) => ui[id]),
+]) {
   control.addEventListener("change", () => {
     updateRepairControls();
     schedulePersist();
   });
+}
 ui.themeToggle.addEventListener("click", () =>
   applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark", true),
 );
@@ -4399,7 +5155,7 @@ ui.closeDeleteGroup.addEventListener("click", () => ui.deleteGroupDialog.close()
 ui.cancelDeleteGroup.addEventListener("click", () => ui.deleteGroupDialog.close());
 ui.addLora.addEventListener("click", openLoraDialog);
 ui.resetLoras.addEventListener("click", () => {
-  draft.loras = clone(defaults?.loras || []);
+  draft.loras = defaultLorasForProfile(currentProfile());
   reconcileLoraTriggers(draft.loras.filter((item) => item.enabled));
   renderLoras();
   schedulePersist();
@@ -4420,9 +5176,10 @@ ui.female_count.addEventListener("input", updatePeopleTotal);
 ui.male_count.addEventListener("input", updatePeopleTotal);
 ui.resetSettings.addEventListener("click", () => {
   if (!confirm("恢复全部模板默认设置？")) return;
-  applySettings(defaults);
+  const profile = currentProfile();
+  applySettings({ ...profileSettingsDefaults(profile), model_profile: profile });
   schedulePersist();
-  toast("已恢复默认设置");
+  toast("已恢复当前模型档案默认设置");
 });
 ui.clearDraft.addEventListener("click", () => {
   if (!confirm("清除本地草稿并恢复默认设置？收藏不会被删除。")) return;
@@ -4444,7 +5201,9 @@ document.querySelectorAll("[data-mobile-view]").forEach((button) =>
   }),
 );
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && ui.poolDrawer.classList.contains("open")) closePool();
+  if (event.key !== "Escape") return;
+  if (ui.kreaPoolDrawer.classList.contains("open")) closeKreaPromptPool();
+  else if (ui.poolDrawer.classList.contains("open")) closePool();
 });
 
 async function initialize() {
@@ -4471,6 +5230,7 @@ async function initialize() {
   }
   await Promise.allSettled([
     loadResources(),
+    loadKreaPromptPool(),
     refreshConnection(),
     pollBatch(),
     loadHistory(1),

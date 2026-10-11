@@ -12,9 +12,15 @@ from pathlib import Path
 from typing import Any
 
 from .persistence import backup_corrupt_file
+from .model_profiles import get_model_profile
+from .workflow import migrate_settings, normalize_lora_path, validate_settings
 
 
 logger = logging.getLogger(__name__)
+
+
+class HistoryMigrationError(RuntimeError):
+    """Raised when legacy history cannot be migrated without risking data."""
 
 
 def _now() -> str:
@@ -50,7 +56,7 @@ class HistoryStore:
         connection = sqlite3.connect(destination, check_same_thread=False)
         try:
             HistoryStore._initialize(connection)
-        except sqlite3.DatabaseError:
+        except Exception:
             connection.close()
             raise
         return connection
@@ -84,7 +90,8 @@ class HistoryStore:
                 sample_seed INTEGER NOT NULL,
                 prompt_seed INTEGER NOT NULL,
                 settings_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                bound_resources_json TEXT NOT NULL DEFAULT '{}'
             );
             CREATE INDEX IF NOT EXISTS idx_images_created ON images(id DESC);
             CREATE INDEX IF NOT EXISTS idx_images_batch ON images(batch_id, sequence);
@@ -101,11 +108,183 @@ class HistoryStore:
             connection.execute(
                 "ALTER TABLE images ADD COLUMN resolved_prompt TEXT NOT NULL DEFAULT ''"
             )
+        if "bound_resources_json" not in image_columns:
+            connection.execute(
+                "ALTER TABLE images ADD COLUMN bound_resources_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        # Migrate before the normal restart-status update so the pre-migration
+        # backup contains the exact legacy database state.
+        HistoryStore._migrate_unprofiled_history(connection)
         connection.execute(
             "UPDATE batches SET status = 'interrupted', error = 'WebUI 重启，未完成批次未自动恢复', updated_at = ? WHERE status IN ('running', 'stopping')",
             (_now(),),
         )
         connection.commit()
+
+    @staticmethod
+    def _unprofiled_rows(
+        connection: sqlite3.Connection,
+    ) -> tuple[list[tuple[str, Any]], list[tuple[int, Any, str]]]:
+        """Return rows whose settings JSON has no usable profile marker."""
+
+        def is_unprofiled(raw_json: Any) -> bool:
+            try:
+                value = json.loads(raw_json)
+            except (TypeError, json.JSONDecodeError):
+                return False
+            if not isinstance(value, dict):
+                return False
+            profile = value.get("model_profile")
+            return profile is None or isinstance(profile, str) and not profile.strip()
+
+        batches = [
+            (str(row[0]), row[1])
+            for row in connection.execute("SELECT id, settings_json FROM batches")
+            if is_unprofiled(row[1])
+        ]
+        images = [
+            (int(row[0]), row[1], str(row[2] or "{}"))
+            for row in connection.execute(
+                "SELECT id, settings_json, bound_resources_json FROM images"
+            )
+            if is_unprofiled(row[1])
+        ]
+        return batches, images
+
+    @staticmethod
+    def _backup_before_migration(connection: sqlite3.Connection) -> Path | None:
+        """Create a stable SQLite snapshot before changing legacy records."""
+
+        row = connection.execute("PRAGMA database_list").fetchone()
+        database_path = str(row[2]) if row is not None else ""
+        if not database_path:
+            # In-memory databases are used by a few integrations and cannot
+            # have a durable backup. The surrounding transaction still keeps
+            # their migration atomic.
+            return None
+        backup_path = Path(f"{database_path}.pre-anima-v2.bak")
+        if backup_path.exists():
+            return backup_path
+        try:
+            backup = sqlite3.connect(backup_path)
+            try:
+                connection.backup(backup)
+            finally:
+                backup.close()
+        except (OSError, sqlite3.Error) as error:
+            try:
+                backup_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise HistoryMigrationError(
+                f"旧历史记录迁移前无法创建数据库备份: {backup_path.name}"
+            ) from error
+        return backup_path
+
+    @staticmethod
+    def _canonical_settings(raw_json: Any) -> dict[str, Any]:
+        source = json.loads(raw_json)
+        if not isinstance(source, dict):
+            raise ValueError("settings_json 必须是 JSON 对象")
+        # Old, untagged settings always belong to Anima. Injecting the profile
+        # before migration also prevents migrate_settings from guessing Krea 2
+        # from an old model filename.
+        source["model_profile"] = "anima"
+        migrated = migrate_settings(source)
+        return validate_settings(migrated)
+
+    @staticmethod
+    def _canonical_bound_resources(
+        raw_json: Any, settings: dict[str, Any]
+    ) -> dict[str, Any]:
+        try:
+            bound = json.loads(raw_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            bound = {}
+        if not isinstance(bound, dict):
+            bound = {}
+
+        profile = get_model_profile("anima")
+        defaults = {
+            "unet": profile["model_name"],
+            "clip": profile["clip_name"],
+            "vae": profile["vae_name"],
+            "seedvr2_model": profile["seedvr2_model"],
+            "seedvr2_vae": profile["seedvr2_vae"],
+        }
+        for key, default in defaults.items():
+            value = bound.get(key)
+            bound[key] = str(value or default).replace("\\", "/")
+        existing_loras = bound.get("loras")
+        if isinstance(existing_loras, list):
+            normalized_loras = []
+            for filename in existing_loras:
+                try:
+                    normalized_loras.append(normalize_lora_path(filename))
+                except (TypeError, ValueError):
+                    continue
+            bound["loras"] = normalized_loras
+        else:
+            bound["loras"] = [
+                item["filename"]
+                for item in settings.get("loras", [])
+                if isinstance(item, dict) and item.get("enabled")
+            ]
+        bound["model_profile"] = "anima"
+        return bound
+
+    @staticmethod
+    def _migrate_unprofiled_history(connection: sqlite3.Connection) -> None:
+        batches, images = HistoryStore._unprofiled_rows(connection)
+        if not batches and not images:
+            return
+
+        HistoryStore._backup_before_migration(connection)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            # Re-read under the write lock in case another process changed the
+            # database between the initial check and the backup.
+            batches, images = HistoryStore._unprofiled_rows(connection)
+            batch_updates: list[tuple[str, str]] = []
+            for batch_id, settings_json in batches:
+                try:
+                    settings = HistoryStore._canonical_settings(settings_json)
+                except (TypeError, ValueError, json.JSONDecodeError) as error:
+                    logger.warning("跳过无法规范化的历史批次 %s: %s", batch_id, error)
+                    continue
+                batch_updates.append(
+                    (json.dumps(settings, ensure_ascii=False, separators=(",", ":")), batch_id)
+                )
+
+            image_updates: list[tuple[str, str, int]] = []
+            for image_id, settings_json, bound_json in images:
+                try:
+                    settings = HistoryStore._canonical_settings(settings_json)
+                except (TypeError, ValueError, json.JSONDecodeError) as error:
+                    logger.warning("跳过无法规范化的历史图片 %s: %s", image_id, error)
+                    continue
+                bound_resources = HistoryStore._canonical_bound_resources(bound_json, settings)
+                image_updates.append(
+                    (
+                        json.dumps(settings, ensure_ascii=False, separators=(",", ":")),
+                        json.dumps(bound_resources, ensure_ascii=False, separators=(",", ":")),
+                        image_id,
+                    )
+                )
+
+            connection.executemany(
+                "UPDATE batches SET settings_json = ? WHERE id = ?", batch_updates
+            )
+            connection.executemany(
+                "UPDATE images SET settings_json = ?, bound_resources_json = ? WHERE id = ?",
+                image_updates,
+            )
+            connection.commit()
+        except Exception as error:
+            connection.rollback()
+            if isinstance(error, HistoryMigrationError):
+                raise
+            raise HistoryMigrationError("历史数据库档案迁移事务失败，原记录已回滚") from error
 
     async def _call(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         loop = asyncio.get_running_loop()
@@ -176,14 +355,16 @@ class HistoryStore:
         settings: dict[str, Any],
         resolved_selection: dict[str, Any] | None = None,
         resolved_prompt: str = "",
+        bound_resources: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         cursor = self.connection.execute(
             """
             INSERT INTO images (
                 batch_id, sequence, prompt_id, filename, subfolder, file_type,
                 positive_prompt, negative_prompt, sample_seed, prompt_seed,
-                settings_json, created_at, resolved_selection_json, resolved_prompt
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                settings_json, created_at, resolved_selection_json, resolved_prompt,
+                bound_resources_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 batch_id,
@@ -200,6 +381,7 @@ class HistoryStore:
                 _now(),
                 json.dumps(resolved_selection or {}, ensure_ascii=False),
                 str(resolved_prompt or ""),
+                json.dumps(bound_resources or {}, ensure_ascii=False),
             ),
         )
         self.connection.commit()
@@ -232,6 +414,7 @@ class HistoryStore:
         result = dict(row)
         result["settings"] = json.loads(result.pop("settings_json"))
         result["resolved_selection"] = json.loads(result.pop("resolved_selection_json", "{}") or "{}")
+        result["bound_resources"] = json.loads(result.pop("bound_resources_json", "{}") or "{}")
         return result
 
     async def list_images(self, page: int = 1, limit: int = 24) -> dict[str, Any]:

@@ -133,6 +133,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             custom_prompts_path=Path(self.temp.name) / "custom_prompts.json",
             style_presets_path=Path(self.temp.name) / "style_presets.json",
             lora_trigger_overrides_path=Path(self.temp.name) / "lora_trigger_overrides.json",
+            resource_profiles_path=Path(self.temp.name) / "resource_profiles.json",
             prompt_replacements_path=Path(self.temp.name) / "prompt_replacements.json",
             anima_tools_dir=_write_fake_tools(Path(self.temp.name)),
         )
@@ -151,18 +152,32 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         index_html = await response.text()
         self.assertIn("Anima", index_html)
-        self.assertIn(
-            'id="hires_percent" type="number" min="1" max="1000" step="1" value="45" required',
-            index_html,
-        )
-        self.assertIn("控制放大模型输出的最终缩放比例", index_html)
+        self.assertIn('id="model_profile"', index_html)
+        self.assertIn('id="base_mode"', index_html)
+        self.assertIn('id="latent_upscale_enabled"', index_html)
+        self.assertIn('id="seedvr2_enabled"', index_html)
+        self.assertIn('id="nvidia_upscale_enabled"', index_html)
+        self.assertIn('id="face_refine_enabled"', index_html)
+        for removed_id in (
+            "hires_enabled",
+            "hires_percent",
+            "hires_model_name",
+            "detailer_hand",
+            "detailer_nsfw",
+            "detailer_face",
+            "detailer_eyes",
+            "cfg_zero_star",
+            "second_sampler_enabled",
+            "secondSamplerDrawer",
+        ):
+            self.assertNotIn(f'id="{removed_id}"', index_html)
         self.assertEqual(
             response.headers["Cache-Control"], "no-cache, max-age=0, must-revalidate"
         )
         static_response = await self.client.get("/static/app.js")
         app_js = await static_response.text()
-        self.assertIn('"hires_percent"', app_js)
-        self.assertIn("percent: Number(ui.hires_percent.value)", app_js)
+        self.assertNotIn('"hires_percent"', app_js)
+        self.assertNotIn("percent: Number(ui.hires_percent.value)", app_js)
         self.assertIn("function reconcileLoraTriggers", app_js)
         self.assertIn("lora_managed_triggers", app_js)
         self.assertIn("lora-catalog-preview", index_html + app_js)
@@ -170,14 +185,8 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="promptRuleDialog"', index_html)
         self.assertIn('id="sampler_name"', index_html)
         self.assertIn('id="scheduler"', index_html)
-        self.assertIn('id="cfg_zero_star"', index_html)
-        self.assertIn('id="second_sampler_enabled"', index_html)
-        self.assertIn('id="secondSamplerDrawer"', index_html)
-        self.assertIn('id="second_sampler_denoise"', index_html)
         self.assertIn('sampler_name: ui.sampler_name.value', app_js)
         self.assertIn('scheduler: ui.scheduler.value', app_js)
-        self.assertIn('cfg_zero_star: ui.cfg_zero_star.checked', app_js)
-        self.assertIn('second_sampler:', app_js)
         self.assertIn("normalizePromptFields", app_js)
         self.assertIn('id="deleteGroupAll"', index_html)
         self.assertIn('value="exclusive"', index_html)
@@ -202,6 +211,164 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             [item["filename"] for item in payload["items"]],
             [item["filename"] for item in DEFAULT_SETTINGS["loras"]],
         )
+
+    async def test_lora_inventory_is_filtered_by_persistent_profile_ownership(self):
+        self.comfy.preview_items = [
+            {"filename": "style/one.safetensors", "trigger_words": ["one"]},
+            {"filename": "style/two.safetensors", "trigger_words": ["two"]},
+        ]
+
+        anima = await (await self.client.get("/api/loras?model_profile=anima")).json()
+        krea = await (await self.client.get("/api/loras?model_profile=krea2")).json()
+        self.assertEqual(anima["count"], 2)
+        self.assertEqual(krea["count"], 0)
+
+        assigned = await self.client.put(
+            "/api/resource-ownership",
+            json={"kind": "loras", "name": "style/one.safetensors", "model_profile": "krea2"},
+        )
+        self.assertEqual((await assigned.json())["model_profile"], "krea2")
+        anima = await (await self.client.get("/api/loras?model_profile=anima")).json()
+        krea = await (await self.client.get("/api/loras?model_profile=krea2")).json()
+        self.assertEqual([item["filename"] for item in anima["items"]], ["style/two.safetensors"])
+        self.assertEqual([item["filename"] for item in krea["items"]], ["style/one.safetensors"])
+
+        ownership = await (await self.client.get("/api/resource-ownership?kind=loras")).json()
+        self.assertEqual(ownership["assignments"]["style/one.safetensors"], "krea2")
+
+    async def test_resource_models_filter_and_profile_availability_use_full_inventory(self):
+        async def inventory():
+            return {
+                "models": [
+                    "anima-base-v1.0.safetensors",
+                    "krea2_turbo_int8_convrot.safetensors",
+                    "custom/older.safetensors",
+                ],
+                "samplers": ["euler"],
+                "schedulers": ["normal"],
+            }
+
+        self.comfy.resource_inventory = inventory
+        anima = await (
+            await self.client.get("/api/resources?model_profile=anima")
+        ).json()
+        krea = await (
+            await self.client.get("/api/resources?model_profile=krea2")
+        ).json()
+        self.assertEqual(
+            anima["models"],
+            ["anima-base-v1.0.safetensors", "custom/older.safetensors"],
+        )
+        self.assertEqual(krea["models"], ["krea2_turbo_int8_convrot.safetensors"])
+        self.assertEqual(
+            anima["model_profiles"]["krea2"]["available"]["model"], True
+        )
+        self.assertEqual(
+            krea["model_profiles"]["anima"]["available"]["model"], True
+        )
+
+    async def test_resource_profile_models_resolve_owned_subfolders_and_filter_availability(self):
+        anima_path = "Anima/anima-base-v1.0.safetensors"
+        krea_path = "Krea/krea2_turbo_int8_convrot.safetensors"
+
+        async def inventory():
+            return {
+                "models": [anima_path, krea_path],
+                "samplers": ["euler"],
+                "schedulers": ["normal"],
+            }
+
+        self.comfy.resource_inventory = inventory
+        resources = await (await self.client.get("/api/resources?model_profile=anima")).json()
+        self.assertEqual(resources["model_profiles"]["anima"]["model_name"], anima_path)
+        self.assertTrue(resources["model_profiles"]["anima"]["available"]["model"])
+        self.assertEqual(resources["model_profiles"]["krea2"]["model_name"], krea_path)
+        self.assertTrue(resources["model_profiles"]["krea2"]["available"]["model"])
+
+        assigned = await self.client.put(
+            "/api/resource-ownership",
+            json={"kind": "models", "name": anima_path, "model_profile": "krea2"},
+        )
+        self.assertEqual((await assigned.json())["model_profile"], "krea2")
+        resources = await (await self.client.get("/api/resources?model_profile=anima")).json()
+        self.assertFalse(resources["model_profiles"]["anima"]["available"]["model"])
+        self.assertTrue(resources["model_profiles"]["krea2"]["available"]["model"])
+        self.assertEqual(resources["model_profiles"]["krea2"]["model_name"], krea_path)
+
+    async def test_batch_model_basename_resolves_to_unique_owned_subfolder_path(self):
+        actual_path = "Anima/anima-base-v1.0.safetensors"
+
+        async def inventory():
+            return {
+                "models": [actual_path],
+                "upscale_models": [DEFAULT_SETTINGS["hires"]["model_name"]],
+                "samplers": [DEFAULT_SETTINGS["sampler_name"], "euler"],
+                "schedulers": [DEFAULT_SETTINGS["scheduler"], "karras"],
+            }
+
+        self.comfy.resource_inventory = inventory
+        response = await self.client.post("/api/batches", json=DEFAULT_SETTINGS)
+        self.assertEqual(response.status, 201, await response.text())
+        state = await response.json()
+        self.assertEqual(state["settings"]["model_name"], actual_path)
+        await self.client.server.app[MANAGER_KEY].wait()
+
+    async def test_batch_rejects_ambiguous_model_basename_but_accepts_exact_path(self):
+        first_path = "folder-a/anima-base-v1.0.safetensors"
+        second_path = "folder-b/anima-base-v1.0.safetensors"
+
+        async def inventory():
+            return {
+                "models": [first_path, second_path],
+                "upscale_models": [DEFAULT_SETTINGS["hires"]["model_name"]],
+                "samplers": [DEFAULT_SETTINGS["sampler_name"], "euler"],
+                "schedulers": [DEFAULT_SETTINGS["scheduler"], "karras"],
+            }
+
+        self.comfy.resource_inventory = inventory
+        ambiguous = await self.client.post("/api/batches", json=DEFAULT_SETTINGS)
+        self.assertEqual(ambiguous.status, 400)
+        self.assertIn("basename 匹配不唯一", (await ambiguous.json())["error"])
+
+        exact = await self.client.post(
+            "/api/batches", json={**DEFAULT_SETTINGS, "model_name": second_path}
+        )
+        self.assertEqual(exact.status, 201, await exact.text())
+        state = await exact.json()
+        self.assertEqual(state["settings"]["model_name"], second_path)
+        await self.client.server.app[MANAGER_KEY].wait()
+
+    async def test_batch_rejects_model_owned_by_other_profile_even_when_basename_is_unique(self):
+        krea_path = "Krea/krea2_turbo_int8_convrot.safetensors"
+
+        async def inventory():
+            return {
+                "models": [krea_path],
+                "upscale_models": [DEFAULT_SETTINGS["hires"]["model_name"]],
+                "samplers": [DEFAULT_SETTINGS["sampler_name"], "euler"],
+                "schedulers": [DEFAULT_SETTINGS["scheduler"], "karras"],
+            }
+
+        self.comfy.resource_inventory = inventory
+        response = await self.client.post(
+            "/api/batches",
+            json={
+                **DEFAULT_SETTINGS,
+                "model_profile": "anima",
+                "model_name": "krea2_turbo_int8_convrot.safetensors",
+            },
+        )
+        self.assertEqual(response.status, 400)
+        error = (await response.json())["error"]
+        self.assertIn("主模型未归属 anima 档案", error)
+        self.assertIn("当前归属 krea2", error)
+
+        stale_path = await self.client.post(
+            "/api/batches",
+            json={**DEFAULT_SETTINGS, "model_name": "old-folder/krea2_turbo_int8_convrot.safetensors"},
+        )
+        self.assertEqual(stale_path.status, 400)
+        self.assertIn("不存在于当前 ComfyUI 清单", (await stale_path.json())["error"])
 
     async def test_lora_inventory_uses_same_origin_preview_proxy(self):
         self.comfy.preview_items = [
@@ -283,12 +450,14 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                     "extra_prompt": "@Niji9il, Blue_Hair",
                 },
                 "managedTriggers": ["@Niji9il"],
+                "model_profile": "krea2",
             },
         )
         self.assertEqual(normalized.status, 200)
         payload = await normalized.json()
         self.assertEqual(payload["fields"]["quality_prompt"], "year 2025, score_9, blue hair")
         self.assertEqual(payload["fields"]["extra_prompt"], "@Niji9il, blue hair")
+        self.assertEqual(payload["model_profile"], "krea2")
 
         created = await self.client.post(
             "/api/prompt-rules",
@@ -314,10 +483,13 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_config_has_empty_default_loras(self):
         payload = await (await self.client.get("/api/config")).json()
-        self.assertEqual(payload["defaults"]["loras"], [])
-        self.assertFalse(payload["defaults"]["cfg_zero_star"])
-        self.assertEqual(payload["defaults"]["second_sampler"]["steps"], 16)
-        self.assertFalse(payload["defaults"]["second_sampler"]["enabled"])
+        defaults = payload["defaults"]
+        self.assertEqual(defaults["loras"], [])
+        self.assertEqual(defaults["model_profile"], "anima")
+        self.assertIn(defaults["base_mode"], {"normal", "dual_sampler"})
+        self.assertIn("upscalers", defaults)
+        for removed in ("hires", "detailers", "cfg_zero_star", "second_sampler"):
+            self.assertNotIn(removed, defaults)
 
     async def test_resources_and_style_preset_crud(self):
         resources = await (await self.client.get("/api/resources")).json()
@@ -664,23 +836,29 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_optional_sampling_settings_are_submitted_and_persisted(self):
         settings = {
-            **DEFAULT_SETTINGS,
             "count": 1,
+            "model_name": DEFAULT_SETTINGS["model_name"],
             "cfg_zero_star": True,
             "second_sampler": {**DEFAULT_SETTINGS["second_sampler"], "enabled": True},
         }
         response = await self.client.post("/api/batches", json=settings)
         self.assertEqual(response.status, 201)
+        state = await response.json()
+        self.assertEqual(state["settings"]["base_mode"], "dual_sampler")
+        for removed in ("hires", "detailers", "cfg_zero_star", "second_sampler"):
+            self.assertNotIn(removed, state["settings"])
         await self.client.server.app[MANAGER_KEY].wait()
         prompt = self.comfy.submissions[-1]["prompt"]
-        self.assertIn("49", prompt)
-        self.assertIn("25", prompt)
-        self.assertEqual(prompt["25"]["inputs"]["seed"], ["37", 0])
-        self.assertEqual(prompt["48"]["inputs"]["samples"], ["25", 0])
+        self.assertIn("701:1245", prompt)
+        self.assertIn("701:1246", prompt)
+        self.assertIn("v2:output", prompt)
+        for removed_id in ("49", "25", "37", "48"):
+            self.assertNotIn(removed_id, prompt)
         history = await (await self.client.get("/api/history")).json()
         saved = history["items"][0]["settings"]
-        self.assertTrue(saved["cfg_zero_star"])
-        self.assertTrue(saved["second_sampler"]["enabled"])
+        self.assertEqual(saved["base_mode"], "dual_sampler")
+        for removed in ("hires", "detailers", "cfg_zero_star", "second_sampler"):
+            self.assertNotIn(removed, saved)
 
     async def test_batch_submission_normalizes_settings_and_resolved_prompt(self):
         settings = {
@@ -699,14 +877,11 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["settings"]["extra_prompt"], "@Niji9il, blue hair")
         await self.client.server.app[MANAGER_KEY].wait()
         submitted = self.comfy.submissions[-1]["prompt"]
-        self.assertEqual(
-            submitted["42"]["inputs"]["quality_prompt"],
-            "year 2025, score_9, blue hair",
-        )
-        self.assertEqual(
-            submitted["60"]["inputs"]["resolved_prompt"],
-            "1girl, @Niji9il, blue hair",
-        )
+        final_prompt = "year 2025, score_9, blue hair, 1girl, @Niji9il"
+        self.assertEqual(submitted["168"]["inputs"]["value"], final_prompt)
+        self.assertEqual(submitted["1010:995"]["inputs"]["text"], final_prompt)
+        self.assertNotIn("42", submitted)
+        self.assertNotIn("60", submitted)
 
     async def test_batch_completes_and_history_is_paged(self):
         response = await self.client.post("/api/batches", json={**DEFAULT_SETTINGS, "count": 1})
@@ -860,10 +1035,15 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay.status, 201)
         await self.client.server.app[MANAGER_KEY].wait()
         replay_prompt = self.comfy.submissions[original_submissions]["prompt"]
-        self.assertEqual(replay_prompt["37"]["inputs"]["seed"], image["sample_seed"])
-        self.assertEqual(replay_prompt["60"]["inputs"]["seed"], image["prompt_seed"])
-        self.assertEqual(replay_prompt["60"]["inputs"]["resolved_prompt"], "generated")
-        self.assertEqual(replay_prompt["42"]["inputs"]["quality_prompt"], "")
+        self.assertEqual(
+            replay_prompt["701:1245"]["inputs"]["noise_seed"], image["sample_seed"]
+        )
+        self.assertEqual(
+            replay_prompt["701:1242"]["inputs"]["values.a"], image["prompt_seed"]
+        )
+        self.assertEqual(replay_prompt["168"]["inputs"]["value"], "generated")
+        for removed_id in ("37", "42", "49", "60"):
+            self.assertNotIn(removed_id, replay_prompt)
 
         variant = await self.client.post(
             f"/api/history/{image['id']}/regenerate",
@@ -873,10 +1053,16 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         await self.client.server.app[MANAGER_KEY].wait()
         variant_prompts = self.comfy.submissions[-2:]
         self.assertTrue(
-            all(item["prompt"]["60"]["inputs"]["seed"] == image["prompt_seed"] for item in variant_prompts)
+            all(
+                item["prompt"]["701:1242"]["inputs"]["values.a"] == image["prompt_seed"]
+                for item in variant_prompts
+            )
         )
         self.assertTrue(
-            all(item["prompt"]["37"]["inputs"]["seed"] != image["sample_seed"] for item in variant_prompts)
+            all(
+                item["prompt"]["701:1245"]["inputs"]["noise_seed"] != image["sample_seed"]
+                for item in variant_prompts
+            )
         )
 
     async def test_regeneration_validation_and_missing_resources(self):

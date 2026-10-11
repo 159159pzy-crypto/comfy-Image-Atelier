@@ -8,7 +8,13 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from .persistence import backup_corrupt_file
+from .persistence import backup_corrupt_file, backup_for_migration
+from .model_profiles import (
+    DEFAULT_MODEL_PROFILE,
+    MODEL_PROFILE_IDS,
+    ModelProfileError,
+    normalize_model_profile,
+)
 from .workflow import WorkflowError, normalize_lora_path
 
 
@@ -41,6 +47,9 @@ class LoraTriggerOverrideStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # ``profile_overrides`` is the v2 store.  ``overrides`` remains an
+        # Anima alias for callers and v1 tests which used the old flat map.
+        self.profile_overrides: dict[str, dict[str, list[str]]] = {}
         self.overrides: dict[str, list[str]] = {}
         self.load_warnings: list[str] = []
         self._lock = asyncio.Lock()
@@ -53,37 +62,90 @@ class LoraTriggerOverrideStore:
             return
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict) or payload.get("version") != 1:
+            if not isinstance(payload, dict) or payload.get("version") not in {1, 2}:
                 raise WorkflowError("LoRA 触发词覆盖文件版本无效")
             raw_overrides = payload.get("overrides", {})
-            if not isinstance(raw_overrides, dict) or len(raw_overrides) > MAX_OVERRIDES:
+            if not isinstance(raw_overrides, dict):
                 raise WorkflowError("LoRA 触发词覆盖内容无效")
-            overrides: dict[str, list[str]] = {}
-            for raw_filename, words in raw_overrides.items():
-                filename = normalize_lora_path(raw_filename)
-                overrides[filename] = normalize_trigger_words(words)
+            profile_overrides: dict[str, dict[str, list[str]]] = {}
+            migrated_legacy = payload.get("version") == 1
+            if migrated_legacy:
+                profile_overrides[DEFAULT_MODEL_PROFILE] = self._normalize_map(raw_overrides)
+            else:
+                if len(raw_overrides) > len(MODEL_PROFILE_IDS) + 16:
+                    raise WorkflowError("LoRA 触发词覆盖配置过多")
+                for raw_profile, values in raw_overrides.items():
+                    profile = self._profile(raw_profile)
+                    if not isinstance(values, dict):
+                        raise WorkflowError("LoRA 触发词覆盖内容无效")
+                    profile_overrides[profile] = self._normalize_map(values)
+            if sum(len(values) for values in profile_overrides.values()) > MAX_OVERRIDES:
+                raise WorkflowError(f"LoRA 触发词覆盖不能超过 {MAX_OVERRIDES} 项")
         except (OSError, json.JSONDecodeError, WorkflowError) as error:
             backup = backup_corrupt_file(self.path)
             self.load_warnings.append(
                 f"LoRA 触发词覆盖文件无法读取({error}),已备份为 {backup.name} 并以空数据启动"
             )
+            self.profile_overrides = {}
             self.overrides = {}
             return
-        self.overrides = overrides
+        self.profile_overrides = profile_overrides
+        self.overrides = self.profile_overrides.setdefault(DEFAULT_MODEL_PROFILE, {})
+        if migrated_legacy:
+            backup = backup_for_migration(self.path, 1)
+            if backup is not None:
+                self.load_warnings.append(f"LoRA 触发词配置已迁移,原文件备份为 {backup.name}")
+            try:
+                self._write_text(
+                    json.dumps(
+                        {"version": 2, "overrides": self.profile_overrides},
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    + "\n"
+                )
+            except OSError as error:
+                self.load_warnings.append(f"LoRA 触发词迁移文件写入失败: {error}")
 
-    def has(self, filename: str) -> bool:
-        identity = normalize_lora_path(filename).casefold()
-        return any(key.casefold() == identity for key in self.overrides)
+    @staticmethod
+    def _profile(value: Any) -> str:
+        try:
+            return normalize_model_profile(value or DEFAULT_MODEL_PROFILE)
+        except ModelProfileError as error:
+            raise WorkflowError(str(error)) from error
 
-    def get(self, filename: str) -> list[str] | None:
+    @staticmethod
+    def _normalize_map(raw: dict[str, Any]) -> dict[str, list[str]]:
+        if len(raw) > MAX_OVERRIDES:
+            raise WorkflowError(f"LoRA 触发词覆盖不能超过 {MAX_OVERRIDES} 项")
+        result: dict[str, list[str]] = {}
+        for raw_filename, words in raw.items():
+            filename = normalize_lora_path(raw_filename)
+            result[filename] = normalize_trigger_words(words)
+        return result
+
+    def _map(self, model_profile: Any = DEFAULT_MODEL_PROFILE) -> dict[str, list[str]]:
+        profile = self._profile(model_profile)
+        return self.profile_overrides.setdefault(profile, {})
+
+    def has(self, filename: str, model_profile: Any = DEFAULT_MODEL_PROFILE) -> bool:
         identity = normalize_lora_path(filename).casefold()
-        for key, words in self.overrides.items():
+        return any(key.casefold() == identity for key in self._map(model_profile))
+
+    def get(self, filename: str, model_profile: Any = DEFAULT_MODEL_PROFILE) -> list[str] | None:
+        identity = normalize_lora_path(filename).casefold()
+        for key, words in self._map(model_profile).items():
             if key.casefold() == identity:
                 return copy.deepcopy(words)
         return None
 
-    def effective(self, filename: str, source_words: Any) -> tuple[list[str], bool]:
-        override = self.get(filename)
+    def effective(
+        self,
+        filename: str,
+        source_words: Any,
+        model_profile: Any = DEFAULT_MODEL_PROFILE,
+    ) -> tuple[list[str], bool]:
+        override = self.get(filename, model_profile)
         if override is not None:
             return override, True
         try:
@@ -91,35 +153,46 @@ class LoraTriggerOverrideStore:
         except WorkflowError:
             return [], False
 
-    async def set(self, filename: str, words: Any) -> list[str]:
+    async def set(
+        self,
+        filename: str,
+        words: Any,
+        model_profile: Any = DEFAULT_MODEL_PROFILE,
+    ) -> list[str]:
         normalized_filename = normalize_lora_path(filename)
         normalized_words = normalize_trigger_words(words)
+        profile = self._profile(model_profile)
         async with self._lock:
+            overrides = self._map(profile)
             existing_key = next(
-                (key for key in self.overrides if key.casefold() == normalized_filename.casefold()),
+                (key for key in overrides if key.casefold() == normalized_filename.casefold()),
                 None,
             )
-            if existing_key is None and len(self.overrides) >= MAX_OVERRIDES:
+            if existing_key is None and sum(len(value) for value in self.profile_overrides.values()) >= MAX_OVERRIDES:
                 raise WorkflowError(f"LoRA 触发词覆盖不能超过 {MAX_OVERRIDES} 项")
             if existing_key is not None and existing_key != normalized_filename:
-                del self.overrides[existing_key]
-            self.overrides[normalized_filename] = normalized_words
+                del overrides[existing_key]
+            overrides[normalized_filename] = normalized_words
+            self.overrides = self.profile_overrides.setdefault(DEFAULT_MODEL_PROFILE, {})
             await self._save()
         return copy.deepcopy(normalized_words)
 
-    async def delete(self, filename: str) -> bool:
+    async def delete(self, filename: str, model_profile: Any = DEFAULT_MODEL_PROFILE) -> bool:
         identity = normalize_lora_path(filename).casefold()
+        profile = self._profile(model_profile)
         async with self._lock:
-            key = next((item for item in self.overrides if item.casefold() == identity), None)
+            overrides = self._map(profile)
+            key = next((item for item in overrides if item.casefold() == identity), None)
             if key is None:
                 return False
-            del self.overrides[key]
+            del overrides[key]
+            self.overrides = self.profile_overrides.setdefault(DEFAULT_MODEL_PROFILE, {})
             await self._save()
         return True
 
     async def _save(self) -> None:
         payload = json.dumps(
-            {"version": 1, "overrides": self.overrides},
+            {"version": 2, "overrides": self.profile_overrides},
             ensure_ascii=False,
             indent=2,
         ) + "\n"

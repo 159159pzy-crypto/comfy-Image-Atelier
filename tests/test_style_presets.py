@@ -48,8 +48,10 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
     async def test_atomic_save_leaves_valid_json_without_temp_files(self):
         await self.store.create({"name": "Atomic", "settings": snapshot(), "favorite": False})
         payload = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["version"], 1)
+        self.assertEqual(payload["version"], 2)
         self.assertEqual(payload["items"][0]["name"], "Atomic")
+        for removed in ("hires", "detailers", "cfg_zero_star", "second_sampler"):
+            self.assertNotIn(removed, payload["items"][0]["settings"])
         self.assertEqual(list(self.path.parent.glob("style-presets-*.json")), [])
 
     def test_corrupt_file_is_backed_up_and_store_starts_empty(self):
@@ -62,16 +64,53 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.path.with_name("style_presets.json.corrupt.bak").is_file())
         self.assertFalse(self.path.exists())
 
+    def test_legacy_v1_presets_migrate_individually_and_force_anima(self):
+        values = [
+            {
+                "id": "legacy-krea",
+                "name": "Old Krea-ish Style",
+                "favorite": False,
+                "created_at": "2024-01-01T00:00:00+00:00",
+                "updated_at": "2024-01-01T00:00:00+00:00",
+                "settings": {
+                    "model_name": "krea2_turbo_int8_convrot.safetensors",
+                    "width": 1024,
+                    "hires": {"enabled": True, "percent": 50},
+                    "obsolete_export_field": True,
+                },
+            },
+            {
+                "id": "broken",
+                "name": "Broken Width",
+                "favorite": False,
+                "settings": {"width": "wide"},
+            },
+        ]
+        self.path.write_text(
+            json.dumps({"version": 1, "items": values}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        store = StylePresetStore(self.path)
+
+        self.assertEqual(len(store.items), 1)
+        self.assertEqual(store.items[0]["model_profile"], "anima")
+        self.assertEqual(store.items[0]["settings"]["model_profile"], "anima")
+        self.assertTrue(any("Broken Width" in warning for warning in store.load_warnings))
+        self.assertTrue(any("已迁移" in warning for warning in store.load_warnings))
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["version"], 2)
+
     def test_partial_legacy_snapshot_receives_current_defaults(self):
         settings = preset_settings({"width": 1024, "manual_artist": "anmi"})
         self.assertEqual(settings["model_name"], DEFAULT_SETTINGS["model_name"])
-        self.assertEqual(settings["hires"], DEFAULT_SETTINGS["hires"])
-        self.assertEqual(settings["detailers"], DEFAULT_SETTINGS["detailers"])
+        self.assertEqual(settings["model_profile"], "anima")
+        self.assertEqual(settings["base_mode"], DEFAULT_SETTINGS["base_mode"])
+        self.assertEqual(settings["upscalers"], DEFAULT_SETTINGS["upscalers"])
         self.assertEqual(settings["sampler_name"], DEFAULT_SETTINGS["sampler_name"])
         self.assertEqual(settings["scheduler"], DEFAULT_SETTINGS["scheduler"])
-        self.assertEqual(settings["cfg_zero_star"], DEFAULT_SETTINGS["cfg_zero_star"])
-        self.assertEqual(settings["second_sampler"], DEFAULT_SETTINGS["second_sampler"])
         self.assertEqual(settings["manual_artist"], "@anmi")
+        for removed in ("hires", "detailers", "cfg_zero_star", "second_sampler"):
+            self.assertNotIn(removed, settings)
 
     async def test_duplicate_names_are_rejected_case_insensitively(self):
         first = await self.store.create({"name": "Soft Light", "settings": snapshot(), "favorite": False})
