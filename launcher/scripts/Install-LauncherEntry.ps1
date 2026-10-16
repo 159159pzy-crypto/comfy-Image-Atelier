@@ -35,7 +35,7 @@ $id = "$($info.version)-$($zipHash.Substring(0, 12))-$([Guid]::NewGuid().ToStrin
 $runtimeContainer = Join-Path $target ".launcher\$id"
 # Each deployment gets a new folder; running instances and old files stay intact.
 Expand-Archive -LiteralPath $archive -DestinationPath $runtimeContainer
-$runtime = Join-Path $runtimeContainer 'AnimaRandomStudio'
+$runtime = $runtimeContainer
 $runtimeConfig = Get-Content -LiteralPath (Join-Path $runtime 'AnimaRandomStudio.runtimeconfig.json') -Raw | ConvertFrom-Json
 $frameworkVersion = ($runtimeConfig.runtimeOptions.includedFrameworks | Where-Object name -eq 'Microsoft.NETCore.App').version
 if (-not $frameworkVersion) { throw 'The candidate does not include a self-contained .NET runtime.' }

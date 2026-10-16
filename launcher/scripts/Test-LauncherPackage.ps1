@@ -16,6 +16,11 @@ $info = @{ sourceCommit = ('a' * 40); sourceKind = 'git-checkout'; sourceDirty =
 $package = New-LauncherPackage -PublishDirectory $publish -ZipPath (Join-Path $work 'AnimaRandomStudio-win-x64-unsigned.zip')
 if ($package.FileCount -ne $fixtureNames.Count + 2) { throw 'Package omitted a file.' }
 Write-Output 'PASS: all runtime files and Unicode subdirectories are packaged and hashed'
+$rootCheck = [System.IO.Compression.ZipFile]::OpenRead($package.ZipPath)
+try {
+    if ($null -eq $rootCheck.GetEntry('AnimaRandomStudio.exe') -or $null -ne $rootCheck.GetEntry('AnimaRandomStudio/AnimaRandomStudio.exe')) { throw 'Launcher EXE must be directly at the ZIP root.' }
+} finally { $rootCheck.Dispose() }
+Write-Output 'PASS: launcher EXE is directly at the ZIP root'
 [System.IO.File]::WriteAllText((Join-Path $work 'SHA256SUMS.txt'), "$($package.Sha256)  AnimaRandomStudio-win-x64-unsigned.zip`n")
 & (Join-Path $PSScriptRoot 'Test-LauncherCandidate.ps1') -CandidateDirectory $work -ExpectedCommit ('a' * 40) -ExpectedVersion '0.4.1' -RequireClean
 $failed = $false
@@ -30,9 +35,9 @@ Write-Output 'PASS: verification rejects omitted publish files'
 $stream = [System.IO.File]::Open($package.ZipPath, [System.IO.FileMode]::Open)
 $zip = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Update)
 try {
-    $entry = $zip.GetEntry('AnimaRandomStudio/AnimaRandomStudio.dll')
+    $entry = $zip.GetEntry('AnimaRandomStudio.dll')
     $entry.Delete()
-    $writer = [System.IO.StreamWriter]::new($zip.CreateEntry('AnimaRandomStudio/AnimaRandomStudio.dll').Open())
+    $writer = [System.IO.StreamWriter]::new($zip.CreateEntry('AnimaRandomStudio.dll').Open())
     try { $writer.Write('tampered') } finally { $writer.Dispose() }
 } finally { $zip.Dispose(); $stream.Dispose() }
 $failed = $false

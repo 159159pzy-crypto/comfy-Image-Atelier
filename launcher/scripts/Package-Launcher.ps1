@@ -49,8 +49,7 @@ function Test-LauncherPackageIntegrity {
     try {
         $entries = @{}
         foreach ($entry in $zip.Entries) {
-            if (-not $entry.FullName.StartsWith('AnimaRandomStudio/', [System.StringComparison]::Ordinal)) { throw "Unexpected archive root: $($entry.FullName)" }
-            $relative = $entry.FullName.Substring('AnimaRandomStudio/'.Length)
+            $relative = $entry.FullName
             if (-not $relative -or $relative -match '[\\:\r\n]' -or @($relative.Split('/') | Where-Object { $_ -in '', '.', '..' }).Count) { throw "Unsafe archive entry: $relative" }
             if ($entries.ContainsKey($relative)) { throw "Duplicate archive entry: $relative" }
             $entries[$relative] = $entry
@@ -101,7 +100,7 @@ function New-LauncherPackage {
     $zip = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Create)
     try {
         foreach ($file in @(Get-LauncherPackageFiles $PublishDirectory)) {
-            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $file.FullName, 'AnimaRandomStudio/' + $file.Relative, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $file.FullName, $file.Relative, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
         }
     } finally { $zip.Dispose(); $stream.Dispose() }
     $count = Test-LauncherPackageIntegrity -ZipPath $ZipPath -PublishDirectory $PublishDirectory

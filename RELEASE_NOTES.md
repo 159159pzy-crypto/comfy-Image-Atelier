@@ -2,7 +2,7 @@
 
 ## 下载与启动
 
-**Windows 用户请下载附件 `AnimaRandomStudio-win-x64-unsigned.zip`，完整解压后运行 `AnimaRandomStudio/AnimaRandomStudio.exe`。不要下载下方 Source code 来找启动器，也不要单独移动 EXE。**
+**Windows 用户请下载附件 `AnimaRandomStudio-win-x64-unsigned.zip`，完整解压到新文件夹后，直接双击根目录的 `AnimaRandomStudio.exe`。不用再进入下一层文件夹。不要下载下方 Source code 来找启动器，也不要单独移动 EXE。**
 
 启动后进入「安装环境」，选择新建或导入已有 ComfyUI，完成后在「概览」点击「启动工作台」。启动器包含 .NET、Windows App Runtime 和应用资源；ComfyUI、节点和模型首次配置时另行下载。新建环境面向 Windows 10/11 x64 与支持 CUDA 12.8 的 NVIDIA 显卡驱动。
 

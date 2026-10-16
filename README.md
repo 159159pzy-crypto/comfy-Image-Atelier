@@ -7,7 +7,7 @@
 ## 下载与启动（Windows）
 
 1. 打开 [1.0.1 下载页](https://github.com/159159pzy-crypto/comfyui-random-image-generation/releases/tag/1.0.1)，下载 **`AnimaRandomStudio-win-x64-unsigned.zip`**。
-2. **完整解压**，进入 `AnimaRandomStudio` 文件夹，双击 **`AnimaRandomStudio.exe`**。请保留同目录的 DLL 和其他文件，不要只复制 EXE。
+2. **完整解压到一个新文件夹**，在解压后的**根目录**直接双击 **`AnimaRandomStudio.exe`**。请保留同目录的 DLL 和其他文件，不要只复制 EXE。
 3. 在「安装环境」选择 **新建环境**，或 **导入已有 ComfyUI**；按界面检查并准备依赖，完成后回到「概览」点击 **启动工作台**。
 
 **不要下载页面底部的 Source code 来找 EXE。** 那两份是开发源码；上面的 `AnimaRandomStudio-win-x64-unsigned.zip` 才是完整启动器。

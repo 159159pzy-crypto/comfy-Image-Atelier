@@ -2,7 +2,7 @@
 
 ## 安装与使用
 
-从 [1.0.1 Release](https://github.com/159159pzy-crypto/comfyui-random-image-generation/releases/tag/1.0.1) 下载 `AnimaRandomStudio-win-x64-unsigned.zip`，完整解压后运行 `AnimaRandomStudio/AnimaRandomStudio.exe`。源码 ZIP 不包含 EXE。
+从 [1.0.1 Release](https://github.com/159159pzy-crypto/comfyui-random-image-generation/releases/tag/1.0.1) 下载 `AnimaRandomStudio-win-x64-unsigned.zip`，完整解压到新文件夹后，直接运行根目录的 `AnimaRandomStudio.exe`。源码 ZIP 不包含 EXE。
 
 - **新建环境**：选择安装位置，检查安装内容，按提示安装。启动器准备独立 Python、Git、ComfyUI、必需节点和 Anima 基础模型；大文件放在所选安装盘。需要 Windows 10/11 x64 和支持 CUDA 12.8 的 NVIDIA 驱动（570.65 或更新版本）。
 - **导入已有环境**：选择含 `main.py` 的 ComfyUI 目录或便携版父目录。支持 `.venv`、`venv`、`python_embeded`；其他布局可手动指定 Python。已有节点和 GPU 运行时保留。
