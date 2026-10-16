@@ -64,5 +64,7 @@ tools/
 !/docs/dependencies.md
 /docs/screenshots/*
 !/docs/screenshots/anima-studio-single-workbench.png
+!/docs/screenshots/anima-studio-common-parameters.png
+!/docs/screenshots/anima-studio-random-workbench.png
 /AGENTS.md
 /CLAUDE.md
