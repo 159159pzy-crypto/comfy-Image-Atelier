@@ -15,6 +15,7 @@ APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_DIR))
 
 from anima_webui.server import COMFY_KEY, MANAGER_KEY, create_app  # noqa: E402
+from anima_webui.comfy import ComfyError  # noqa: E402
 from anima_webui.workflow import DEFAULT_SETTINGS  # noqa: E402
 
 
@@ -53,6 +54,11 @@ class FakeComfy:
     def __init__(self):
         self.preview_items = []
         self.submissions = []
+        self.base_models = {
+            "krea2_turbo_int8_convrot.safetensors": "Krea 2 Turbo",
+            "Krea/krea2_turbo_int8_convrot.safetensors": "Krea 2 Turbo",
+        }
+        self.classification_calls = []
         self.favorites_data = {
             section: {"groups": [{"id": "default", "name": "Default Favorites", "isSystem": True}], "items": []}
             for section in ("artist", "character", "lora", "clothing", "background", "pose", "expression")
@@ -93,6 +99,27 @@ class FakeComfy:
             "schedulers": [DEFAULT_SETTINGS["scheduler"], "karras"],
         }
 
+    async def resource_classifications(self, kind, *, refresh=False):
+        self.classification_calls.append((kind, refresh))
+        if kind == "loras":
+            items = copy.deepcopy((await self.lora_inventory())["items"])
+        else:
+            items = [{"filename": name} for name in (await self.resource_inventory())["models"]]
+        for item in items:
+            name = item["filename"].replace("\\", "/")
+            # Synthetic fixtures have explicit Anima metadata by default;
+            # tests override metadata independently of the resource filename.
+            base = self.base_models.get(name, item.get("base_model", "Anima"))
+            profile = {"Anima": "anima", "Krea 2 Turbo": "krea2"}.get(base)
+            status = "recognized" if profile else "unknown" if base == "Unknown" else "unsupported"
+            item.update(name=name, normalized_path=name, basename=name.rsplit("/", 1)[-1],
+                        folder=name.rsplit("/", 1)[0] if "/" in name else "",
+                        base_model=base, model_profile=profile, classification_source="lora-manager",
+                        classification_status=status,
+                        classification_reason="" if profile else f"插件分类为 {base}")
+        return {"items": items, "source": "lora-manager",
+                "manager_url": self.base_url + ("/loras" if kind == "loras" else "/checkpoints")}
+
     async def favorites(self):
         return copy.deepcopy(self.favorites_data)
 
@@ -128,6 +155,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.comfy = FakeComfy()
         app = create_app(
             app_dir=APP_DIR,
+            data_dir=Path(self.temp.name) / "data",
             comfy=self.comfy,
             history_path=Path(self.temp.name) / "history.sqlite3",
             custom_prompts_path=Path(self.temp.name) / "custom_prompts.json",
@@ -212,7 +240,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             [item["filename"] for item in DEFAULT_SETTINGS["loras"]],
         )
 
-    async def test_lora_inventory_is_filtered_by_persistent_profile_ownership(self):
+    async def test_lora_inventory_follows_plugin_classification_and_refresh(self):
         self.comfy.preview_items = [
             {"filename": "style/one.safetensors", "trigger_words": ["one"]},
             {"filename": "style/two.safetensors", "trigger_words": ["two"]},
@@ -223,18 +251,17 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(anima["count"], 2)
         self.assertEqual(krea["count"], 0)
 
-        assigned = await self.client.put(
-            "/api/resource-ownership",
-            json={"kind": "loras", "name": "style/one.safetensors", "model_profile": "krea2"},
-        )
-        self.assertEqual((await assigned.json())["model_profile"], "krea2")
-        anima = await (await self.client.get("/api/loras?model_profile=anima")).json()
+        self.comfy.base_models["style/one.safetensors"] = "Krea 2 Turbo"
+        anima = await (await self.client.get("/api/loras?model_profile=anima&refresh=1")).json()
+        self.assertIn(("loras", True), self.comfy.classification_calls)
         krea = await (await self.client.get("/api/loras?model_profile=krea2")).json()
         self.assertEqual([item["filename"] for item in anima["items"]], ["style/two.safetensors"])
         self.assertEqual([item["filename"] for item in krea["items"]], ["style/one.safetensors"])
 
         ownership = await (await self.client.get("/api/resource-ownership?kind=loras")).json()
         self.assertEqual(ownership["assignments"]["style/one.safetensors"], "krea2")
+        self.assertEqual(ownership["source"], "lora-manager")
+        self.assertEqual(ownership["manager_url"], "http://127.0.0.1:8188/loras")
 
     async def test_resource_models_filter_and_profile_availability_use_full_inventory(self):
         async def inventory():
@@ -285,12 +312,9 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resources["model_profiles"]["krea2"]["model_name"], krea_path)
         self.assertTrue(resources["model_profiles"]["krea2"]["available"]["model"])
 
-        assigned = await self.client.put(
-            "/api/resource-ownership",
-            json={"kind": "models", "name": anima_path, "model_profile": "krea2"},
-        )
-        self.assertEqual((await assigned.json())["model_profile"], "krea2")
-        resources = await (await self.client.get("/api/resources?model_profile=anima")).json()
+        self.comfy.base_models[anima_path] = "Krea 2 Turbo"
+        resources = await (await self.client.get("/api/resources?model_profile=anima&refresh=1")).json()
+        self.assertIn(("models", True), self.comfy.classification_calls)
         self.assertFalse(resources["model_profiles"]["anima"]["available"]["model"])
         self.assertTrue(resources["model_profiles"]["krea2"]["available"]["model"])
         self.assertEqual(resources["model_profiles"]["krea2"]["model_name"], krea_path)
@@ -312,6 +336,22 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         state = await response.json()
         self.assertEqual(state["settings"]["model_name"], actual_path)
         await self.client.server.app[MANAGER_KEY].wait()
+
+    async def test_exact_unknown_default_model_cannot_redirect_to_recognized_subfolder(self):
+        exact = "anima-base-v1.0.safetensors"
+        nested = "Anima/anima-base-v1.0.safetensors"
+        async def inventory():
+            return {"models": [exact, nested], "samplers": ["euler"], "schedulers": ["normal"]}
+        self.comfy.resource_inventory = inventory
+        self.comfy.base_models[exact] = "Unknown"
+        payload = await (await self.client.get("/api/resources")).json()
+        self.assertEqual(payload["models"], [nested])
+        self.assertFalse(payload["model_profiles"]["anima"]["available"]["model"])
+        self.assertEqual(payload["model_profiles"]["anima"]["model_name"], exact)
+        response = await self.client.post("/api/batches", json={**DEFAULT_SETTINGS, "model_name": exact})
+        self.assertEqual(response.status, 400)
+        self.assertIn("Unknown", (await response.json())["error"])
+        self.assertEqual(self.comfy.submissions, [])
 
     async def test_batch_rejects_ambiguous_model_basename_but_accepts_exact_path(self):
         first_path = "folder-a/anima-base-v1.0.safetensors"
@@ -360,8 +400,8 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.status, 400)
         error = (await response.json())["error"]
-        self.assertIn("主模型未归属 anima 档案", error)
-        self.assertIn("当前归属 krea2", error)
+        self.assertIn("主模型不适用于 anima 档案", error)
+        self.assertIn("Krea 2 Turbo", error)
 
         stale_path = await self.client.post(
             "/api/batches",
@@ -402,6 +442,78 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
 
         invalid = await self.client.get("/api/loras/preview?filename=../one.safetensors")
         self.assertEqual(invalid.status, 404)
+
+    async def test_plugin_metadata_controls_selection_without_filename_guessing(self):
+        self.comfy.preview_items = [
+            {"filename": "anima-style.safetensors", "base_model": "Unknown"},
+            {"filename": "krea2-style.safetensors", "base_model": "Anima"},
+            {"filename": "other.safetensors", "base_model": "Qwen"},
+        ]
+        payload = await (await self.client.get("/api/loras")).json()
+        self.assertEqual([item["filename"] for item in payload["items"]], ["krea2-style.safetensors"])
+        self.assertEqual(len(payload["classification_items"]), 3)
+        for filename, base in (("anima-style.safetensors", "Unknown"), ("other.safetensors", "Qwen")):
+            response = await self.client.post("/api/batches", json={
+                **DEFAULT_SETTINGS, "loras": [{"filename": filename, "strength": 1, "enabled": True}],
+            })
+            self.assertEqual(response.status, 400)
+            self.assertIn(base, (await response.json())["error"])
+        self.assertEqual(self.comfy.submissions, [])
+
+    async def test_unknown_model_metadata_blocks_batch_and_retires_manual_assignment(self):
+        self.comfy.base_models[DEFAULT_SETTINGS["model_name"]] = "Unknown"
+        payload = await (await self.client.get("/api/resources?refresh=1")).json()
+        self.assertEqual(payload["models"], [])
+        self.assertEqual(payload["model_items"][0]["base_model"], "Unknown")
+        response = await self.client.post("/api/batches", json=DEFAULT_SETTINGS)
+        self.assertEqual(response.status, 400)
+        self.assertIn("Unknown", (await response.json())["error"])
+        response = await self.client.put("/api/resource-ownership", json={
+            "kind": "models", "name": DEFAULT_SETTINGS["model_name"], "model_profile": "anima",
+        })
+        self.assertEqual(response.status, 410)
+        self.assertIn("Lora-Manager", (await response.json())["error"])
+        self.assertFalse(Path(self.temp.name, "resource_profiles.json").exists())
+        self.assertEqual(self.comfy.submissions, [])
+
+    async def test_plugin_failure_blocks_lists_and_submission_without_stale_fallback(self):
+        self.assertEqual((await self.client.get("/api/resources")).status, 200)
+        async def offline(kind, *, refresh=False):
+            raise ComfyError("LoRA Manager 清单读取失败")
+        self.comfy.resource_classifications = offline
+        for endpoint in ("/api/resources", "/api/loras", "/api/resource-ownership?kind=models"):
+            response = await self.client.get(endpoint)
+            self.assertEqual(response.status, 503)
+            self.assertIn("LoRA Manager", (await response.json())["error"])
+        response = await self.client.post("/api/batches", json=DEFAULT_SETTINGS)
+        self.assertEqual(response.status, 503)
+        self.assertEqual(self.comfy.submissions, [])
+
+    async def test_changed_plugin_classification_blocks_all_history_modes(self):
+        history = self.client.server.app[MANAGER_KEY].history
+        await history.create_batch("classified-history", 1, DEFAULT_SETTINGS)
+        image = await history.add_image(
+            batch_id="classified-history", sequence=1, prompt_id="old-prompt",
+            image={"filename": "old.png", "type": "output"},
+            positive_prompt="saved prompt", negative_prompt="saved negative",
+            sample_seed=123, prompt_seed=456, settings=DEFAULT_SETTINGS,
+            resolved_selection={}, resolved_prompt="saved prompt",
+        )
+        self.comfy.base_models[DEFAULT_SETTINGS["model_name"]] = "Qwen"
+        endpoint = f"/api/history/{image['id']}"
+        response = await self.client.get(endpoint + "/regeneration-options")
+        self.assertEqual(response.status, 200)
+        options = await response.json()
+        self.assertTrue(all(not value["available"] for value in options["modes"].values()))
+        self.assertIn("Qwen", str(options["resourceIssues"]))
+        for mode in ("replay", "prompt_variant", "content_redraw", "settings_reroll"):
+            response = await self.client.post(endpoint + "/regenerate", json={"mode": mode})
+            self.assertEqual(response.status, 400)
+            self.assertIn("Qwen", (await response.json())["error"])
+        stored = await history.get_image(image["id"])
+        self.assertEqual(stored["sample_seed"], 123)
+        self.assertEqual(stored["prompt_seed"], 456)
+        self.assertEqual(self.comfy.submissions, [])
 
     async def test_lora_trigger_override_can_be_edited_cleared_and_reset(self):
         self.comfy.preview_items = [
@@ -949,6 +1061,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         trusted_host = "anima.165-99-43-225.sslip.io"
         trusted_app = create_app(
             app_dir=APP_DIR,
+            data_dir=Path(self.temp.name) / "trusted-data",
             comfy=FakeComfy(),
             history_path=Path(self.temp.name) / "trusted-history.sqlite3",
             custom_prompts_path=Path(self.temp.name) / "trusted-custom-prompts.json",
@@ -1107,6 +1220,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         app = create_app(
             app_dir=APP_DIR,
             comfy=FakeComfy(),
+            data_dir=Path(self.temp.name) / "shutdown-data",
             history_path=Path(self.temp.name) / "shutdown-history.sqlite3",
             custom_prompts_path=Path(self.temp.name) / "shutdown-custom-prompts.json",
             style_presets_path=Path(self.temp.name) / "shutdown-style-presets.json",

@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .persistence import backup_corrupt_file
+from .persistence import StorageProtection
 from .workflow import WorkflowError
 
 
@@ -111,7 +111,9 @@ def _looks_like_tag(value: str) -> bool:
     return bool(_TAG_SHAPE_RE.fullmatch(value))
 
 
-class PromptRuleStore:
+class PromptRuleStore(StorageProtection):
+    store_name = "prompt_rules"
+
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -123,6 +125,7 @@ class PromptRuleStore:
 
     def reload(self) -> None:
         self.load_warnings = []
+        self.read_only_reason = None
         if not self.path.is_file():
             self.disabled_builtins = set()
             self.custom_rules = []
@@ -141,11 +144,8 @@ class PromptRuleStore:
             if len(rules) > MAX_CUSTOM_RULES:
                 raise WorkflowError(f"自定义提示词规则不能超过 {MAX_CUSTOM_RULES} 条")
             self.custom_rules = [self._normalize_custom(item, existing=True) for item in rules]
-        except (OSError, json.JSONDecodeError, WorkflowError) as error:
-            backup = backup_corrupt_file(self.path)
-            self.load_warnings.append(
-                f"提示词规则文件无法读取({error}),已备份为 {backup.name} 并以默认规则启动"
-            )
+        except (OSError, UnicodeError, json.JSONDecodeError, WorkflowError) as error:
+            self._recover_load_failure(error, fallback="默认规则")
             self.disabled_builtins = set()
             self.custom_rules = []
 
@@ -167,6 +167,7 @@ class PromptRuleStore:
 
     async def create(self, payload: dict[str, Any]) -> dict[str, Any]:
         async with self._lock:
+            self.ensure_writable()
             if len(self.custom_rules) >= MAX_CUSTOM_RULES:
                 raise WorkflowError(f"自定义提示词规则不能超过 {MAX_CUSTOM_RULES} 条")
             item = self._normalize_custom(
@@ -179,6 +180,7 @@ class PromptRuleStore:
 
     async def update(self, rule_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         async with self._lock:
+            self.ensure_writable()
             if rule_id in BUILTIN_IDS:
                 unknown = set(payload) - {"enabled"}
                 if unknown or not isinstance(payload.get("enabled"), bool):
@@ -207,6 +209,7 @@ class PromptRuleStore:
         if rule_id in BUILTIN_IDS:
             raise WorkflowError("内置规则不能删除,可以停用")
         async with self._lock:
+            self.ensure_writable()
             previous = len(self.custom_rules)
             self.custom_rules = [item for item in self.custom_rules if item["id"] != rule_id]
             if len(self.custom_rules) == previous:
@@ -466,6 +469,7 @@ class PromptRuleStore:
         await asyncio.to_thread(self._write_text, payload)
 
     def _write_text(self, text: str) -> None:
+        self.ensure_writable()
         fd, temp_name = tempfile.mkstemp(
             prefix="prompt-rules-", suffix=".json", dir=self.path.parent
         )

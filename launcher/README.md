@@ -2,7 +2,7 @@
 
 Windows 10/11 x64，**WinUI 3（Windows App SDK，C#）**，非打包（unpackaged）+ 自包含文件夹分发。用户无需安装 .NET 或 Windows App Runtime，也不需要从源码启动 WebUI。模型、ComfyUI 和第三方节点按需从各自来源下载，不随启动器再分发。v2 工作台支持 Anima 与 Krea 2 两个模型档案；档案资源、SeedVR2、N 卡放大和 Forbidden Vision 脸部细化插件状态由 WebUI `/api/resources` 统一检查。
 
-> 说明：WinUI 3 不支持单文件发布。启动器输出为 `dist\launcher` 文件夹（`AnimaRandomStudio.exe` 与其依赖 DLL），请将**整个目录**一并分发。
+> 完整包为 `AnimaRandomStudio-win-x64-unsigned.zip`（或签名版 `signed.zip`）。先解压整个 ZIP，再运行 `AnimaRandomStudio/AnimaRandomStudio.exe`。WinUI 3 使用自包含文件夹分发，EXE、DLL、运行时和界面资源必须放在一起。GitHub 的 Source code ZIP 是源码，不含可执行启动器。
 
 ## 使用
 
@@ -18,7 +18,7 @@ Windows 10/11 x64，**WinUI 3（Windows App SDK，C#）**，非打包（unpackag
 
 ## v2 工作流与模型档案
 
-工作台以附件 `D:\loud\workflow (1).json` 的 ComfyUI 前端工作流为可视化基线，并使用仓库 `templates\workflow_api_v2.json` 的 API Format 版本提交。启动器不会覆盖用户的原始 ComfyUI 工作流；升级时请把附件留作回滚和手工核对基线。
+工作台以仓库 `templates/workflow_ui_v2.json` 为可视化基线，使用 `templates/workflow_api_v2.json` 的 API Format 版本提交。启动器不会覆盖用户的原始 ComfyUI 工作流；升级时请保留自己的工作流供回滚和核对。
 
 - **Anima**：`anima-base-v1.0.safetensors` + `qwen_3_06b_base.safetensors` + `qwen_image_vae.safetensors`，编码类型 `stable_diffusion`，默认底图－双采样器。
 - **Krea 2**：`krea2_turbo_int8_convrot.safetensors` + `qwen3vl_4b_fp8_scaled.safetensors` + `qwen_image_vae.safetensors`，编码类型 `krea2`，默认普通底图。
@@ -30,6 +30,8 @@ Windows 10/11 x64，**WinUI 3（Windows App SDK，C#）**，非打包（unpackag
 `manifests/model-manifest.json` 是唯一自动下载清单。条目只有 HTTPS URL、确定大小和完整 SHA-256 同时存在才可自动安装。不按文件名猜地址。v2 的 Anima、Krea 2 和 SeedVR2 条目在来源未锁定时标为仅检测 / 手动导入；启动器不会猜测下载地址。LoRA 只扫描本地文件，具体选择留在工作台。
 
 通过 ComfyUI 自己的 `folder_paths` 与 `load_extra_path_config` 解析 `extra_model_paths.yaml`，支持 `models/clip`、`models/unet`、安全子目录及 Impact 的 `ultralytics_bbox` / `ultralytics_segm`。新下载遵循配置的默认搜索目录。启动时从 `/object_info` 取得实际模型相对名称，映射到工作流；同名歧义会报错。启动后新增模型可能需要重启 ComfyUI。
+
+Anima Tools 以 `js/` 下四个文件识别：`character_data.js`、`clothing_data.js`、`pose_data.js`、`background_data.js`。扫描、安装和启动使用同一个目录发现结果，支持标准目录、`-main` / `-master` 和自定义目录名；已有 ZIP 安装会保留，不会再克隆一份。可通过 `ANIMA_TOOLS_DIR` 指定目录，兼容 `COMFYUI_ANIMA_TOOLS`；无效的显式路径、多个有效候选，以及标准名称或含任意一个数据文件但内容不齐的目录都会报错。无标志数据文件的其他目录不算 Anima Tools；自动发现跳过隐藏、`.disabled` 和安装暂存目录。
 
 提供官方、HF/Python 国内镜像、GitHub 镜像组合、自定义来源。Git 镜像可填 HTTPS 前缀或 `{url}` 模板；自定义 ComfyUI 仓库也必须包含清单锁定提交。镜像只作用于本程序子进程，不修改系统 Git/pip 配置。镜像可用性取决于提供方。PyTorch 使用官方固定 Windows CUDA wheel，UV 管理固定 Python 版本。
 
@@ -45,7 +47,7 @@ Windows 10/11 x64，**WinUI 3（Windows App SDK，C#）**，非打包（unpackag
 - 关闭窗口最小化到托盘；“退出（保留服务）”保持服务；“停止服务并退出”停止拥有的服务。设置页可创建桌面快捷方式。
 - 配置：`%LOCALAPPDATA%\AnimaRandomStudio\launcher.json`；日志：`logs\`；独立用户数据：`data\`；应用版本：`versions\`。高级验收可用 `ANIMA_LAUNCHER_HOME` 指向隔离状态目录。
 - 不自动拉取最新 ComfyUI 或节点。导入已有节点版本会保留，并在日志标注版本差异；启动时再验证必需类是否实际加载。正在运行的 ComfyUI 端口会阻止依赖安装。
-- 替换 EXE 后，从设置主动“应用内置新版”。启动健康检查通过才保存版本指针，旧资源保留；停止工作台后可“回退上一工作台版本”。用户数据与应用代码分离。应用回退不回滚用户生成的数据。
+- 升级时将完整新版 ZIP 解压到新目录，退出旧启动器后运行新目录中的 EXE，再从设置“应用内置新版”。不要只替换 EXE，工作台资源嵌在随包程序集内。健康检查失败会恢复旧版本指针，旧资源保留；停止工作台后可“回退上一工作台版本”。用户数据与应用代码分离。此功能应用本地内置工作台，不会自动从 GitHub 下载更新。
 - 要更换锁定的 ComfyUI/节点版本，使用新版清单在**另一空目录新建环境**，验证后切换目录；旧环境保留用于回退。不在用户现有节点目录强行 checkout/reset。模型可通过 `extra_model_paths.yaml` 共用，避免重复下载。
 
 ## 开发和构建
@@ -55,23 +57,26 @@ Windows 10/11 x64，**WinUI 3（Windows App SDK，C#）**，非打包（unpackag
 ```powershell
 dotnet run -c Release --project launcher/Anima.Launcher.Tests
 python -m pytest -q
+pwsh ./launcher/scripts/Test-LauncherPackage.ps1
 pwsh ./Build-Launcher.ps1
 ```
 
-构建脚本优先使用本机 `%LOCALAPPDATA%\Codex\dotnet-sdk-8`，否则使用 PATH 中的 SDK。输出 `dist/launcher/AnimaRandomStudio.exe` 和 `SHA256SUMS.txt`。资源打包仅包含 WebUI 源码、静态文件、模板和许可证，不包含本机数据、密钥、模型或 `.venv`。构建时会打包当前工作树中的前端文件。
+构建脚本优先使用本机 `%LOCALAPPDATA%\Codex\dotnet-sdk-8`，否则使用 PATH 中的 SDK。默认在全新的 `dist/candidates/<构建编号>/` 中生成候选，不覆盖已有 `dist/launcher`；也可用 `-CandidateDirectory '<新的候选目录>'` 指定一个尚不存在的目录。输出完整 ZIP、ZIP 外的 `SHA256SUMS.txt` 和列出路径的 `candidate.json`。
+
+ZIP 内的 `FILES.sha256` 覆盖全部其他文件。`build-info.json` 记录来源提交、工作树是否含未提交修改、变更文件列表和 WebUI payload SHA-256。打包后逐项比对 ZIP 与完整 publish 输出；遗漏 DLL、运行时或子目录文件会使构建失败。WebUI payload 只包含源码、静态文件、模板与许可证，不包含用户数据、密钥、模型或 `.venv`。构建使用当前工作树，未提交内容会明确标记。
 
 ```powershell
-# 只读导入诊断；完整哈希扫描增加 --hashes
-./dist/launcher/AnimaRandomStudio.exe --diagnose F:\comfyui --report F:\report.json
-# 外部服务生命周期验收；--generate 会实际生成一张图片
-dotnet run -c Release --project launcher/Anima.Launcher.Tests -- --live F:\comfyui --generate
-# 新建 NVIDIA 环境（会下载 Python / CUDA wheel / 节点及依赖）
-dotnet run --project launcher/Anima.Launcher.Tests -- --install-new F:\AnimaTest\ComfyUI
-# 验证新建环境的启动/停止；先备齐模型，可用 extra_model_paths.yaml 共享
-dotnet run -c Release --project launcher/Anima.Launcher.Tests -- --live F:\AnimaTest\ComfyUI --owned --generate
+# 替换两个路径占位符；从完整解压目录执行只读导入诊断
+& '<解压目录>\AnimaRandomStudio\AnimaRandomStudio.exe' --diagnose '<实际ComfyUI目录>' --report './diagnosis.json'
+# 已有环境的真实生成验收；会实际生成一张图片
+dotnet run -c Release --project launcher/Anima.Launcher.Tests -- --live '<实际ComfyUI目录>' --generate
+# 新建环境验收会下载 Python / CUDA wheel / 节点及依赖，请选新的空目录
+dotnet run --project launcher/Anima.Launcher.Tests -- --install-new '<新的空目录>'
 ```
 
-不在普通 CI 中运行 GPU 或大模型下载验收。Windows CI 运行核心测试、Python 测试与单文件发布。清单维护者必须在改动提交或依赖版本后重新执行真实安装和生成。
+不在普通 CI 中运行 GPU 或大模型下载验收。Windows CI 运行核心测试、Python 测试、打包校验测试，并上传完整候选 ZIP 与校验文件；它不会创建 GitHub Release。清单维护者必须在改动提交或依赖版本后重新执行真实安装和生成。
+
+交付前应从 ZIP 开始验收：核对外部 SHA-256，解压到新目录，核对 `FILES.sha256`，使用独立 `ANIMA_LAUNCHER_HOME` 执行 `--diagnose`，再确认 WinUI 窗口和工作台健康接口。`--diagnose` 成功不代表窗口资源已验证。已有启动器运行时，固定单实例锁会唤醒旧窗口，因此必须核对进程可执行路径；不要把旧窗口当成新候选启动成功。
 
 ## 发布
 

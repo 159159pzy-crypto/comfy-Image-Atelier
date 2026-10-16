@@ -65,8 +65,17 @@ const ui = Object.fromEntries(
     "krea_prompt_pool_enabled",
     "kreaPromptPoolFile",
     "kreaPromptPoolText",
-    "kreaPromptPoolAppend",
-    "kreaPromptPoolReplace",
+    "kreaPromptImportFormat",
+    "kreaPromptImportMode",
+    "kreaPromptImportDialog",
+    "kreaPromptImportForm",
+    "kreaPromptImportClose",
+    "kreaPromptImportCancel",
+    "kreaPromptImportPreviewButton",
+    "kreaPromptImportHint",
+    "kreaPromptImportSummary",
+    "kreaPromptImportRows",
+    "kreaPromptImportCommit",
     "kreaPromptPoolCount",
     "kreaPromptPoolList",
     "openKreaPromptPool",
@@ -77,9 +86,23 @@ const ui = Object.fromEntries(
     "kreaPoolMeta",
     "kreaPoolSearch",
     "kreaPoolSelectedOnly",
-    "selectAllKreaPool",
+    "kreaPoolSelectPage",
+    "kreaPoolSelectAll",
+    "kreaPoolDeleteSelection",
+    "kreaPoolAddItem",
+    "kreaPoolOpenImport",
+    "kreaPoolPrev",
+    "kreaPoolNext",
+    "kreaPoolPageLabel",
     "clearKreaPoolSelection",
     "kreaPoolSelectionLabel",
+    "kreaPromptItemDialog",
+    "kreaPromptItemForm",
+    "kreaPromptItemTitle",
+    "kreaPromptItemText",
+    "kreaPromptItemClose",
+    "kreaPromptItemCancel",
+    "kreaPromptItemDelete",
     "poolOverview",
     "character_detail",
     "manual_artist",
@@ -311,6 +334,8 @@ const ui = Object.fromEntries(
     "ownershipSummary",
     "ownershipList",
     "ownershipError",
+    "openLoraManager",
+    "refreshResourceClassification",
     "base_mode",
     "sampler_name",
     "scheduler",
@@ -447,8 +472,18 @@ let draft = { modes: {}, counts: {}, fixed: {}, pools: {}, loras: [], managedTri
 let profileDrafts = {};
 let profileResources = {};
 let activeProfileId = "anima";
-let kreaPromptPool = { model_profile: "krea2", items: [], count: 0 };
+let kreaPromptPool = { model_profile: "krea2", items: [], count: 0, page: 1, pages: 0 };
 let kreaPromptPoolSelection = [];
+let kreaPoolPage = 1;
+let kreaPoolPages = 0;
+let kreaPoolQueryCount = 0;
+let kreaPoolTotalCount = 0;
+let kreaSelectedViewItems = null;
+let kreaSelectedViewQuery = "";
+let kreaPoolSearchTimer = null;
+let editingKreaPromptItem = null;
+let kreaImportPreview = null;
+let kreaImportRequest = 0;
 let activeSection = "character";
 let poolPage = 1;
 let poolPages = 1;
@@ -459,6 +494,7 @@ let editingCustom = null;
 let editingCustomGroup = null;
 let editingFavoriteItem = null;
 let loraInventory = [];
+let loraClassificationItems = [];
 let loraInventoryLoaded = false;
 let loraInventoryError = "";
 let editingLoraTrigger = null;
@@ -474,6 +510,7 @@ let stylePresetRequest = 0;
 let stylePresetProfile = "";
 let resources = { models: [], seedvr2_models: [], upscale_models: [], samplers: [], schedulers: [], model_profiles: {}, nodes: {}, plugins: {} };
 let resourceRequest = 0;
+let resourceInventoryProfile = "";
 let resourceError = "";
 let resourcesLoaded = false;
 let loraInventoryRequest = 0;
@@ -529,9 +566,60 @@ async function request(path, options = {}) {
   } catch {
     payload = {};
   }
-  if (!response.ok) throw new Error(payload.error || `请求失败 (${response.status})`);
+  if (!response.ok) {
+    if (payload.code === "storage_read_only" && payload.store) {
+      config.storage_status ||= {};
+      config.storage_status[payload.store] = { read_only: true, reason: payload.error, path: payload.path };
+      renderStorageStatus();
+    }
+    throw new Error(payload.error || `请求失败 (${response.status})`);
+  }
   return payload;
 }
+
+// Protection lasts until restart. Observe new controls and later enable attempts
+// so asynchronous resource/history refreshes cannot re-enable protected writes.
+const STORAGE_CONTROLS = {
+  history: "#startButton, #confirmReplay, #confirmVariant, #deleteRecord",
+  style_presets: "#savePreset, .preset-actions button",
+  custom_prompts: '#customForm button[type="submit"], #deleteCustom, #customGroupForm button[type="submit"], #deleteCustomGroup, #commitImport, [data-storage-write="custom_prompts"]',
+  lora_triggers: '#loraTriggerForm button[type="submit"], #resetLoraTriggers',
+  prompt_rules: '#promptRuleForm button[type="submit"], #deletePromptRule, .prompt-rule-actions input',
+  prompt_pools: '#kreaPromptItemForm button[type="submit"], #kreaPromptItemDelete, #kreaPoolDeleteSelection, #kreaPromptImportCommit, .krea-prompt-remove',
+};
+function protectStorageControls() {
+  for (const [store, selector] of Object.entries(STORAGE_CONTROLS)) {
+    const status = config.storage_status?.[store];
+    if (!status?.read_only) continue;
+    for (const control of document.querySelectorAll(selector)) {
+      if (!control.disabled) control.disabled = true;
+      control.title = status.reason || "此存储已受保护，请修复文件后重启";
+    }
+  }
+}
+function renderStorageStatus() {
+  const protectedStores = Object.values(config.storage_status || {}).filter((item) => item.read_only);
+  const messages = protectedStores.map((item) => `${item.path || item.store}：${item.reason}`);
+  const diagnostic = config.catalog?.discovery;
+  if (diagnostic?.message) messages.push(diagnostic.message);
+  const panel = document.getElementById("storageWarning");
+  panel.hidden = messages.length === 0;
+  panel.textContent = messages.join("\n");
+  for (const dialog of document.querySelectorAll("dialog")) {
+    let note = dialog.querySelector(".storage-protection-note");
+    if (!note && protectedStores.length) {
+      note = document.createElement("p");
+      note.className = "storage-protection-note";
+      note.setAttribute("role", "status");
+      (dialog.querySelector("form") || dialog).prepend(note);
+    }
+    if (note) note.textContent = protectedStores.map((item) => `${item.path || item.store}：${item.reason}`).join("\n");
+  }
+  protectStorageControls();
+}
+new MutationObserver(protectStorageControls).observe(document.body, {
+  childList: true, subtree: true, attributes: true, attributeFilter: ["disabled"],
+});
 
 function escapeHtml(value) {
   const span = document.createElement("span");
@@ -773,12 +861,12 @@ function restoreProfileDraft(profile, settings = {}, { preferStored = true } = {
   const targetProfile = normalizeProfileId(profile);
   const sourceProfile = normalizeProfileId(settings?.model_profile || targetProfile);
   const profileDefault = profileSettingsDefaults(profile);
-  const source = (preferStored ? stored : null) || (settings && settings.modes ? settings : profileStateFrom(profileDefault || settings));
+  const source = (preferStored ? stored : null) || (settings && settings.modes ? settings : profileStateFrom({ ...profileDefault, ...settings }));
   draft = {
     modes: clone(source.modes || {}), counts: clone(source.counts || {}), fixed: clone(source.fixed || {}),
     pools: clone(source.pools || defaultPools()), loras: clone(source.loras || []), managedTriggers: clone(source.managedTriggers || []),
   };
-  if (!stored && normalizeProfileId(profile) === "krea2" && !defaults?.profile_settings?.krea2 && !defaults?.profiles?.krea2?.settings) {
+  if (!stored && sourceProfile !== targetProfile && normalizeProfileId(profile) === "krea2" && !defaults?.profile_settings?.krea2 && !defaults?.profiles?.krea2?.settings) {
     draft.pools = defaultPools();
     draft.loras = [];
     draft.managedTriggers = [];
@@ -1146,7 +1234,7 @@ function updatePeopleTotal() {
 }
 function updatePoolOverview() {
   ui.poolOverview.textContent = currentProfile() === "krea2"
-    ? `${kreaPromptPool.items.length} 项词条 · ${kreaPromptPoolSelection.length} 项已选`
+    ? `${kreaPromptPool.count || 0} 项词条 · ${kreaPromptPoolSelection.length} 项已选`
     : `${SECTIONS.reduce((sum, section) => sum + selectedCount(section), 0)} 项已选`;
 }
 
@@ -1237,12 +1325,59 @@ function reconcileLoraTriggers(addFor = []) {
   if (ui.extra_prompt.value !== nextPrompt) ui.extra_prompt.value = nextPrompt;
 }
 function loraItem(filename) {
+  if (loraInventoryProfile !== currentProfile()) return null;
   const identity = normalizedPath(filename);
-  const exact = loraInventory.find((item) => normalizedPath(item.filename) === identity);
-  if (exact) return exact;
+  const candidates = loraInventory.filter((item) => item.model_profile === currentProfile() && item.classification_status === "recognized");
+  return candidates.find((item) => normalizedPath(item.filename) === identity) || null;
+}
+function classificationItem(items, filename) {
+  const identity = normalizedPath(filename);
+  const matches = (items || []).filter((item) => normalizedPath(item.name || item.filename) === identity);
+  if (matches.length === 1) return matches[0];
   if (identity.includes("/")) return null;
-  const matches = loraInventory.filter((item) => normalizedPath(item.filename).split("/").pop() === identity);
-  return matches.length === 1 ? matches[0] : null;
+  const basenameMatches = (items || []).filter((item) => normalizedPath(item.name || item.filename).split("/").pop() === identity);
+  return basenameMatches.length === 1 ? basenameMatches[0] : null;
+}
+function classificationReason(item, fallback) {
+  if (item?.model_profile && item.model_profile !== currentProfile()) {
+    return `LoRA Manager 识别为 ${profileLabel(item.model_profile)}，与当前 ${profileLabel(currentProfile())} 档案不匹配`;
+  }
+  return item?.classification_reason || fallback;
+}
+function loraSelectionIssue(filename) {
+  if (!loraInventoryLoaded || loraInventoryProfile !== currentProfile()) return loraInventoryError || "正在读取 LoRA Manager 分类";
+  if (loraItem(filename)) return "";
+  return classificationReason(classificationItem(loraClassificationItems, filename), "文件不在当前 ComfyUI LoRA 清单中");
+}
+function modelSelectionIssue(filename = ui.model_name?.value || "") {
+  if (!resourcesLoaded || resourceInventoryProfile !== currentProfile()) return resourceError || "正在读取 LoRA Manager 分类";
+  if (resources.models.includes(filename)) return "";
+  if (!normalizedPath(filename).includes("/")) {
+    const names = (resources.model_items || []).map((item) => item.name || item.filename);
+    const exact = names.some((name) => normalizedPath(name) === normalizedPath(filename));
+    if (!exact && names.filter((name) => normalizedPath(name).split("/").pop() === normalizedPath(filename)).length > 1) return "存在多个同名主模型，请选择完整路径";
+  }
+  return classificationReason(classificationItem(resources.model_items, filename), filename ? "文件不在当前 ComfyUI 主模型清单中" : "没有识别为当前档案的主模型");
+}
+function generationClassificationIssues(settings = null) {
+  const issues = [];
+  const modelName = settings?.model_name ?? ui.model_name?.value ?? "";
+  const modelIssue = modelSelectionIssue(modelName);
+  if (modelIssue) issues.push(`主模型：${modelIssue}`);
+  if (!loraInventoryLoaded || loraInventoryProfile !== currentProfile()) issues.push(loraInventoryError || "正在读取 LoRA Manager 分类");
+  else for (const item of settings?.loras || draft.loras || []) {
+    if (!item.enabled) continue;
+    const reason = loraSelectionIssue(item.filename);
+    if (reason) issues.push(`${item.filename}：${reason}`);
+  }
+  return [...new Set(issues)];
+}
+function updateGenerationAvailability() {
+  if (!ui.startButton) return;
+  const issues = generationClassificationIssues();
+  const storage = config.storage_status?.history;
+  ui.startButton.disabled = submitInFlight || !ui.connection.classList.contains("online") || issues.length > 0 || Boolean(storage?.read_only);
+  ui.startButton.title = storage?.read_only ? storage.reason || "历史存储已受保护" : issues.join("；");
 }
 function loraPresentation(inventoryItem, fallback) {
   const path = String(inventoryItem?.normalized_path || fallback || "").replaceAll("\\", "/");
@@ -1258,7 +1393,8 @@ function renderLoras() {
   ui.loraEmpty.hidden = loras.length > 0;
   ui.loraList.replaceChildren(
     ...loras.map((item, index) => {
-      const available = !loraInventoryLoaded || Boolean(loraItem(item.filename));
+      const selectionIssue = loraSelectionIssue(item.filename);
+      const available = !selectionIssue;
       const high = Math.abs(Number(item.strength)) > 2;
       const row = document.createElement("div");
       row.className = `lora-row${available ? "" : " missing"}`;
@@ -1266,7 +1402,7 @@ function renderLoras() {
       const display = loraPresentation(inventoryItem, item.filename);
       const triggers = normalizeTriggerWords(inventoryItem?.trigger_words || []);
       const triggerLabel = inventoryItem?.trigger_override ? "触发词（已覆盖）" : "触发词";
-      row.innerHTML = `<input class="lora-toggle" type="checkbox" ${item.enabled ? "checked" : ""} title="启用 LoRA" aria-label="启用 ${escapeHtml(item.filename)}"><div class="lora-name"><strong title="${escapeHtml(display.path)}">${escapeHtml(display.label)}</strong><small class="${available && !high ? "" : "lora-warning"}">${available ? (high ? "高强度 · 模型 + CLIP" : "模型 + CLIP") : "文件不存在"}</small>${triggers.length || inventoryItem?.trigger_override ? `<small class="lora-trigger-line" title="自动触发词">${triggerLabel}：${triggers.length ? escapeHtml(triggers.join(", ")) : "已禁用"}</small>` : ""}</div><input class="lora-strength" type="number" min="-100" max="100" step="0.05" value="${Number(item.strength)}" title="LoRA strength" aria-label="${escapeHtml(item.filename)} 强度"><div class="lora-actions"><button class="button ghost compact lora-trigger-edit" type="button" data-lora-triggers ${inventoryItem ? "" : "disabled"}>触发词</button><button class="icon-button dark" type="button" data-lora-up title="上移" aria-label="上移">↑</button><button class="icon-button dark" type="button" data-lora-down title="下移" aria-label="下移">↓</button><button class="icon-button dark" type="button" data-lora-remove title="移除" aria-label="移除">×</button></div>`;
+      row.innerHTML = `<input class="lora-toggle" type="checkbox" ${item.enabled ? "checked" : ""} title="启用 LoRA" aria-label="启用 ${escapeHtml(item.filename)}"><div class="lora-name"><strong title="${escapeHtml(display.path)}">${escapeHtml(display.label)}</strong><small class="${available && !high ? "" : "lora-warning"}">${available ? (high ? "高强度 · 模型 + CLIP" : "模型 + CLIP") : escapeHtml(selectionIssue)}</small>${triggers.length || inventoryItem?.trigger_override ? `<small class="lora-trigger-line" title="自动触发词">${triggerLabel}：${triggers.length ? escapeHtml(triggers.join(", ")) : "已禁用"}</small>` : ""}</div><input class="lora-strength" type="number" min="-100" max="100" step="0.05" value="${Number(item.strength)}" title="LoRA strength" aria-label="${escapeHtml(item.filename)} 强度"><div class="lora-actions"><button class="button ghost compact lora-trigger-edit" type="button" data-lora-triggers ${inventoryItem ? "" : "disabled"}>触发词</button><button class="icon-button dark" type="button" data-lora-up title="上移" aria-label="上移">↑</button><button class="icon-button dark" type="button" data-lora-down title="下移" aria-label="下移">↓</button><button class="icon-button dark" type="button" data-lora-remove title="移除" aria-label="移除">×</button></div>`;
       row.querySelector(".lora-toggle").addEventListener("change", (event) => {
         item.enabled = event.target.checked;
         reconcileLoraTriggers(item.enabled ? [item] : []);
@@ -1299,6 +1435,7 @@ function renderLoras() {
       return row;
     }),
   );
+  updateGenerationAvailability();
 }
 function moveLora(index, delta) {
   const next = index + delta;
@@ -1307,21 +1444,23 @@ function moveLora(index, delta) {
   renderLoras();
   schedulePersist();
 }
-async function loadLoraInventory() {
+async function loadLoraInventory({ refresh = false } = {}) {
   const requestedProfile = currentProfile();
   const requestId = ++loraInventoryRequest;
+  loraInventoryLoaded = false;
+  loraInventoryError = "";
   if (loraInventoryProfile !== requestedProfile) {
     loraInventoryProfile = requestedProfile;
     loraInventory = [];
-    loraInventoryLoaded = false;
-    loraInventoryError = "";
-    renderLoras();
-    renderLoraCatalog();
+    loraClassificationItems = [];
   }
+  renderLoras();
+  renderLoraCatalog();
   try {
-    const data = await request(`/api/loras?model_profile=${encodeURIComponent(requestedProfile)}`);
+    const data = await request(`/api/loras?model_profile=${encodeURIComponent(requestedProfile)}${refresh ? "&refresh=1" : ""}`);
     if (requestId !== loraInventoryRequest || requestedProfile !== currentProfile()) return;
     loraInventory = data.items || [];
+    loraClassificationItems = Array.isArray(data.classification_items) ? data.classification_items : loraInventory;
     loraInventoryLoaded = true;
     loraInventoryError = "";
     reconcileLoraTriggers(draft.loras.filter((item) => item.enabled));
@@ -1330,6 +1469,7 @@ async function loadLoraInventory() {
   } catch (error) {
     if (requestId !== loraInventoryRequest || requestedProfile !== currentProfile()) return;
     loraInventory = [];
+    loraClassificationItems = [];
     loraInventoryLoaded = false;
     loraInventoryError = error.message;
     renderLoras();
@@ -1396,9 +1536,10 @@ function parseLoraTriggerInput(value) {
 }
 function replaceLoraInventoryItem(value) {
   const identity = normalizedPath(value.filename);
-  const index = loraInventory.findIndex((item) => normalizedPath(item.filename) === identity);
-  if (index >= 0) loraInventory[index] = value;
-  else loraInventory.push(value);
+  loraClassificationItems = loraClassificationItems.filter((item) => normalizedPath(item.name || item.filename) !== identity);
+  loraClassificationItems.push(value);
+  loraInventory = loraInventory.filter((item) => normalizedPath(item.filename) !== identity);
+  if (value.model_profile === currentProfile() && value.classification_status === "recognized") loraInventory.push(value);
 }
 function openLoraTriggerDialog(configuredItem) {
   const inventoryItem = loraItem(configuredItem.filename);
@@ -1550,8 +1691,8 @@ function renderBatch(batch, queue = currentQueue) {
     }
   }
   ui.stopButton.disabled = !active || batch.status === "stopping";
-  // 队列时代:运行中也允许点"开始"(进入队列),只受连接与在途请求限制
-  ui.startButton.disabled = submitInFlight || !ui.connection.classList.contains("online");
+  // 运行中仍可加入队列，但分类有效性与连接状态共用同一守卫。
+  updateGenerationAvailability();
   ui.startButton.textContent = active ? "加入队列" : "开始生成";
   ui.batchError.hidden = !batch?.error;
   ui.batchError.textContent = batch?.error || "";
@@ -1566,11 +1707,11 @@ async function refreshConnection() {
     const status = await request("/api/status");
     ui.connection.className = `status-badge ${status.online ? "online" : "offline"}`;
     ui.connection.querySelector("span").textContent = status.online ? `ComfyUI ${status.version}` : "ComfyUI 离线";
-    ui.startButton.disabled = submitInFlight || !status.online;
+    updateGenerationAvailability();
   } catch {
     ui.connection.className = "status-badge offline";
     ui.connection.querySelector("span").textContent = "ComfyUI 离线";
-    ui.startButton.disabled = true;
+    updateGenerationAvailability();
   }
 }
 let pollErrorShown = false;
@@ -1632,10 +1773,15 @@ function renderHistoryPage(data) {
   cacheHistoryPage(data);
   ui.gallery.replaceChildren(...historyItems.map(card));
   ui.emptyState.hidden = historyItems.length > 0;
+  const historyUnavailable = config.storage_status?.history?.available === false;
+  ui.emptyState.querySelector("strong").textContent = historyUnavailable ? "历史记录暂不可用" : "等待第一张作品";
+  ui.emptyState.querySelector("small").textContent = historyUnavailable
+    ? "原历史文件已受保护，生成已暂停。请按顶部提示修复文件后重启。"
+    : "完成生成后会出现在这里";
   ui.pageLabel.textContent = `${historyPage} / ${historyPages}`;
   ui.prevPage.disabled = historyPage <= 1;
   ui.nextPage.disabled = historyPage >= historyPages;
-  ui.historyCount.textContent = `${data.total || 0} 张图片`;
+  ui.historyCount.textContent = historyUnavailable ? "历史存储不可用" : `${data.total || 0} 张图片`;
   updatePreviewNavigation();
 }
 
@@ -2378,11 +2524,20 @@ function updateVariantDrawer() {
   };
   ui.confirmVariant.textContent = labels[mode];
   const available = Boolean(regenerationOptions?.modes?.[mode]?.available);
-  ui.confirmVariant.disabled = !available || (mode === "content_redraw" && !sections.length);
-  const reasons = regenerationReasons(mode);
+  const reasons = [...regenerationReasons(mode)];
+  if (mode === "content_redraw") {
+    for (const [section, value] of Object.entries(regenerationOptions?.sections || {})) {
+      if (value.random && !sections.includes(section) && value.canPreserve === false)
+        reasons.push(value.preserveReason || `请同时重抽 ${section}：缺少可靠的历史快照`);
+    }
+  }
+  ui.confirmVariant.disabled = !available || reasons.length > 0 || (mode === "content_redraw" && !sections.length);
   if (reasons.length && !(regenerationOptions?.resourceIssues || []).length) {
     ui.variantStatus.dataset.state = "error";
     ui.variantStatus.innerHTML = `<strong>当前方式不可用</strong><span>${reasons.map(escapeHtml).join("<br>")}</span>`;
+  } else if (!(regenerationOptions?.resourceIssues || []).length) {
+    ui.variantStatus.dataset.state = "ok";
+    ui.variantStatus.textContent = "资源检查通过，所选方式可用。";
   }
 }
 
@@ -2412,7 +2567,7 @@ async function submitRegeneration(mode, count = 1, sections = []) {
     try {
       renderBatchPayload(await request("/api/batches/current"));
     } catch {
-      ui.startButton.disabled = !ui.connection.classList.contains("online");
+      updateGenerationAvailability();
     }
     if (regenerationOptions) renderRegenerationOptions();
   }
@@ -2561,6 +2716,7 @@ function openKreaPromptPool() {
   ui.kreaPoolBackdrop.classList.remove("closing");
   ui.kreaPoolBackdrop.hidden = false;
   ui.kreaPoolSearch.focus({ preventScroll: true });
+  void loadKreaPromptPool();
 }
 function closeKreaPromptPool() {
   ui.kreaPoolDrawer.classList.remove("open");
@@ -2582,16 +2738,19 @@ function renderKreaPromptPool() {
   ui.animaPromptPoolControls.hidden = enabled;
   const items = Array.isArray(kreaPromptPool.items) ? kreaPromptPool.items : [];
   ui.krea_prompt_pool_enabled.checked = enabled && ui.krea_prompt_pool_enabled.checked;
-  ui.krea_prompt_pool_enabled.disabled = !enabled || items.length === 0 || kreaPromptPoolSelection.length === 0;
+  ui.krea_prompt_pool_enabled.disabled = !enabled || Number(kreaPromptPool.count || 0) === 0 || kreaPromptPoolSelection.length === 0;
   const selected = new Set(readKreaPoolSelection().ids);
-  ui.kreaPromptPoolCount.textContent = `${items.length} 项 · 已选 ${selected.size}`;
-  const query = ui.kreaPoolSearch.value.trim().toLocaleLowerCase();
-  const visible = items.filter((item) => {
-    const matches = String(item.text || item.prompt || "").toLocaleLowerCase().includes(query);
-    return matches && (!ui.kreaPoolSelectedOnly.checked || selected.has(String(item.id)));
-  });
-  ui.kreaPoolMeta.textContent = `${items.length} 项可用 · ${selected.size} 项已选`;
+  const total = Number(kreaPromptPool.count || 0);
+  const filteredCount = Number(kreaPoolQueryCount || 0);
+  const pageCount = Math.max(1, Number(kreaPoolPages || 0));
+  const visible = items;
+  ui.kreaPromptPoolCount.textContent = `${total} 项 · 已选 ${selected.size}`;
+  ui.kreaPoolMeta.textContent = `${filteredCount} 项匹配 · ${selected.size} 项已选`;
   ui.kreaPoolSelectionLabel.textContent = `已选择 ${selected.size} 项`;
+  ui.kreaPoolPageLabel.textContent = `${Math.min(kreaPoolPage, pageCount)} / ${pageCount}`;
+  ui.kreaPoolPrev.disabled = kreaPoolPage <= 1 || !kreaPoolPages;
+  ui.kreaPoolNext.disabled = kreaPoolPage >= kreaPoolPages || !kreaPoolPages;
+  ui.kreaPoolDeleteSelection.disabled = selected.size === 0;
   ui.kreaPromptPoolList.replaceChildren(...visible.map((item) => {
     const row = document.createElement("article");
     row.className = `krea-prompt-row${selected.has(String(item.id)) ? " selected" : ""}`;
@@ -2603,11 +2762,20 @@ function renderKreaPromptPool() {
       const id = String(item.id);
       if (checkbox.checked) kreaPromptPoolSelection = [...new Set([...kreaPromptPoolSelection, id])];
       else kreaPromptPoolSelection = kreaPromptPoolSelection.filter((value) => value !== id);
+      if (ui.kreaPoolSelectedOnly.checked) applyKreaSelectedViewPage();
       renderKreaPromptPool();
       schedulePersist();
     });
     const text = document.createElement("span");
     text.textContent = item.text || item.prompt || "";
+    const tools = document.createElement("div");
+    tools.className = "krea-prompt-tools";
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "button ghost compact";
+    edit.textContent = "编辑";
+    edit.setAttribute("aria-label", "编辑自然语言提示词");
+    edit.addEventListener("click", () => openKreaPromptItemDialog(item));
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "icon-button dark krea-prompt-remove";
@@ -2615,112 +2783,326 @@ function renderKreaPromptPool() {
     remove.setAttribute("aria-label", "从词池删除");
     remove.textContent = "×";
     remove.addEventListener("click", () => deleteKreaPromptPoolItem(item));
-    row.append(checkbox, text, remove);
+    tools.append(edit, remove);
+    row.append(checkbox, text, tools);
     return row;
   }));
-  if (!visible.length) ui.kreaPromptPoolList.innerHTML = `<div class="inline-empty">${items.length ? "没有匹配的提示词。" : "Krea 2 词池为空，请导入自然语言提示词。"}</div>`;
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "inline-empty krea-prompt-empty";
+    empty.textContent = total ? "没有匹配的提示词。" : "Krea 2 词池为空，请新增或导入自然语言提示词。";
+    ui.kreaPromptPoolList.append(empty);
+  }
   updatePoolOverview();
 }
-async function deleteKreaPromptPoolItem(item) {
-  try {
-    await request(`/api/prompt-pools/items?model_profile=krea2&id=${encodeURIComponent(item.id)}`, { method: "DELETE" });
-    const id = String(item.id);
-    kreaPromptPool.items = kreaPromptPool.items.filter((value) => String(value.id) !== id);
-    kreaPromptPoolSelection = kreaPromptPoolSelection.filter((value) => value !== id);
-    if (!kreaPromptPoolSelection.length) ui.krea_prompt_pool_enabled.checked = false;
-    renderKreaPromptPool();
-    schedulePersist();
-  } catch (error) { toast(error.message); }
+function kreaPoolParams({ page = 1, limit = 48, q = ui.kreaPoolSearch.value.trim(), selectedIds = [] } = {}) {
+  const params = new URLSearchParams({ model_profile: "krea2", page: String(page), limit: String(limit), q });
+  if (selectedIds.length) params.set("selected_ids", selectedIds.join(","));
+  return params;
 }
-async function loadKreaPromptPool() {
+async function fetchAllKreaPromptPoolItems(query) {
+  const first = await request(`/api/prompt-pools?${kreaPoolParams({ page: 1, limit: 500, q: query })}`);
+  const pages = Math.max(1, Number(first.pages || 1));
+  const items = [...(Array.isArray(first.items) ? first.items : [])];
+  for (let start = 2; start <= pages; start += 6) {
+    const batch = Array.from({ length: Math.min(6, pages - start + 1) }, (_, index) => start + index);
+    const result = await Promise.all(batch.map((page) =>
+      request(`/api/prompt-pools?${kreaPoolParams({ page, limit: 500, q: query })}`),
+    ));
+    for (const payload of result) items.push(...(Array.isArray(payload.items) ? payload.items : []));
+  }
+  let poolCount = Number(first.pool_count ?? first.total_count);
+  if (!Number.isFinite(poolCount)) poolCount = query ? kreaPoolTotalCount : Number(first.count ?? first.total ?? items.length);
+  if (!Number.isFinite(poolCount) || poolCount < 0) poolCount = items.length;
+  if (query && !kreaPoolTotalCount && !Number.isFinite(Number(first.pool_count ?? first.total_count))) {
+    const totalPayload = await request(`/api/prompt-pools?${kreaPoolParams({ page: 1, limit: 1, q: "" })}`);
+    poolCount = Number(totalPayload.pool_count ?? totalPayload.total_count ?? totalPayload.count ?? totalPayload.total ?? poolCount);
+  }
+  return {
+    items,
+    count: Number(first.count ?? first.total ?? items.length),
+    poolCount: Number.isFinite(poolCount) ? poolCount : items.length,
+  };
+}
+function applyKreaSelectedViewPage() {
+  if (!Array.isArray(kreaSelectedViewItems)) return;
+  const selected = new Set(kreaPromptPoolSelection);
+  const matches = kreaSelectedViewItems.filter((item) => selected.has(String(item.id)));
+  kreaPoolQueryCount = matches.length;
+  kreaPoolPages = Math.ceil(matches.length / 48);
+  kreaPoolPage = Math.max(1, Math.min(kreaPoolPage, Math.max(kreaPoolPages, 1)));
+  kreaPromptPool.items = matches.slice((kreaPoolPage - 1) * 48, kreaPoolPage * 48);
+  kreaPromptPool.page = kreaPoolPage;
+  kreaPromptPool.pages = kreaPoolPages;
+}
+async function deleteKreaPromptPoolItem(item) {
+  return deleteKreaPromptPoolSelection([String(item.id)]);
+}
+async function loadKreaPromptPool({ page = kreaPoolPage, force = false } = {}) {
   if (currentProfile() !== "krea2") {
     renderKreaPromptPool();
     return;
   }
   const requestId = ++kreaPromptPoolRequest;
+  const query = ui.kreaPoolSearch.value.trim();
   try {
-    const payload = await request("/api/prompt-pools?model_profile=krea2");
+    if (ui.kreaPoolSelectedOnly.checked) {
+      if (force || kreaSelectedViewItems === null || kreaSelectedViewQuery !== query) {
+        const result = await fetchAllKreaPromptPoolItems(query);
+        if (requestId !== kreaPromptPoolRequest || currentProfile() !== "krea2") return;
+        kreaSelectedViewItems = result.items;
+        kreaSelectedViewQuery = query;
+        kreaPoolTotalCount = result.poolCount;
+        kreaPromptPool.count = result.poolCount;
+      }
+      kreaPoolPage = Math.max(1, Number(page) || 1);
+      applyKreaSelectedViewPage();
+    } else {
+      const selectedIds = kreaPromptPoolSelection.slice(0, 48);
+      const payload = await request(`/api/prompt-pools?${kreaPoolParams({ page, limit: 48, q: query, selectedIds })}`);
+      if (requestId !== kreaPromptPoolRequest || currentProfile() !== "krea2") return;
+      kreaPoolPage = Number(payload.page || page || 1);
+      kreaPoolPages = Number(payload.pages || 0);
+      kreaPoolQueryCount = Number(payload.count ?? payload.total ?? payload.items?.length ?? 0);
+      const payloadPoolCount = Number(payload.pool_count ?? payload.total_count);
+      if (Number.isFinite(payloadPoolCount)) kreaPoolTotalCount = payloadPoolCount;
+      else if (!query) kreaPoolTotalCount = kreaPoolQueryCount;
+      if (kreaPoolPages === 0) kreaPoolPage = 1;
+      if (kreaPoolPages > 0 && kreaPoolPage > kreaPoolPages) {
+        await loadKreaPromptPool({ page: kreaPoolPages });
+        return;
+      }
+      kreaPromptPool = {
+        model_profile: "krea2",
+        items: Array.isArray(payload.items) ? payload.items : [],
+        count: Number.isFinite(kreaPoolTotalCount) ? kreaPoolTotalCount : kreaPoolQueryCount,
+        page: kreaPoolPage,
+        pages: kreaPoolPages,
+      };
+    }
     if (requestId !== kreaPromptPoolRequest || currentProfile() !== "krea2") return;
-    kreaPromptPool = { model_profile: "krea2", items: Array.isArray(payload.items) ? payload.items : [], count: Number(payload.count || payload.items?.length || 0) };
-    const validIds = new Set(kreaPromptPool.items.map((item) => String(item.id)));
-    kreaPromptPoolSelection = kreaPromptPoolSelection.filter((id) => validIds.has(String(id)));
     renderKreaPromptPool();
   } catch (error) {
     if (requestId !== kreaPromptPoolRequest || currentProfile() !== "krea2") return;
-    kreaPromptPool = { model_profile: "krea2", items: [], count: 0 };
+    kreaPromptPool = { model_profile: "krea2", items: [], count: 0, page: 1, pages: 0 };
+    kreaPoolTotalCount = 0;
+    kreaPoolQueryCount = 0;
+    kreaPoolPages = 0;
     renderKreaPromptPool();
     toast(`Krea 2 提示词池读取失败：${error.message}`);
   }
 }
-function parseKreaCsv(text) {
-  const rows = [];
-  let row = [];
-  let cell = "";
-  let quoted = false;
-  const source = String(text || "").replace(/^\uFEFF/, "");
-  for (let index = 0; index < source.length; index++) {
-    const char = source[index];
-    if (quoted) {
-      if (char === '"' && source[index + 1] === '"') { cell += '"'; index++; }
-      else if (char === '"') quoted = false;
-      else cell += char;
-    } else if (char === '"' && !cell) quoted = true;
-    else if (char === ",") { row.push(cell.trim()); cell = ""; }
-    else if (char === "\n" || char === "\r") {
-      if (char === "\r" && source[index + 1] === "\n") index++;
-      row.push(cell.trim());
-      if (row.some(Boolean)) rows.push(row);
-      row = []; cell = "";
-    } else cell += char;
-  }
-  row.push(cell.trim());
-  if (row.some(Boolean)) rows.push(row);
-  if (!rows.length) return [];
-  const headerIndex = rows[0].findIndex((value) => /^(text|prompt|提示词|自然语言)$/i.test(value));
-  const column = headerIndex >= 0 ? headerIndex : 0;
-  const start = headerIndex >= 0 ? 1 : 0;
-  return rows.slice(start).map((values) => values[column] || "").map((value) => value.trim()).filter(Boolean);
+function openKreaPromptItemDialog(item = null) {
+  editingKreaPromptItem = item ? { id: String(item.id), text: String(item.text || item.prompt || "") } : null;
+  ui.kreaPromptItemTitle.textContent = editingKreaPromptItem ? "编辑自然语言提示词" : "新增自然语言提示词";
+  ui.kreaPromptItemText.value = editingKreaPromptItem?.text || "";
+  ui.kreaPromptItemDelete.hidden = !editingKreaPromptItem;
+  ui.kreaPromptItemDialog.showModal();
+  ui.kreaPromptItemText.focus({ preventScroll: true });
 }
-function parseKreaPromptText(text, format = "") {
-  const source = String(text || "").trim();
-  if (!source) return [];
-  if (format === "csv") return parseKreaCsv(source);
-  if (source.startsWith("[") || source.startsWith("{")) {
-    try {
-      const value = JSON.parse(source);
-      const values = Array.isArray(value) ? value : Array.isArray(value.items) ? value.items : Array.isArray(value.prompts) ? value.prompts : [];
-      return values.map((item) => typeof item === "string" ? item : item?.text || item?.prompt || "").map((item) => String(item).trim()).filter(Boolean);
-    } catch {
-      // 解析失败时按纯文本行导入。
+async function saveKreaPromptItem(event) {
+  event.preventDefault();
+  const text = ui.kreaPromptItemText.value.trim();
+  if (!text) return;
+  const previousId = editingKreaPromptItem?.id || "";
+  try {
+    const payload = await request("/api/prompt-pools/items", {
+      method: editingKreaPromptItem ? "PUT" : "POST",
+      body: JSON.stringify({ model_profile: "krea2", ...(previousId ? { id: previousId } : {}), text }),
+    });
+    const item = payload.item || payload;
+    if (Number.isFinite(Number(item.count))) kreaPoolTotalCount = Number(item.count);
+    const id = String(item.id || "");
+    if (previousId) kreaPromptPoolSelection = kreaPromptPoolSelection.filter((value) => value !== previousId);
+    if (id) kreaPromptPoolSelection = [...new Set([...kreaPromptPoolSelection, id])];
+    if (kreaPromptPoolSelection.length) ui.krea_prompt_pool_enabled.checked = true;
+    ui.kreaPromptItemDialog.close();
+    editingKreaPromptItem = null;
+    kreaSelectedViewItems = null;
+    await loadKreaPromptPool();
+    schedulePersist();
+    toast(previousId ? "提示词已更新并选中" : "提示词已新增并选中");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+async function deleteKreaPromptPoolSelection(ids = kreaPromptPoolSelection) {
+  const targets = [...new Set(ids.map(String))];
+  if (!targets.length) return;
+  const question = targets.length === 1 ? "删除选中的 1 条 Krea 2 提示词？" : `删除选中的 ${targets.length} 条 Krea 2 提示词？`;
+  if (!confirm(question)) return;
+  try {
+    let payload;
+    if (targets.length === 1) {
+      payload = await request(`/api/prompt-pools/items?model_profile=krea2&id=${encodeURIComponent(targets[0])}`, { method: "DELETE" });
+    } else {
+      payload = await request("/api/prompt-pools/items/delete", {
+        method: "POST",
+        body: JSON.stringify({ model_profile: "krea2", ids: targets }),
+      });
     }
+    if (Number.isFinite(Number(payload?.count))) kreaPoolTotalCount = Number(payload.count);
+    kreaPromptPoolSelection = kreaPromptPoolSelection.filter((id) => !targets.includes(id));
+    if (!kreaPromptPoolSelection.length) ui.krea_prompt_pool_enabled.checked = false;
+    if (editingKreaPromptItem && targets.includes(editingKreaPromptItem.id)) ui.kreaPromptItemDialog.close();
+    kreaSelectedViewItems = null;
+    await loadKreaPromptPool();
+    schedulePersist();
+    toast(`已删除 ${targets.length} 条提示词`);
+  } catch (error) {
+    toast(error.message);
   }
-  return source.replaceAll("\r", "").split("\n").map((line) => line.trim()).filter(Boolean);
 }
-async function importKreaPromptPool(mode) {
-  if (currentProfile() !== "krea2") return;
-  let text = ui.kreaPromptPoolText.value;
-  const file = ui.kreaPromptPoolFile.files?.[0];
-  if (file) text = await file.text();
-  const items = parseKreaPromptText(text, file?.name.toLowerCase().endsWith(".csv") ? "csv" : file?.name.toLowerCase().endsWith(".json") ? "json" : "");
-  if (!items.length) {
-    toast("请输入或选择至少一条自然语言提示词");
+function openKreaPromptImportDialog() {
+  kreaImportRequest += 1;
+  kreaImportPreview = null;
+  ui.kreaPromptPoolFile.value = "";
+  ui.kreaPromptPoolText.value = "";
+  ui.kreaPromptImportFormat.value = "auto";
+  ui.kreaPromptImportMode.value = "append";
+  ui.kreaPromptImportHint.textContent = "选择文件或粘贴内容后，先校验预览，再确认写入。";
+  ui.kreaPromptImportSummary.hidden = true;
+  ui.kreaPromptImportRows.replaceChildren();
+  ui.kreaPromptImportCommit.disabled = true;
+  ui.kreaPromptImportCommit.textContent = "确认追加";
+  ui.kreaPromptImportDialog.showModal();
+  ui.kreaPromptPoolText.focus({ preventScroll: true });
+}
+function resolveKreaImportFormat(content) {
+  const selected = ui.kreaPromptImportFormat.value;
+  if (selected !== "auto") return selected;
+  const text = String(content).replace(/^\uFEFF/, "").trim();
+  if (/^[\[{]/.test(text)) return "json";
+  const firstLine = text.split(/\r?\n/, 1)[0] || "";
+  if (/(^|,)\s*"?(?:text|prompt|提示词|自然语言)"?\s*(,|$)/i.test(firstLine)) return "csv";
+  return "text";
+}
+function invalidateKreaPromptImportPreview(message = "内容或格式已变化，请重新校验并预览。") {
+  kreaImportRequest += 1;
+  kreaImportPreview = null;
+  ui.kreaPromptImportSummary.hidden = true;
+  ui.kreaPromptImportRows.replaceChildren();
+  ui.kreaPromptImportCommit.disabled = true;
+  ui.kreaPromptImportCommit.textContent = ui.kreaPromptImportMode.value === "replace" ? "确认替换" : "确认追加";
+  ui.kreaPromptImportHint.textContent = message;
+}
+async function previewKreaPromptImport() {
+  const content = ui.kreaPromptPoolText.value;
+  if (!content.trim()) {
+    kreaImportPreview = null;
+    ui.kreaPromptImportCommit.disabled = true;
+    ui.kreaPromptImportHint.textContent = "请先选择文件或输入提示词内容。";
     return;
   }
+  const requestId = ++kreaImportRequest;
+  ui.kreaPromptImportCommit.disabled = true;
+  ui.kreaPromptImportHint.textContent = "正在校验导入内容…";
+  try {
+    const payload = await request("/api/prompt-pools/import/preview", {
+      method: "POST",
+      body: JSON.stringify({
+        model_profile: "krea2",
+        mode: ui.kreaPromptImportMode.value,
+        format: resolveKreaImportFormat(content),
+        content,
+      }),
+    });
+    if (requestId !== kreaImportRequest) return;
+    kreaImportPreview = {
+      ...payload,
+      source: content,
+      mode: ui.kreaPromptImportMode.value,
+      format: resolveKreaImportFormat(content),
+    };
+    renderKreaPromptImportPreview();
+  } catch (error) {
+    if (requestId !== kreaImportRequest) return;
+    kreaImportPreview = null;
+    ui.kreaPromptImportSummary.hidden = true;
+    ui.kreaPromptImportRows.replaceChildren();
+    ui.kreaPromptImportCommit.disabled = true;
+    ui.kreaPromptImportHint.textContent = `校验失败：${error.message}`;
+  }
+}
+function renderKreaPromptImportPreview() {
+  if (!kreaImportPreview) return;
+  const summary = kreaImportPreview.summary || {};
+  const items = Array.isArray(kreaImportPreview.items) ? kreaImportPreview.items : [];
+  const getNumber = (...keys) => {
+    for (const key of keys) if (Number.isFinite(Number(summary[key]))) return Number(summary[key]);
+    return null;
+  };
+  const duplicateCount = getNumber("duplicates", "duplicate", "duplicate_count", "duplicates_count", "repeated", "repeat_count");
+  const newCount = getNumber("new", "new_count", "added", "importable") ?? items.length;
+  const existingCount = getNumber("existingDuplicates", "existing_duplicates", "existing", "existing_count", "already_exists");
+  const inputCount = getNumber("input", "input_count", "total", "total_count") ?? items.length + (duplicateCount || 0);
+  const summaryParts = [
+    `${inputCount} 条输入`,
+    `${newCount} 条新增`,
+    ...(duplicateCount === null ? [] : [`${duplicateCount} 条输入重复`]),
+    ...(existingCount === null ? [] : [`${existingCount} 条与词池重复`]),
+  ];
+  ui.kreaPromptImportSummary.hidden = false;
+  ui.kreaPromptImportSummary.replaceChildren(...summaryParts.map((label) => {
+    const tag = document.createElement("span");
+    tag.textContent = label;
+    return tag;
+  }));
+  const rows = items.slice(0, 100).map((value, index) => {
+    const text = typeof value === "string" ? value : String(value?.text || value?.prompt || "");
+    const row = document.createElement("div");
+    row.className = "krea-import-row";
+    const ordinal = document.createElement("small");
+    ordinal.textContent = String(index + 1);
+    const prompt = document.createElement("span");
+    prompt.textContent = text;
+    row.append(ordinal, prompt);
+    return row;
+  });
+  if (items.length > 100) {
+    const more = document.createElement("div");
+    more.className = "krea-import-more";
+    more.textContent = `其余 ${items.length - 100} 条已校验，不在预览中展开。`;
+    rows.push(more);
+  }
+  ui.kreaPromptImportRows.replaceChildren(...rows);
+  const mode = kreaImportPreview.mode;
+  ui.kreaPromptImportHint.textContent = mode === "replace"
+    ? "预览通过后，确认将用这些待导入词条替换整个 Krea 2 词池。"
+    : "预览通过后，确认将待导入词条追加到 Krea 2 词池。重复项会按不区分大小写的规则去重。";
+  ui.kreaPromptImportCommit.disabled = items.length === 0;
+  ui.kreaPromptImportCommit.textContent = mode === "replace" ? `确认替换（${items.length} 项）` : `确认追加（${items.length} 项）`;
+}
+async function commitKreaPromptImport() {
+  if (!kreaImportPreview || kreaImportPreview.source !== ui.kreaPromptPoolText.value || kreaImportPreview.mode !== ui.kreaPromptImportMode.value || kreaImportPreview.format !== resolveKreaImportFormat(ui.kreaPromptPoolText.value)) {
+    await previewKreaPromptImport();
+    return;
+  }
+  const mode = kreaImportPreview.mode;
+  const items = Array.isArray(kreaImportPreview.items) ? kreaImportPreview.items : [];
+  if (!items.length) return;
+  ui.kreaPromptImportCommit.disabled = true;
   try {
     const payload = await request("/api/prompt-pools/import", {
       method: "POST",
-      body: JSON.stringify({ model_profile: "krea2", items, mode }),
+      body: JSON.stringify({ model_profile: "krea2", mode, items }),
     });
-    kreaPromptPool = { model_profile: "krea2", items: Array.isArray(payload.items) ? payload.items : [], count: Number(payload.count || payload.items?.length || 0) };
-    const allIds = new Set(kreaPromptPool.items.map((item) => String(item.id)));
-    kreaPromptPoolSelection = mode === "replace" ? [...allIds] : [...new Set([...kreaPromptPoolSelection, ...allIds])];
-    ui.krea_prompt_pool_enabled.checked = allIds.size > 0;
-    ui.kreaPromptPoolText.value = "";
-    ui.kreaPromptPoolFile.value = "";
-    renderKreaPromptPool();
+    if (Number.isFinite(Number(payload?.count))) kreaPoolTotalCount = Number(payload.count);
+    const importedIds = Array.isArray(payload.imported_ids)
+      ? payload.imported_ids.map(String)
+      : Array.isArray(payload.importedIds) ? payload.importedIds.map(String) : [];
+    kreaPromptPoolSelection = mode === "replace"
+      ? importedIds
+      : [...new Set([...kreaPromptPoolSelection, ...importedIds])];
+    ui.krea_prompt_pool_enabled.checked = kreaPromptPoolSelection.length > 0;
+    ui.kreaPromptImportDialog.close();
+    kreaImportPreview = null;
+    kreaSelectedViewItems = null;
+    await loadKreaPromptPool({ force: true });
     schedulePersist();
-    toast(mode === "replace" ? "Krea 2 词池已替换" : "Krea 2 词池已追加");
+    toast(mode === "replace" ? "Krea 2 词池已替换" : `Krea 2 词池已追加 ${importedIds.length} 项`);
   } catch (error) {
+    ui.kreaPromptImportCommit.disabled = false;
     toast(error.message);
   }
 }
@@ -3650,6 +4032,7 @@ function openDeleteGroupDialog(kind, group) {
   ui.deleteGroupError.hidden = true;
   ui.deleteGroupError.textContent = "";
   ui.confirmDeleteGroup.disabled = false;
+  ui.confirmDeleteGroup.dataset.storageWrite = favorite ? "" : "custom_prompts";
   ui.confirmDeleteGroup.textContent = "删除";
   ui.deleteGroupDialog.showModal();
 }
@@ -4020,7 +4403,7 @@ function resolveInventoryPath(selected, values) {
   const matches = values.filter((value) => String(value).replaceAll("\\", "/").split("/").pop().toLocaleLowerCase() === basename);
   return matches.length === 1 ? matches[0] : requested;
 }
-function populateModelSelect(select, values, selected) {
+function populateModelSelect(select, values, selected, missingReason = "当前分类不可用") {
   const groups = new Map();
   for (const raw of values) {
     const value = String(raw || "").replaceAll("\\", "/");
@@ -4038,13 +4421,28 @@ function populateModelSelect(select, values, selected) {
     options.push(optgroup);
   }
   if (selected && !values.includes(selected)) {
-    const missing = new Option(`当前缺失 · ${selected}`, selected);
+    const missing = new Option(`不可用 · ${selected} · ${missingReason}`, selected);
     missing.dataset.missing = "true";
+    missing.disabled = true;
+    missing.title = missingReason;
     options.unshift(missing);
   }
-  if (!options.length) options.push(new Option("没有归属当前档案的主模型", ""));
+  if (!options.length) options.push(new Option("没有识别为当前档案的主模型", ""));
   select.replaceChildren(...options);
   select.value = selected && [...select.options].some((option) => option.value === selected) ? selected : "";
+}
+function refreshCurrentModelSelection() {
+  const selected = ui.model_name.value || profileDrafts[currentProfile()]?.model_name || "";
+  const values = resourcesLoaded && resourceInventoryProfile === currentProfile() ? resources.models : [];
+  // Resolve legacy basenames against the complete inventory before filtering by profile.
+  // An incompatible exact path must never be replaced by a similarly named compatible file.
+  const allNames = resourcesLoaded && resourceInventoryProfile === currentProfile()
+    ? (resources.model_items || []).map((item) => item.name || item.filename).filter(Boolean) : [];
+  const exact = allNames.find((value) => normalizedPath(value) === normalizedPath(selected));
+  const matches = allNames.filter((value) => normalizedPath(value).split("/").pop() === normalizedPath(selected));
+  const resolved = exact || (!normalizedPath(selected).includes("/") && matches.length === 1 ? matches[0] : selected);
+  populateModelSelect(ui.model_name, values, resolved, modelSelectionIssue(resolved));
+  ui.model_name.disabled = values.length === 0;
 }
 function modelLabel(value) {
   const filename = String(value || "未选择模型")
@@ -4071,7 +4469,7 @@ function updateProfileResources() {
   if (boundSeed && resources.seedvr2_models?.includes(boundSeed) && !ui.seedvr2_model_name.value) ensureSelectValue(ui.seedvr2_model_name, boundSeed);
   ui.seedvr2_model_name.title = profile.seedvr2_model ? `档案默认：${profile.seedvr2_model}` : "请选择 SeedVR2 模型";
   ui.modelProfileHint.dataset.profileReady = String(!missing.length && available.model !== false);
-  ui.model_name.title = `${profileLabel(currentProfile())} 主模型`;
+  ui.model_name.title = modelSelectionIssue() || `${profileLabel(currentProfile())} 主模型`;
 }
 function profileOptionsFromResources() {
   const entries = profileEntries();
@@ -4081,7 +4479,7 @@ function profileOptionsFromResources() {
     { id: "krea2", label: "Krea 2" },
   ];
 }
-async function loadResources() {
+async function loadResources({ refresh = false } = {}) {
   const requestId = ++resourceRequest;
   const selectedProfile = currentProfile();
   const selectedSeed = ui.seedvr2_model_name.value || profileConfig(selectedProfile).seedvr2_model || "";
@@ -4089,7 +4487,10 @@ async function loadResources() {
   const selectedSampler = ui.sampler_name.value || profileDefaults(selectedProfile).sampler_name || defaults?.sampler_name || "";
   const selectedScheduler = ui.scheduler.value || profileDefaults(selectedProfile).scheduler || defaults?.scheduler || "";
   resourcesLoaded = false;
+  resourceInventoryProfile = selectedProfile;
   resourceError = "";
+  refreshCurrentModelSelection();
+  updateGenerationAvailability();
   ui.model_profile.disabled = true;
   ui.base_mode.disabled = false;
   ui.sampler_name.disabled = true;
@@ -4102,11 +4503,12 @@ async function loadResources() {
   ui.seedvr2_model_name.replaceChildren(new Option("跟随模型档案", ""));
   ui.seedvr2_vae_name.replaceChildren(new Option("跟随模型档案", ""));
   try {
-    const payload = await request(`/api/resources?model_profile=${encodeURIComponent(selectedProfile)}`);
+    const payload = await request(`/api/resources?model_profile=${encodeURIComponent(selectedProfile)}${refresh ? "&refresh=1" : ""}`);
     if (requestId !== resourceRequest || selectedProfile !== currentProfile()) return;
     const modelProfiles = payload.model_profiles || payload.profiles || {};
     resources = {
       models: Array.isArray(payload.models) ? payload.models : [],
+      model_items: Array.isArray(payload.model_items) ? payload.model_items : [],
       profile_models: payload.profile_models && typeof payload.profile_models === "object" ? payload.profile_models : {},
       model_assignments: payload.model_assignments || {},
       seedvr2_models: Array.isArray(payload.seedvr2_models) ? payload.seedvr2_models : [],
@@ -4128,8 +4530,6 @@ async function loadResources() {
     ensureSelectValue(ui.model_profile, selectedProfile);
     activeProfileId = currentProfile();
     const modelValues = resources.models.length ? resources.models : (resources.profile_models[selectedProfile] || []);
-    const selectedModel = resolveInventoryPath(profileDrafts[selectedProfile]?.model_name || ui.model_name.value || profileConfig(selectedProfile).model_name || "", modelValues);
-    populateModelSelect(ui.model_name, modelValues, selectedModel);
     populateResourceSelect(ui.sampler_name, resources.samplers, selectedSampler, "没有可用 Sampler");
     populateResourceSelect(ui.scheduler, resources.schedulers, selectedScheduler, "没有可用 Scheduler");
     const seedValues = resources.seedvr2_models;
@@ -4149,7 +4549,7 @@ async function loadResources() {
     for (const id of ["latent_second_scheduler", "seedvr2_scheduler", "face_scheduler"]) ui[id].disabled = resources.schedulers.length === 0;
   } catch (error) {
     if (requestId !== resourceRequest || selectedProfile !== currentProfile()) return;
-    resources = { models: [], profile_models: {}, model_assignments: {}, seedvr2_models: [], seedvr2_vaes: [], upscale_models: [], samplers: [], schedulers: [], model_profiles: {}, profiles: {}, nodes: {}, plugins: {} };
+    resources = { models: [], model_items: [], profile_models: {}, model_assignments: {}, seedvr2_models: [], seedvr2_vaes: [], upscale_models: [], samplers: [], schedulers: [], model_profiles: {}, profiles: {}, nodes: {}, plugins: {} };
     profileResources = {};
     resourceError = `模型资源读取失败：${error.message}`;
     ui.model_profile.disabled = false;
@@ -4163,6 +4563,7 @@ async function loadResources() {
   updateRepairControls();
 }
 function updateRepairControls() {
+  refreshCurrentModelSelection();
   const upscalers = {
     latent: ui.latent_upscale_enabled.checked,
     seedvr2: ui.seedvr2_enabled.checked,
@@ -4190,7 +4591,7 @@ function updateRepairControls() {
   const warnings = [];
   if (resourceError) warnings.push(resourceError);
   if (resourcesLoaded && profile.missing?.length) warnings.push(`${profileLabel(currentProfile())} 缺少资源：${profile.missing.join("、")}`);
-  if (resourcesLoaded && (!settings.model_name || !resources.models.includes(settings.model_name))) warnings.push(`${profileLabel(currentProfile())} 主模型不可用或未归属：${settings.model_name || "无可用模型"}`);
+  warnings.push(...generationClassificationIssues(settings));
   if (resourcesLoaded && upscalers.seedvr2 && settings.upscalers.seedvr2.model_name && resources.seedvr2_models.length && !resources.seedvr2_models.includes(settings.upscalers.seedvr2.model_name)) warnings.push(`SeedVR2 模型不可用：${settings.upscalers.seedvr2.model_name}`);
   if (resourcesLoaded && upscalers.face && settings.upscalers.face_refine.upscaler_model && !resources.upscale_models.includes(settings.upscalers.face_refine.upscaler_model)) warnings.push(`脸部放大模型不可用：${settings.upscalers.face_refine.upscaler_model}`);
   const advertisedAvailability = (inventory, names) => {
@@ -4215,18 +4616,31 @@ function updateRepairControls() {
   if (resourcesLoaded && !resources.schedulers.length) warnings.push("ComfyUI 当前没有可用 Scheduler");
   if (resourcesLoaded && !resources.samplers.includes(settings.sampler_name)) warnings.push(`Sampler 不可用：${settings.sampler_name}`);
   if (resourcesLoaded && !resources.schedulers.includes(settings.scheduler)) warnings.push(`Scheduler 不可用：${settings.scheduler}`);
-  const missingLoras = settings.loras.filter((item) => !loraItem(item.filename)).map((item) => item.filename);
-  if (loraInventoryLoaded && missingLoras.length) warnings.push(`LoRA 不可用：${missingLoras.join("、")}`);
   ui.resourceWarning.hidden = warnings.length === 0;
   ui.resourceWarning.textContent = warnings.join("；");
   updateProfileResources();
+  updateGenerationAvailability();
 }
 
 let ownershipItems = [];
+let ownershipRequest = 0;
+function safeLoraManagerUrl(value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" || !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) || url.username || url.password) return "";
+    return url.href;
+  } catch { return ""; }
+}
+function setLoraManagerUrl(value) {
+  const url = safeLoraManagerUrl(value);
+  if (!ui.openLoraManager || !url) return;
+  ui.openLoraManager.href = url;
+  ui.openLoraManager.hidden = false;
+}
 function renderResourceOwnership() {
   const query = ui.ownershipSearch.value.trim().toLocaleLowerCase();
-  const filtered = ownershipItems.filter((item) => `${item.name || ""} ${item.folder || ""} ${item.basename || ""}`.toLocaleLowerCase().includes(query));
-  ui.ownershipSummary.textContent = `${ownershipItems.length} 项资源 · ${ownershipItems.filter((item) => !item.model_profile).length} 项未归属`;
+  const filtered = ownershipItems.filter((item) => `${item.name || ""} ${item.folder || ""} ${item.basename || ""} ${item.base_model || ""} ${item.classification_reason || ""}`.toLocaleLowerCase().includes(query));
+  ui.ownershipSummary.textContent = `${ownershipItems.length} 项资源 · ${ownershipItems.filter((item) => !item.model_profile).length} 项未识别或不支持 · 分类来自 LoRA Manager`;
   ui.ownershipList.replaceChildren(...filtered.map((item) => {
     const row = document.createElement("article");
     row.className = "ownership-row";
@@ -4235,54 +4649,60 @@ function renderResourceOwnership() {
     const name = document.createElement("strong");
     name.textContent = item.basename || item.name;
     const folder = document.createElement("small");
-    folder.textContent = item.folder || item.name;
+    folder.textContent = item.name;
     folder.title = item.name;
-    copy.append(name, folder);
-    const select = document.createElement("select");
-    select.setAttribute("aria-label", `${item.name} 档案归属`);
-    select.append(new Option("未归属", ""), new Option("Anima", "anima"), new Option("Krea 2", "krea2"));
-    select.value = item.model_profile || "";
-    select.addEventListener("change", () => updateResourceOwnership(item, select.value || null, select));
-    row.append(copy, select);
+    const reason = document.createElement("small");
+    reason.className = "ownership-reason";
+    reason.textContent = item.classification_reason || (item.model_profile ? "已识别" : "请在 LoRA Manager 中补全 base_model");
+    copy.append(name, folder, reason);
+    const metadata = document.createElement("div");
+    metadata.className = "ownership-metadata";
+    const baseModel = document.createElement("span");
+    baseModel.textContent = `base_model：${item.base_model || "未提供"}`;
+    const mode = document.createElement("strong");
+    mode.textContent = `模式：${item.model_profile ? profileLabel(item.model_profile) : "不可用"}`;
+    metadata.append(baseModel, mode);
+    row.append(copy, metadata);
     return row;
   }));
   if (!filtered.length) ui.ownershipList.innerHTML = '<div class="inline-empty">没有匹配的资源。</div>';
 }
-async function loadResourceOwnership() {
+async function loadResourceOwnership({ refresh = false } = {}) {
   const kind = ui.ownershipKind.value;
+  const requestId = ++ownershipRequest;
+  ownershipItems = [];
+  ui.openLoraManager.hidden = true;
+  ui.openLoraManager.removeAttribute("href");
+  setLoraManagerUrl(`${String(config.comfy_url || "").replace(/\/+$/, "")}/${kind === "models" ? "checkpoints" : "loras"}`);
   ui.ownershipError.hidden = true;
   ui.ownershipSummary.textContent = "正在读取资源清单…";
   ui.ownershipList.replaceChildren();
   try {
-    const payload = await request(`/api/resource-ownership?kind=${encodeURIComponent(kind)}`);
+    const payload = await request(`/api/resource-ownership?kind=${encodeURIComponent(kind)}${refresh ? "&refresh=1" : ""}`);
+    if (requestId !== ownershipRequest || kind !== ui.ownershipKind.value) return;
     ownershipItems = Array.isArray(payload.items) ? payload.items : [];
+    setLoraManagerUrl(payload.manager_url);
     renderResourceOwnership();
   } catch (error) {
+    if (requestId !== ownershipRequest || kind !== ui.ownershipKind.value) return;
     ownershipItems = [];
     ui.ownershipSummary.textContent = "资源清单读取失败";
     ui.ownershipError.textContent = error.message;
     ui.ownershipError.hidden = false;
   }
 }
-async function updateResourceOwnership(item, modelProfile, select) {
-  select.disabled = true;
-  ui.ownershipError.hidden = true;
+async function refreshResourceClassification() {
+  ui.refreshResourceClassification.disabled = true;
   try {
-    const updated = await request("/api/resource-ownership", {
-      method: "PUT",
-      body: JSON.stringify({ kind: ui.ownershipKind.value, name: item.name, model_profile: modelProfile }),
-    });
-    ownershipItems = ownershipItems.map((value) => value.name === item.name ? updated : value);
-    renderResourceOwnership();
-    if (ui.ownershipKind.value === "models") await loadResources();
-    else await loadLoraInventory();
-    toast(`${item.basename || item.name} 已归入 ${modelProfile || "未归属"}`);
-  } catch (error) {
-    select.value = item.model_profile || "";
-    ui.ownershipError.textContent = error.message;
-    ui.ownershipError.hidden = false;
+    await Promise.allSettled([
+      loadResourceOwnership({ refresh: true }),
+      loadResources({ refresh: true }),
+      loadLoraInventory({ refresh: true }),
+    ]);
+    regenerationOptions = null;
+    if (selectedRecord && (!ui.replayDrawer.hidden || !ui.variantDrawer.hidden)) await loadRegenerationOptions();
   } finally {
-    select.disabled = false;
+    ui.refreshResourceClassification.disabled = false;
   }
 }
 
@@ -4689,6 +5109,12 @@ async function removeArtistFavorite(name) {
 async function submitBatch(settings, seeds = null) {
   // 统一的批次提交入口:主表单、复现、变体共用;in-flight 守卫防双击重复入队。
   if (submitInFlight) return false;
+  const classificationIssues = generationClassificationIssues(settings);
+  if (classificationIssues.length) {
+    updateGenerationAvailability();
+    toast(classificationIssues.join("；"));
+    return false;
+  }
   submitInFlight = true;
   ui.startButton.disabled = true;
   try {
@@ -4707,7 +5133,7 @@ async function submitBatch(settings, seeds = null) {
     try {
       renderBatchPayload(await request("/api/batches/current"));
     } catch {
-      ui.startButton.disabled = !ui.connection.classList.contains("online");
+      updateGenerationAvailability();
     }
   }
 }
@@ -5073,21 +5499,60 @@ ui.closeResourceOwnership.addEventListener("click", () => ui.resourceOwnershipDi
 ui.closeResourceOwnershipFooter.addEventListener("click", () => ui.resourceOwnershipDialog.close());
 ui.ownershipKind.addEventListener("change", loadResourceOwnership);
 ui.ownershipSearch.addEventListener("input", renderResourceOwnership);
+ui.refreshResourceClassification.addEventListener("click", refreshResourceClassification);
 ui.openKreaPromptPool.addEventListener("click", openKreaPromptPool);
 ui.closeKreaPool.addEventListener("click", closeKreaPromptPool);
 ui.confirmKreaPool.addEventListener("click", closeKreaPromptPool);
 ui.kreaPoolBackdrop.addEventListener("click", closeKreaPromptPool);
-ui.kreaPoolSearch.addEventListener("input", renderKreaPromptPool);
-ui.kreaPoolSelectedOnly.addEventListener("change", renderKreaPromptPool);
-ui.selectAllKreaPool.addEventListener("click", () => {
-  kreaPromptPoolSelection = [...new Set(kreaPromptPool.items.map((item) => String(item.id)))];
-  if (kreaPromptPoolSelection.length) ui.krea_prompt_pool_enabled.checked = true;
+ui.kreaPoolSearch.addEventListener("input", () => {
+  clearTimeout(kreaPoolSearchTimer);
+  kreaPoolSearchTimer = setTimeout(() => {
+    kreaPoolPage = 1;
+    kreaSelectedViewItems = null;
+    void loadKreaPromptPool({ page: 1, force: true });
+  }, 220);
+});
+ui.kreaPoolSelectedOnly.addEventListener("change", () => {
+  kreaPoolPage = 1;
+  kreaSelectedViewItems = null;
+  void loadKreaPromptPool({ page: 1, force: true });
+});
+ui.kreaPoolSelectPage.addEventListener("click", () => {
+  const pageIds = kreaPromptPool.items.map((item) => String(item.id));
+  kreaPromptPoolSelection = [...new Set([...kreaPromptPoolSelection, ...pageIds])];
+  if (pageIds.length) ui.krea_prompt_pool_enabled.checked = true;
   renderKreaPromptPool();
   schedulePersist();
+});
+ui.kreaPoolSelectAll.addEventListener("click", async () => {
+  const query = ui.kreaPoolSearch.value.trim();
+  const previous = ui.kreaPoolSelectAll.disabled;
+  ui.kreaPoolSelectAll.disabled = true;
+  try {
+    const result = await fetchAllKreaPromptPoolItems(query);
+    const selected = new Set(kreaPromptPoolSelection);
+    const matchingItems = ui.kreaPoolSelectedOnly.checked
+      ? result.items.filter((item) => selected.has(String(item.id)))
+      : result.items;
+    const ids = matchingItems.map((item) => String(item.id));
+    kreaPromptPoolSelection = [...new Set([...kreaPromptPoolSelection, ...ids])];
+    if (ids.length) ui.krea_prompt_pool_enabled.checked = true;
+    kreaSelectedViewItems = null;
+    await loadKreaPromptPool({ page: kreaPoolPage, force: true });
+    schedulePersist();
+    toast(ids.length ? `已选中当前筛选结果 ${ids.length} 项` : "当前筛选结果为空");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    ui.kreaPoolSelectAll.disabled = previous;
+  }
 });
 ui.clearKreaPoolSelection.addEventListener("click", () => {
   kreaPromptPoolSelection = [];
   ui.krea_prompt_pool_enabled.checked = false;
+  if (ui.kreaPoolSelectedOnly.checked) {
+    applyKreaSelectedViewPage();
+  }
   renderKreaPromptPool();
   schedulePersist();
 });
@@ -5095,12 +5560,49 @@ ui.krea_prompt_pool_enabled.addEventListener("change", () => {
   if (currentProfile() !== "krea2") ui.krea_prompt_pool_enabled.checked = false;
   schedulePersist();
 });
-ui.kreaPromptPoolAppend.addEventListener("click", () => importKreaPromptPool("append"));
-ui.kreaPromptPoolReplace.addEventListener("click", () => importKreaPromptPool("replace"));
 ui.kreaPromptPoolFile.addEventListener("change", async () => {
   const file = ui.kreaPromptPoolFile.files?.[0];
   if (!file) return;
   ui.kreaPromptPoolText.value = await file.text();
+  const name = file.name.toLowerCase();
+  ui.kreaPromptImportFormat.value = name.endsWith(".csv") ? "csv" : name.endsWith(".json") ? "json" : "auto";
+  await previewKreaPromptImport();
+});
+ui.kreaPoolPrev.addEventListener("click", () => {
+  if (kreaPoolPage <= 1) return;
+  kreaPoolPage -= 1;
+  if (ui.kreaPoolSelectedOnly.checked) applyKreaSelectedViewPage();
+  else void loadKreaPromptPool({ page: kreaPoolPage });
+  renderKreaPromptPool();
+});
+ui.kreaPoolNext.addEventListener("click", () => {
+  if (kreaPoolPage >= kreaPoolPages) return;
+  kreaPoolPage += 1;
+  if (ui.kreaPoolSelectedOnly.checked) applyKreaSelectedViewPage();
+  else void loadKreaPromptPool({ page: kreaPoolPage });
+  renderKreaPromptPool();
+});
+ui.kreaPoolDeleteSelection.addEventListener("click", () => deleteKreaPromptPoolSelection());
+ui.kreaPoolAddItem.addEventListener("click", () => openKreaPromptItemDialog());
+ui.kreaPoolOpenImport.addEventListener("click", openKreaPromptImportDialog);
+ui.kreaPromptItemForm.addEventListener("submit", saveKreaPromptItem);
+ui.kreaPromptItemClose.addEventListener("click", () => ui.kreaPromptItemDialog.close());
+ui.kreaPromptItemCancel.addEventListener("click", () => ui.kreaPromptItemDialog.close());
+ui.kreaPromptItemDelete.addEventListener("click", () => {
+  if (editingKreaPromptItem) void deleteKreaPromptPoolSelection([editingKreaPromptItem.id]);
+});
+ui.kreaPromptImportClose.addEventListener("click", () => ui.kreaPromptImportDialog.close());
+ui.kreaPromptImportCancel.addEventListener("click", () => ui.kreaPromptImportDialog.close());
+ui.kreaPromptImportPreviewButton.addEventListener("click", previewKreaPromptImport);
+ui.kreaPromptImportCommit.addEventListener("click", commitKreaPromptImport);
+ui.kreaPromptPoolText.addEventListener("input", () => {
+  invalidateKreaPromptImportPreview("内容已变化，请重新校验并预览。");
+});
+ui.kreaPromptImportMode.addEventListener("change", () => {
+  invalidateKreaPromptImportPreview("导入方式已变化，请重新校验并预览。");
+});
+ui.kreaPromptImportFormat.addEventListener("change", () => {
+  invalidateKreaPromptImportPreview("导入格式已变化，请重新校验并预览。");
 });
 for (const control of [
   ui.latent_second_sampler_enabled,
@@ -5212,6 +5714,7 @@ async function initialize() {
     const payload = await request("/api/config");
     config = payload;
     defaults = payload.defaults;
+    renderStorageStatus();
     // 启动期数据文件恢复等服务端警告(如坏文件已备份重建)逐条提示。
     for (const warning of payload.warnings || []) toast(warning);
     loadStoredView();

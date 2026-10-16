@@ -237,7 +237,7 @@ internal sealed class LauncherState : IDisposable
         var nodes = await Inventory.Nodes(Config.ComfyRoot, Program.Runtime, Commands.Find("git.exe"), ct);
         var loras = await Task.Run(() => Inventory.Loras(probe), ct);
         AppendLog($"本地 LoRA：{loras.Length} 个，仅检测；请在工作台选择使用。");
-        foreach (var node in nodes) AppendLog($"节点 {node.Name}: {node.State} {node.Commit}");
+        foreach (var node in nodes) AppendLog($"节点 {node.Name}: {node.State} {node.Commit} · {node.Path}");
         Scanned?.Invoke(scan);
         Save();
         Reloaded();

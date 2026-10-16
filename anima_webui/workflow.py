@@ -233,7 +233,6 @@ REQUIRED_API_NODES: dict[int, str] = {
     HIRES_SCALE_ID: "高清修复缩放",
     HIRES_MODEL_ID: "高清修复模型加载",
     HIRES_UPSCALE_ID: "高清修复放大",
-    COMPOSER_ID: "Anima 提示词合成器",
 }
 _DETAILER_LABELS = {"hand": "手部", "nsfw": "NSFW", "face": "面部", "eyes": "眼睛"}
 REQUIRED_UI_NODES: dict[int, str] = dict(REQUIRED_API_NODES)
@@ -1083,52 +1082,6 @@ def validate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]
     return settings
 
 
-def _api_composer() -> dict[str, Any]:
-    return {
-        "inputs": {
-            "enable_artist": False,
-            "enable_character": True,
-            "enable_clothing": True,
-            "enable_background": True,
-            "enable_pose": True,
-            "character_detail": "trigger_tags",
-            "seed": -1,
-            "artist_count": 0,
-            "preview_collapsed": False,
-            "resolved_prompt": "",
-            "character_count": 1,
-            "clothing_count": 1,
-            "pose_count": 1,
-            "background_count": 1,
-            "extra_prompt": "",
-        },
-        "class_type": "AnimaPromptComposer",
-        "_meta": {"title": "Anima Prompt Random Draw"},
-    }
-
-
-def _visual_composer(link_id: int) -> dict[str, Any]:
-    return {
-        "id": COMPOSER_ID,
-        "type": "AnimaPromptComposer",
-        "pos": [1035, 95],
-        "size": [420, 430],
-        "flags": {},
-        "order": 25,
-        "mode": 0,
-        "inputs": [],
-        "outputs": [{"name": "text", "type": "STRING", "slot_index": 0, "links": [link_id]}],
-        "properties": {
-            "Node name for S&R": "AnimaPromptComposer",
-            "cnr_id": "Comfyui-Anima-Tools",
-        },
-        "widgets_values": [False, True, True, True, True, "trigger_tags", -1, 0, False, "", 1, 1, 1, 1, ""],
-        "title": "随机角色 / 服装 / 姿势 / 背景",
-        "color": "#253b36",
-        "bgcolor": "#35534b",
-    }
-
-
 def _remove_visual_nodes(workflow: dict[str, Any]) -> set[int]:
     workflow["nodes"] = [node for node in workflow["nodes"] if node.get("id") not in REMOVED_NODE_IDS]
     removed_links = {
@@ -1269,6 +1222,72 @@ def _prepare_hires_nodes(api: dict[str, Any], ui: dict[str, Any]) -> None:
     ui["last_link_id"] = max(int(ui.get("last_link_id", 0)), scale_link)
 
 
+def _set_native_positive(api: dict[str, Any], ui: dict[str, Any], text: str) -> None:
+    """Remove the plugin's queue-time random resolver from both graph forms."""
+    positive = api[str(POSITIVE_ID)]
+    positive["class_type"] = "CLIPTextEncode"
+    positive["inputs"] = {"clip": positive["inputs"]["clip"], "text": text}
+    api.pop(str(COMPOSER_ID), None)
+    node = _visual_node(ui, POSITIVE_ID)
+    clip_link = next(item.get("link") for item in node["inputs"] if item["name"] == "clip")
+    removed = {
+        link[0] for link in ui.get("links", [])
+        if COMPOSER_ID in (link[1], link[3])
+        or (link[3] == POSITIVE_ID and link[0] != clip_link)
+    }
+    ui["links"] = [link for link in ui.get("links", []) if link[0] not in removed]
+    ui["nodes"] = [item for item in ui["nodes"] if item["id"] != COMPOSER_ID]
+    for item in ui["nodes"]:
+        for value in item.get("inputs", []):
+            if value.get("link") in removed:
+                value["link"] = None
+        for output in item.get("outputs", []):
+            if isinstance(output.get("links"), list):
+                output["links"] = [link for link in output["links"] if link not in removed] or None
+    node.update({
+        "type": "CLIPTextEncode",
+        "title": "正向提示词",
+        "inputs": [
+            {"name": "clip", "type": "CLIP", "link": clip_link},
+            {"name": "text", "type": "STRING", "widget": {"name": "text"}, "link": None},
+        ],
+        "outputs": [{"name": "CONDITIONING", "type": "CONDITIONING", "slot_index": 0,
+                     "links": node["outputs"][0].get("links")}],
+        "widgets_values": [text],
+        "properties": {"Node name for S&R": "CLIPTextEncode", "cnr_id": "comfy-core"},
+    })
+
+
+def _legacy_positive_prompt(settings: dict[str, Any], resolved: str, full: str) -> str:
+    if full.strip():
+        return full
+    if not resolved.strip() and any(settings.get(f"random_{section}") for section in PROMPT_SECTIONS):
+        raise WorkflowError("随机提示词尚未解析，无法提交生成")
+    values = [settings["quality_prompt"], settings["manual_artist"]]
+    for section in PROMPT_SECTIONS:
+        if not settings.get(f"random_{section}"):
+            values.append(settings.get(f"fixed_{section}", ""))
+    if resolved.strip():
+        values.append(resolved)
+    else:
+        for count, singular, plural in (
+            (settings.get("female_count", 0), "1girl", "girls"),
+            (settings.get("male_count", 0), "1boy", "boys"),
+        ):
+            if count:
+                values.append(singular if count == 1 else f"{count}{plural}")
+    values.append(settings.get("extra_prompt", ""))
+    parts: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for part in str(value).replace("\n", ",").replace("\r", ",").split(","):
+            part = part.replace("_raw_:", "", 1).strip()
+            if part and part.casefold() not in seen:
+                seen.add(part.casefold())
+                parts.append(part)
+    return ", ".join(parts)
+
+
 def prepare_templates(
     api_source: dict[str, Any], ui_source: dict[str, Any]
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1278,64 +1297,10 @@ def prepare_templates(
     for node_id in ("3", "4"):
         api.pop(node_id, None)
     _prepare_hires_nodes(api, ui)
-    api[str(COMPOSER_ID)] = _api_composer()
-
-    positive = api[str(POSITIVE_ID)]
-    positive_clip = positive["inputs"]["clip"]
-    positive["class_type"] = "AnimaPromptPlusClipEncode"
-    positive["inputs"] = {
-        "clip": positive_clip,
-        "quality_prompt": DEFAULT_QUALITY,
-        "artist_tags": "",
-        "character_tags": "",
-        "clothing_tags": "",
-        "pose_tags": "",
-        "background_tags": "",
-        "extra_prompt": [str(COMPOSER_ID), 0],
-        "separator": ", ",
-    }
-    positive.setdefault("_meta", {})["title"] = "Anima Positive Prompt"
-
+    _remove_visual_nodes(ui)
+    _set_native_positive(api, ui, DEFAULT_QUALITY)
     negative = api[str(NEGATIVE_ID)]
     negative["inputs"] = {"text": DEFAULT_NEGATIVE, "clip": negative["inputs"]["clip"]}
-
-    _remove_visual_nodes(ui)
-    next_link_id = max((int(link[0]) for link in ui.get("links", [])), default=0) + 1
-    ui["nodes"].append(_visual_composer(next_link_id))
-
-    positive_ui = _visual_node(ui, POSITIVE_ID)
-    clip_link = next(item["link"] for item in positive_ui["inputs"] if item["name"] == "clip")
-    conditioning_links = positive_ui["outputs"][0].get("links")
-    positive_ui.update(
-        {
-            "type": "AnimaPromptPlusClipEncode",
-            "pos": [1485, 75],
-            "size": [430, 455],
-            "title": "Anima 正面提示词",
-            "inputs": [
-                {"name": "clip", "type": "CLIP", "link": clip_link},
-                {"name": "quality_prompt", "type": "STRING", "widget": {"name": "quality_prompt"}, "link": None},
-                {"name": "artist_tags", "type": "STRING", "widget": {"name": "artist_tags"}, "link": None},
-                {"name": "character_tags", "type": "STRING", "widget": {"name": "character_tags"}, "link": None},
-                {"name": "clothing_tags", "type": "STRING", "widget": {"name": "clothing_tags"}, "link": None},
-                {"name": "pose_tags", "type": "STRING", "widget": {"name": "pose_tags"}, "link": None},
-                {"name": "background_tags", "type": "STRING", "widget": {"name": "background_tags"}, "link": None},
-                {"name": "extra_prompt", "type": "STRING", "widget": {"name": "extra_prompt"}, "link": next_link_id},
-                {"name": "separator", "type": "STRING", "widget": {"name": "separator"}, "link": None},
-            ],
-            "outputs": [
-                {"name": "positive", "type": "CONDITIONING", "slot_index": 0, "links": conditioning_links},
-                {"name": "text", "type": "STRING", "slot_index": 1, "links": None},
-            ],
-            "widgets_values": [DEFAULT_QUALITY, "", "", "", "", "", "", "", ", "],
-            "properties": {
-                "Node name for S&R": "AnimaPromptPlusClipEncode",
-                "cnr_id": "Comfyui-Anima-Tools",
-            },
-            "color": "#253b36",
-            "bgcolor": "#35534b",
-        }
-    )
 
     negative_ui = _visual_node(ui, NEGATIVE_ID)
     negative_clip_link = next(item["link"] for item in negative_ui["inputs"] if item["name"] == "clip")
@@ -1347,9 +1312,6 @@ def prepare_templates(
     ]
     negative_ui["widgets_values"] = [DEFAULT_NEGATIVE]
 
-    ui["links"].append([next_link_id, COMPOSER_ID, 0, POSITIVE_ID, 7, "STRING"])
-    ui["last_node_id"] = max(int(ui.get("last_node_id", 0)), COMPOSER_ID)
-    ui["last_link_id"] = max(int(ui.get("last_link_id", 0)), next_link_id)
     return api, ui
 
 
@@ -1636,6 +1598,8 @@ def _v2_prompt(settings: dict[str, Any], resolved_prompt: str, resolved_prompt_f
         return resolved_prompt_full
     if resolved_prompt.strip():
         return resolved_prompt
+    if any(settings.get(f"random_{section}") for section in PROMPT_SECTIONS):
+        raise WorkflowError("随机提示词尚未解析，无法提交生成")
     parts: list[str] = []
     for key in ("quality_prompt", "manual_artist"):
         value = str(settings.get(key) or "").strip()
@@ -1671,122 +1635,6 @@ def _v2_set_sampler(api: dict[str, Any], node_id: str, settings: dict[str, Any],
             inputs[name] = value
     if "denoise" in inputs:
         inputs["denoise"] = 1.0
-
-
-def _v2_add_legacy_compatibility_nodes(
-    api: dict[str, Any],
-    settings: dict[str, Any],
-    *,
-    sample_seed: int,
-    prompt_seed: int,
-    resolved_prompt: str,
-    resolved_prompt_full: str,
-    frozen_positive_prompt: str,
-    frozen_negative_prompt: str,
-) -> None:
-    """Expose a small detached v1 readback view for embedded clients.
-
-    The browser's v2 payload never contains these keys.  They are only added
-    when a caller supplied one of the deprecated v1 controls (the in-memory
-    ``DEFAULT_SETTINGS`` keeps those aliases for old integrations).  The
-    nodes are disconnected from the v2 output graph and use current node
-    classes, so they do not re-enable CFGZeroStar, ADetailer, or the removed
-    pixel-upscale chain.  Existing history/PNG readers can therefore inspect
-    the familiar seed and prompt fields while all real execution follows the
-    v2 graph.
-    """
-
-    if not any(key in settings for key in _LEGACY_SETTING_KEYS):
-        return
-
-    # Keep the legacy readback node aligned with the historical composer-only
-    # value.  The v2 graph itself still receives ``resolved_prompt_full`` so
-    # quality and fixed tags are preserved in the actual conditioning path.
-    positive = frozen_positive_prompt or resolved_prompt or resolved_prompt_full
-    negative = frozen_negative_prompt or settings["negative_prompt"]
-    api["60"] = {
-        "inputs": {"seed": prompt_seed, "resolved_prompt": positive},
-        "class_type": "AnimaPromptComposer",
-        "_meta": {"title": "Legacy prompt readback"},
-    }
-    api["42"] = {
-        "inputs": {
-            "clip": [V2_CLIP_ID, 0],
-            "quality_prompt": "" if frozen_positive_prompt else settings["quality_prompt"],
-            "artist_tags": "",
-            "character_tags": "",
-            "clothing_tags": "",
-            "pose_tags": "",
-            "background_tags": "",
-            "extra_prompt": ["60", 0],
-            "separator": ", ",
-        },
-        "class_type": "AnimaPromptPlusClipEncode",
-        "_meta": {"title": "Legacy prompt readback"},
-    }
-    api["45"] = {
-        "inputs": {"text": negative, "clip": [V2_CLIP_ID, 0]},
-        "class_type": "CLIPTextEncode",
-        "_meta": {"title": "Legacy negative prompt readback"},
-    }
-    api["37"] = {
-        "inputs": {"seed": sample_seed},
-        "class_type": "PrimitiveInt",
-        "_meta": {"title": "Legacy seed readback"},
-    }
-
-    second = settings.get("second_sampler") or {}
-    cfg_zero_star = bool(settings.get("cfg_zero_star"))
-    model_ref: list[Any] = ["49", 0] if cfg_zero_star else [V2_UNET_ID, 0]
-    if cfg_zero_star:
-        api["49"] = {
-            "inputs": {"model": [V2_UNET_ID, 0]},
-            "class_type": "ModelPassThrough",
-            "_meta": {"title": "Legacy model readback"},
-        }
-    api["5"] = {
-        "inputs": {
-            "seed": ["37", 0],
-            "steps": settings["steps"],
-            "cfg": settings["cfg"],
-            "sampler_name": settings["sampler_name"],
-            "scheduler": settings["scheduler"],
-            "denoise": 1.0,
-            "model": model_ref,
-            "positive": ["42", 0],
-            "negative": ["45", 0],
-        },
-        "class_type": "KSampler",
-        "_meta": {"title": "Legacy sampler readback"},
-    }
-    if second.get("enabled"):
-        api["25"] = {
-            "inputs": {
-                "seed": ["37", 0],
-                "steps": second["steps"],
-                "cfg": second["cfg"],
-                "sampler_name": second["sampler_name"],
-                "scheduler": second["scheduler"],
-                "denoise": second["denoise"],
-                "model": model_ref,
-                "positive": ["42", 0],
-                "negative": ["45", 0],
-                "latent_image": ["5", 0],
-            },
-            "class_type": "KSampler",
-            "_meta": {"title": "Legacy second sampler readback"},
-        }
-        api["48"] = {
-            "inputs": {"samples": ["25", 0]},
-            "class_type": "ModelPassThrough",
-            "_meta": {"title": "Legacy latent readback"},
-        }
-    else:
-        api["48"] = {
-            "inputs": {"samples": ["5", 0]},
-            "class_type": "ModelPassThrough",
-            "_meta": {"title": "Legacy latent readback"},
-        }
 
 
 def _render_v2_workflows(
@@ -2321,37 +2169,10 @@ def render_workflows(
     ]
     frozen_positive_prompt = str(frozen_positive_prompt or "")
     frozen_negative_prompt = str(frozen_negative_prompt or "")
-    composer_inputs = api[str(COMPOSER_ID)]["inputs"]
-    composer_inputs.update(
-        {
-            "enable_artist": False,
-            "enable_character": settings["random_character"],
-            "enable_clothing": settings["random_clothing"],
-            "enable_background": settings["random_background"],
-            "enable_pose": settings["random_pose"],
-            "character_detail": settings["character_detail"],
-            "seed": prompt_seed,
-            "artist_count": 0,
-            "preview_collapsed": False,
-            "resolved_prompt": frozen_positive_prompt or resolved_prompt,
-            "character_count": settings["random_character_count"],
-            "clothing_count": settings["random_clothing_count"],
-            "pose_count": settings["random_pose_count"],
-            "background_count": settings["random_background_count"],
-            "extra_prompt": ""
-            if frozen_positive_prompt or resolved_prompt
-            else settings["extra_prompt"],
-        }
+    positive_text = frozen_positive_prompt or _legacy_positive_prompt(
+        settings, resolved_prompt, resolved_prompt_full
     )
-    positive = api[str(POSITIVE_ID)]["inputs"]
-    injected_full_prompt = frozen_positive_prompt
-    positive["quality_prompt"] = "" if injected_full_prompt else settings["quality_prompt"]
-    positive["artist_tags"] = "" if injected_full_prompt else settings["manual_artist"]
-    positive["character_tags"] = "" if injected_full_prompt or settings["random_character"] else settings["fixed_character"]
-    positive["clothing_tags"] = "" if injected_full_prompt or settings["random_clothing"] else settings["fixed_clothing"]
-    positive["pose_tags"] = "" if injected_full_prompt or settings["random_pose"] else settings["fixed_pose"]
-    positive["background_tags"] = "" if injected_full_prompt or settings["random_background"] else settings["fixed_background"]
-    positive["extra_prompt"] = [str(COMPOSER_ID), 0]
+    _set_native_positive(api, ui, positive_text)
     api[str(NEGATIVE_ID)]["inputs"]["text"] = frozen_negative_prompt or settings["negative_prompt"]
     api["23"]["inputs"]["value"] = settings["width"]
     api["31"]["inputs"]["value"] = settings["height"]
@@ -2392,36 +2213,6 @@ def render_workflows(
     api["12"]["inputs"]["images"] = current_image
     _set_ui_mode(ui, 52, False)
 
-    _set_ui_widget(
-        ui,
-        COMPOSER_ID,
-        [
-            False,
-            settings["random_character"],
-            settings["random_clothing"],
-            settings["random_background"],
-            settings["random_pose"],
-            settings["character_detail"],
-            prompt_seed,
-            0,
-            False,
-            frozen_positive_prompt or resolved_prompt,
-            settings["random_character_count"],
-            settings["random_clothing_count"],
-            settings["random_pose_count"],
-            settings["random_background_count"],
-            ""
-            if frozen_positive_prompt or resolved_prompt
-            else settings["extra_prompt"],
-        ],
-    )
-    _set_ui_widget(ui, POSITIVE_ID, positive["quality_prompt"], 0)
-    _set_ui_widget(ui, POSITIVE_ID, positive["artist_tags"], 1)
-    _set_ui_widget(ui, POSITIVE_ID, positive["character_tags"], 2)
-    _set_ui_widget(ui, POSITIVE_ID, positive["clothing_tags"], 3)
-    _set_ui_widget(ui, POSITIVE_ID, positive["pose_tags"], 4)
-    _set_ui_widget(ui, POSITIVE_ID, positive["background_tags"], 5)
-    _set_ui_widget(ui, POSITIVE_ID, settings["extra_prompt"], 7)
     _set_ui_widget(ui, NEGATIVE_ID, api[str(NEGATIVE_ID)]["inputs"]["text"], 0)
     for node_id, value in ((23, settings["width"]), (31, settings["height"]), (35, 1), (39, settings["steps"]), (41, settings["cfg"]), (12, filename_prefix)):
         _set_ui_widget(ui, node_id, value, 0)
@@ -2471,6 +2262,11 @@ def build_submission(
     if _is_v2_api_template(api_template):
         for legacy_key in _LEGACY_SETTING_KEYS:
             metadata_settings.pop(legacy_key, None)
+    final_positive = (
+        frozen_positive_prompt or _v2_prompt(metadata_settings, resolved_prompt, resolved_prompt_full)
+        if _is_v2_api_template(api_template)
+        else api[str(POSITIVE_ID)]["inputs"]["text"]
+    )
     metadata = {
         "settings": metadata_settings,
         "sample_seed": sample_seed,
@@ -2478,7 +2274,7 @@ def build_submission(
         "sequence": sequence,
         "resolved_selection": resolved_selection or {},
         "resolved_prompt": resolved_prompt,
-        "resolved_prompt_full": resolved_prompt_full,
+        "resolved_prompt_full": final_positive,
         "frozen_positive_prompt": frozen_positive_prompt,
     }
     return {

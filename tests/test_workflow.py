@@ -58,9 +58,9 @@ class WorkflowTests(unittest.TestCase):
     def test_prompt_nodes_are_replaced_without_touching_core_nodes(self):
         self.assertNotIn("3", self.api)
         self.assertNotIn("4", self.api)
-        self.assertEqual(self.api["60"]["class_type"], "AnimaPromptComposer")
-        self.assertEqual(self.api["42"]["class_type"], "AnimaPromptPlusClipEncode")
-        self.assertEqual(self.api["42"]["inputs"]["extra_prompt"], ["60", 0])
+        self.assertNotIn("60", self.api)
+        self.assertEqual(self.api["42"]["class_type"], "CLIPTextEncode")
+        self.assertIsInstance(self.api["42"]["inputs"]["text"], str)
         self.assertIsInstance(self.api["45"]["inputs"]["text"], str)
         for node_id in ("1", "2", "5", "12", "17", "18", "22", "26", "48"):
             self.assertEqual(self.api[node_id]["class_type"], self.api_source[node_id]["class_type"])
@@ -95,30 +95,16 @@ class WorkflowTests(unittest.TestCase):
             "sampler_name": "euler",
             "scheduler": "karras",
         }
-        api, ui = render_workflows(self.api, self.ui, settings, 123456, 987, "AnimaRandom/test")
-        composer = api["60"]["inputs"]
-        self.assertFalse(composer["enable_artist"])
-        self.assertEqual(composer["artist_count"], 0)
-        self.assertFalse(composer["enable_character"])
-        self.assertEqual(composer["character_count"], 2)
-        self.assertTrue(composer["enable_clothing"])
-        self.assertEqual(composer["clothing_count"], 3)
-        self.assertFalse(composer["enable_pose"])
-        self.assertEqual(composer["pose_count"], 1)
-        self.assertTrue(composer["enable_background"])
-        self.assertEqual(composer["background_count"], 4)
-        self.assertEqual(composer["extra_prompt"], "rain")
-        self.assertEqual(composer["seed"], 987)
-        self.assertEqual(api["42"]["inputs"]["artist_tags"], "@anmi")
+        full = "quality, @anmi, fixed hero, selected coat, fixed pose, selected room, rain"
+        api, ui = render_workflows(
+            self.api, self.ui, settings, 123456, 987, "AnimaRandom/test", resolved_prompt_full=full,
+        )
+        self.assertNotIn("60", api)
+        self.assertEqual(api["42"]["inputs"]["text"], full)
         self.assertEqual(api["5"]["inputs"]["sampler_name"], "euler")
         self.assertEqual(api["5"]["inputs"]["scheduler"], "karras")
         sampler_ui = next(node for node in ui["nodes"] if node["id"] == 5)
         self.assertEqual(sampler_ui["widgets_values"][4:6], ["euler", "karras"])
-        self.assertEqual(api["42"]["inputs"]["character_tags"], "fixed hero")
-        self.assertEqual(api["42"]["inputs"]["clothing_tags"], "")
-        self.assertEqual(api["42"]["inputs"]["pose_tags"], "fixed pose")
-        self.assertEqual(api["42"]["inputs"]["background_tags"], "")
-        self.assertEqual(api["42"]["inputs"]["quality_prompt"], "quality")
         self.assertEqual(api["45"]["inputs"]["text"], "bad")
         self.assertEqual(api["37"]["inputs"]["seed"], 123456)
         self.assertEqual(api["35"]["inputs"]["value"], 1)
@@ -128,16 +114,56 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(api["41"]["inputs"]["value"], 3.5)
         self.assertEqual(api["12"]["inputs"]["filename_prefix"], "AnimaRandom/test")
         ui_nodes = {node["id"]: node for node in ui["nodes"]}
-        self.assertEqual(ui_nodes[60]["widgets_values"][6], 987)
-        self.assertEqual(ui_nodes[42]["widgets_values"][7], "rain")
-        self.assertEqual(ui_nodes[60]["widgets_values"][10:14], [2, 3, 1, 4])
-        self.assertEqual(ui_nodes[42]["widgets_values"][2:6], ["fixed hero", "", "fixed pose", ""])
+        self.assertNotIn(60, ui_nodes)
+        self.assertEqual(ui_nodes[42]["widgets_values"], [full])
         # 回归:标量控件节点的 widgets_values 必须保持列表结构,
         # 否则嵌入 PNG 的 UI 工作流拖回 ComfyUI 时无法还原(#P0-1)。
         for node_id, expected in ((23, 1024), (31, 768), (35, 1), (39, 22), (41, 3.5), (12, "AnimaRandom/test")):
             with self.subTest(node=node_id):
                 self.assertIsInstance(ui_nodes[node_id]["widgets_values"], list)
                 self.assertEqual(ui_nodes[node_id]["widgets_values"][0], expected)
+
+    def test_old_templates_submit_final_text_without_plugin_random_nodes(self):
+        old_api = read_json(APP_DIR / "templates/workflow_api.json")
+        old_ui = read_json(APP_DIR / "templates/workflow_ui.json")
+        full = "quality, character A, selected coat, selected pose, selected room, selected expression, extra"
+        payload = build_submission(
+            old_api, old_ui, {**DEFAULT_SETTINGS, "random_character": True},
+            41, 73, "test", "client", 1,
+            resolved_prompt="untrusted composer fallback", resolved_prompt_full=full,
+        )
+        graph = payload["prompt"]
+        embedded = payload["extra_data"]["extra_pnginfo"]
+        self.assertEqual(graph["42"]["inputs"]["text"], full)
+        self.assertEqual(embedded["anima_random_webui"]["resolved_prompt_full"], full)
+        self.assertFalse(any(node["class_type"].startswith("AnimaPrompt") for node in graph.values()))
+        ui = embedded["workflow"]
+        self.assertFalse(any(node["type"].startswith("AnimaPrompt") for node in ui["nodes"]))
+        node = next(node for node in ui["nodes"] if node["id"] == 42)
+        self.assertEqual(node["widgets_values"], [full])
+        self.assertFalse(any(60 in (link[1], link[3]) for link in ui["links"]))
+        for link in ui["links"]:
+            if link[1] == 42:
+                self.assertEqual((link[2], link[5]), (0, "CONDITIONING"))
+        from anima_webui.comfy import extract_positive_prompt
+        self.assertEqual(extract_positive_prompt({"prompt": [0, "id", graph, {"extra_pnginfo": embedded}]}), full)
+
+    def test_random_settings_without_resolved_text_are_rejected(self):
+        with self.assertRaisesRegex(WorkflowError, "尚未解析"):
+            render_workflows(self.api, self.ui, {**DEFAULT_SETTINGS, "random_character": True}, 1, 2, "test")
+
+    def test_legacy_composer_only_input_keeps_fixed_fields_and_deduplicates(self):
+        settings = {**DEFAULT_SETTINGS, "quality_prompt": "quality", "manual_artist": "anmi",
+                    "fixed_character": "fixed hero", "fixed_expression": "smile", "extra_prompt": "rain"}
+        api, _ = render_workflows(self.api, self.ui, settings, 1, 2, "test", resolved_prompt="1girl, smile, rain")
+        self.assertEqual(api["42"]["inputs"]["text"], "quality, @anmi, fixed hero, smile, 1girl, rain")
+
+    def test_legacy_fallback_strips_raw_marker_like_catalog(self):
+        settings = {**DEFAULT_SETTINGS, "quality_prompt": "", "manual_artist": "",
+                    "fixed_character": "_raw_:fixed hero", "extra_prompt": "_raw_:rain"}
+        api, _ = render_workflows(self.api, self.ui, settings, 1, 2, "test",
+                                  resolved_prompt="_raw_:selected pose, rain")
+        self.assertEqual(api["42"]["inputs"]["text"], "fixed hero, selected pose, rain")
 
     def test_render_replaces_loras_in_api_and_visual_workflows(self):
         settings = {
@@ -427,9 +453,9 @@ class WorkflowTests(unittest.TestCase):
             frozen_positive_prompt="frozen hero, frozen pose, ",
             frozen_negative_prompt="frozen negative ",
         )
-        self.assertEqual(api["60"]["inputs"]["resolved_prompt"], "frozen hero, frozen pose, ")
-        self.assertEqual(api["42"]["inputs"]["quality_prompt"], "")
-        self.assertEqual(api["42"]["inputs"]["artist_tags"], "")
+        self.assertNotIn("60", api)
+        self.assertEqual(api["42"]["inputs"]["text"], "frozen hero, frozen pose, ")
+        self.assertEqual(set(api["42"]["inputs"]), {"clip", "text"})
         self.assertEqual(api["45"]["inputs"]["text"], "frozen negative ")
         self.assertEqual(api["37"]["inputs"]["seed"], 123)
         self.assertEqual(api["5"]["inputs"]["sampler_name"], DEFAULT_SETTINGS["sampler_name"])
@@ -489,7 +515,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_generated_json_supports_unicode(self):
         text = json.dumps(self.ui, ensure_ascii=False)
-        self.assertIn("随机角色", text)
+        self.assertIn("正向提示词", text)
 
 
 class TemplateValidationTests(unittest.TestCase):

@@ -191,8 +191,13 @@ class HistoryMigrationTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 connection.close()
 
-            with self.assertRaises(HistoryMigrationError):
-                HistoryStore(path)
+            store = HistoryStore(path)
+            try:
+                self.assertFalse(store.available)
+                self.assertIn("迁移失败", store.read_only_reason)
+                self.assertEqual((await store.list_images())["items"], [])
+            finally:
+                await store.close()
 
             connection = sqlite3.connect(path)
             try:

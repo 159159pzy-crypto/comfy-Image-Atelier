@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from .persistence import backup_corrupt_file, backup_for_migration
+from .persistence import StorageProtection, backup_for_migration
 from .model_profiles import (
     DEFAULT_MODEL_PROFILE,
     MODEL_PROFILE_IDS,
@@ -43,7 +43,9 @@ def normalize_trigger_words(value: Any) -> list[str]:
     return result
 
 
-class LoraTriggerOverrideStore:
+class LoraTriggerOverrideStore(StorageProtection):
+    store_name = "lora_triggers"
+
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -57,7 +59,9 @@ class LoraTriggerOverrideStore:
 
     def reload(self) -> None:
         self.load_warnings = []
+        self.read_only_reason = None
         if not self.path.is_file():
+            self.profile_overrides = {}
             self.overrides = {}
             return
         try:
@@ -81,21 +85,18 @@ class LoraTriggerOverrideStore:
                     profile_overrides[profile] = self._normalize_map(values)
             if sum(len(values) for values in profile_overrides.values()) > MAX_OVERRIDES:
                 raise WorkflowError(f"LoRA 触发词覆盖不能超过 {MAX_OVERRIDES} 项")
-        except (OSError, json.JSONDecodeError, WorkflowError) as error:
-            backup = backup_corrupt_file(self.path)
-            self.load_warnings.append(
-                f"LoRA 触发词覆盖文件无法读取({error}),已备份为 {backup.name} 并以空数据启动"
-            )
+        except (OSError, UnicodeError, json.JSONDecodeError, WorkflowError) as error:
+            self._recover_load_failure(error)
             self.profile_overrides = {}
             self.overrides = {}
             return
         self.profile_overrides = profile_overrides
         self.overrides = self.profile_overrides.setdefault(DEFAULT_MODEL_PROFILE, {})
         if migrated_legacy:
-            backup = backup_for_migration(self.path, 1)
-            if backup is not None:
-                self.load_warnings.append(f"LoRA 触发词配置已迁移,原文件备份为 {backup.name}")
             try:
+                backup = backup_for_migration(self.path, 1)
+                if backup is not None:
+                    self.load_warnings.append(f"LoRA 触发词配置已迁移,原文件备份为 {backup.name}")
                 self._write_text(
                     json.dumps(
                         {"version": 2, "overrides": self.profile_overrides},
@@ -105,7 +106,7 @@ class LoraTriggerOverrideStore:
                     + "\n"
                 )
             except OSError as error:
-                self.load_warnings.append(f"LoRA 触发词迁移文件写入失败: {error}")
+                self._protect_storage(f"LoRA 触发词已在内存迁移，但迁移备份或写回失败({error})")
 
     @staticmethod
     def _profile(value: Any) -> str:
@@ -130,11 +131,11 @@ class LoraTriggerOverrideStore:
 
     def has(self, filename: str, model_profile: Any = DEFAULT_MODEL_PROFILE) -> bool:
         identity = normalize_lora_path(filename).casefold()
-        return any(key.casefold() == identity for key in self._map(model_profile))
+        return any(key.casefold() == identity for key in self.profile_overrides.get(self._profile(model_profile), {}))
 
     def get(self, filename: str, model_profile: Any = DEFAULT_MODEL_PROFILE) -> list[str] | None:
         identity = normalize_lora_path(filename).casefold()
-        for key, words in self._map(model_profile).items():
+        for key, words in self.profile_overrides.get(self._profile(model_profile), {}).items():
             if key.casefold() == identity:
                 return copy.deepcopy(words)
         return None
@@ -163,6 +164,7 @@ class LoraTriggerOverrideStore:
         normalized_words = normalize_trigger_words(words)
         profile = self._profile(model_profile)
         async with self._lock:
+            self.ensure_writable()
             overrides = self._map(profile)
             existing_key = next(
                 (key for key in overrides if key.casefold() == normalized_filename.casefold()),
@@ -181,6 +183,7 @@ class LoraTriggerOverrideStore:
         identity = normalize_lora_path(filename).casefold()
         profile = self._profile(model_profile)
         async with self._lock:
+            self.ensure_writable()
             overrides = self._map(profile)
             key = next((item for item in overrides if item.casefold() == identity), None)
             if key is None:
@@ -199,6 +202,7 @@ class LoraTriggerOverrideStore:
         await asyncio.to_thread(self._write_text, payload)
 
     def _write_text(self, text: str) -> None:
+        self.ensure_writable()
         fd, temp_name = tempfile.mkstemp(
             prefix="lora-trigger-overrides-", suffix=".json", dir=self.path.parent
         )

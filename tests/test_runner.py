@@ -165,6 +165,22 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await store.close()
 
+    async def test_read_only_history_rejects_generation_before_submit(self):
+        def blocked():
+            raise RuntimeError("history is read-only")
+        with tempfile.TemporaryDirectory() as directory:
+            history = HistoryStore(Path(directory) / "history.sqlite3")
+            comfy = FakeComfy()
+            manager = BatchManager(FakeTemplates(), history, comfy)
+            history.ensure_writable = blocked
+            try:
+                with self.assertRaisesRegex(RuntimeError, "read-only"):
+                    await manager.start({**DEFAULT_SETTINGS, "count": 1})
+                self.assertEqual(comfy.submissions, [])
+                self.assertFalse(manager.active())
+            finally:
+                await history.close()
+
     async def test_running_batch_is_marked_interrupted_after_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.sqlite3"
@@ -377,7 +393,8 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
         await manager.start({**DEFAULT_SETTINGS, "count": 1}, regeneration=regeneration)
         await manager.wait()
         submitted = self.comfy.submissions[-1]
-        self.assertEqual(submitted["resolved_selection"]["character"], original["character"])
+        self.assertEqual(submitted["resolved_selection"]["character"][0]["prompt"], original["character"][0]["prompt"])
+        self.assertEqual(submitted["resolved_selection"]["character"][0]["snapshot_version"], 2)
         self.assertEqual(submitted["resolved_selection"]["pose"][0]["id"], "pose:new")
 
     async def test_invalid_seeds_are_rejected(self):

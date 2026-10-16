@@ -22,7 +22,7 @@ from .model_profiles import (
     ModelProfileError,
     normalize_model_profile,
 )
-from .persistence import backup_corrupt_file
+from .persistence import StorageProtection
 from .workflow import WorkflowError, normalize_lora_path
 
 
@@ -30,8 +30,10 @@ RESOURCE_KINDS = ("models", "loras")
 STORE_VERSION = 1
 
 
-class ResourceProfileStore:
+class ResourceProfileStore(StorageProtection):
     """Store exclusive profile ownership for ComfyUI resource paths."""
+
+    store_name = "resource_profiles"
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -89,6 +91,7 @@ class ResourceProfileStore:
 
     def reload(self) -> None:
         self.load_warnings = []
+        self.read_only_reason = None
         if not self.path.is_file():
             self.assignments = {kind: {} for kind in RESOURCE_KINDS}
             self.initialized = set()
@@ -101,11 +104,8 @@ class ResourceProfileStore:
             initialized = payload.get("initialized", [])
             if not isinstance(initialized, list) or any(item not in RESOURCE_KINDS for item in initialized):
                 raise WorkflowError("资源归属 initialized 内容无效")
-        except (OSError, json.JSONDecodeError, WorkflowError) as error:
-            backup = backup_corrupt_file(self.path)
-            self.load_warnings.append(
-                f"资源归属文件无法读取({error}),已备份为 {backup.name} 并以空数据启动"
-            )
+        except (OSError, UnicodeError, json.JSONDecodeError, WorkflowError) as error:
+            self._recover_load_failure(error)
             self.assignments = {kind: {} for kind in RESOURCE_KINDS}
             self.initialized = set()
             return
@@ -138,6 +138,10 @@ class ResourceProfileStore:
         normalized_names = list(dict.fromkeys(self.normalize_name(name) for name in names if str(name or "").strip()))
         changed = False
         async with self._lock:
+            if self.read_only_reason:
+                # A GET inventory request must stay readable without claiming
+                # unknown resources or overwriting unprotected ownership data.
+                return {name: self._lookup(normalized_kind, name) for name in normalized_names}
             mapping = self.assignments[normalized_kind]
             if normalized_kind not in self.initialized:
                 for name in normalized_names:
@@ -157,6 +161,7 @@ class ResourceProfileStore:
         normalized_name = self.normalize_name(name)
         profile = self._profile(model_profile)
         async with self._lock:
+            self.ensure_writable()
             mapping = self.assignments[normalized_kind]
             existing = next(
                 (key for key in mapping if key.casefold() == normalized_name.casefold()),
@@ -196,6 +201,7 @@ class ResourceProfileStore:
         await asyncio.to_thread(self._write_text, text)
 
     def _write_text(self, text: str) -> None:
+        self.ensure_writable()
         fd, temp_name = tempfile.mkstemp(
             prefix="resource-profiles-", suffix=".json", dir=self.path.parent
         )

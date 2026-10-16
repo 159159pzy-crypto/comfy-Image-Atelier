@@ -9,7 +9,7 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_DIR))
 
-from anima_webui.catalog import CatalogError, PromptCatalog, compose_people_tags  # noqa: E402
+from anima_webui.catalog import CatalogError, PromptCatalog, compose_people_tags, resolve_history_selection  # noqa: E402
 from anima_webui.custom_prompts import MAX_GROUPS_PER_SECTION, CustomPromptStore  # noqa: E402
 from anima_webui.workflow import DEFAULT_SETTINGS, validate_settings  # noqa: E402
 
@@ -55,6 +55,101 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_character_snapshot_records_effective_trigger_and_redraw_preserves_it(self):
+        from anima_webui.runner import BatchManager
+        settings = validate_settings({
+            **DEFAULT_SETTINGS, "character_detail": "trigger", "random_character": True,
+            "random_pose": True, "quality_prompt": "", "manual_artist": "",
+            "pools": {**DEFAULT_SETTINGS["pools"],
+                      "character": {"mode": "include", "ids": ["character:alpha||series"], "excluded_ids": []},
+                      "pose": {"mode": "include", "ids": ["pose:stand", "pose:sit"], "excluded_ids": []}},
+        })
+        original = self.catalog.resolve_prompt(settings, 1)
+        character = original["selected"]["character"][0]
+        self.assertEqual(character["snapshot_version"], 2)
+        self.assertEqual(character["trigger"], ["alpha", "series"])
+        self.assertEqual(character["prompt"], "alpha, series")
+        manager = BatchManager.__new__(BatchManager)
+        manager.catalog = self.catalog
+        redraw = manager._resolve_regeneration(settings, 0, {
+            "mode": "content_redraw", "fixed_selection": {"character": [character]},
+            "original_selection": original["selected"], "redraw_sections": ["pose"],
+        })
+        self.assertTrue(redraw["_changed"])
+        self.assertIn("alpha, series", redraw["full_prompt"])
+        self.assertIn("standing", redraw["full_prompt"])
+        self.assertNotIn("blue eyes", redraw["full_prompt"])
+
+    def test_legacy_character_snapshot_uses_history_before_current_catalog(self):
+        entry = {"id": "character:deleted||old", "builtin": True,
+                 "prompt": "old identity, old series, 1girl, old clothes",
+                 "tags": ["1girl", "old clothes"]}
+        selected = {"character": [entry]}
+        restored, issues = resolve_history_selection(selected, {"character_detail": "trigger", "female_count": 1}, self.catalog)
+        self.assertEqual(issues, {})
+        self.assertEqual(restored["character"][0]["prompt"], "old identity, old series")
+        self.assertNotIn("trigger", entry)
+        full, _ = resolve_history_selection(selected, {"character_detail": "trigger_tags", "female_count": 1})
+        self.assertEqual(full["character"][0]["prompt"], "old identity, old series, old clothes")
+
+    def test_unrecoverable_or_mismatched_history_requires_character_redraw(self):
+        settings = {"random_character": True, "character_detail": "trigger"}
+        broken = {"character": [{"id": "character:deleted", "prompt": "blue eyes", "tags": ["blue eyes"]}]}
+        restored, issues = resolve_history_selection(broken, settings, self.catalog)
+        self.assertEqual(restored, {})
+        self.assertIn("无法可靠保留角色", issues["character"])
+        legacy = {"character": [{"prompt": "alpha, series, blue eyes", "tags": ["blue eyes"]}]}
+        _, issues = resolve_history_selection(legacy, settings, self.catalog, "mystery, other")
+        self.assertIn("不一致", issues["character"])
+
+    def test_new_and_custom_snapshots_work_without_catalog(self):
+        for entry in (
+            {"snapshot_version": 2, "prompt": "identity", "tags": ["unwanted clothes"]},
+            {"id": "custom:123", "prompt": "custom identity, custom clothes", "tags": ["custom identity", "custom clothes"]},
+        ):
+            restored, issues = resolve_history_selection({"character": [entry]}, {"character_detail": "trigger"})
+            self.assertEqual(issues, {})
+            self.assertEqual(restored["character"][0]["prompt"], entry["prompt"])
+
+    def test_effective_empty_snapshot_does_not_restore_excluded_person_tags(self):
+        from anima_webui.runner import BatchManager
+        entry = {"id": "custom:counts", "builtin": False, "snapshot_version": 2,
+                 "prompt": "", "tags": ["1girl", "solo"]}
+        settings = validate_settings({
+            **DEFAULT_SETTINGS, "random_character": True, "random_pose": True,
+            "female_count": 2, "quality_prompt": "", "manual_artist": "",
+            "pools": {**DEFAULT_SETTINGS["pools"],
+                      "pose": {"mode": "include", "ids": ["pose:stand"], "excluded_ids": []}},
+        })
+        restored, issues = resolve_history_selection({"character": [entry]}, settings, self.catalog, "2girls, sitting")
+        self.assertNotIn("character", issues)
+        self.assertEqual(restored["character"][0]["prompt"], "")
+        manager = BatchManager.__new__(BatchManager)
+        manager.catalog = self.catalog
+        resolved = manager._resolve_regeneration(settings, 0, {
+            "mode": "content_redraw", "fixed_selection": restored,
+            "original_selection": {"pose": [{"id": "pose:sit"}]}, "redraw_sections": ["pose"],
+        })
+        self.assertEqual(resolved["full_prompt"], "2girls, standing, ")
+        self.assertEqual(resolved["selected"]["character"][0]["prompt"], "")
+
+    def test_effective_and_custom_role_snapshots_check_final_identity(self):
+        for entry in (
+            {"id": "character:alpha||series", "builtin": True, "snapshot_version": 2,
+             "prompt": "alpha, series", "trigger": ["alpha", "series"], "tags": ["blue eyes"]},
+            {"id": "custom:identity", "builtin": False, "snapshot_version": 2,
+             "prompt": "alpha, series", "tags": ["alpha", "series"]},
+            {"id": "custom:identity", "builtin": False,
+             "prompt": "alpha, series", "tags": ["alpha", "series"]},
+        ):
+            with self.subTest(entry=entry):
+                restored, issues = resolve_history_selection({"character": [entry]}, {}, self.catalog, "beta, series")
+                self.assertEqual(restored, {})
+                self.assertIn("历史角色与最终提示词不一致", issues["character"])
+                restored, issues = resolve_history_selection({"character": [entry]}, {}, self.catalog, "alpha, series")
+                self.assertEqual(issues, {})
+                self.assertEqual(restored["character"][0]["prompt"], "alpha, series")
 
     def test_search_and_stable_ids(self):
         result = self.catalog.search("clothing", "外套")

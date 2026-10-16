@@ -151,6 +151,7 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
     public async Task StartWebUI(LauncherConfig config, RuntimeManifest manifest, CancellationToken ct)
     {
         config.Validate();
+        var nodeDirectories = Inventory.ResolveNodeDirectories(config.ComfyRoot, manifest);
         var before = owned.Count;
         try
         {
@@ -169,7 +170,7 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
                 // rolling back to an older snapshot must not crash its argparse.
                 var supportsShutdown = SupportsShutdownEndpoint(config.AppRoot);
                 var shutdownToken = supportsShutdown ? Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant() : null;
-                var argv = new List<string> { Path.Combine(config.AppRoot, "run.py"), "--host", "127.0.0.1", "--port", config.WebPort.ToString(), "--comfy-url", config.ComfyUrl, "--anima-tools-dir", Path.Combine(config.ComfyRoot, "custom_nodes", "Comfyui-Anima-Tools"), "--data-dir", config.DataDir, "--resource-paths", resourceFile, "--no-browser" };
+                var argv = WebUiArguments(config, resourceFile, nodeDirectories);
                 if (shutdownToken is not null) { argv.Add("--shutdown-token"); argv.Add(shutdownToken); }
                 var process = await StartProcess(config.Python, argv, config.AppRoot, "WebUI", ct, shutdownToken: shutdownToken);
                 await Ready(config.WebUrl + "/api/launcher-health", process, ct);
@@ -183,6 +184,17 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
             foreach (var p in owned.Skip(before).ToArray()) { Stop(p); owned.Remove(p); }
             Save(); throw;
         }
+    }
+
+    public static List<string> WebUiArguments(LauncherConfig config, string resourceFile, IReadOnlyDictionary<string, string> nodeDirectories)
+    {
+        var args = new List<string> { Path.Combine(config.AppRoot, "run.py"), "--host", "127.0.0.1", "--port", config.WebPort.ToString(), "--comfy-url", config.ComfyUrl, "--data-dir", config.DataDir, "--resource-paths", resourceFile, "--no-browser" };
+        if (nodeDirectories.TryGetValue(AnimaToolsDiscovery.NodeId, out var tools) && Directory.Exists(tools))
+        {
+            args.Add("--anima-tools-dir");
+            args.Add(tools);
+        }
+        return args;
     }
 
     /// <summary>Start ComfyUI and the WebUI together; rolls back everything started during this call on failure.</summary>

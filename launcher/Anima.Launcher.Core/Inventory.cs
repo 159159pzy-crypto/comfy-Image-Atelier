@@ -7,7 +7,7 @@ public sealed record ModelStatus(ModelItem Model, string State, string? FoundPat
 {
     public bool Missing => State is "缺失" or "大小异常" or "哈希异常";
 }
-public sealed record NodeStatus(string Name, string State, string Commit);
+public sealed record NodeStatus(string Name, string State, string Commit, string Path = "");
 
 public static class Inventory
 {
@@ -76,16 +76,28 @@ public static class Inventory
         }
         return results;
     }
+    public static Dictionary<string, string> ResolveNodeDirectories(string root, RuntimeManifest manifest)
+    {
+        var paths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var repo in manifest.Nodes)
+        {
+            var found = repo.Id.Equals(AnimaToolsDiscovery.NodeId, StringComparison.OrdinalIgnoreCase) ? AnimaToolsDiscovery.Resolve(root) : null;
+            paths[repo.Id] = found ?? Path.Combine(Path.GetFullPath(root), "custom_nodes", repo.Id);
+        }
+        return paths;
+    }
+
     public static async Task<List<NodeStatus>> Nodes(string root, RuntimeManifest manifest, string? git, CancellationToken ct)
     {
         var results = new List<NodeStatus>();
+        var paths = ResolveNodeDirectories(root, manifest);
         foreach (var repo in manifest.Nodes)
         {
-            var folder = Path.Combine(root, "custom_nodes", repo.Id);
-            if (!Directory.Exists(folder)) { results.Add(new(repo.Id, "缺失", "")); continue; }
-            if (!Directory.Exists(Path.Combine(folder, ".git")) || git is null) { results.Add(new(repo.Id, "已有安装，版本未验证", "")); continue; }
+            var folder = paths[repo.Id];
+            if (!Directory.Exists(folder)) { results.Add(new(repo.Id, "缺失", "", folder)); continue; }
+            if (!Directory.Exists(Path.Combine(folder, ".git")) || git is null) { results.Add(new(repo.Id, "已有安装，版本未验证", "", folder)); continue; }
             var commit = (await Commands.Run(git, ["rev-parse", "HEAD"], folder, null, ct)).Trim();
-            results.Add(new(repo.Id, commit == repo.Commit ? "锁定版本" : "已有其他版本（保留）", commit));
+            results.Add(new(repo.Id, commit == repo.Commit ? "锁定版本" : "已有其他版本（保留）", commit, folder));
         }
         return results;
     }

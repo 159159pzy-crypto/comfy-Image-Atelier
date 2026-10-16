@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any
 
 from .comfy import ComfyAborted, ComfyError, extract_images, extract_positive_prompt
-from .catalog import PromptCatalog
+from .catalog import PromptCatalog, resolve_history_selection, split_prompt
 from .history import HistoryStore
 from .prompt_rules import PromptRuleStore
 from .prompt_pools import PromptPoolStore
@@ -396,6 +396,9 @@ class BatchManager:
         regeneration: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         async with self._start_lock:
+            ensure_writable = getattr(self.history, "ensure_writable", None)
+            if ensure_writable is not None:
+                ensure_writable()
             regeneration = self._validate_regeneration(regeneration)
             normalized_overrides = overrides
             if self.prompt_rules is not None and not (
@@ -609,10 +612,25 @@ class BatchManager:
                         "positive",
                         protected_lora_words=protected,
                     )
+                    selected = copy.deepcopy(resolved["selected"])
+                    for entries in selected.values():
+                        for snapshot in entries:
+                            if snapshot.get("snapshot_version") != 2:
+                                continue
+                            snapshot["prompt"], _ = self.prompt_rules.normalize_text(
+                                snapshot["prompt"], "positive", protected_lora_words=protected,
+                            )
+                            if snapshot.get("trigger"):
+                                trigger, _ = self.prompt_rules.normalize_text(
+                                    ", ".join(split_prompt(snapshot["trigger"])),
+                                    "positive", protected_lora_words=protected,
+                                )
+                                snapshot["trigger"] = split_prompt(trigger)
                     resolved = {
                         **resolved,
                         "composer_prompt": composer_prompt,
                         "full_prompt": full_prompt,
+                        "selected": selected,
                     }
                 submission_args = (
                     settings, sample_seed, prompt_seed, prefix, self.client_id, sequence
@@ -786,21 +804,15 @@ class BatchManager:
             return self._resolve_prompt(settings, prompt_seed)
         if not self.catalog:
             raise WorkflowError("当前提示词目录不可用，无法重新抽取内容")
+        restored, issues = resolve_history_selection(fixed_selection, settings, self.catalog)
+        for section in fixed_selection:
+            if section in issues:
+                raise WorkflowError(issues[section])
+        fixed_selection = restored
         redraw_settings = copy.deepcopy(settings)
         for section, entries in fixed_selection.items():
             redraw_settings[f"random_{section}"] = False
-            parts: list[str] = []
-            for item in entries:
-                parts.extend(
-                    self.catalog.prompt_parts(
-                        item,
-                        section,
-                        settings.get("character_detail", "trigger_tags"),
-                        bool(settings.get("female_count") or settings.get("male_count"))
-                        and section == "character",
-                    )
-                )
-            redraw_settings[f"fixed_{section}"] = ", ".join(parts)
+            redraw_settings[f"fixed_{section}"] = ", ".join(item["prompt"] for item in entries)
         resolved = self.catalog.resolve_prompt(redraw_settings, prompt_seed)
         merged = copy.deepcopy(resolved["selected"])
         for section, entries in fixed_selection.items():

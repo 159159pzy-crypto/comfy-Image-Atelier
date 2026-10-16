@@ -1,5 +1,7 @@
+import asyncio
 import sys
 import unittest
+from collections import Counter
 from pathlib import Path
 
 from aiohttp import web
@@ -71,11 +73,9 @@ class PlainTextResponseTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ComfyError, "404"):
             await self.client._json("GET", "/anima-tools/lora/manifest")
 
-    async def test_lora_inventory_degrades_without_manifest_endpoint(self):
-        # 回归:清单端点不存在时应回退到 LoraLoader 名称,而不是让 /api/loras
-        # 与批次启动整体失败。
-        inventory = await self.client.lora_inventory()
-        self.assertEqual([item["filename"] for item in inventory["items"]], ["one.safetensors"])
+    async def test_lora_inventory_requires_lora_manager(self):
+        with self.assertRaisesRegex(ComfyError, "LoRA Manager.*404"):
+            await self.client.lora_inventory()
 
 
 class LoraPreviewTests(unittest.IsolatedAsyncioTestCase):
@@ -94,11 +94,15 @@ class LoraPreviewTests(unittest.IsolatedAsyncioTestCase):
                         {
                             "file_path": "F:/comfyui/models/loras/风格/one.safetensors",
                             "folder": "风格",
+                            "base_model": "Anima",
                             "preview_url": "/api/lm/previews?path=one",
                             "civitai": {"trainedWords": ["@one"]},
                         }
                     ],
                     "total_pages": 1,
+                    "page": 1,
+                    "page_size": 100,
+                    "total": 1,
                 }
             )
 
@@ -109,8 +113,12 @@ class LoraPreviewTests(unittest.IsolatedAsyncioTestCase):
                 headers={"Cache-Control": "private, max-age=90"},
             )
 
+        async def roots(request):
+            return web.json_response({"success": True, "roots": ["F:/comfyui/models/loras"]})
+
         app.router.add_get("/object_info", object_info)
         app.router.add_get("/api/lm/loras/list", manager_list)
+        app.router.add_get("/api/lm/loras/roots", roots)
         app.router.add_get("/api/lm/previews", preview)
         self.server = TestServer(app)
         await self.server.start_server()
@@ -157,8 +165,10 @@ class FakeInventoryClient(ComfyClient):
         }
 
     async def _json(self, method, path, **kwargs):
-        if path == "/anima-tools/lora/manifest":
-            return {"items": [{"filename": "风格/one.safetensors", "display_name": "One"}]}
+        if path == "/api/lm/loras/roots":
+            return {"success": True, "roots": ["F:/comfyui/models/loras"]}
+        if path.startswith("/api/lm/loras/list?"):
+            return {"items": [{"file_path": "F:/comfyui/models/loras/风格/one.safetensors", "base_model": "Anima"}], "total_pages": 1}
         raise ComfyError("unexpected")
 
 
@@ -182,8 +192,9 @@ class InventoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(inventory["items"][0]["filename"], "风格\\one.safetensors")
         self.assertEqual(inventory["items"][0]["normalized_path"], "风格/one.safetensors")
         self.assertEqual(inventory["items"][0]["folder"], "风格")
-        self.assertEqual(inventory["items"][0]["metadata_source"], "anima-tools")
-        self.assertFalse(inventory["items"][0]["trigger_metadata_available"])
+        self.assertEqual(inventory["items"][0]["metadata_source"], "lora-manager")
+        self.assertTrue(inventory["items"][0]["trigger_metadata_available"])
+        self.assertEqual(inventory["items"][0]["model_profile"], "anima")
 
     async def test_lora_manager_metadata_is_paginated_matched_and_normalized(self):
         class ManagerClient(FakeInventoryClient):
@@ -191,11 +202,12 @@ class InventoryTests(unittest.IsolatedAsyncioTestCase):
                 if path.startswith("/api/lm/loras/list"):
                     page = 2 if "page=2" in path else 1
                     return {
-                        "items": []
+                        "items": [{"file_path": "F:/comfyui/models/loras/stale.safetensors", "base_model": "Anima"}]
                         if page == 2
                         else [
                             {
                                 "model_name": "One Model",
+                                "base_model": "Anima",
                                 "file_path": "F:/comfyui/models/loras/风格/one.safetensors",
                                 "folder": "风格",
                                 "file_size": 123,
@@ -208,18 +220,7 @@ class InventoryTests(unittest.IsolatedAsyncioTestCase):
                         ],
                         "total_pages": 2,
                     }
-                if path == "/anima-tools/lora/manifest":
-                    return {
-                        "items": [
-                            {
-                                "filename": "风格/one.safetensors",
-                                "display_name": "Manifest One",
-                                "thumb_url": "/anima-tools/preview",
-                            },
-                            {"filename": "stale.safetensors"},
-                        ]
-                    }
-                raise ComfyError("unexpected")
+                return await super()._json(method, path, **kwargs)
 
         inventory = await ManagerClient().lora_inventory()
         self.assertEqual(inventory["count"], 1)
@@ -242,6 +243,215 @@ class InventoryTests(unittest.IsolatedAsyncioTestCase):
                 "schedulers": ["simple", "karras"],
             },
         )
+
+
+class ManagerClassificationApiTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.calls = Counter()
+        self.info = {
+            "LoraLoader": {"input": {"required": {"lora_name": [["style\\one.safetensors"]]}}},
+            "UNETLoader": {"input": {"required": {"unet_name": [["model.safetensors"]]}}},
+        }
+        self.items = {
+            "loras": [{"file_path": "F:/models/loras/style/one.safetensors", "base_model": "Anima"}],
+            "checkpoints": [
+                {"file_path": "F:/models/checkpoints/model.safetensors", "base_model": "Anima"},
+                {"file_path": "F:/models/diffusion_models/model.safetensors", "base_model": "Krea 2 Turbo"},
+            ],
+        }
+        self.overrides = {}
+
+        async def handler(request):
+            self.calls[request.path] += 1
+            key = request.path + (f"?page={request.query['page']}" if "page" in request.query else "")
+            if key in self.overrides:
+                value = self.overrides[key]
+                if isinstance(value, web.Response):
+                    return value
+                return web.json_response(value)
+            if request.path == "/object_info":
+                return web.json_response(self.info)
+            if request.path == "/api/lm/loras/roots":
+                return web.json_response({"success": True, "roots": ["F:/models/loras"]})
+            if request.path == "/api/lm/checkpoints/unet_roots":
+                return web.json_response({"success": True, "roots": ["F:/models/diffusion_models", "F:/models/unet"]})
+            if request.path in {"/api/lm/loras/list", "/api/lm/checkpoints/list"}:
+                values = self.items[request.path.split("/")[-2]]
+                return web.json_response({"items": values, "total": len(values), "page": 1, "page_size": 100, "total_pages": 1 if values else 0})
+            return web.Response(status=404, text="Not Found")
+
+        app = web.Application()
+        app.router.add_get("/{path:.*}", handler)
+        self.server = TestServer(app)
+        await self.server.start_server()
+        self.client = ComfyClient(f"http://127.0.0.1:{self.server.port}")
+
+    async def asyncTearDown(self):
+        await self.client.close()
+        await self.server.close()
+
+    async def test_both_inventories_use_plugin_and_real_loader_names(self):
+        models = await self.client.resource_classifications("models")
+        loras = await self.client.lora_inventory()
+        self.assertEqual(models["source"], "lora-manager")
+        self.assertEqual(models["manager_url"], self.client.base_url + "/checkpoints")
+        self.assertEqual(loras["manager_url"], self.client.base_url + "/loras")
+        self.assertEqual(models["items"][0]["model_profile"], "krea2")
+        self.assertEqual(loras["items"][0]["name"], "style/one.safetensors")
+        self.assertEqual(await self.client.lora_filenames(), ["style\\one.safetensors"])
+        self.assertEqual(self.calls["/object_info"], 1)
+        self.assertFalse(any("anima-tools" in path or "scan" in path or "health-check" in path for path in self.calls))
+
+    async def test_all_pages_are_read_before_matching(self):
+        values = [{"file_path": f"F:/models/loras/unused/{i}.safetensors", "base_model": "Pony"} for i in range(100)]
+        self.overrides["/api/lm/loras/list?page=1"] = {"items": values, "total": 101, "page": 1, "page_size": 100, "total_pages": 2}
+        self.overrides["/api/lm/loras/list?page=2"] = {"items": self.items["loras"], "total": 101, "page": 2, "page_size": 100, "total_pages": 2}
+        result = await self.client.lora_inventory()
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["items"][0]["model_profile"], "anima")
+        self.assertEqual(self.calls["/api/lm/loras/list"], 2)
+
+    async def test_missing_plugin_routes_are_explicit_errors_without_fallback(self):
+        for path in ("/api/lm/loras/roots", "/api/lm/loras/list?page=1", "/api/lm/checkpoints/unet_roots"):
+            with self.subTest(path=path):
+                self.overrides = {path: web.Response(status=404, text="Not Found")}
+                with self.assertRaisesRegex(ComfyError, "LoRA Manager.*404"):
+                    await self.client.resource_classifications("models" if "checkpoints" in path else "loras", refresh=True)
+
+    async def test_page_failure_rejects_entire_inventory(self):
+        self.overrides["/api/lm/loras/list?page=1"] = {"items": self.items["loras"], "total_pages": 2}
+        self.overrides["/api/lm/loras/list?page=2"] = web.Response(status=503, text="not ready")
+        with self.assertRaisesRegex(ComfyError, "LoRA Manager.*503"):
+            await self.client.lora_inventory()
+        self.assertNotIn("loras", self.client._classification_cache)
+
+    async def test_malformed_pagination_is_rejected(self):
+        good = {"items": self.items["loras"], "total_pages": 1}
+        for payload in (
+            {**good, "items": {}}, {**good, "items": ["invalid"]},
+            {**good, "items": [{"file_path": "relative.safetensors"}]},
+            {**good, "total_pages": "1"}, {**good, "total_pages": True},
+            {**good, "total_pages": -1}, {**good, "total_pages": 0},
+            {**good, "page": 2}, {**good, "page_size": 1},
+            {**good, "total": 2}, {**good, "total": True},
+            {"items": [], "total_pages": 2},
+        ):
+            with self.subTest(payload=payload):
+                self.overrides["/api/lm/loras/list?page=1"] = payload
+                with self.assertRaisesRegex(ComfyError, "LoRA Manager"):
+                    await self.client.lora_inventory(refresh=True)
+
+    async def test_repeated_or_changed_pages_are_rejected(self):
+        self.overrides["/api/lm/loras/list?page=1"] = {"items": self.items["loras"], "total_pages": 2}
+        for page_two in (
+            {"items": self.items["loras"], "total_pages": 2},
+            {"items": self.items["loras"], "total_pages": 3},
+            {"items": [], "total_pages": 2},
+        ):
+            with self.subTest(page_two=page_two):
+                self.overrides["/api/lm/loras/list?page=2"] = page_two
+                with self.assertRaisesRegex(ComfyError, "LoRA Manager"):
+                    await self.client.lora_inventory(refresh=True)
+
+    async def test_invalid_roots_and_loader_info_are_rejected(self):
+        for payload in ({"roots": []}, {"success": False, "roots": []}, {"success": True, "roots": "F:/loras"}, {"success": True, "roots": [None]}):
+            with self.subTest(payload=payload):
+                self.overrides["/api/lm/loras/roots"] = payload
+                with self.assertRaisesRegex(ComfyError, "LoRA Manager"):
+                    await self.client.lora_inventory(refresh=True)
+        self.overrides.clear()
+        for node in ({}, {"input": []}, {"input": {"required": {"lora_name": [[123]]}}}):
+            with self.subTest(node=node):
+                self.info["LoraLoader"] = node
+                with self.assertRaisesRegex(ComfyError, "LoraLoader"):
+                    await self.client.lora_inventory(refresh=True)
+
+    async def test_empty_plugin_cache_does_not_assign_unknown_loader_choices(self):
+        self.items["loras"] = []
+        result = await self.client.lora_inventory()
+        self.assertEqual(result["items"][0]["classification_status"], "unindexed")
+        self.assertIsNone(result["items"][0]["model_profile"])
+
+    async def test_empty_loader_inventory_is_valid_and_not_filled_by_plugin(self):
+        self.info["LoraLoader"]["input"]["required"]["lora_name"] = [[]]
+        self.assertEqual((await self.client.lora_inventory())["items"], [])
+
+    async def test_combo_options_are_supported(self):
+        self.info["UNETLoader"]["input"]["required"]["unet_name"] = ["COMBO", {"options": ["model.safetensors"]}]
+        result = await self.client.resource_classifications("models")
+        self.assertEqual(result["items"][0]["model_profile"], "krea2")
+
+    async def test_classification_cache_is_shared_with_lora_inventory_and_refreshes_both_sources(self):
+        first = await self.client.lora_inventory()
+        self.assertIs(await self.client.resource_classifications("loras"), first)
+        self.items["loras"][0]["base_model"] = "Krea 2"
+        self.assertEqual((await self.client.lora_inventory())["items"][0]["model_profile"], "anima")
+        self.info["LoraLoader"]["input"]["required"]["lora_name"][0].append("new.safetensors")
+        refreshed = await self.client.resource_classifications("loras", refresh=True)
+        self.assertEqual(refreshed["items"][0]["model_profile"], "krea2")
+        self.assertEqual(refreshed["items"][1]["classification_status"], "unindexed")
+        self.assertIs(await self.client.lora_inventory(), refreshed)
+        self.assertEqual(self.calls["/object_info"], 2)
+        self.assertEqual(self.calls["/api/lm/loras/list"], 2)
+
+    async def test_expired_cache_reloads_and_failed_refresh_does_not_return_stale_classification(self):
+        await self.client.lora_inventory()
+        _, result = self.client._classification_cache["loras"]
+        self.client._classification_cache["loras"] = (-10.0, result)
+        self.items["loras"][0]["base_model"] = "Krea 2"
+        self.assertEqual((await self.client.lora_inventory())["items"][0]["model_profile"], "krea2")
+        self.overrides["/api/lm/loras/roots"] = web.Response(status=500, text="broken")
+        with self.assertRaisesRegex(ComfyError, "LoRA Manager"):
+            await self.client.lora_inventory(refresh=True)
+        with self.assertRaisesRegex(ComfyError, "LoRA Manager"):
+            await self.client.lora_inventory()
+
+    async def test_refresh_waits_for_older_fetch_and_remains_the_cached_result(self):
+        started, release = asyncio.Event(), asyncio.Event()
+        original = self.client._json
+
+        async def delayed(method, path, **kwargs):
+            payload = await original(method, path, **kwargs)
+            if path.startswith("/api/lm/loras/list?") and not started.is_set():
+                started.set()
+                await release.wait()
+            return payload
+
+        self.client._json = delayed
+        old_request = asyncio.create_task(self.client.lora_inventory())
+        await asyncio.wait_for(started.wait(), 2)
+        self.items["loras"][0]["base_model"] = "Krea 2"
+        refresh_request = asyncio.create_task(self.client.lora_inventory(refresh=True))
+        await asyncio.sleep(0)
+        self.assertFalse(refresh_request.done())
+        release.set()
+        old, fresh = await asyncio.gather(old_request, refresh_request)
+        self.assertEqual(old["items"][0]["model_profile"], "anima")
+        self.assertEqual(fresh["items"][0]["model_profile"], "krea2")
+        self.assertIs(await self.client.lora_inventory(), fresh)
+        self.assertEqual(self.calls["/api/lm/loras/list"], 2)
+
+    async def test_old_object_info_cannot_overwrite_refreshed_object_cache(self):
+        started, release = asyncio.Event(), asyncio.Event()
+        original = self.client._json
+
+        async def delayed(method, path, **kwargs):
+            payload = await original(method, path, **kwargs)
+            if path == "/object_info" and not started.is_set():
+                started.set()
+                await release.wait()
+            return payload
+
+        self.client._json = delayed
+        old_request = asyncio.create_task(self.client.object_info())
+        await asyncio.wait_for(started.wait(), 2)
+        self.info["LoraLoader"]["input"]["required"]["lora_name"][0].append("new.safetensors")
+        fresh = await self.client.lora_inventory(refresh=True)
+        self.assertEqual(fresh["count"], 2)
+        release.set()
+        await old_request
+        info = await self.client.object_info()
+        self.assertEqual(info["LoraLoader"]["input"]["required"]["lora_name"][0], ["style\\one.safetensors", "new.safetensors"])
 
 
 class WaitForHistoryTests(unittest.IsolatedAsyncioTestCase):

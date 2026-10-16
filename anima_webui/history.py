@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .persistence import backup_corrupt_file
+from .persistence import StorageProtection, backup_corrupt_file
 from .model_profiles import get_model_profile
 from .workflow import migrate_settings, normalize_lora_path, validate_settings
 
@@ -27,7 +27,7 @@ def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-class HistoryStore:
+class HistoryStore(StorageProtection):
     """sqlite 持久化。
 
     所有数据库操作都在一个专用单线程 executor 上执行:
@@ -37,29 +37,98 @@ class HistoryStore:
     因此 check_same_thread=False 是安全的。
     """
 
+    store_name = "history"
+
     def __init__(self, path: str | Path):
         destination = Path(path)
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        self.path = destination
+        self.read_only_reason = None
+        self.available = True
         self.load_warnings: list[str] = []
         try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
             self.connection = self._open(destination)
+        except HistoryMigrationError as error:
+            self._use_unavailable_view(f"历史数据库迁移失败({error})，未替换原数据库")
         except sqlite3.DatabaseError as error:
-            # 坏数据库不再阻断启动:改名备份后重建,并向界面报告警告。
-            backup = backup_corrupt_file(destination)
-            logger.warning("历史数据库无法读取(%s),已备份为 %s 并重建", error, backup.name)
-            self.load_warnings.append(f"历史数据库无法读取,已备份为 {backup.name} 并重建")
-            self.connection = self._open(destination)
+            # Busy/readonly/unavailable databases are not corrupt. Only
+            # quarantine confirmed corruption; never move a locked database.
+            code = getattr(error, "sqlite_errorcode", None)
+            corrupt = isinstance(code, int) and (code & 0xFF) in {
+                sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB
+            }
+            if not corrupt:
+                self._use_unavailable_view(f"历史数据库无法打开({error})，未替换原数据库")
+            else:
+                try:
+                    backup = backup_corrupt_file(destination)
+                except OSError as backup_error:
+                    self._use_unavailable_view(
+                        f"历史数据库无法读取({error})，备份失败({backup_error})，原文件未改动"
+                    )
+                else:
+                    self.load_warnings.append(f"历史数据库无法读取,已备份为 {backup.name} 并重建")
+                    try:
+                        self.connection = self._open(destination)
+                    except (OSError, sqlite3.Error, HistoryMigrationError) as rebuild_error:
+                        self._use_unavailable_view(
+                            f"历史数据库已备份为 {backup.name}，重建失败({rebuild_error})"
+                        )
+        except OSError as error:
+            self._use_unavailable_view(f"历史数据库无法打开({error})，未替换原数据库")
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="anima-history")
+
+    def _use_unavailable_view(self, reason: str) -> None:
+        self.available = False
+        self._protect_storage(reason)
+        # This database only supplies an empty read view. All write methods
+        # and generation entry points must pass ensure_writable first.
+        self.connection = sqlite3.connect(":memory:", check_same_thread=False)
+        self._initialize(self.connection)
+
+    def storage_status(self) -> dict[str, Any]:
+        return {**super().storage_status(), "available": self.available}
 
     @staticmethod
     def _open(destination: Path) -> sqlite3.Connection:
         connection = sqlite3.connect(destination, check_same_thread=False)
         try:
+            HistoryStore._backup_before_schema_changes(connection)
             HistoryStore._initialize(connection)
         except Exception:
             connection.close()
             raise
         return connection
+
+    @staticmethod
+    def _backup_before_schema_changes(connection: sqlite3.Connection) -> None:
+        """Back up legacy data before ALTER/CREATE can modify its source file."""
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        if not tables.intersection({"batches", "images"}):
+            return
+        needs_backup = not {"batches", "images"}.issubset(tables)
+        for table in ("batches", "images"):
+            if table not in tables:
+                continue
+            columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+            if table == "images" and not {
+                "resolved_selection_json", "resolved_prompt", "bound_resources_json"
+            }.issubset(columns):
+                needs_backup = True
+            if "settings_json" not in columns:
+                continue
+            for row in connection.execute(f"SELECT settings_json FROM {table}"):
+                try:
+                    settings = json.loads(row[0])
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if isinstance(settings, dict):
+                    profile = settings.get("model_profile")
+                    if profile is None or isinstance(profile, str) and not profile.strip():
+                        needs_backup = True
+                        break
+        if needs_backup:
+            HistoryStore._backup_before_migration(connection)
 
     @staticmethod
     def _initialize(connection: sqlite3.Connection) -> None:
@@ -291,9 +360,11 @@ class HistoryStore:
         return await loop.run_in_executor(self._executor, functools.partial(func, *args, **kwargs))
 
     async def create_batch(self, batch_id: str, total: int, settings: dict[str, Any]) -> dict[str, Any]:
+        self.ensure_writable()
         return await self._call(self._create_batch, batch_id, total, settings)
 
     def _create_batch(self, batch_id: str, total: int, settings: dict[str, Any]) -> dict[str, Any]:
+        self.ensure_writable()
         timestamp = _now()
         self.connection.execute(
             "INSERT INTO batches (id, total, completed, status, error, settings_json, created_at, updated_at) VALUES (?, ?, 0, 'running', '', ?, ?, ?)",
@@ -310,6 +381,7 @@ class HistoryStore:
         status: str | None = None,
         error: str | None = None,
     ) -> dict[str, Any]:
+        self.ensure_writable()
         return await self._call(
             self._update_batch, batch_id, completed=completed, status=status, error=error
         )
@@ -322,6 +394,7 @@ class HistoryStore:
         status: str | None = None,
         error: str | None = None,
     ) -> dict[str, Any]:
+        self.ensure_writable()
         fields = ["updated_at = ?"]
         values: list[Any] = [_now()]
         if completed is not None:
@@ -339,6 +412,7 @@ class HistoryStore:
         return self._get_batch(batch_id)
 
     async def add_image(self, **kwargs: Any) -> dict[str, Any]:
+        self.ensure_writable()
         return await self._call(self._add_image, **kwargs)
 
     def _add_image(
@@ -357,6 +431,7 @@ class HistoryStore:
         resolved_prompt: str = "",
         bound_resources: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        self.ensure_writable()
         cursor = self.connection.execute(
             """
             INSERT INTO images (
@@ -441,9 +516,11 @@ class HistoryStore:
         }
 
     async def delete_image(self, image_id: int) -> bool:
+        self.ensure_writable()
         return await self._call(self._delete_image, image_id)
 
     def _delete_image(self, image_id: int) -> bool:
+        self.ensure_writable()
         cursor = self.connection.execute("DELETE FROM images WHERE id = ?", (image_id,))
         self.connection.commit()
         return cursor.rowcount > 0

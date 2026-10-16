@@ -14,11 +14,12 @@
       document.documentElement.dataset.theme = theme;
     })();
   </script>
-  <link rel="stylesheet" href="/static/styles.css?v=20261003-cfgzero-2ndsampler1">
+  <link rel="stylesheet" href="/static/styles.css?v=20261016-recovery">
 </head>
 <body>
   <div class="ambient" aria-hidden="true"></div>
   <div id="appError" class="app-error" role="alert" hidden></div>
+  <div id="storageWarning" class="storage-warning" role="status" hidden></div>
 
   <header class="topbar glass">
     <a class="brand" href="#" aria-label="Anima Random Studio 首页">
@@ -121,8 +122,8 @@
               <option value="krea2">Krea 2</option>
             </select></label>
             <p id="modelProfileHint" class="field-hint">档案会自动切换 UNet、CLIP、VAE、编码方式与采样参数。</p>
-            <label class="field"><span>主模型</span><select id="model_name"><option value="">正在读取模型...</option></select><small class="field-hint">只显示归属当前档案的模型；CLIP 与 VAE 随档案绑定。</small></label>
-            <button id="manageResourceOwnership" class="button ghost compact" type="button">管理模型 / LoRA 归属</button>
+            <label class="field"><span>主模型</span><select id="model_name"><option value="">正在读取模型...</option></select><small class="field-hint">按 LoRA Manager 的 base_model 识别模型；CLIP 与 VAE 随档案绑定。</small></label>
+            <button id="manageResourceOwnership" class="button ghost compact" type="button">模型 / LoRA 管理</button>
             <div id="resourceWarning" class="resource-warning" hidden></div>
           </div>
         </details>
@@ -300,29 +301,54 @@
       <label class="compact-check"><input id="kreaPoolSelectedOnly" type="checkbox"><span>仅看已选</span></label>
     </div>
     <div class="pool-actions">
-      <button id="selectAllKreaPool" class="button ghost" type="button">全选词库</button>
+      <button id="kreaPoolSelectPage" class="button ghost" type="button">选中本页</button>
+      <button id="kreaPoolSelectAll" class="button ghost" type="button">全选筛选结果</button>
       <button id="clearKreaPoolSelection" class="button ghost" type="button">清空选择</button>
-      <details class="krea-pool-import">
-        <summary class="button ghost compact">导入 / 编辑词池</summary>
-        <div class="krea-pool-import-content">
-          <label class="field"><span>JSON / CSV 文件</span><input id="kreaPromptPoolFile" type="file" accept=".json,.csv,text/csv,application/json"></label>
-          <label class="field"><span>每行一条自然语言提示词</span><textarea id="kreaPromptPoolText" rows="5" placeholder="输入提示词，或粘贴 JSON / CSV 内容"></textarea></label>
-          <div class="krea-prompt-pool-actions"><button id="kreaPromptPoolAppend" class="button ghost compact" type="button">追加</button><button id="kreaPromptPoolReplace" class="button primary compact" type="button">替换词池</button></div>
-        </div>
-      </details>
+      <button id="kreaPoolDeleteSelection" class="button danger compact" type="button" disabled>批量删除</button>
+      <button id="kreaPoolAddItem" class="button primary compact" type="button">新增提示词</button>
+      <button id="kreaPoolOpenImport" class="button ghost compact" type="button">批量导入</button>
     </div>
     <div class="pool-browser krea-pool-browser"><section class="pool-results"><div id="kreaPromptPoolList" class="pool-grid" aria-live="polite"></div></section></div>
     <footer class="drawer-footer">
       <span id="kreaPoolSelectionLabel">已选择 0 项</span>
+      <div class="pager"><button id="kreaPoolPrev" class="icon-button dark" type="button" title="上一页" aria-label="上一页">‹</button><span id="kreaPoolPageLabel">1 / 1</span><button id="kreaPoolNext" class="icon-button dark" type="button" title="下一页" aria-label="下一页">›</button></div>
       <button id="confirmKreaPool" class="button primary" type="button">完成</button>
     </footer>
   </aside>
   <div id="kreaPoolBackdrop" class="drawer-backdrop" hidden></div>
 
+  <dialog id="kreaPromptItemDialog" class="compact-dialog krea-prompt-item-dialog">
+    <form id="kreaPromptItemForm" method="dialog">
+      <div class="dialog-heading"><div><span class="kicker">KREA 2 · PROMPT</span><h2 id="kreaPromptItemTitle">新增自然语言提示词</h2></div><button id="kreaPromptItemClose" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
+      <label class="field"><span>提示词文本</span><textarea id="kreaPromptItemText" rows="8" maxlength="20000" placeholder="输入一条自然语言提示词" required></textarea></label>
+      <div class="dialog-actions"><button id="kreaPromptItemDelete" class="button danger" type="button" hidden>删除</button><span></span><button id="kreaPromptItemCancel" class="button ghost" type="button">取消</button><button class="button primary" type="submit">保存</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="kreaPromptImportDialog" class="import-dialog krea-prompt-import-dialog">
+    <form id="kreaPromptImportForm" method="dialog">
+      <div class="dialog-heading"><div><span class="kicker">KREA 2 · BATCH IMPORT</span><h2>批量导入自然语言提示词</h2></div><button id="kreaPromptImportClose" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
+      <div class="krea-import-inputs">
+        <label class="field"><span>JSON / CSV 文件</span><input id="kreaPromptPoolFile" type="file" accept=".json,.csv,text/csv,application/json"></label>
+        <label class="field"><span>导入格式</span><select id="kreaPromptImportFormat"><option value="auto">自动识别 JSON / 文本行</option><option value="text">每行一条文本</option><option value="json">JSON</option><option value="csv">CSV</option></select></label>
+      </div>
+      <label class="field krea-import-text-field"><span>提示词内容</span><textarea id="kreaPromptPoolText" rows="7" placeholder="每行一条提示词，也可粘贴 JSON 或 CSV 内容"></textarea></label>
+      <div class="krea-import-options">
+        <label class="field"><span>导入方式</span><select id="kreaPromptImportMode"><option value="append">追加到现有词池</option><option value="replace">替换整个词池</option></select></label>
+        <button id="kreaPromptImportPreviewButton" class="button ghost compact" type="button">校验并预览</button>
+      </div>
+      <p id="kreaPromptImportHint" class="import-hint" aria-live="polite">选择文件或粘贴内容后，先校验预览，再确认写入。</p>
+      <div id="kreaPromptImportSummary" class="import-summary krea-import-summary" hidden></div>
+      <div id="kreaPromptImportRows" class="import-rows krea-import-rows" aria-live="polite"></div>
+      <div class="dialog-actions"><span></span><span></span><button id="kreaPromptImportCancel" class="button ghost" type="button">取消</button><button id="kreaPromptImportCommit" class="button primary" type="button" disabled>确认追加</button></div>
+    </form>
+  </dialog>
+
   <dialog id="resourceOwnershipDialog" class="resource-ownership-dialog">
     <form method="dialog" class="resource-ownership-form">
-      <div class="dialog-heading"><div><span class="kicker">RESOURCE OWNERSHIP</span><h2>模型 / LoRA 归属</h2></div><button id="closeResourceOwnership" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
-      <p class="field-hint">新发现的资源默认未归属。只有归入当前档案的模型和 LoRA 会出现在相应下拉框。</p>
+      <div class="dialog-heading"><div><span class="kicker">LORA MANAGER</span><h2>模型 / LoRA 分类</h2></div><button id="closeResourceOwnership" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
+      <p class="field-hint">分类来自 ComfyUI-Lora-Manager。请在插件中管理资源和 base_model，完成后刷新；无法识别或不支持的资源不会用于生成。</p>
+      <div class="ownership-actions"><a id="openLoraManager" class="button ghost compact" target="_blank" rel="noopener noreferrer" hidden>打开 LoRA Manager</a><button id="refreshResourceClassification" class="button ghost compact" type="button">刷新分类</button></div>
       <div class="ownership-toolbar">
         <label class="field"><span>资源类型</span><select id="ownershipKind"><option value="models">主模型</option><option value="loras">LoRA</option></select></label>
         <label class="field"><span>搜索</span><input id="ownershipSearch" type="search" placeholder="按文件名或文件夹搜索"></label>
@@ -555,6 +581,6 @@
   </dialog>
 
   <div id="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20261003-cfgzero-2ndsampler1" defer></script>
+  <script src="/static/app.js?v=20261016-recovery" defer></script>
 </body>
 </html>

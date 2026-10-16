@@ -8,9 +8,15 @@ using System.Text.RegularExpressions;
 namespace Anima.Launcher.Core;
 
 public sealed record InstallJournal(string Root, string Stage, string Status, DateTime UpdatedUtc, string? Error = null);
+public sealed record NodeInstallPlan(Repository Repository, string Directory, bool PreserveExisting);
 
 public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloads downloads, Action<string> log, IProgress<DownloadProgress>? progress)
 {
+    public static IReadOnlyList<NodeInstallPlan> PlanNodes(string root, RuntimeManifest runtime)
+    {
+        var directories = Inventory.ResolveNodeDirectories(root, runtime);
+        return runtime.Nodes.Select(repo => new NodeInstallPlan(repo, directories[repo.Id], Directory.Exists(directories[repo.Id]) && !File.Exists(Path.Combine(directories[repo.Id], ".anima-revision.json")))).ToArray();
+    }
     private static readonly Regex Sam2Line = new(@"^(?:sam2(?:\[[^\]]*\])?\s*@\s*)?git\+https://github\.com/facebookresearch/sam2(?:\.git)?(?:@[\w./\-]+)?\s*$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private string? git;
     private string? uv;
@@ -170,6 +176,9 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         Safety.ValidateRuntime(manifest);
         if (string.IsNullOrWhiteSpace(config.ComfyRoot)) throw new InvalidDataException("请先选择 ComfyUI 目录：新建选空目录，导入选含 main.py 的目录。");
         config.ComfyRoot = Path.GetFullPath(config.ComfyRoot);
+        // Resolve aliases before any external command or install mutation. An existing
+        // ZIP install must never trigger a second clone into the canonical folder.
+        var nodePlans = PlanNodes(config.ComfyRoot, manifest);
         if (await ServiceManager.PortOpen(config.ComfyPort) || OwnedComfyRunning()) throw new IOException("安装依赖前请先停止此环境的 ComfyUI，避免运行过程中改动 Python 包。");
         var file = Path.Combine(stateDir, "install-state.json");
         if (File.Exists(file))
@@ -229,11 +238,11 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         var skip = Path.Combine(custom, "skip_download_model");
         var hadSkip = File.Exists(skip);
         if (!hadSkip) File.WriteAllText(skip, "Model downloads are managed by Anima Random Studio.\n");
-        foreach (var repo in manifest.Nodes)
+        foreach (var node in nodePlans)
         {
-            var target = Path.Combine(custom, repo.Id);
-            var managed = File.Exists(Path.Combine(target, ".anima-revision.json"));
-            if (Directory.Exists(target) && !managed) { log($"保留已有节点 {repo.Id}；不升级、不改依赖。"); continue; }
+            var repo = node.Repository;
+            var target = node.Directory;
+            if (node.PreserveExisting) { log($"保留已有节点 {repo.Id}：{target}；不升级、不改依赖。"); continue; }
             await Stage(config, "安装节点 " + repo.Id, async () =>
             {
                 await Clone(repo, target, config, ct);

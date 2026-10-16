@@ -104,6 +104,78 @@ Check(scan.Single().State == "已校验" && scan.Single().Destination == Path.Co
 var portable = Path.Combine(work, "portable"); Directory.CreateDirectory(Path.Combine(portable, "ComfyUI")); Directory.CreateDirectory(Path.Combine(portable, "python_embeded"));
 File.WriteAllText(Path.Combine(portable, "ComfyUI", "main.py"), ""); File.WriteAllText(Path.Combine(portable, "ComfyUI", "folder_paths.py"), ""); File.WriteAllText(Path.Combine(portable, "python_embeded", "python.exe"), "");
 Check(Inventory.NormalizeRoot(portable) == Path.Combine(portable, "ComfyUI") && Inventory.FindPython(Path.Combine(portable, "ComfyUI"), "").Contains("python_embeded"), "portable parent and bundled Python detected");
+var toolsEnv = Environment.GetEnvironmentVariable("ANIMA_TOOLS_DIR");
+var legacyToolsEnv = Environment.GetEnvironmentVariable("COMFYUI_ANIMA_TOOLS");
+try
+{
+    Environment.SetEnvironmentVariable("ANIMA_TOOLS_DIR", null);
+    Environment.SetEnvironmentVariable("COMFYUI_ANIMA_TOOLS", null);
+    string AddTools(string comfyRoot, string name)
+    {
+        var folder = Path.Combine(comfyRoot, "custom_nodes", name);
+        Directory.CreateDirectory(Path.Combine(folder, "js"));
+        foreach (var filename in AnimaToolsDiscovery.DataFiles) File.WriteAllText(Path.Combine(folder, "js", filename), "[]");
+        return folder;
+    }
+    var discoveryRoot = Path.Combine(work, "目录 with spaces");
+    Check(AnimaToolsDiscovery.Resolve(discoveryRoot) is null, "absent tools remain optional");
+    foreach (var name in new[] { AnimaToolsDiscovery.NodeId, AnimaToolsDiscovery.NodeId + "-main", AnimaToolsDiscovery.NodeId + "-master", "renamed 中文 provider" })
+    {
+        var instance = Path.Combine(discoveryRoot, name);
+        var folder = AddTools(instance, name);
+        Check(AnimaToolsDiscovery.Resolve(instance) == folder, "data signature discovers " + name);
+    }
+    var activeRoot = Path.Combine(discoveryRoot, "alias integration");
+    var alias = AddTools(activeRoot, AnimaToolsDiscovery.NodeId + "-main");
+    AddTools(activeRoot, "ignored.disabled");
+    AddTools(activeRoot, "ignored.anima-installing");
+    AddTools(activeRoot, ".ignored");
+    Check(AnimaToolsDiscovery.Resolve(activeRoot) == alias, "disabled and staging copies do not create ambiguity");
+    var animaManifest = manifest with { Nodes = [manifest.Nodes.Single(node => node.Id == AnimaToolsDiscovery.NodeId)] };
+    var resolvedNodes = Inventory.ResolveNodeDirectories(activeRoot, animaManifest);
+    var discoveredNodes = await Inventory.Nodes(activeRoot, animaManifest, null, default);
+    Check(discoveredNodes.Single().Path == alias && discoveredNodes.Single().State != "缺失", "inventory reports the ZIP install's actual directory");
+    var installPlan = Installer.PlanNodes(activeRoot, animaManifest).Single();
+    Check(installPlan.Directory == alias && installPlan.PreserveExisting, "installer preserves alias installation without cloning a second copy");
+    var startArguments = ServiceManager.WebUiArguments(new LauncherConfig { ComfyRoot = activeRoot, AppRoot = root }, "resources.json", resolvedNodes);
+    Check(startArguments[startArguments.IndexOf("--anima-tools-dir") + 1] == alias, "WebUI startup receives the same resolved tools directory");
+    var missingArguments = ServiceManager.WebUiArguments(new LauncherConfig { ComfyRoot = discoveryRoot, AppRoot = root }, "resources.json", Inventory.ResolveNodeDirectories(discoveryRoot, animaManifest));
+    Check(!missingArguments.Contains("--anima-tools-dir"), "missing optional tools do not become an invalid explicit path");
+
+    Environment.SetEnvironmentVariable("ANIMA_TOOLS_DIR", Path.Combine(work, "not-present"));
+    Check(AnimaToolsDiscovery.Resolve(activeRoot, alias) == alias, "explicit selection has precedence over environment");
+    await Throws(() => Task.FromResult(AnimaToolsDiscovery.Resolve(activeRoot)), "invalid selected environment never falls back to an automatic match");
+    Environment.SetEnvironmentVariable("ANIMA_TOOLS_DIR", alias);
+    Environment.SetEnvironmentVariable("COMFYUI_ANIMA_TOOLS", Path.Combine(work, "not-present-either"));
+    Check(AnimaToolsDiscovery.Resolve(activeRoot) == alias, "primary environment wins over legacy environment");
+    await Throws(() => Task.FromResult(AnimaToolsDiscovery.Resolve(activeRoot, Path.Combine(work, "invalid-explicit"))), "invalid explicit selection never falls back to valid environment");
+    Environment.SetEnvironmentVariable("ANIMA_TOOLS_DIR", null);
+    Environment.SetEnvironmentVariable("COMFYUI_ANIMA_TOOLS", alias);
+    Check(AnimaToolsDiscovery.Resolve(activeRoot) == alias, "legacy environment remains supported");
+    Environment.SetEnvironmentVariable("COMFYUI_ANIMA_TOOLS", null);
+    var incompleteRoot = Path.Combine(discoveryRoot, "incomplete");
+    Directory.CreateDirectory(Path.Combine(incompleteRoot, "custom_nodes", AnimaToolsDiscovery.NodeId + "-master", "js"));
+    await Throws(() => Task.FromResult(Installer.PlanNodes(incompleteRoot, animaManifest)), "incomplete known installation blocks a duplicate clone");
+    var partialRoot = Path.Combine(discoveryRoot, "partially renamed provider");
+    var partialJs = Path.Combine(partialRoot, "custom_nodes", "custom provider name", "js");
+    Directory.CreateDirectory(partialJs);
+    File.WriteAllText(Path.Combine(partialJs, AnimaToolsDiscovery.DataFiles[0]), "[]");
+    await Throws(() => Task.FromResult(Installer.PlanNodes(partialRoot, animaManifest)), "a renamed provider with only some data files blocks a duplicate clone");
+    AddTools(activeRoot, AnimaToolsDiscovery.NodeId);
+    await Throws(() => Task.FromResult(AnimaToolsDiscovery.Resolve(activeRoot)), "multiple valid providers require explicit selection");
+    Check(AnimaToolsDiscovery.Resolve(activeRoot, alias) == alias, "explicit selection resolves multiple valid providers");
+    var unusedState = Path.Combine(work, "ambiguous-install-state");
+    var isolatedHandler = new FakeHandler();
+    using var isolatedDownloads = new Downloads(null, isolatedHandler);
+    var rejectedInstaller = new Installer(unusedState, animaManifest, isolatedDownloads, _ => { }, null);
+    try { await rejectedInstaller.Install(new LauncherConfig { ComfyRoot = activeRoot, Python = "must-not-run.exe" }, false, default); throw new Exception("Ambiguous install unexpectedly ran"); }
+    catch (InvalidDataException error) { Check(error.Message.Contains("多个") && isolatedHandler.Seen.Count == 0 && !Directory.Exists(unusedState), "ambiguous installation fails before commands, downloads, or state writes"); }
+}
+finally
+{
+    Environment.SetEnvironmentVariable("ANIMA_TOOLS_DIR", toolsEnv);
+    Environment.SetEnvironmentVariable("COMFYUI_ANIMA_TOOLS", legacyToolsEnv);
+}
 await Throws(() => { new LauncherConfig { SchemaVersion = 9 }.Validate(); return Task.CompletedTask; }, "future config schema rejected");
 
 var interrupted = Path.Combine(work, "interrupted.bin");

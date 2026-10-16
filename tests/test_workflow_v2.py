@@ -12,6 +12,7 @@ from anima_webui.model_profiles import get_model_profile  # noqa: E402
 from anima_webui.launcher import configure_resources  # noqa: E402
 from anima_webui.workflow import (  # noqa: E402
     DEFAULT_SETTINGS,
+    WorkflowError,
     WorkflowTemplates,
     render_workflows,
     validate_settings,
@@ -93,6 +94,19 @@ class V2WorkflowRendererTests(unittest.TestCase):
         self.assertNotIn("FaceDetailerPipe", classes)
         self.assertNotIn("UpscaleModelLoader", classes)
         self.assertNotIn("ImageUpscaleWithModel", classes)
+
+    def test_random_sections_require_resolved_text_and_frozen_replay_still_works(self):
+        templates = WorkflowTemplates(self.api_template, self.ui_template)
+        for section in ("character", "clothing", "pose", "background", "expression"):
+            settings = {**DEFAULT_SETTINGS, f"random_{section}": True}
+            with self.subTest(section=section):
+                with self.assertRaisesRegex(WorkflowError, "随机提示词尚未解析"):
+                    templates.submission(settings, 1, 2, "test", "client", 1)
+                frozen = "historical exact prompt, "
+                payload = templates.submission(settings, 1, 2, "test", "client", 1,
+                                               frozen_positive_prompt=frozen)
+                self.assertEqual(payload["prompt"]["168"]["inputs"]["value"], frozen)
+                self.assertEqual(payload["extra_data"]["extra_pnginfo"]["anima_random_webui"]["resolved_prompt_full"], frozen)
 
     def test_launcher_mapping_is_applied_after_dynamic_profile_switch(self):
         templates = WorkflowTemplates(self.api_template, self.ui_template)

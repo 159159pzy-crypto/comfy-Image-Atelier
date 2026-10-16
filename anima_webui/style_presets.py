@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .persistence import backup_corrupt_file, backup_for_migration
+from .persistence import StorageProtection, backup_for_migration
 from .prompt_rules import PromptRuleStore
 from .model_profiles import (
     DEFAULT_MODEL_PROFILE,
@@ -32,6 +32,7 @@ def _locked(method: Any) -> Any:
     @functools.wraps(method)
     async def wrapper(self: "StylePresetStore", *args: Any, **kwargs: Any) -> Any:
         async with self._lock:
+            self.ensure_writable()
             return await method(self, *args, **kwargs)
 
     return wrapper
@@ -121,7 +122,9 @@ def preset_settings(
     }
 
 
-class StylePresetStore:
+class StylePresetStore(StorageProtection):
+    store_name = "style_presets"
+
     def __init__(self, path: str | Path, prompt_rules: PromptRuleStore | None = None):
         self.path = Path(path)
         self.prompt_rules = prompt_rules
@@ -133,6 +136,7 @@ class StylePresetStore:
 
     def reload(self) -> None:
         self.load_warnings = []
+        self.read_only_reason = None
         if not self.path.is_file():
             self.items = []
             return
@@ -145,13 +149,9 @@ class StylePresetStore:
             if not isinstance(values, list):
                 raise WorkflowError("风格预设 items 必须是数组")
             # Version 1 snapshots predate profile namespaces and the v2 repair
-            # schema.  Always preserve a backup before normalizing them, even
+            # schema. Always preserve a backup before persisting normalization, even
             # when a hand-edited v1 item already happens to contain a profile.
             migrated_legacy = version == 1
-            if migrated_legacy:
-                backup = backup_for_migration(self.path, 2)
-                if backup is not None:
-                    self.load_warnings.append(f"风格预设已迁移,原文件备份为 {backup.name}")
             # Migrate each snapshot independently.  A single hand-edited or
             # obsolete entry must not make every previously saved style
             # disappear.  Keep a warning with the item name so the user can
@@ -201,28 +201,24 @@ class StylePresetStore:
                             f"风格预设 {raw_item.get('name') or index + 1} 无法迁移({error}),已跳过"
                         )
                         cleaned_legacy = True
-        except (OSError, json.JSONDecodeError, WorkflowError) as error:
-            # 坏文件不再阻断启动:改名备份后以空数据继续,并向界面报告警告。
-            backup = backup_corrupt_file(self.path)
-            logger.warning("风格预设文件无法读取(%s),已备份为 %s 并以空数据启动", error, backup.name)
-            self.load_warnings.append(f"风格预设文件无法读取,已备份为 {backup.name} 并以空数据启动")
+        except (OSError, UnicodeError, json.JSONDecodeError, WorkflowError) as error:
+            self._recover_load_failure(error)
             self.items = []
             return
         self.items = items
         if migrated_legacy or cleaned_legacy:
-            if not migrated_legacy:
+            try:
                 backup = backup_for_migration(self.path, 2)
                 if backup is not None:
                     self.load_warnings.append(
-                        f"无效风格预设已隔离到新文件,原文件备份为 {backup.name}"
+                        f"风格预设已迁移,原文件备份为 {backup.name}"
                     )
-            try:
                 self._write_text(
                     json.dumps({"version": 2, "items": self.items}, ensure_ascii=False, indent=2)
                     + "\n"
                 )
             except OSError as error:
-                self.load_warnings.append(f"风格预设迁移文件写入失败: {error}")
+                self._protect_storage(f"风格预设已在内存迁移，但迁移备份或写回失败({error})")
 
     def list(self, model_profile: str | None = None) -> dict[str, Any]:
         profile_id: str | None = None
@@ -383,6 +379,7 @@ class StylePresetStore:
         await asyncio.to_thread(self._write_text, payload)
 
     def _write_text(self, text: str) -> None:
+        self.ensure_writable()
         fd, temp_name = tempfile.mkstemp(prefix="style-presets-", suffix=".json", dir=self.path.parent)
         try:
             with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:

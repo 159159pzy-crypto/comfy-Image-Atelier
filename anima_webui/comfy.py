@@ -8,7 +8,8 @@ from urllib.parse import urlencode, urlparse
 
 import aiohttp
 
-from .workflow import normalize_lora_path
+from .resource_classification import classify_resources
+from .workflow import WorkflowError, normalize_lora_path
 
 
 class ComfyError(RuntimeError):
@@ -34,7 +35,9 @@ class ComfyClient:
         self.poll_interval = poll_interval
         self.session: aiohttp.ClientSession | None = None
         self._object_info_cache: tuple[float, dict[str, Any] | None] = (0.0, None)
-        self._lora_inventory_cache: tuple[float, dict[str, Any] | None] = (0.0, None)
+        self._object_info_generation = 0
+        self._classification_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._classification_locks = {kind: asyncio.Lock() for kind in ("models", "loras")}
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
@@ -76,162 +79,109 @@ class ComfyClient:
         timestamp, cached = self._object_info_cache
         if cached is not None and loop.time() - timestamp < 5.0:
             return cached
+        generation = self._object_info_generation
         data = await self._json("GET", "/object_info")
-        self._object_info_cache = (loop.time(), data)
+        if generation == self._object_info_generation:
+            self._object_info_cache = (loop.time(), data)
         return data
 
-    async def lora_inventory(self) -> dict[str, Any]:
-        """Return ComfyUI LoRAs enriched by LoRA Manager and Anima Tools metadata."""
-        loop = asyncio.get_running_loop()
-        timestamp, cached = self._lora_inventory_cache
-        if cached is not None and loop.time() - timestamp < 5.0:
-            return cached
+    async def _manager_inventory(self, prefix: str) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        expected_pages: int | None = None
+        expected_total: int | None = None
+        seen_pages: set[str] = set()
+        page = 1
+        while True:
+            payload = await self._json(
+                "GET", f"/api/lm/{prefix}/list?{urlencode({'page': page, 'page_size': 100})}"
+            )
+            values = payload.get("items")
+            total_pages = payload.get("total_pages")
+            if (
+                not isinstance(values, list)
+                or not all(isinstance(value, dict) for value in values)
+                or isinstance(total_pages, bool)
+                or not isinstance(total_pages, int)
+                or total_pages < 0
+                or total_pages == 0 and values
+                or total_pages > 1 and not values
+                or len(values) > 100
+            ):
+                raise ComfyError("LoRA Manager 返回了无效的分页清单")
+            if "page" in payload and (type(payload["page"]) is not int or payload["page"] != page):
+                raise ComfyError("LoRA Manager 返回的页码不一致")
+            if "page_size" in payload and (type(payload["page_size"]) is not int or payload["page_size"] != 100):
+                raise ComfyError("LoRA Manager 返回的分页大小不一致")
+            if expected_pages is not None and total_pages != expected_pages:
+                raise ComfyError("LoRA Manager 清单在分页期间发生变化，请刷新重试")
+            expected_pages = total_pages
+            page_identity = json.dumps(values, sort_keys=True)
+            if values and page_identity in seen_pages:
+                raise ComfyError("LoRA Manager 返回了重复分页，无法确认完整清单")
+            seen_pages.add(page_identity)
+            if "total" in payload:
+                total = payload["total"]
+                if type(total) is not int or total < 0:
+                    raise ComfyError("LoRA Manager 返回了无效的模型总数")
+                if expected_total is not None and total != expected_total:
+                    raise ComfyError("LoRA Manager 清单在分页期间发生变化，请刷新重试")
+                expected_total = total
+            items.extend(values)
+            if page >= max(1, total_pages):
+                if expected_total is not None and len(items) != expected_total:
+                    raise ComfyError("LoRA Manager 返回的清单不完整，请在插件中检查并刷新")
+                return items
+            page += 1
 
-        names: list[str] = []
-        source_available = False
-        object_info_available = False
-        try:
+    async def resource_classifications(self, kind: str, *, refresh: bool = False) -> dict[str, Any]:
+        if kind not in {"models", "loras"}:
+            raise ValueError("资源类型必须是 models 或 loras")
+        async with self._classification_locks[kind]:
+            loop = asyncio.get_running_loop()
+            if refresh:
+                self._object_info_generation += 1
+                self._object_info_cache = (0.0, None)
+                self._classification_cache.pop(kind, None)
+            cached = self._classification_cache.get(kind)
+            if cached is not None and loop.time() - cached[0] < 5.0:
+                return cached[1]
+
             object_info = await self.object_info()
-            node = object_info.get("LoraLoader") or {}
-            required = ((node.get("input") or {}).get("required") or {})
-            choices = required.get("lora_name")
+            node_name, input_name = ("UNETLoader", "unet_name") if kind == "models" else ("LoraLoader", "lora_name")
+            node = object_info.get(node_name)
+            inputs = node.get("input") if isinstance(node, dict) else None
+            required = inputs.get("required") if isinstance(inputs, dict) else None
+            choices = required.get(input_name) if isinstance(required, dict) else None
+            names = None
             if isinstance(choices, list) and choices and isinstance(choices[0], list):
-                names = [str(value) for value in choices[0]]
-                source_available = True
-                object_info_available = True
-        except ComfyError:
-            names = []
+                names = choices[0]
+            elif isinstance(choices, list) and len(choices) > 1 and isinstance(choices[1], dict):
+                names = choices[1].get("options")
+            if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+                raise ComfyError(f"ComfyUI 未返回有效的 {node_name} 资源列表")
 
-        manager_items: list[dict[str, Any]] = []
-        manager_available = False
-        try:
-            page = 1
-            while True:
-                payload = await self._json(
-                    "GET",
-                    f"/api/lm/loras/list?{urlencode({'page': page, 'page_size': 100})}",
-                )
-                values = payload.get("items") or []
-                if not isinstance(values, list):
-                    raise ComfyError("LoRA Manager 返回了无效清单")
-                manager_items.extend(item for item in values if isinstance(item, dict))
-                manager_available = True
-                total_pages = payload.get("total_pages", 1)
-                if isinstance(total_pages, bool) or not isinstance(total_pages, int):
-                    total_pages = 1
-                if page >= max(1, total_pages):
-                    break
-                page += 1
-        except ComfyError:
-            manager_items = []
-            manager_available = False
-
-        manifest_items: dict[str, dict[str, Any]] = {}
-        try:
-            manifest = await self._json("GET", "/anima-tools/lora/manifest")
-            source_available = True
-            for item in manifest.get("items") or []:
-                if isinstance(item, dict) and item.get("filename"):
-                    filename = str(item["filename"])
-                    identity = normalize_lora_path(filename).casefold()
-                    manifest_items[identity] = item
-                    if not object_info_available and not any(
-                        normalize_lora_path(name).casefold() == identity for name in names
-                    ):
-                        names.append(filename)
-        except ComfyError:
-            pass
-
-        if not source_available and manager_available:
-            for item in manager_items:
-                file_path = str(item.get("file_path") or "").replace("\\", "/")
-                basename = file_path.rsplit("/", 1)[-1]
-                folder = str(item.get("folder") or "").strip("/\\")
-                if basename:
-                    names.append(f"{folder}/{basename}" if folder else basename)
-            source_available = True
-
-        if not source_available:
-            raise ComfyError("无法读取 ComfyUI 本地 LoRA 列表")
-
-        def manager_item_for(normalized: str) -> dict[str, Any]:
-            identity = normalized.casefold()
-            matches = []
-            for item in manager_items:
-                file_path = str(item.get("file_path") or "").replace("\\", "/")
-                path_identity = file_path.casefold()
-                if path_identity == identity or path_identity.endswith(f"/{identity}"):
-                    matches.append(item)
-                    continue
-                basename = file_path.rsplit("/", 1)[-1]
-                folder = str(item.get("folder") or "").strip("/\\")
-                relative = f"{folder}/{basename}" if folder else basename
-                if relative.casefold() == identity:
-                    matches.append(item)
-            return matches[0] if len(matches) == 1 else {}
-
-        def trigger_words(metadata: dict[str, Any]) -> list[str]:
-            civitai = metadata.get("civitai") or {}
-            values = civitai.get("trainedWords") if isinstance(civitai, dict) else []
-            if not isinstance(values, list):
-                return []
-            result: list[str] = []
-            seen_words: set[str] = set()
-            for value in values:
-                if not isinstance(value, str):
-                    continue
-                word = value.strip()
-                identity = word.casefold()
-                if word and identity not in seen_words:
-                    result.append(word)
-                    seen_words.add(identity)
+            prefix = "checkpoints" if kind == "models" else "loras"
+            roots_path = "/api/lm/checkpoints/unet_roots" if kind == "models" else "/api/lm/loras/roots"
+            try:
+                roots_data = await self._json("GET", roots_path)
+                roots = roots_data.get("roots")
+                if roots_data.get("success") is not True or not isinstance(roots, list):
+                    raise ComfyError("LoRA Manager 返回了无效的模型根目录")
+                manager_items = await self._manager_inventory(prefix)
+                items = classify_resources(names, manager_items, roots)
+            except (ComfyError, ValueError, WorkflowError) as error:
+                raise ComfyError(f"LoRA Manager 分类读取失败: {error}；请确认插件已启用并完成扫描") from error
+            result = {
+                "items": items,
+                "count": len(items),
+                "source": "lora-manager",
+                "manager_url": f"{self.base_url}/{prefix}",
+            }
+            self._classification_cache[kind] = (loop.time(), result)
             return result
 
-        items = []
-        seen: set[str] = set()
-        for filename in names:
-            normalized = normalize_lora_path(filename)
-            identity = normalized.casefold()
-            if identity in seen:
-                continue
-            seen.add(identity)
-            manager_metadata = manager_item_for(normalized)
-            manifest_metadata = manifest_items.get(identity) or {}
-            preview = str(
-                manager_metadata.get("preview_url")
-                or manifest_metadata.get("thumb_url")
-                or ""
-            )
-            metadata_source = (
-                "lora-manager"
-                if manager_metadata
-                else "anima-tools"
-                if manifest_metadata
-                else "comfyui"
-            )
-            items.append(
-                {
-                    "filename": filename,
-                    "normalized_path": normalized,
-                    "folder": normalized.rsplit("/", 1)[0] if "/" in normalized else "",
-                    "basename": normalized.rsplit("/", 1)[-1],
-                    "display_name": str(
-                        manager_metadata.get("model_name")
-                        or manifest_metadata.get("display_name")
-                        or normalized.rsplit("/", 1)[-1].rsplit(".", 1)[0]
-                    ),
-                    "preview": preview,
-                    "has_preview": bool(preview),
-                    "preview_nsfw_level": manager_metadata.get("preview_nsfw_level", 0),
-                    "trigger_words": trigger_words(manager_metadata),
-                    "trigger_metadata_available": bool(manager_metadata),
-                    "metadata_source": metadata_source,
-                    "size": manager_metadata.get("file_size") or manifest_metadata.get("size"),
-                }
-            )
-        result = {"items": items, "count": len(items)}
-        self._lora_inventory_cache = (loop.time(), result)
-        return result
+    async def lora_inventory(self, *, refresh: bool = False) -> dict[str, Any]:
+        return await self.resource_classifications("loras", refresh=refresh)
 
     async def lora_preview(self, filename: str) -> tuple[bytes, str, str]:
         normalized = normalize_lora_path(filename)
@@ -487,6 +437,12 @@ def extract_images(history_entry: dict[str, Any]) -> list[dict[str, Any]]:
 
 def extract_positive_prompt(history_entry: dict[str, Any]) -> str:
     prompt_data = history_entry.get("prompt") or []
+    if len(prompt_data) > 2 and isinstance(prompt_data[2], dict):
+        positive = prompt_data[2].get("42") or {}
+        if positive.get("class_type") == "CLIPTextEncode":
+            text = (positive.get("inputs") or {}).get("text")
+            if isinstance(text, str):
+                return text
     if len(prompt_data) > 3 and isinstance(prompt_data[3], dict):
         extra = prompt_data[3].get("extra_pnginfo") or {}
         records = extra.get("anima_prompt") or {}

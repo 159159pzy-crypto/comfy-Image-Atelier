@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .catalog import SECTIONS, CatalogError, PromptCatalog, normalize_text
-from .persistence import backup_corrupt_file
+from .persistence import StorageProtection
 
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,7 @@ def _locked(method: Any) -> Any:
     @functools.wraps(method)
     async def wrapper(self: "CustomPromptStore", *args: Any, **kwargs: Any) -> Any:
         async with self._lock:
+            self.ensure_writable()
             return await method(self, *args, **kwargs)
 
     return wrapper
@@ -75,7 +76,9 @@ TEMPLATE_EXAMPLES = {
 }
 
 
-class CustomPromptStore:
+class CustomPromptStore(StorageProtection):
+    store_name = "custom_prompts"
+
     def __init__(self, path: str | Path, catalog: PromptCatalog):
         self.path = Path(path)
         self.catalog = catalog
@@ -88,6 +91,7 @@ class CustomPromptStore:
 
     def reload(self) -> None:
         self.load_warnings = []
+        self.read_only_reason = None
         if not self.path.is_file():
             self.items = []
             self.groups = {section: [] for section in SECTIONS}
@@ -123,12 +127,9 @@ class CustomPromptStore:
                     self._write_text(self._serialize(self.groups, self.items))
                 except OSError as error:
                     logger.warning("自定义提示词 v4 迁移暂未写回: %s", error)
-                    self.load_warnings.append("自定义提示词已在内存迁移，但 v4 文件暂未写回")
-        except (OSError, json.JSONDecodeError, CatalogError) as error:
-            # 坏文件不再阻断启动:改名备份后以空数据继续,并向界面报告警告。
-            backup = backup_corrupt_file(self.path)
-            logger.warning("自定义提示词文件无法读取(%s),已备份为 %s 并以空数据启动", error, backup.name)
-            self.load_warnings.append(f"自定义提示词文件无法读取,已备份为 {backup.name} 并以空数据启动")
+                    self._protect_storage(f"自定义提示词已在内存迁移，但迁移备份或写回失败({error})")
+        except (OSError, UnicodeError, json.JSONDecodeError, CatalogError, ValueError, TypeError) as error:
+            self._recover_load_failure(error)
             self.items = []
             self.groups = {section: [] for section in SECTIONS}
             # 同时把目录从 set_custom_items 可能留下的半修改状态恢复为无自定义项。
@@ -764,6 +765,7 @@ class CustomPromptStore:
         ) + "\n"
 
     def _write_text(self, text: str) -> None:
+        self.ensure_writable()
         fd, temp_name = tempfile.mkstemp(prefix="custom-prompts-", suffix=".json", dir=self.path.parent)
         try:
             with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:

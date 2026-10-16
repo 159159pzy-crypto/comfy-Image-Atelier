@@ -17,9 +17,9 @@
 
 ## Windows 安装启动器
 
-双击 `AnimaRandomStudio.exe`，按“选择 ComfyUI 目录 → 检查或安装环境 → 勾选缺失模型 → 启动工作台”完成首次配置。之后双击自动检查并启动服务，托盘提供打开工作台、启动/停止、检查资源、设置与日志。已有 `models/clip`、`models/unet` 和 `extra_model_paths.yaml` 中的资源会被识别，模型必须勾选才下载。
+拿到 `AnimaRandomStudio-win-x64-unsigned.zip` 或签名版完整包后，先解压整个 ZIP，再双击其中 `AnimaRandomStudio/AnimaRandomStudio.exe`。按“选择 ComfyUI 目录 → 检查或安装环境 → 勾选缺失模型 → 启动工作台”完成首次配置。之后双击自动检查并启动服务，托盘提供打开工作台、启动/停止、检查资源、设置与日志。已有 `models/clip`、`models/unet` 和 `extra_model_paths.yaml` 中的资源会被识别，模型必须勾选才下载。
 
-源码构建运行 `pwsh ./Build-Launcher.ps1`，输出位于 `dist/launcher/`；新版基于 **WinUI 3**，以自包含文件夹分发（`AnimaRandomStudio.exe` + 依赖 DLL，内置 .NET / Windows App Runtime / WebUI），无需为启动器单独安装运行时。详见 [启动器使用、构建与发布说明](launcher/README.md)。首次发布包仍需可信 Authenticode 签名。
+GitHub 自动生成的 **Source code (zip/tar.gz)** 是源码，不包含 EXE 或启动 BAT；如果 Release 中只有 Source code，请按下方“源码安装与启动”操作，或自行构建启动器。源码构建运行 `pwsh ./Build-Launcher.ps1`，在 `dist/candidates/<构建编号>/` 生成完整 ZIP、ZIP 的 `SHA256SUMS.txt` 和 `candidate.json`。启动器基于 **WinUI 3**，必须保留完整解压目录（EXE、DLL、运行时和界面资源），无需另装 .NET / Windows App Runtime。详见 [启动器使用、构建与发布说明](launcher/README.md)。未签名候选包会在文件名中明确标为 `unsigned`；本地构建不会自动上传或发布。
 
 ## 主要功能
 
@@ -37,10 +37,12 @@
 ### 模型、LoRA 与修复
 
 - 默认 Anima 绑定 `anima-base-v1.0.safetensors`、`qwen_3_06b_base.safetensors`、`qwen_image_vae.safetensors` 和 `stable_diffusion` 编码类型；Krea 2 绑定 `krea2_turbo_int8_convrot.safetensors`、`qwen3vl_4b_fp8_scaled.safetensors`、`qwen_image_vae.safetensors` 和 `krea2` 编码类型。
+- 底模和 LoRA 统一按 ComfyUI-Lora-Manager 的 `base_model` 分类：`Anima` 进入 Anima；`Krea 2`、`Krea 2 Turbo` 及大小写、空格、连字符变体进入 Krea 2。Unknown、未收录或其他架构不会进入生成选择；文件名、目录和标签不作为分类依据。
 - LoRA 支持 `models/loras` 下的任意安全子目录；选择器按当前模型档案读取清单、预览、触发词和覆盖值，不会把另一档案的配置带入当前提交。
+- “模型 / LoRA 分类”展示插件基础模型、生图模式和不可用原因；通过“打开 LoRA Manager”在插件内维护分类，再回工作台“刷新分类”。刷新重新读取插件清单，不触发插件全盘扫描。
 - 高清链按顺序独立旁路：底图 → 潜空间放大 → SeedVR2 修复放大 → N 卡放大 → ForbiddenVision 脸部细化。旧 `UpscaleModelLoader` / `ImageUpscaleWithModel` 链、CFGZeroStar 和四类独立 ADetailer 不再进入 v2 提交。
 - 底图模式严格二选一：普通底图或底图－双采样器；默认值由模型档案提供。关闭的修复阶段会清除提交中的孤立节点和连接。
-- 批次启动前校验当前档案的 UNet、CLIP、VAE、采样器、启用的 LoRA、SeedVR2 资源及可选处理节点；N 卡放大和脸部细化预检检查节点/插件可用性，不承诺独立模型文件扫描。
+- 批次启动和历史再生成前校验当前档案的底模与 LoRA 分类，以及 UNet、CLIP、VAE、采样器、SeedVR2 资源及可选处理节点；N 卡放大和脸部细化预检检查节点/插件可用性，不承诺独立模型文件扫描。保存过的资源若不再符合分类，会保留选择并显示原因，提交时拦截。
 - `GET /api/resources` 同时返回两个档案的绑定资源、节点状态和可选插件状态，便于启动器与前端显示可用性。
 
 ### 收藏与提示词分组
@@ -69,7 +71,7 @@
 
 | 项目 | 要求 |
 | --- | --- |
-| 操作系统 | Windows 10/11（启动批处理使用 Windows 路径） |
+| 操作系统 | Windows 10/11（安装启动器面向 Windows x64） |
 | Python | 3.11 或更高版本 |
 | ComfyUI | 可正常运行的本机实例，默认 `http://127.0.0.1:8188` |
 | WebUI | 默认监听 `http://127.0.0.1:8190` |
@@ -89,7 +91,7 @@
 | [ComfyUI-Prompt-Assistant](https://github.com/yawiii/ComfyUI-Prompt-Assistant) | `PromptExpand` 提示词后处理 |
 | [KreaSeedVarianceEnhancer](https://github.com/harukimix/KreaSeedVarianceEnhancer) | Krea 2 自然语言条件随机增强 |
 | [ComfyUI-KJNodes](https://github.com/kijai/ComfyUI-KJNodes) | `ModelPassThrough`、`VRAM_Debug`、图像/潜空间辅助节点 |
-| [ComfyUI-Lora-Manager](https://github.com/willmiao/ComfyUI-Lora-Manager) | 两组 LoRA、触发词和元数据节点 |
+| [ComfyUI-Lora-Manager](https://github.com/willmiao/ComfyUI-Lora-Manager) | 必需的底模 / LoRA 分类来源，以及 LoRA 预览、触发词和元数据节点 |
 | [ComfyUI-Impact-Pack](https://github.com/ltdrdata/ComfyUI-Impact-Pack) / Subpack | 可选检测与图像处理节点 |
 | ComfyUI 内置 SeedVR2 | `SeedVR2Preprocess`、`SeedVR2Conditioning`、`SeedVR2PostProcessing` |
 | [ComfyUI-NVIDIA-RTX-VSR-Pro](https://github.com/whmc76/ComfyUI-NVIDIA-RTX-VSR-Pro) | `RTXVideoSuperResolution` N 卡放大（可选） |
@@ -110,16 +112,28 @@ ComfyUI 核心节点（包括逻辑开关、采样、VAE 和 `SaveImage`）以�
 | SeedVR2 | VAE | `ema_vae_fp16.safetensors` | SeedVR2 节点要求的 VAE 目录 | 启用 SeedVR2 时必需 |
 | N 卡放大 | 节点与 GPU 能力 | `RTXVideoSuperResolution` / `NvidiaUpscale` | 节点包配置目录 | 启用 N 卡放大时必需；不使用独立放大模型文件 |
 
-LoRA 放在 `F:\comfyui\models\loras\`，可以继续分目录，例如：
+LoRA 放在你实际 ComfyUI 目录下的 `models/loras/`，可以继续分目录，例如：
 
 ```text
-F:\comfyui\models\loras\artist-a\style.safetensors
-F:\comfyui\models\loras\character\blue_archive\kazusa.safetensors
+<ComfyUI目录>/models/loras/artist-a/style.safetensors
+<ComfyUI目录>/models/loras/character/blue_archive/kazusa.safetensors
 ```
 
 重启 ComfyUI 或刷新其模型列表后，WebUI 才能读取新资源。启动器和 `/api/resources` 会按档案分别报告 UNet、CLIP、VAE、SeedVR2、节点及插件状态；缺失资源不会静默替换。
 
-## 安装与启动
+底模还须出现在 LoRA Manager 的 Checkpoints 清单及 ComfyUI 的 `UNETLoader` 清单中；仅出现在普通 checkpoint 加载器中的文件不能用于当前两套工作流。LoRA 须同时出现在插件和 LoRA 加载器清单中。工作台按插件模型根目录将绝对路径关联到加载器相对路径，支持多个模型根目录与中文路径；同名但路径有歧义的文件不会自动匹配。
+
+## 源码安装与启动
+
+以下命令在项目根目录的 PowerShell 中执行。项目没有固定盘符要求，也不需要创建启动 BAT。
+
+### 配置与历史恢复
+
+遇到配置内容损坏时，工作台会先备份原文件；只有备份成功才提示“已备份”。读取失败、迁移失败或备份失败时，工作台仍可打开，并持续显示受影响文件的路径和原因。对应存储进入只读保护，修改请求返回 HTTP 503（`code: storage_read_only`，附 `store` 和 `path`）；资源扫描不会自动认领未知资源。如果历史数据库不可用，历史页显示空视图并明确提示不可用，同时暂停生成与再生成，避免完成图片后无法记录。
+
+先解除占用、检查文件及目录权限，必要时从备份修复原文件，再重启工作台重新检查。界面没有强制覆盖原文件入口。`/api/config` 的 `storage_status` 可查看各存储保护状态，`catalog.discovery` 可查看 Anima Tools 目录发现诊断。
+
+旧历史在使用内容重抽时按需恢复角色快照，不批量改写数据库。无法恢复角色身份或其快照与最终提示词冲突时，需要同时重抽角色；也可选择冻结全文的原图回放或同提示词变体。“载入设置”仍恢复原批次数量和候选池。
 
 ### 1. 启动 ComfyUI
 
@@ -129,7 +143,7 @@ F:\comfyui\models\loras\character\blue_archive\kazusa.safetensors
 http://127.0.0.1:8188
 ```
 
-先将附件基线 `D:\loud\workflow (1).json` 导入 ComfyUI，确认节点包已加载；仓库保留该前端工作流基线，并使用 `templates/workflow_api_v2.json` 作为 API Format 提交模板。仓库根目录的 `AnimaBasicV7-Random-WebUI.json` 仍用于旧版可视化工作流兼容，不会自动覆盖你的 ComfyUI 工作流。
+可将仓库中的 `templates/workflow_ui_v2.json` 导入 ComfyUI，确认节点包已加载；实际提交使用 `templates/workflow_api_v2.json`。仓库根目录的 `AnimaBasicV7-Random-WebUI.json` 仍用于旧版可视化工作流兼容，不会自动覆盖你的 ComfyUI 工作流。
 
 ### 2. 获取仓库
 
@@ -140,33 +154,27 @@ cd comfyui-random-image-generation
 
 ### 3. 安装运行依赖
 
-如果复用已有 ComfyUI 虚拟环境：
-
-```powershell
-F:\comfyui\.venv\Scripts\python.exe -m pip install aiohttp
-```
-
-如果使用独立环境：
+推荐使用 Python 3.11 或以上的独立环境，依赖版本由 `pyproject.toml` 管理：
 
 ```powershell
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install aiohttp
+.\.venv\Scripts\python.exe -m pip install -e .
+```
+
+也可复用 ComfyUI 的 Python 3.11+：将下例引号内替换为真实 `python.exe` 路径（便携包常见于 `python_embeded` 或 `python_embedded`），仍在本项目根目录执行：
+
+```powershell
+& '<实际Python目录>\python.exe' -m pip install -e .
 ```
 
 ### 4. 启动 Anima Random Studio
 
-在默认安装位置 `F:\comfyuishengtu`，可以双击：
-
-```text
-启动Anima随机生图WebUI.bat
-```
-
-其他目录请修改批处理中的 `ANIMA_PYTHON`，或直接运行：
-
 ```powershell
-python run.py
+.\.venv\Scripts\python.exe run.py
 ```
+
+复用 ComfyUI Python 时，用同一个解释器执行 `run.py`。源码放在便携包根目录、与 `ComfyUI` 文件夹同级时可自动发现 Anima Tools；其他位置使用 `--anima-tools-dir '<实际节点目录>'`。
 
 启动后访问：
 
@@ -194,13 +202,21 @@ python run.py --comfy-url http://127.0.0.1:8188 --port 8193 --no-browser
 
 打开 WebUI 后依次确认：
 
-1. `/api/resources` 返回 Anima 与 Krea 2 两个档案，并确认当前档案的 UNet、CLIP、VAE 名称可用。
+1. 确认 ComfyUI-Lora-Manager 已加载并完成模型收录；在“模型 / LoRA 分类”检查 `base_model`，刷新后确认 `/api/resources` 返回 Anima 与 Krea 2 两个档案，且当前档案的 UNet、CLIP、VAE 名称可用。
 2. 在模型选择器切换 Anima / Krea 2，检查绑定资源、编码类型、默认底图模式和 SeedVR2 资源随档案改变。
 3. Anima 先关闭所有可选修复生成一张最小批次；再按潜空间、SeedVR2、N 卡、脸部细化顺序逐项开启。
 4. 切换 Krea 2 后先导入自然语言 JSON/CSV 词池，再启用随机抽取；空池会在提交前明确提示。
 5. 普通底图与底图－双采样器只能二选一；资源或插件缺失时应先修复环境，不要手动改 API payload 绕过检查。
 
 ## 使用说明
+
+### 模型与 LoRA 分类管理
+
+打开“模型 / LoRA 分类”，切换底模或 LoRA 查看文件、插件 `base_model`、识别结果及不可用原因。点击“打开 LoRA Manager”进入当前 ComfyUI 的 `/checkpoints` 或 `/loras` 页面，修改基础模型后回到工作台点击“刷新分类”；新增文件尚未收录时，先在插件中完成扫描。工作台没有本地手动归属入口，`base_model` 的含义见[插件元数据说明](https://github.com/willmiao/ComfyUI-Lora-Manager/blob/main/docs/metadata-json-schema.md)。
+
+只有已明确关联到加载器文件且分类为 Anima 或 Krea 2 的资源可选。插件不可用或清单读取失败时，工作台会报告原因并禁止新批次及历史再生成，不回退到旧归属记录。旧设置、预设或历史中的不兼容选择会保留并提示，请在插件修正分类后刷新，或明确选择适合当前档案的资源。
+
+已有 `data/resource_profiles.json` 保留供回退，但不再读取、写入、初始化或参与存储健康检查，也不会将旧归属写入插件。LoRA 触发词的本地编辑、覆盖与恢复插件原值功能继续使用原有行为；CLIP/VAE 绑定、提示词和历史种子不由此次分类迁移修改。
 
 ### 提示词池与批量导入
 
@@ -269,7 +285,7 @@ output/            生成图片（默认不提交）
 | `output/AnimaRandom/<日期>/<批次>/` | 生成图片 |
 | `templates/workflow_api_v2.json` | 以附件工作流导出的 API Format 基线，提交前由渲染器按档案和开关绑定 |
 | `templates/workflow_api.json` | 旧 Anima API 兼容模板，供历史回放和升级路径使用 |
-| `templates/workflow_ui.json` | 旧可视化工作流兼容模板；附件前端基线另保存于 `D:\loud\workflow (1).json` |
+| `templates/workflow_ui.json` | 旧可视化工作流兼容模板；v2 可视化基线见 `templates/workflow_ui_v2.json` |
 | `AnimaBasicV7-Random-WebUI.json` | 旧版可视化工作流兼容文件 |
 
 收藏条目、收藏画师和收藏分组由 Anima Tools 的本地接口保存；不会写入本项目的 Git 工作区。`data/`、`output/`、缓存和日志默认由 `.gitignore` 排除。
@@ -280,10 +296,17 @@ WebUI 前端使用以下本地接口：
 
 | 方法 | 路径 | 作用 |
 | --- | --- | --- |
-| `GET` | `/api/resources` | 当前清单及 Anima / Krea 2 的模型、CLIP、VAE、SeedVR2、节点和插件状态 |
-| `GET` | `/api/loras?model_profile=anima|krea2` | 按模型档案过滤 LoRA 清单、预览地址及触发词元数据 |
-| `GET` | `/api/prompt-pools?model_profile=krea2` | 读取模型隔离的自然语言池 |
-| `POST` | `/api/prompt-pools/import` | 以 JSON/CSV 导入 Krea 2 或指定档案的自然语言池（`replace` / `append`） |
+| `GET` | `/api/resources` | 当前清单及 Anima / Krea 2 的模型、CLIP、VAE、SeedVR2、节点和插件状态，附插件分类来源、原始 `base_model` 和识别状态 |
+| `GET` | `/api/loras?model_profile=anima|krea2` | 按插件分类过滤 LoRA 清单、预览地址及触发词元数据，附原始 `base_model` 和识别状态 |
+| `GET` | `/api/resource-ownership?kind=models|loras` | 查看插件分类、加载器文件关联和不可用原因；保留旧接口名称供兼容 |
+| `PUT` | `/api/resource-ownership` | 已停用，返回 HTTP 410 并提示在 LoRA Manager 中修改分类 |
+| `GET` | `/api/prompt-pools?model_profile=krea2&q=...&page=1&limit=48` | 搜索并分页读取模型隔离的自然语言池 |
+| `POST` | `/api/prompt-pools/import/preview` | 校验自然语言池导入内容并预览去重统计 |
+| `POST` | `/api/prompt-pools/import` | 以文本、JSON 或 CSV 导入自然语言池（`replace` / `append`） |
+| `POST` | `/api/prompt-pools/items` | 新增一条自然语言提示词 |
+| `PUT` | `/api/prompt-pools/items` | 编辑一条自然语言提示词 |
+| `POST` | `/api/prompt-pools/items/delete` | 批量删除自然语言提示词 |
+| `DELETE` | `/api/prompt-pools/items?model_profile=krea2&id=...` | 删除一条自然语言提示词 |
 | `GET` | `/api/loras/preview?filename=...` | 代理已入库 LoRA 的本地预览资源 |
 | `PUT/DELETE` | `/api/loras/triggers` | 保存全局有效触发词覆盖，或按 `filename` 查询参数恢复管理器原值 |
 | `GET/POST` | `/api/prompt-rules` | 列出规则或创建自定义精确替换规则 |
@@ -308,11 +331,13 @@ WebUI 前端使用以下本地接口：
 
 这些接口默认只绑定本机，不是面向公网的远程服务 API。
 
+`GET /api/resources`、`GET /api/loras` 和 `GET /api/resource-ownership` 均支持 `refresh=true`，用于绕过工作台缓存、重新读取插件分类清单；不调用插件扫描接口。普通读取和提交校验共用分类来源。
+
 ## 常见问题
 
 ### 模型下拉框为空或显示离线
 
-先确认 ComfyUI 正在运行，并直接打开 `http://127.0.0.1:8188/object_info`。检查对应 Loader 是否存在，以及模型是否放在正确目录；移动模型后重启 ComfyUI 再刷新 WebUI。
+先确认 ComfyUI 正在运行，并直接打开 `http://127.0.0.1:8188/object_info`。检查对应 Loader 是否存在，以及模型是否放在正确目录；移动模型后重启 ComfyUI。在“模型 / LoRA 分类”检查插件是否收录、路径是否明确及 `base_model` 是否受支持，修正后点击“刷新分类”。插件断连或清单读取失败时无法确认分类，新生成请求会被拦截。
 
 ### 提交时报“主模型不存在”或修复资源不可用
 
@@ -320,7 +345,7 @@ WebUI 前端使用以下本地接口：
 
 ### LoRA 看不到或数量不对
 
-确认文件位于 `models/loras`，并检查 `/object_info` 的 `LoraLoader` 列表。预览图和触发词来自 ComfyUI-Lora-Manager 已扫描的本地缓存；没有元数据时仍可选择和生成，只显示占位图且不会自动填写触发词。子目录使用 `/` 作为规范化分隔符；同名 LoRA 不会按 basename 猜测，旧配置需要重新选择明确路径。
+确认文件位于 `models/loras` 或已配置的模型根目录，并检查 `/object_info` 的 LoRA 加载器列表和 LoRA Manager 的收录状态。预览图、触发词与 `base_model` 来自插件；未收录、Unknown、其他架构或路径有歧义的 LoRA 均不可选。仅缺少预览图或触发词不会阻止已正确分类的 LoRA 使用。子目录使用 `/` 作为规范化分隔符；同名 LoRA 不会按 basename 猜测。在插件修正基础模型或扫描新文件后，回工作台点击“刷新分类”。
 
 ### SeedVR2、N 卡放大或脸部细化执行失败
 
@@ -328,11 +353,13 @@ WebUI 前端使用以下本地接口：
 
 ### Krea 2 提示词池为空
 
-Krea 2 不复用 Anima 的五类 Tag 池。打开 Krea 2 面板，导入 JSON 字符串数组、`{"items": [...]}` 或每行一条的 CSV；导入成功后再启用随机抽取。`prompt_seed` 相同会选择相同自然语言条目。
+Krea 2 不复用 Anima 的五类 Tag 池。打开自然语言池可搜索、分页、跨页选择、新增/编辑/删除提示词；批量导入支持粘贴文本或 JSON/CSV 文件，预览去重结果后再追加或替换。JSON 支持字符串数组、`{"items": [...]}`、`{"prompts": [...]}` 及包含 `text` / `prompt` 字段的对象数组；CSV 可按 `text`、`prompt`、`提示词` 或 `自然语言` 表头读取，也可使用第一列。相同提示词按不区分大小写去重。导入成功后启用随机抽取；`prompt_seed` 相同会选择相同自然语言条目。
 
 ### WebUI 能打开但 Anima 提示池为空
 
-确认 `Comfyui-Anima-Tools` 路径可被探测。默认探测位置包括项目同级 `comfyui/custom_nodes/Comfyui-Anima-Tools` 和 `F:/comfyui/custom_nodes/Comfyui-Anima-Tools`；其他位置使用 `--anima-tools-dir`。
+检查节点目录的 `js/` 下是否有 `character_data.js`、`clothing_data.js`、`pose_data.js`、`background_data.js`。启动器在所选 ComfyUI 的 `custom_nodes` 中发现有效目录；源码自动检查项目同级的 `ComfyUI/custom_nodes`。标准名称、ZIP 解压的 `-main` / `-master` 和其他改名均按这四个文件识别，不必强行改名。`.disabled`、安装暂存和隐藏目录不会自动选中。
+
+显式 `--anima-tools-dir` 优先于 `ANIMA_TOOLS_DIR`，后者优先于兼容环境变量 `COMFYUI_ANIMA_TOOLS`，最后才自动探测。指定路径无效会明确报错，不会改用另一份安装；发现多个有效目录时，请用参数或环境变量指定一个，或移走重复安装。标准名称目录或含有任意一个上述数据文件的改名目录，缺文件时均视为不完整；先修复该目录，启动器不会在旁边再次安装副本。无这些数据文件的其他目录不会被当作 Anima Tools。
 
 ### 浏览器显示旧界面
 
@@ -343,7 +370,7 @@ Krea 2 不复用 Anima 的五类 Tag 池。打开 Krea 2 面板，导入 JSON �
 安装开发依赖并运行：
 
 ```powershell
-python -m pip install aiohttp pytest
+python -m pip install -e '.[dev]'
 python -m pytest -q
 node --check static\app.js
 python -m compileall -q anima_webui tests run.py
@@ -357,7 +384,7 @@ git diff --check
 
 ```powershell
 python generate_templates.py
-# 之后在 ComfyUI 导出 D:\loud\workflow (1).json 的 API Format，覆盖 templates/workflow_api_v2.json
+# 编辑 templates/workflow_ui_v2.json 后，在 ComfyUI 导出 API Format，更新 templates/workflow_api_v2.json
 ```
 
 测试覆盖资源枚举、LoRA 子目录和路径安全、动态修复链、画师 `@` 规范化、风格预设、收藏树、分组快照导入、安全删除、自定义项、历史记录和批量导入。
@@ -368,4 +395,4 @@ python generate_templates.py
 - `--comfy-url` 只接受本机 HTTP 地址，不接受远程主机、凭据、查询参数或片段。
 - LoRA 路径拒绝绝对路径和 `..` 路径穿越；工作流资源使用 ComfyUI 返回的实时清单。
 - 运行时历史、收藏、预设和生成图片默认不进入 Git；公开仓库前请再次检查是否误提交模型、图片或本机配置。
-- 本仓库当前未附带 `LICENSE`。模型、LoRA、检测器和第三方节点遵循各自授权条款；公开分发前请根据实际资源授权补充项目许可证。
+- 本项目代码采用 [MIT License](LICENSE)。模型、LoRA、检测器和第三方节点遵循各自授权条款。

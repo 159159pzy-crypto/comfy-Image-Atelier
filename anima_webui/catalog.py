@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 import random
 from collections import Counter
 from pathlib import Path
@@ -122,25 +123,74 @@ def _read_js_array(path: Path) -> list[dict[str, Any]]:
     return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
 
 
-def discover_tools_dir(app_dir: str | Path, override: str | Path | None = None) -> Path | None:
-    candidates = []
-    if override:
-        candidates.append(Path(override))
-    import os
+def discover_tools(app_dir: str | Path, override: str | Path | None = None) -> dict[str, Any]:
+    """Inspect only known custom_nodes roots; never silently replace an explicit path."""
+    source = "argument" if override else "auto"
+    explicit = override
+    if not explicit:
+        for key in ("ANIMA_TOOLS_DIR", "COMFYUI_ANIMA_TOOLS"):
+            if os.environ.get(key, "").strip():
+                explicit, source = os.environ[key], key
+                break
+    result: dict[str, Any] = {
+        "status": "missing", "source": source, "path": "", "candidates": [],
+        "missing_files": [], "message": "未安装 Anima Tools；可指定 --anima-tools-dir，或安装到 ComfyUI/custom_nodes 后重启。",
+    }
 
-    for key in ("ANIMA_TOOLS_DIR", "COMFYUI_ANIMA_TOOLS"):
-        if os.environ.get(key):
-            candidates.append(Path(os.environ[key]))
-    root = Path(app_dir)
-    # 只保留可移植的探测规则:显式参数、环境变量、项目同级的 comfyui 目录。
-    # (Windows 文件系统大小写不敏感,同级规则同样覆盖 ComfyUI 等写法。)
-    candidates.append(root.parent / "comfyui" / "custom_nodes" / "Comfyui-Anima-Tools")
-    for candidate in candidates:
-        if (candidate / "js").is_dir() and all(
-            (candidate / "js" / name).is_file() for name in DATA_FILES.values()
-        ):
-            return candidate
-    return None
+    def missing(path: Path) -> list[str]:
+        return [f"js/{name}" for name in DATA_FILES.values() if not (path / "js" / name).is_file()]
+
+    if explicit:
+        path = Path(explicit).expanduser().resolve()
+        absent = missing(path)
+        result.update(path=str(path), candidates=[str(path)], missing_files=absent)
+        if absent:
+            result.update(status="invalid", message=f"Anima Tools 路径无效: {path}；缺少: {', '.join(absent)}。请修正指定路径并重启。")
+        else:
+            result.update(status="available", message="")
+        return result
+    root = Path(app_dir).resolve()
+    parents = [root.parent / "comfyui" / "custom_nodes", root / "custom_nodes", root.parent / "custom_nodes"]
+    valid: dict[str, Path] = {}
+    incomplete: dict[str, Path] = {}
+    scan_errors: list[str] = []
+    for parent in parents:
+        if not parent.is_dir():
+            continue
+        try:
+            children = list(parent.iterdir())
+        except OSError as error:
+            scan_errors.append(f"{parent}: {error}")
+            continue
+        for candidate in children:
+            name = candidate.name.casefold()
+            if not candidate.is_dir() or name.startswith(".") or any(name.endswith(suffix) for suffix in (".disabled", ".anima-installing", ".extracting")):
+                continue
+            physical = candidate.resolve()
+            key = os.path.normcase(str(physical))
+            if not missing(candidate):
+                valid[key] = physical
+            elif name in {"comfyui-anima-tools", "comfyui-anima-tools-main", "comfyui-anima-tools-master"} or any((candidate / "js" / file).is_file() for file in DATA_FILES.values()):
+                incomplete[key] = physical
+    paths = sorted(str(path) for path in valid.values())
+    result["candidates"] = paths
+    if len(paths) > 1:
+        result.update(status="ambiguous", message="发现多个 Anima Tools 目录，请用 --anima-tools-dir 显式指定并重启: " + "；".join(paths))
+    elif paths:
+        result.update(status="available", path=paths[0], message="")
+    elif incomplete:
+        paths = sorted(str(path) for path in incomplete.values())
+        result.update(status="incomplete", candidates=paths, message="Anima Tools 安装不完整，请修复已有目录后重启: " + "；".join(f"{path} (缺少 {', '.join(missing(Path(path)))})" for path in paths))
+    elif scan_errors:
+        result.update(status="unreadable", message="无法扫描 Anima Tools 目录: " + "；".join(scan_errors))
+    return result
+
+
+def discover_tools_dir(app_dir: str | Path, override: str | Path | None = None) -> Path | None:
+    result = discover_tools(app_dir, override)
+    if result["status"] not in {"available", "missing"}:
+        raise CatalogError(result["message"])
+    return Path(result["path"]) if result["status"] == "available" else None
 
 
 def _character_key(item: dict[str, Any]) -> str:
@@ -189,10 +239,96 @@ def pose_conflict_slots(item: dict[str, Any]) -> list[str]:
     return slots
 
 
+def resolve_history_selection(
+    selected: dict[str, Any],
+    settings: dict[str, Any],
+    catalog: "PromptCatalog | None" = None,
+    positive_prompt: str = "",
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str]]:
+    """Restore usable snapshots without changing persisted history.
+
+    Return restored sections and per-section reasons that prevent keeping a
+    section fixed during content redraw. Replay uses its frozen full prompt
+    and does not need this recovery path.
+    """
+    restored: dict[str, list[dict[str, Any]]] = {}
+    issues: dict[str, str] = {}
+    for section in SECTIONS:
+        entries = selected.get(section) if isinstance(selected, dict) else None
+        if not isinstance(entries, list) or not entries:
+            if settings.get(f"random_{section}"):
+                issues[section] = "缺少历史实际抽取结果，请同时重抽此维度"
+            continue
+        snapshots = []
+        for entry in entries:
+            try:
+                snapshots.append(_restore_history_item(entry, section, settings, catalog, positive_prompt))
+            except CatalogError as error:
+                issues[section] = str(error)
+                break
+        if section not in issues:
+            restored[section] = snapshots
+    return restored, issues
+
+
+def _restore_history_item(
+    entry: Any, section: str, settings: dict[str, Any],
+    catalog: "PromptCatalog | None", positive_prompt: str,
+) -> dict[str, Any]:
+    if not isinstance(entry, dict):
+        raise CatalogError("历史抽取结果无效，请同时重抽此维度")
+    snapshot = copy.deepcopy(entry)
+    prompt = split_prompt(entry.get("prompt"))
+    effective_snapshot = entry.get("snapshot_version") == 2 and isinstance(entry.get("prompt"), str)
+    custom = entry.get("builtin") is False or str(entry.get("id", "")).startswith("custom:")
+    if effective_snapshot:
+        # An empty effective prompt can be intentional after removing person tags.
+        parts = prompt
+    elif section != "character" or custom:
+        parts = prompt or split_prompt(entry.get("tags"))
+        if not parts:
+            raise CatalogError("历史提示词快照为空，请同时重抽此维度")
+    else:
+        tags = split_prompt(entry.get("tags"))
+        trigger = split_prompt(entry.get("trigger"))
+        if not trigger and prompt:
+            if not tags:
+                trigger = prompt
+            elif len(prompt) > len(tags) and prompt[-len(tags):] == tags:
+                # v1 built-in snapshots were stored as trigger + tags.
+                trigger = prompt[:-len(tags)]
+        if not trigger and catalog is not None:
+            current = catalog.get(str(entry.get("id") or ""))
+            candidate = split_prompt((current or {}).get("trigger"))
+            historical_tokens = {normalize_text(value) for value in prompt}
+            if candidate and all(normalize_text(value) in historical_tokens for value in candidate):
+                trigger = candidate
+        if not trigger:
+            raise CatalogError("旧记录无法可靠保留角色，请同时重抽角色，或使用同提示词变体")
+        snapshot["trigger"] = trigger
+        parts = trigger + (tags if settings.get("character_detail", "trigger_tags") == "trigger_tags" else [])
+        if settings.get("female_count") or settings.get("male_count"):
+            parts = [part for part in parts if normalize_text(part) not in PERSON_TAGS]
+    if section == "character":
+        effective_tokens = {normalize_text(value) for value in parts}
+        identity = [] if custom else split_prompt(snapshot.get("trigger"))
+        identity = [value for value in identity if normalize_text(value) in effective_tokens] or parts
+        final_tokens = {normalize_text(value) for value in split_prompt(positive_prompt)}
+        if final_tokens and not all(normalize_text(value) in final_tokens for value in identity):
+            raise CatalogError("历史角色与最终提示词不一致，请同时重抽角色，或使用同提示词变体")
+    if effective_snapshot:
+        return snapshot
+    snapshot["prompt"] = ", ".join(parts)
+    snapshot["snapshot_version"] = 2
+    return snapshot
+
+
 class PromptCatalog:
     def __init__(self, app_dir: str | Path, tools_dir: str | Path | None = None):
         self.app_dir = Path(app_dir)
-        self.tools_dir = discover_tools_dir(self.app_dir, tools_dir)
+        self.discovery = discover_tools(self.app_dir, tools_dir)
+        self.tools_dir = Path(self.discovery["path"]) if self.discovery["status"] == "available" else None
+        self.load_warnings: list[str] = []
         self._items: dict[str, list[dict[str, Any]]] = {section: [] for section in SECTIONS}
         self._by_id: dict[str, dict[str, Any]] = {}
         self._official: dict[str, Any] = {}
@@ -203,6 +339,7 @@ class PromptCatalog:
         return self.tools_dir is not None
 
     def reload(self) -> None:
+        self.load_warnings = [self.discovery["message"]] if self.discovery["message"] else []
         self._items = {section: [] for section in SECTIONS}
         self._by_id = {}
         self._official = {}
@@ -217,14 +354,16 @@ class PromptCatalog:
             try:
                 payload = json.loads(official_path.read_text(encoding="utf-8"))
                 self._official = payload if isinstance(payload, dict) else {}
-            except json.JSONDecodeError as error:
+            except (OSError, ValueError) as error:
                 logger.warning("角色官方数据无法解析,已忽略: %s", error)
+                self.load_warnings.append(f"角色官方数据无法读取: {official_path}: {error}")
                 self._official = {}
         for section, filename in DATA_FILES.items():
             try:
                 source = _read_js_array(js_dir / filename)
             except (OSError, CatalogError) as error:
                 logger.warning("提示词数据文件 %s 无法读取,按空池处理: %s", filename, error)
+                self.load_warnings.append(f"提示词数据文件无法读取: {js_dir / filename}: {error}")
                 source = []
             entries = [self._to_entry(section, item) for item in source]
             self._items[section] = [item for item in entries if item]
@@ -575,10 +714,18 @@ class PromptCatalog:
             if not settings.get(f"random_{section}"):
                 append(split_prompt(settings.get(f"fixed_{section}")))
         append(composer_parts)
-        public_selected = {
-            section: [self.public_item(item) for item in entries]
-            for section, entries in selected.items()
-        }
+        public_selected = {}
+        for section, entries in selected.items():
+            snapshots = []
+            for item in entries:
+                snapshot = self.public_item(item)
+                snapshot["snapshot_version"] = 2
+                snapshot["prompt"] = ", ".join(self.prompt_parts(
+                    item, section, settings.get("character_detail", "trigger_tags"),
+                    strip_people and section == "character",
+                ))
+                snapshots.append(snapshot)
+            public_selected[section] = snapshots
         return {
             "composer_prompt": f"{', '.join(composer_parts)}, " if composer_parts else "",
             "full_prompt": f"{', '.join(full_parts)}, " if full_parts else "",
@@ -596,6 +743,7 @@ class PromptCatalog:
         )
         result = {key: item.get(key) for key in keys}
         result["tags"] = item.get("tags") or []
+        result["trigger"] = item.get("trigger") or []
         return result
 
     def get(self, item_id: str) -> dict[str, Any] | None:

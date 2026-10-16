@@ -17,13 +17,20 @@ jobs:
           python-version: '3.11'
       - run: python -m pip install -e '.[dev]'
       - run: python -m pytest -q
+      - run: node --check static/app.js
+      - run: node --test tests/frontend_state.test.cjs
       - run: dotnet run -c Release --project launcher/Anima.Launcher.Tests
+      - name: Verify package integrity checks
+        shell: pwsh
+        run: ./launcher/scripts/Test-LauncherPackage.ps1
       - name: Publish unsigned candidate
         shell: pwsh
-        run: ./Build-Launcher.ps1
+        run: ./Build-Launcher.ps1 -CandidateDirectory '${{ github.workspace }}/dist/ci-candidate'
       - uses: actions/upload-artifact@v4
         with:
           name: AnimaRandomStudio-win-x64-unsigned
+          if-no-files-found: error
           path: |
-            dist/launcher/AnimaRandomStudio.exe
-            dist/launcher/SHA256SUMS.txt
+            dist/ci-candidate/AnimaRandomStudio-win-x64-unsigned.zip
+            dist/ci-candidate/SHA256SUMS.txt
+            dist/ci-candidate/candidate.json
