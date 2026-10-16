@@ -4,9 +4,11 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
-from anima_webui.history import HistoryMigrationError, HistoryStore
+from anima_webui.history import HistoryStore
 
 
 def _create_legacy_history(path: Path) -> tuple[str, str]:
@@ -97,7 +99,127 @@ def _create_legacy_history(path: Path) -> tuple[str, str]:
     return legacy_json, tagged_json
 
 
+def _create_pre_single_history_with_old_backup(path: Path) -> Path:
+    """Model a current v2 database that has outgrown its original backup."""
+    _, tagged_json = _create_legacy_history(path)
+    old_backup_path = Path(f"{path}.pre-anima-v2.bak")
+    with closing(sqlite3.connect(path)) as connection:
+        for name in ("resolved_selection_json", "bound_resources_json"):
+            connection.execute(f"ALTER TABLE images ADD COLUMN {name} TEXT NOT NULL DEFAULT '{{}}'")
+        connection.execute("ALTER TABLE images ADD COLUMN resolved_prompt TEXT NOT NULL DEFAULT ''")
+        connection.execute("UPDATE batches SET settings_json = ?", (tagged_json,))
+        connection.execute("UPDATE images SET settings_json = ?", (tagged_json,))
+        connection.commit()
+        with closing(sqlite3.connect(old_backup_path)) as backup:
+            connection.backup(backup)
+        for sequence in (2, 3):
+            connection.execute(
+                """
+                INSERT INTO images (
+                    batch_id, sequence, prompt_id, filename, sample_seed, prompt_seed,
+                    settings_json, created_at
+                ) VALUES ('tagged', ?, ?, ?, 11, 12, ?, 'newer')
+                """,
+                (sequence, f"prompt-new-{sequence}", f"new-{sequence}.png", tagged_json),
+            )
+        connection.commit()
+    return old_backup_path
+
+
 class HistoryMigrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_single_upgrade_snapshots_latest_history_before_schema_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            old_backup_path = _create_pre_single_history_with_old_backup(path)
+            old_backup_bytes = old_backup_path.read_bytes()
+            store = HistoryStore(path)
+            try:
+                self.assertTrue(store.available)
+                self.assertEqual((await store.list_images())["total"], 4)
+            finally:
+                await store.close()
+
+            backup_path = Path(f"{path}.pre-single-workbench.bak")
+            with closing(sqlite3.connect(backup_path)) as backup:
+                self.assertEqual(
+                    [row[0] for row in backup.execute("SELECT filename FROM images ORDER BY id")],
+                    ["legacy.png", "tagged.png", "new-2.png", "new-3.png"],
+                )
+                columns = {row[1] for row in backup.execute("PRAGMA table_info(images)")}
+                self.assertNotIn("single_runtime_json", columns)
+                self.assertIsNone(backup.execute(
+                    "SELECT name FROM sqlite_master WHERE name = 'prompt_jobs'"
+                ).fetchone())
+            self.assertEqual(old_backup_path.read_bytes(), old_backup_bytes)
+            with closing(sqlite3.connect(path)) as upgraded:
+                self.assertIn("single_runtime_json", {
+                    row[1] for row in upgraded.execute("PRAGMA table_info(images)")
+                })
+                self.assertIsNotNone(upgraded.execute(
+                    "SELECT name FROM sqlite_master WHERE name = 'prompt_jobs'"
+                ).fetchone())
+
+            reopened = HistoryStore(path)
+            await reopened.close()
+            self.assertEqual(
+                [item.name for item in path.parent.glob("*.pre-single-workbench*.bak")],
+                [backup_path.name],
+            )
+
+    async def test_single_backup_failure_preserves_original_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            old_backup_path = _create_pre_single_history_with_old_backup(path)
+            original_bytes = path.read_bytes()
+            old_backup_bytes = old_backup_path.read_bytes()
+            backup_path = Path(f"{path}.pre-single-workbench.bak")
+            real_connect = sqlite3.connect
+
+            def fail_backup_open(destination, *args, **kwargs):
+                if Path(destination) == backup_path:
+                    raise sqlite3.OperationalError("test backup disk failure")
+                return real_connect(destination, *args, **kwargs)
+
+            with patch("anima_webui.history.sqlite3.connect", side_effect=fail_backup_open):
+                store = HistoryStore(path)
+            try:
+                self.assertFalse(store.available)
+                self.assertIn("单图工作台升级前无法创建数据库备份", store.read_only_reason)
+            finally:
+                await store.close()
+
+            self.assertEqual(path.read_bytes(), original_bytes)
+            self.assertEqual(old_backup_path.read_bytes(), old_backup_bytes)
+            self.assertFalse(backup_path.exists())
+            with closing(sqlite3.connect(path)) as original:
+                self.assertEqual(original.execute("SELECT COUNT(*) FROM images").fetchone()[0], 4)
+                self.assertNotIn("single_runtime_json", {
+                    row[1] for row in original.execute("PRAGMA table_info(images)")
+                })
+                self.assertIsNone(original.execute(
+                    "SELECT name FROM sqlite_master WHERE name = 'prompt_jobs'"
+                ).fetchone())
+
+    async def test_single_upgrade_preserves_existing_snapshot_of_restored_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            old_backup_path = _create_pre_single_history_with_old_backup(path)
+            existing_snapshot = Path(f"{path}.pre-single-workbench.bak")
+            existing_snapshot.write_bytes(old_backup_path.read_bytes())
+            original_snapshot_bytes = existing_snapshot.read_bytes()
+            store = HistoryStore(path)
+            try:
+                self.assertTrue(store.available)
+            finally:
+                await store.close()
+
+            self.assertEqual(existing_snapshot.read_bytes(), original_snapshot_bytes)
+            with closing(sqlite3.connect(Path(f"{path}.pre-single-workbench-2.bak"))) as backup:
+                self.assertEqual(backup.execute("SELECT COUNT(*) FROM images").fetchone()[0], 4)
+                self.assertNotIn("single_runtime_json", {
+                    row[1] for row in backup.execute("PRAGMA table_info(images)")
+                })
+
     async def test_legacy_records_are_backed_up_and_migrated_to_anima_once(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.sqlite3"

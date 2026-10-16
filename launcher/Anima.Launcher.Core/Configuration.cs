@@ -20,11 +20,18 @@ public sealed class LauncherConfig
 {
     public int SchemaVersion { get; set; } = 1;
     public string ComfyRoot { get; set; } = "";
+    public string InstallRoot { get; set; } = "";
+    public string RuntimeRoot { get; set; } = "";
     public string Python { get; set; } = "";
+    public bool PythonExplicit { get; set; }
     public string AppRoot { get; set; } = "";
     public string DataDir { get; set; } = "";
     public bool ManagedComfy { get; set; }
     public bool SetupComplete { get; set; }
+    public bool InstallPending { get; set; }
+    public bool StartOnLaunch { get; set; }
+    public string SelectedProfile { get; set; } = "anima";
+    public string PinnedAppRoot { get; set; } = "";
     public int ComfyPort { get; set; } = 8188;
     public int WebPort { get; set; } = 8190;
     public string SourceId { get; set; } = "official";
@@ -36,9 +43,11 @@ public sealed class LauncherConfig
     public List<string> ComfyArguments { get; set; } = [];
     public string ComfyUrl => $"http://127.0.0.1:{ComfyPort}";
     public string WebUrl => $"http://127.0.0.1:{WebPort}";
+    public LauncherConfig Clone() => JsonSerializer.Deserialize<LauncherConfig>(JsonSerializer.Serialize(this, JsonFile.Options), JsonFile.Options)!;
     public void Validate()
     {
         if (SchemaVersion != 1) throw new InvalidDataException("不支持此配置版本，请使用对应版本的启动器。");
+        if (SelectedProfile is not ("anima" or "krea2")) throw new InvalidDataException("请选择 Anima 或 Krea 2 模型档案。");
         if (ComfyPort is < 1024 or > 65535 || WebPort is < 1024 or > 65535 || ComfyPort == WebPort) throw new InvalidDataException("端口需为 1024–65535 的两个不同值。");
         foreach (var url in new[] { GitMirror, ModelMirror, PipIndex, CustomRepository }.Where(x => x.Length > 0)) Safety.Https(url.Replace("{url}", "https://github.com/example/repo.git"));
         // Runtime and model-directory overrides must be explicit in the imported configuration.
@@ -52,9 +61,24 @@ public sealed record Artifact(string Id, string Url, long Size, string Sha256, s
 public sealed record RuntimeManifest(int SchemaVersion, string Version, string Validation, Repository Comfy, string PythonVersion, string TorchVersion, string TorchVisionVersion, string TorchAudioVersion, string TorchIndex, Artifact[] Tools, Repository[] Nodes, Artifact[] TorchWheels, string[] PythonConstraints, string Sam2Commit);
 public sealed record ModelItem(string Id, string Name, string Group, string Category, string RelativePath, string[] Aliases, long Size, string Sha256, string[] Urls, string License, string LicenseUrl)
 {
+    public string SourceUrl { get; init; } = "";
     public bool CanDownload => Size > 0 && Regex.IsMatch(Sha256 ?? "", "^[a-fA-F0-9]{64}$") && Urls.Length > 0;
 }
 public sealed record ModelManifest(int SchemaVersion, ModelItem[] Models);
+public sealed record ModelProfileDefinition(string Id, string Label, string ModelName, string ClipName, string VaeName, string ClipType, string Seedvr2Model, string Seedvr2Vae);
+public sealed record ModelProfilesManifest(int SchemaVersion, string DefaultProfile, ModelProfileDefinition[] Profiles)
+{
+    public ModelProfileDefinition Get(string id) => SchemaVersion == 1
+        ? Profiles.SingleOrDefault(p => p.Id == id) ?? throw new InvalidDataException($"未知模型档案：{id}")
+        : throw new InvalidDataException("不支持的模型档案版本。");
+    public ModelItem[] RequiredModels(ModelManifest models, string id)
+    {
+        var profile = Get(id);
+        return new[] { ("diffusion_models", profile.ModelName), ("text_encoders", profile.ClipName), ("vae", profile.VaeName) }
+            .Select(required => models.Models.SingleOrDefault(m => m.Category == required.Item1 && m.RelativePath == required.Item2)
+                ?? throw new InvalidDataException($"模型清单缺少 {profile.Label} 的 {required.Item2}")).ToArray();
+    }
+}
 public sealed record SourceProfile(string Id, string Name, string GitTemplate, string HuggingFaceBase, string PipIndex);
 public sealed record SourceManifest(int SchemaVersion, SourceProfile[] Profiles);
 
@@ -89,6 +113,7 @@ public static class Safety
             Under(Path.GetTempPath(), item.Category + "/" + item.RelativePath);
             foreach (var alias in item.Aliases) Under(Path.GetTempPath(), alias);
             foreach (var url in item.Urls) Https(url);
+            if (item.SourceUrl.Length > 0) Https(item.SourceUrl);
             if (item.Urls.Length > 0 && !item.CanDownload) throw new InvalidDataException($"{item.Id} 下载信息不完整。");
         }
     }

@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml.Media;
 using System.Drawing;
 using System.Runtime.InteropServices;
 using Windows.Graphics;
+using Brush = Microsoft.UI.Xaml.Media.Brush;
 
 namespace Anima.Launcher;
 
@@ -21,6 +22,8 @@ public sealed partial class MainWindow : Window
     private TaskbarIcon? tray;
     private volatile bool reallyClose;
     private bool minimizeNotified;
+    private int selectedPage;
+    private bool downloadCancelable;
 
     public MainWindow(App app, bool forceShow)
     {
@@ -33,13 +36,15 @@ public sealed partial class MainWindow : Window
 
         var hwnd = Win32Interop.GetWindowFromWindowId(AppWindow.Id);
         var scale = GetDpiForWindow(hwnd) / 96.0;
-        AppWindow.Resize(new SizeInt32((int)(1180 * scale), (int)(780 * scale)));
+        var area = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
+        var width = Math.Min((int)(1160 * scale), Math.Max(640, area.Width - (int)(32 * scale)));
+        var height = Math.Min((int)(820 * scale), Math.Max(480, area.Height - (int)(32 * scale)));
+        AppWindow.Resize(new SizeInt32(width, height));
         if (AppWindow.Presenter is OverlappedPresenter presenter)
         {
-            presenter.PreferredMinimumWidth = (int)(900 * scale);
-            presenter.PreferredMinimumHeight = (int)(640 * scale);
+            presenter.PreferredMinimumWidth = Math.Min((int)(760 * scale), width);
+            presenter.PreferredMinimumHeight = Math.Min((int)(600 * scale), height);
         }
-        var area = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
         var size = AppWindow.Size;
         AppWindow.Move(new PointInt32(area.X + (area.Width - size.Width) / 2, area.Y + (area.Height - size.Height) / 2));
         try { AppWindow.SetIcon("app.ico"); } catch { }
@@ -52,8 +57,9 @@ public sealed partial class MainWindow : Window
         app.State = State; // Pages resolve state via App.Shared during navigation.
         WireState();
 
-        Nav.SelectedItem = Nav.MenuItems[0];
-        ContentFrame.Navigate(typeof(Pages.ServicesPage));
+        GoToPage(0);
+        RootGrid.ActualThemeChanged += (_, _) => UpdateNavigation();
+        RootGrid.SizeChanged += (_, e) => BrandCopy.Visibility = e.NewSize.Width < 720 ? Visibility.Collapsed : Visibility.Visible;
 
         CreateTray();
         StartShowSignalListener();
@@ -65,23 +71,36 @@ public sealed partial class MainWindow : Window
 
     private void WireState()
     {
-        State.StatusChanged += text => DispatcherQueue.TryEnqueue(() => StatusBar.Message = text);
-        State.ProgressChanged += value => DispatcherQueue.TryEnqueue(() => TaskProgress.Value = value);
+        State.StatusChanged += text => DispatcherQueue.TryEnqueue(() =>
+        {
+            StatusText.Text = text;
+            StatusText.Foreground = ThemeBrush("StudioSecondaryBrush");
+        });
+        State.ProgressChanged += value => DispatcherQueue.TryEnqueue(() =>
+        {
+            TaskProgress.IsIndeterminate = value < 0;
+            if (value >= 0) TaskProgress.Value = value;
+        });
         State.BusyChanged += busy => DispatcherQueue.TryEnqueue(() =>
         {
-            StartButton.IsEnabled = !busy;
-            StopButton.IsEnabled = !busy;
-            PauseButton.IsEnabled = busy;
-            if (!busy) { TaskProgress.Value = 0; CancelButton.IsEnabled = false; }
+            if (busy) { TaskProgress.Value = 0; TaskProgress.IsIndeterminate = true; }
+            else { TaskProgress.IsIndeterminate = false; downloadCancelable = false; }
+            UpdateTaskState();
         });
-        State.DownloadCancelable += on => DispatcherQueue.TryEnqueue(() => CancelButton.IsEnabled = on);
+        State.DownloadCancelable += on => DispatcherQueue.TryEnqueue(() => { downloadCancelable = on; UpdateTaskState(); });
+        State.TaskStateChanged += () => DispatcherQueue.TryEnqueue(UpdateTaskState);
+        State.TaskProgressChanged += text => DispatcherQueue.TryEnqueue(() =>
+        {
+            ProgressDetail.Text = text;
+            ProgressDetail.Visibility = string.IsNullOrWhiteSpace(text) ? Visibility.Collapsed : Visibility.Visible;
+        });
         State.Scanned += scan => DispatcherQueue.TryEnqueue(() => State.RebuildRows(scan));
         State.NavigateRequested += index => DispatcherQueue.TryEnqueue(() => GoToPage(index));
         State.TaskFailed += ex => DispatcherQueue.TryEnqueue(async () =>
         {
             State.AppendLog(ex.Message);
-            StatusBar.Severity = InfoBarSeverity.Error;
-            StatusBar.Message = ex.Message;
+            StatusText.Foreground = ThemeBrush("StudioDangerBrush");
+            StatusText.Text = ex.Message;
             ShowWindow();
             if (Content?.XamlRoot is { } root) await Dialogs.Error(root, ex.Message);
         });
@@ -90,34 +109,49 @@ public sealed partial class MainWindow : Window
 
     // --- Navigation ---
 
-    private void Nav_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
+    private void UpdateTaskState()
     {
-        if (args.IsSettingsSelected) { Navigate(typeof(Pages.SettingsPage), "设置"); return; }
-        var tag = (args.SelectedItemContainer?.Tag as string) ?? "home";
-        switch (tag)
-        {
-            case "env": Navigate(typeof(Pages.EnvironmentPage), "ComfyUI 环境"); break;
-            case "models": Navigate(typeof(Pages.ModelsPage), "模型与节点"); break;
-            case "logs": Navigate(typeof(Pages.LogsPage), "日志"); break;
-            default: Navigate(typeof(Pages.ServicesPage), "服务"); break;
-        }
+        PauseButton.Visibility = State.Busy ? Visibility.Visible : Visibility.Collapsed;
+        CancelButton.Visibility = State.Busy && downloadCancelable ? Visibility.Visible : Visibility.Collapsed;
+        RetryButton.Visibility = !State.Busy && State.CanRetry ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private void Navigate(Type page, string header)
+    private void Nav_Click(object sender, RoutedEventArgs e)
     {
+        if (sender is Button { Tag: string tag } && int.TryParse(tag, out var index)) GoToPage(index);
+    }
+
+    internal void GoToPage(int index)
+    {
+        selectedPage = Math.Clamp(index, 0, 4);
+        var page = selectedPage switch
+        {
+            1 => typeof(Pages.EnvironmentPage),
+            2 => typeof(Pages.ModelsPage),
+            3 => typeof(Pages.LogsPage),
+            4 => typeof(Pages.SettingsPage),
+            _ => typeof(Pages.ServicesPage),
+        };
         if (ContentFrame.CurrentSourcePageType != page) ContentFrame.Navigate(page);
-        Nav.Header = header;
+        UpdateNavigation();
     }
 
-    private void GoToPage(int index)
+    internal Brush ThemeBrush(string key)
     {
-        switch (index)
+        var theme = new Windows.UI.ViewManagement.AccessibilitySettings().HighContrast ? "HighContrast"
+            : RootGrid.ActualTheme == ElementTheme.Light ? "Light" : "Default";
+        var dictionary = (ResourceDictionary)Application.Current.Resources.ThemeDictionaries[theme];
+        return (Brush)dictionary[key];
+    }
+
+    private void UpdateNavigation()
+    {
+        var buttons = new[] { HomeNav, EnvironmentNav, ModelsNav, LogsNav, SettingsNav };
+        for (var i = 0; i < buttons.Length; i++)
         {
-            case 1: Nav.SelectedItem = Nav.MenuItems[1]; break;   // 环境
-            case 2: Nav.SelectedItem = Nav.MenuItems[2]; break;   // 模型与节点
-            case 3: Nav.SelectedItem = Nav.MenuItems[3]; break;   // 日志
-            case 4: Nav.SelectedItem = Nav.SettingsItem; break;   // 设置
-            default: Nav.SelectedItem = Nav.MenuItems[0]; break;  // 服务
+            buttons[i].Background = i == selectedPage ? ThemeBrush("StudioSurfaceBrush") : new SolidColorBrush(Colors.Transparent);
+            buttons[i].Foreground = ThemeBrush(i == selectedPage ? "StudioTextBrush" : "StudioSecondaryBrush");
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(buttons[i], i == selectedPage ? "当前页面" : "");
         }
     }
 
@@ -134,20 +168,19 @@ public sealed partial class MainWindow : Window
             State.SystemInfoText = info;
             State.Reloaded();
             State.OfferUpgradeIfNeeded();
-            // Even with --show (no auto-start), migrate to the bundled build so the
-            // version takes effect; a stale running instance is replaced, not orphaned.
-            if (State.Config.SetupComplete)
+            // Opening the launcher is read-only by default. Starting services is an
+            // explicit primary action unless the user opted in to auto-start.
+            if (State.Config.SetupComplete && State.Config.StartOnLaunch && !State.Config.InstallPending && !State.FreshInstallRequested && !forceShow)
                 await State.Run(async ct =>
                 {
-                    var stoppedStale = await State.EnsureCurrentVersionAsync(ct);
-                    if (!forceShow || stoppedStale) await State.StartServicesAsync(ct);
+                    await State.StartServicesAsync(ct);
                 });
         }
         catch (Exception ex)
         {
             State.AppendLog(ex.ToString());
-            StatusBar.Severity = InfoBarSeverity.Error;
-            StatusBar.Message = ex.Message;
+            StatusText.Foreground = ThemeBrush("StudioDangerBrush");
+            StatusText.Text = ex.Message;
         }
     }
 
@@ -162,7 +195,7 @@ public sealed partial class MainWindow : Window
             if (State.Busy)
             {
                 args.Cancel = true;
-                StatusBar.Message = "托盘不可用且任务进行中；请先暂停任务再退出。";
+                StatusText.Text = "托盘不可用且任务进行中；请先暂停任务再退出。";
                 return;
             }
             Program.Log("托盘不可用，关闭窗口将直接退出（服务保留）。");
@@ -185,7 +218,7 @@ public sealed partial class MainWindow : Window
 
     private void Exit(bool stop)
     {
-        if (State.Busy) { ShowWindow(); StatusBar.Message = "请先暂停当前任务再退出。"; return; }
+        if (State.Busy) { ShowWindow(); StatusText.Text = "请先暂停当前任务再退出。"; return; }
         reallyClose = true;
         try
         {
@@ -205,15 +238,19 @@ public sealed partial class MainWindow : Window
 
     // --- Theme ---
 
-    internal void ApplyTheme()
+    internal void ApplyTheme(string? overrideTheme = null)
     {
         if (Content is not FrameworkElement element) return;
-        element.RequestedTheme = State.Config.Theme switch
+        element.RequestedTheme = (overrideTheme ?? State.PendingSettingsFields?.Theme ?? State.Config.Theme) switch
         {
             "dark" => ElementTheme.Dark,
             "light" => ElementTheme.Light,
             _ => ElementTheme.Default,
         };
+        AppWindow.TitleBar.ButtonBackgroundColor = Colors.Transparent;
+        AppWindow.TitleBar.ButtonInactiveBackgroundColor = Colors.Transparent;
+        AppWindow.TitleBar.ButtonForegroundColor = element.ActualTheme == ElementTheme.Dark ? Colors.White : Colors.Black;
+        UpdateNavigation();
     }
 
     // --- Tray ---
@@ -234,9 +271,9 @@ public sealed partial class MainWindow : Window
             }
             Item("打开工作台", () => Program.Open(State.Config.WebUrl));
             Item("打开 ComfyUI", () => Program.Open(State.Config.ComfyUrl));
-            Item("启动服务", () => _ = State.Run(State.StartServicesAsync));
+            Item("启动服务", () => { if (!State.Busy) { ReadPagesIntoConfig(); _ = State.Run(State.StartServicesAsync); } });
             Item("停止本程序服务", () => _ = State.StopServicesAsync());
-            Item("重新检查模型和节点", () => { ShowWindow(); GoToPage(2); _ = State.Run(ct => State.Scan(ct)); });
+            Item("重新检查模型和节点", () => { if (!State.Busy) { ShowWindow(); ReadPagesIntoConfig(); GoToPage(2); _ = State.Run(ct => State.Scan(ct)); } });
             Item("打开环境 / 安装页面", () => { ShowWindow(); GoToPage(1); });
             Item("设置", () => { ShowWindow(); GoToPage(4); });
             Item("打开日志目录", () => Program.Open(Path.Combine(Program.StateDir, "logs")));
@@ -292,8 +329,7 @@ public sealed partial class MainWindow : Window
 
     // --- Footer commands ---
 
-    private async void Start_Click(object sender, RoutedEventArgs e) =>
-        await State.Run(async ct => { ReadPagesIntoConfig(); await State.StartServicesAsync(ct); });
+    private async void Retry_Click(object sender, RoutedEventArgs e) => await State.ResumeTaskAsync();
 
     private async void Stop_Click(object sender, RoutedEventArgs e) => await State.StopServicesAsync();
 
@@ -307,8 +343,10 @@ public sealed partial class MainWindow : Window
     private async void Rescan_Click(object sender, RoutedEventArgs e)
     {
         ShowWindow();
+        if (State.Busy) return;
+        ReadPagesIntoConfig();
         GoToPage(2);
-        await State.Run(async ct => { ReadPagesIntoConfig(); await State.Scan(ct); });
+        await State.Run(ct => State.Scan(ct));
     }
 
     private void GoEnvironment_Click(object sender, RoutedEventArgs e) => GoToPage(1);

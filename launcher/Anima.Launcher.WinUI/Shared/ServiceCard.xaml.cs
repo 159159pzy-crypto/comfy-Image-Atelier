@@ -7,7 +7,7 @@ namespace Anima.Launcher;
 /// <summary>A status card for one managed service: name + status badge + URL + start/stop/open.</summary>
 public sealed partial class ServiceCard : UserControl
 {
-    private const double NarrowThreshold = 600;
+    private const double NarrowThreshold = 650;
 
     public ServiceCard()
     {
@@ -37,41 +37,53 @@ public sealed partial class ServiceCard : UserControl
     public void Update(ServiceInfo info, bool busy)
     {
         UrlText.Text = info.Url;
-        var (label, state) = !info.Configured ? ("未配置", 0)
-            : info.Managed ? ("运行中 · 本程序", 2)
-            : info.Running && info.Ours ? ("运行中 · 外部", 1)
-            : info.Running ? ("运行中 · 未知", 1)
-            : ("已停止", 0);
+        var (label, state) = info.Status switch
+        {
+            "ready" => ("已就绪", 2),
+            "external" => ("已就绪 · 外部服务", 2),
+            "starting" => ("正在启动…", 1),
+            "conflict" => ("端口被占用", 3),
+            "error" => ("尚未就绪", 3),
+            "stopped" => ("已停止", 0),
+            _ => ("未配置", 0),
+        };
 
         StatusText.Text = label;
-        var brush = state switch
-        {
-            2 => (Brush)Application.Current.Resources["SystemFillColorSuccessBrush"],
-            1 => (Brush)Application.Current.Resources["SystemFillColorAttentionBrush"],
-            _ => (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"],
-        };
+        var theme = new Windows.UI.ViewManagement.AccessibilitySettings().HighContrast ? "HighContrast"
+            : ActualTheme == ElementTheme.Light ? "Light" : "Default";
+        var colors = (ResourceDictionary)Application.Current.Resources.ThemeDictionaries[theme];
+        var brush = (Brush)colors[state == 2 ? "StudioSuccessBrush" : state == 1 ? "StudioWarningBrush" : state == 3 ? "StudioDangerBrush" : "StudioTertiaryBrush"];
         StatusText.Foreground = brush;
-        StatusBadge.Background = (Brush)Application.Current.Resources[
-            state == 0 ? "ControlFillColorSecondaryBrush" : "ControlFillColorSecondaryBrush"];
+        StatusDot.Fill = brush;
 
         // Only managed services can be stopped; only running services can be opened.
-        StartButton.IsEnabled = !busy && info.Configured && !info.Running;
+        StartButton.IsEnabled = !busy && info.Configured && !info.Running && info.Status != "starting";
         StopButton.IsEnabled = !busy && info.Managed;
-        OpenButton.IsEnabled = info.Running;
+        OpenButton.IsEnabled = info.Running && (info.Ours || info.Managed);
 
         if (!info.Configured)
         {
             HintText.Text = "先在「环境」页选择 ComfyUI 目录并完成首次配置。";
             HintText.Visibility = Visibility.Visible;
         }
-        else if (info.Running && !info.Ours && !info.Managed)
+        else if (info.Status == "conflict")
         {
             HintText.Text = "该端口被其他程序占用；外部服务不归启动器停止。";
             HintText.Visibility = Visibility.Visible;
         }
-        else if (info.Running && info.Ours && !info.Managed)
+        else if (info.Status == "external")
         {
-            HintText.Text = "检测到同一 ComfyUI 的外部实例（可复用，不归启动器停止）。";
+            HintText.Text = "正在复用外部服务，启动器不会停止它。";
+            HintText.Visibility = Visibility.Visible;
+        }
+        else if (info.Status == "starting")
+        {
+            HintText.Text = "正在等待服务响应，首次加载模型可能需要一些时间。";
+            HintText.Visibility = Visibility.Visible;
+        }
+        else if (info.Status == "error" || !string.IsNullOrWhiteSpace(info.Detail))
+        {
+            HintText.Text = string.IsNullOrWhiteSpace(info.Detail) ? "服务还未通过健康检查，可查看日志后重试。" : info.Detail;
             HintText.Visibility = Visibility.Visible;
         }
         else HintText.Visibility = Visibility.Collapsed;

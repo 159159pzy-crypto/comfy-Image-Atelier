@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ruff_cache/
 .venv/
 venv/
 
@@ -41,6 +42,8 @@ dist/
 launcher/**/bin/
 launcher/**/obj/
 launcher/payload.zip
+/.launcher/
+/AnimaRandomStudio.exe
 
 # Agent session dumps
 .dsh-session-dump.txt
@@ -55,3 +58,11 @@ dsh-session-dump*
 anima_natural/
 anima_studio/
 tools/
+
+# Internal notes, review reports and unused local screenshots
+/docs/*.md
+!/docs/dependencies.md
+/docs/screenshots/*
+!/docs/screenshots/anima-studio-single-workbench.png
+/AGENTS.md
+/CLAUDE.md

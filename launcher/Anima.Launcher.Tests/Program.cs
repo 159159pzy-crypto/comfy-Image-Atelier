@@ -1,9 +1,17 @@
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Anima.Launcher.Core;
+
+if (args.FirstOrDefault() == "--http-fixture")
+{
+    await ReleaseRecoveryTests.ServeFixture(args);
+    return;
+}
 
 var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
 var manifestDir = Path.Combine(root, "launcher", "manifests");
@@ -27,6 +35,18 @@ Directory.CreateDirectory(work);
 var count = 0;
 void Check(bool condition, string label) { if (!condition) throw new Exception("FAIL: " + label); count++; Console.WriteLine("PASS: " + label); }
 async Task Throws(Func<Task> operation, string label) { try { await operation(); } catch { Check(true, label); return; } throw new Exception("Expected failure: " + label); }
+async Task ThrowsType<T>(Func<Task> operation, string label) where T : Exception
+{
+    try { await operation(); }
+    catch (T) { Check(true, label); return; }
+    throw new Exception("Expected " + typeof(T).Name + ": " + label);
+}
+count += await ReleaseRecoveryTests.Run(work, manifest);
+if (args.Contains("--recovery-only"))
+{
+    Console.WriteLine($"{count} recovery checks passed; artifacts: {work}");
+    return;
+}
 Safety.Validate(manifest, models); Check(true, "shipped manifests validate");
 var requiredV2Classes = new[] { "PromptSelector", "QuickGroupManager", "ResolutionPreset", "PromptExpand", "KreaSeedVarianceEnhancer", "ModelPassThrough", "VRAM_Debug", "Lora Loader (LoraManager)", "Any Switch (rgthree)", "ComfyMathExpression" };
 var installedNodeClasses = manifest.Nodes.SelectMany(node => node.RequiredClasses).ToHashSet(StringComparer.Ordinal);
@@ -268,6 +288,257 @@ Check(legacyOwned.Single().ShutdownToken is null, "legacy process record without
 var tokenOwned = JsonFile.Read<OwnedProcess[]>(WriteJson(work, "owned-token.json", "[{\"pid\":123,\"startTimeUtcTicks\":456,\"executable\":\"python.exe\",\"role\":\"WebUI\",\"shutdownToken\":\"abc\"}]"));
 Check(tokenOwned.Single().ShutdownToken == "abc", "shutdown token round-trips");
 
+// Resource discovery may be incomplete before a user imports a model. Opening the
+// workbench must still work, and duplicate basenames must never choose a random file.
+var noModels = ServiceManager.ResourceBindings(JsonDocument.Parse("{}").RootElement);
+Check(noModels.Count == 0, "empty model inventory does not block service readiness");
+var resourceNodes = JsonDocument.Parse("""
+    {"UNETLoader":{"input":{"required":{"unet_name":[["A/anima-base-v1.0.safetensors","B/anima-base-v1.0.safetensors","Krea/krea2_turbo_int8_convrot.safetensors"]]}}},
+     "CLIPLoader":{"input":{"required":{"clip_name":[["Encoders/qwen_3_06b_base.safetensors"]]}}},
+     "VAELoader":{"input":{"required":{"vae_name":[["qwen_image_vae.safetensors"]]}}}}
+    """).RootElement;
+var availableBindings = ServiceManager.ResourceBindings(resourceNodes);
+Check(!availableBindings.ContainsKey("anima-base-v1.0.safetensors") && availableBindings["krea2_turbo_int8_convrot.safetensors"] == "Krea/krea2_turbo_int8_convrot.safetensors", "ambiguous base model omitted while available profile stays usable");
+Check(availableBindings["qwen_3_06b_base.safetensors"] == "Encoders/qwen_3_06b_base.safetensors" && availableBindings["qwen_image_vae.safetensors"] == "qwen_image_vae.safetensors", "available encoder and shared VAE preserve their actual relative paths");
+var exactNodes = JsonDocument.Parse("""{"UNETLoader":{"input":{"required":{"unet_name":[["anima-base-v1.0.safetensors","Other/anima-base-v1.0.safetensors"]]}}}}""").RootElement;
+Check(ServiceManager.ResourceBindings(exactNodes)["anima-base-v1.0.safetensors"] == "anima-base-v1.0.safetensors", "unambiguous exact model path wins over matching subfolder basename");
+
+foreach (var terminal in new[] { "completed", "stopped", "error", "cancelled" })
+    Check(RuntimePolicies.WorkbenchActivity(JsonDocument.Parse("{\"batch\":{\"status\":\"" + terminal + "\"},\"queue\":[]}").RootElement) == WorkbenchActivity.Idle, "retained " + terminal + " batch permits version switching");
+foreach (var activeStatus in new[] { "running", "stopping" })
+    Check(RuntimePolicies.WorkbenchActivity(JsonDocument.Parse("{\"batch\":{\"status\":\"" + activeStatus + "\"},\"queue\":[]}").RootElement) == WorkbenchActivity.Busy, activeStatus + " batch blocks version switching");
+Check(RuntimePolicies.WorkbenchActivity(JsonDocument.Parse("{\"batch\":null,\"queue\":[]}").RootElement) == WorkbenchActivity.Idle, "unused workbench is idle");
+Check(RuntimePolicies.WorkbenchActivity(JsonDocument.Parse("{\"batch\":null,\"queue\":[{}]}").RootElement) == WorkbenchActivity.Busy, "queued work blocks version switching even without active batch");
+Check(RuntimePolicies.WorkbenchActivity(null) == WorkbenchActivity.Unknown && RuntimePolicies.WorkbenchActivity(JsonDocument.Parse("{}").RootElement) == WorkbenchActivity.Unknown && RuntimePolicies.WorkbenchActivity(JsonDocument.Parse("{\"batch\":{},\"queue\":[]}").RootElement) == WorkbenchActivity.Unknown, "missing or malformed activity never authorizes an automatic stop");
+var versionsRoot = Path.Combine(work, "versions");
+var oldVersion = Path.Combine(versionsRoot, "app-old");
+var newVersion = Path.Combine(versionsRoot, "app-new");
+Check(RuntimePolicies.ShouldSwitchBundledVersion(oldVersion, newVersion, versionsRoot, true, false), "managed old snapshot may upgrade when unpinned");
+Check(!RuntimePolicies.ShouldSwitchBundledVersion(oldVersion, newVersion, versionsRoot, true, true), "user rollback pin survives the next launcher start");
+Check(!RuntimePolicies.ShouldSwitchBundledVersion(oldVersion, newVersion, versionsRoot, false, false) && !RuntimePolicies.ShouldSwitchBundledVersion(newVersion, newVersion, versionsRoot, true, false), "first setup and current snapshot do not trigger an upgrade");
+Check(!RuntimePolicies.ShouldSwitchBundledVersion(root, newVersion, versionsRoot, true, false) && !RuntimePolicies.ShouldSwitchBundledVersion(Path.Combine(work, "versions-other", "app-old"), newVersion, versionsRoot, true, false), "source checkouts and sibling paths are never automatic upgrade targets");
+var scriptPath = Path.Combine(oldVersion, "run.py");
+Check(RuntimePolicies.CommandLineMatchesSnapshot("python.exe \"" + scriptPath + "\" --port 8190", oldVersion), "snapshot ownership matches the absolute run.py argument");
+Check(!RuntimePolicies.CommandLineMatchesSnapshot("python.exe -c print(1) --output \"" + oldVersion + "\"", oldVersion) && !RuntimePolicies.CommandLineMatchesSnapshot("python.exe \"" + scriptPath + ".other\"", oldVersion), "directory mentions and similar script names do not authorize process termination");
+var originalConfig = new LauncherConfig { ComfyRoot = Path.Combine(work, "original"), ComfyArguments = ["--lowvram"], PinnedAppRoot = oldVersion };
+var taskConfig = RuntimePolicies.SnapshotConfig(originalConfig);
+originalConfig.ComfyRoot = Path.Combine(work, "changed");
+originalConfig.ComfyArguments.Add("--cpu");
+Check(taskConfig.ComfyRoot != originalConfig.ComfyRoot && taskConfig.ComfyArguments.SequenceEqual(new[] { "--lowvram" }) && taskConfig.PinnedAppRoot == oldVersion, "task snapshot preserves paths, rollback policy, and independent argument list");
+await ThrowsType<InvalidDataException>(() => Task.FromResult(RuntimePolicies.SnapshotConfig(new LauncherConfig { WebPort = 8188 })), "invalid draft fails before becoming a task snapshot");
+var legacyConfig = JsonSerializer.Deserialize<LauncherConfig>("{\"setupComplete\":true}", JsonFile.Options)!;
+Check(!legacyConfig.StartOnLaunch && legacyConfig.SelectedProfile == "anima" && legacyConfig.PinnedAppRoot == "", "legacy configuration defaults to an explicit start and Anima profile");
+var serviceRuntime = Path.Combine(work, "service-runtime");
+var serviceConfig = new LauncherConfig { ManagedComfy = true, RuntimeRoot = serviceRuntime };
+var serviceEnvironment = ServiceManager.BuildRuntimeEnvironment(serviceConfig);
+Check(serviceEnvironment["HF_HOME"] == Path.Combine(serviceRuntime, "cache", "huggingface")
+    && serviceEnvironment["HF_HUB_CACHE"] == serviceEnvironment["HUGGINGFACE_HUB_CACHE"]
+    && serviceEnvironment["TORCH_HOME"] == Path.Combine(serviceRuntime, "cache", "torch")
+    && serviceEnvironment["TEMP"] == Path.Combine(serviceRuntime, "temp") && serviceEnvironment["TMP"] == serviceEnvironment["TEMP"],
+    "managed services route model caches and temporary files to the selected runtime volume");
+Check(serviceEnvironment.Where(pair => pair.Key != "LORA_MANAGER_PORTABLE").All(pair => pair.Value.StartsWith(serviceRuntime + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+    && !Directory.Exists(serviceRuntime), "runtime environment planning confines all overrides to the chosen root without creating directories");
+var inheritedHfHome = Environment.GetEnvironmentVariable("HF_HOME");
+var serviceInfo = Commands.Info("python.exe", [], work, serviceEnvironment);
+Check(serviceInfo.Environment["HF_HOME"] == serviceEnvironment["HF_HOME"] && serviceInfo.Environment["TMP"] == serviceEnvironment["TMP"]
+    && Environment.GetEnvironmentVariable("HF_HOME") == inheritedHfHome, "runtime cache overrides apply only to child process configuration");
+var legacyServiceEnvironment = ServiceManager.BuildRuntimeEnvironment(new LauncherConfig { ManagedComfy = true });
+Check(legacyServiceEnvironment.Count == 1 && legacyServiceEnvironment["LORA_MANAGER_PORTABLE"] == "1", "legacy managed environments without a runtime path retain their cache defaults");
+var importedServiceEnvironment = ServiceManager.BuildRuntimeEnvironment(new LauncherConfig { RuntimeRoot = serviceRuntime });
+var importedServiceInfo = Commands.Info("python.exe", [], work, importedServiceEnvironment);
+importedServiceInfo.Environment.TryGetValue("HF_HOME", out var importedHfHome);
+Check(importedServiceEnvironment.Count == 0 && importedHfHome == inheritedHfHome,
+    "imported environments preserve inherited model-cache settings even when an installer cache root is configured");
+Check(ServiceManager.BuildRuntimeEnvironment(new LauncherConfig { RuntimeRoot = serviceRuntime }, hasManagedMarker: true)["HF_HOME"] == serviceEnvironment["HF_HOME"],
+    "a managed repository marker restores runtime cache routing for an older saved configuration");
+var profiles = JsonFile.Read<ModelProfilesManifest>(Path.Combine(manifestDir, "model-profiles.json"));
+var animaModels = profiles.RequiredModels(models, "anima");
+var kreaModels = profiles.RequiredModels(models, "krea2");
+Check(animaModels.Length == 3 && animaModels.All(m => m.Id is "anima-base-v1" or "qwen-text" or "qwen-vae"), "Anima install selects only its three required base resources");
+Check(kreaModels.Length == 3 && kreaModels.All(m => m.Id is "krea2-turbo" or "qwen3vl-krea2" or "qwen-vae"), "Krea install selects its profile resources and shared VAE");
+await ThrowsType<InvalidDataException>(() => Task.FromResult(profiles.RequiredModels(models, "unknown")), "unknown model profile is rejected before installation");
+var installParent = Path.Combine(work, "fresh-install-parent");
+var installDraft = new LauncherConfig { InstallRoot = installParent, SelectedProfile = "anima", ComfyArguments = ["--lowvram"] };
+var planState = Path.Combine(work, "plan-state");
+var installationPlan = InstallationPlanner.Create(installDraft, manifest, planState, true, models, profiles);
+Check(installationPlan.ComfyRoot == Path.Combine(installParent, "ComfyUI") && installationPlan.RuntimeRoot == Path.Combine(installParent, "runtime") && installationPlan.CreateConfig().Python == Path.Combine(installParent, "ComfyUI", ".venv", "Scripts", "python.exe"), "fresh install derives sibling environment and runtime directories from one parent");
+installDraft.InstallRoot = Path.Combine(work, "later-edit");
+installDraft.ComfyArguments.Add("--cpu");
+var disposablePlanConfig = installationPlan.CreateConfig();
+disposablePlanConfig.ComfyArguments.Clear();
+Check(installationPlan.ComfyRoot == Path.Combine(installParent, "ComfyUI") && installationPlan.CreateConfig().ComfyArguments.SequenceEqual(new[] { "--lowvram" }), "installation plan stays unchanged after UI edits and returned-config mutations");
+Check(!Directory.Exists(installParent) && !Directory.Exists(planState), "creating an installation plan performs no installation or directory writes");
+var volumeEstimate = InstallationPlanner.EstimateVolumes(installationPlan);
+Check(volumeEstimate.Length == 1 && volumeEstimate[0].RequiredBytes == installationPlan.EnvironmentBytes + installationPlan.RuntimeBytes + 256L * 1024 * 1024, "same-volume installation includes both environment and runtime reserves once");
+var legacyInstallRoot = Path.Combine(work, "legacy-comfy-root");
+var legacyPlan = InstallationPlanner.Create(new LauncherConfig { ComfyRoot = legacyInstallRoot }, manifest, planState, true);
+Check(legacyPlan.ComfyRoot == legacyInstallRoot && legacyPlan.RuntimeRoot == planState, "legacy direct ComfyUI install path remains compatible");
+await ThrowsType<InvalidDataException>(() => Task.FromResult(InstallationPlanner.Create(new LauncherConfig { ComfyRoot = legacyInstallRoot, RuntimeRoot = Path.Combine(legacyInstallRoot, "runtime") }, manifest, planState, true)), "nested runtime directory is rejected before installation");
+Check(InstallationPlanner.IsNvidiaDriverSupported("570.65") && InstallationPlanner.IsNvidiaDriverSupported("580.10") && !InstallationPlanner.IsNvidiaDriverSupported("570.64") && !InstallationPlanner.IsNvidiaDriverSupported("not-a-driver"), "CUDA driver preflight accepts the minimum and rejects older or invalid versions");
+
+var remainingTarget = Path.Combine(work, "remaining-download.bin");
+Check(Downloads.RemainingBytes(remainingTarget, data.Length, hash) == data.Length, "missing download reserves its full size");
+File.WriteAllBytes(remainingTarget + ".part", data[..1000]);
+JsonFile.Write(remainingTarget + ".part.json", new ResumeInfo(hash, data.Length, "https://example.com/model", null));
+Check(Downloads.RemainingBytes(remainingTarget, data.Length, hash) == data.Length - 1000, "matching resume identity credits only the retained partial bytes");
+JsonFile.Write(remainingTarget + ".part.json", new ResumeInfo(new string('0', 64), data.Length, "https://example.com/model", null));
+Check(Downloads.RemainingBytes(remainingTarget, data.Length, hash) == data.Length, "wrong partial checksum identity receives no disk-space credit");
+File.WriteAllText(remainingTarget + ".part.json", "broken");
+Check(Downloads.RemainingBytes(remainingTarget, data.Length, hash) == data.Length, "corrupt partial metadata retains a conservative full allocation");
+JsonFile.Write(remainingTarget + ".part.json", new ResumeInfo(hash, 500, "https://example.com/model", null));
+Check(Downloads.RemainingBytes(remainingTarget, 500, hash) == 500, "oversized partial receives no disk-space credit");
+File.WriteAllBytes(remainingTarget, data);
+Check(Downloads.RemainingBytes(remainingTarget, data.Length, hash) == 0, "existing final file requires no duplicate allocation before integrity verification");
+
+var resumeManifest = manifest with
+{
+    Nodes = [],
+    Tools = [new Artifact("resume-tool", "https://example.com/tool.zip", data.Length, hash, "tool.exe")],
+    TorchWheels = [new Artifact("resume-wheel", "https://example.com/torch.whl", data.Length, hash, "torch.whl")],
+};
+var resumedConfig = new LauncherConfig { InstallRoot = Path.Combine(work, "resume-install") };
+var resumeState = Path.Combine(work, "resume-install-state");
+var emptyResumePlan = InstallationPlanner.Create(resumedConfig, resumeManifest, resumeState, true);
+var runtimeCache = Path.Combine(emptyResumePlan.RuntimeRoot, "cache");
+var wheelCache = Path.Combine(runtimeCache, "wheels", "torch.whl");
+Directory.CreateDirectory(Path.GetDirectoryName(wheelCache)!);
+File.WriteAllBytes(wheelCache + ".part", data[..1000]);
+JsonFile.Write(wheelCache + ".part.json", new ResumeInfo(hash, data.Length, "https://example.com/torch.whl", null));
+var partialResumePlan = InstallationPlanner.Create(resumedConfig, resumeManifest, resumeState, true);
+Check(partialResumePlan.RuntimeBytes == emptyResumePlan.RuntimeBytes - 1000 && partialResumePlan.EstimatedDownloadBytes == emptyResumePlan.EstimatedDownloadBytes - 1000, "resumed installation reserves only missing wheel bytes");
+File.WriteAllBytes(wheelCache, data);
+File.WriteAllBytes(Path.Combine(runtimeCache, "resume-tool.zip"), data);
+var cachedPlan = await InstallationPlanner.RefreshSpaceEstimateAsync(emptyResumePlan, default);
+Check(cachedPlan.EstimatedDownloadBytes == 0 && cachedPlan.RuntimeBytes == cachedPlan.RuntimeReserveBytes, "verified complete caches remove download allocation from the frozen plan");
+var corruptWheel = data.ToArray(); corruptWheel[0] ^= 1;
+File.WriteAllBytes(wheelCache, corruptWheel);
+await ThrowsType<InvalidDataException>(() => InstallationPlanner.RefreshSpaceEstimateAsync(emptyResumePlan, default), "same-size corrupt cache blocks preflight instead of being trusted");
+Check(File.ReadAllBytes(wheelCache).SequenceEqual(corruptWheel), "space preflight never deletes or rewrites a corrupt cache");
+File.WriteAllBytes(wheelCache, data);
+
+var resumedEnvironment = emptyResumePlan.CreateConfig();
+var resumedVenv = Path.Combine(resumedEnvironment.ComfyRoot, ".venv");
+Directory.CreateDirectory(Path.Combine(resumedVenv, "Scripts"));
+File.WriteAllText(Path.Combine(resumedVenv, "Scripts", "python.exe"), "fixture");
+File.WriteAllText(Path.Combine(resumedVenv, "pyvenv.cfg"), "home = fixture");
+JsonFile.Write(Path.Combine(resumedEnvironment.ComfyRoot, ".anima-revision.json"), resumeManifest.Comfy);
+File.WriteAllLines(Path.Combine(resumedEnvironment.ComfyRoot, ".anima-constraints.txt"), resumeManifest.PythonConstraints);
+foreach (var (package, version) in new[] { ("torch", resumeManifest.TorchVersion), ("torchvision", resumeManifest.TorchVisionVersion), ("torchaudio", resumeManifest.TorchAudioVersion) })
+{
+    var metadata = Path.Combine(resumedVenv, "Lib", "site-packages", package + "-" + version + ".dist-info");
+    Directory.CreateDirectory(metadata);
+    File.WriteAllText(Path.Combine(metadata, "RECORD"), "");
+    File.WriteAllText(Path.Combine(metadata, "METADATA"), "Name: " + package + "\nVersion: " + version + "\n");
+}
+JsonFile.Write(Path.Combine(resumeState, "install-state.json"), new InstallJournal(resumedEnvironment.ComfyRoot, "验证运行依赖", "interrupted", DateTime.UtcNow));
+var completedResumePlan = InstallationPlanner.Create(resumedConfig, resumeManifest, resumeState, true);
+Check(completedResumePlan.EnvironmentBytes < 512L * 1024 * 1024 && completedResumePlan.RuntimeBytes < 512L * 1024 * 1024, "completed core stages and valid caches allow low-space continuation without a second full install reserve");
+InstallationPlanner.PreserveCompletedStages(resumedEnvironment, resumeManifest, resumeState);
+JsonFile.Write(Path.Combine(resumeState, "install-state.json"), new InstallJournal(resumedEnvironment.ComfyRoot, "准备隔离安装工具", "running", DateTime.UtcNow));
+var restartedResumePlan = InstallationPlanner.Create(resumedConfig, resumeManifest, resumeState, true);
+Check(restartedResumePlan.EnvironmentBytes == completedResumePlan.EnvironmentBytes, "completed stage evidence survives a restarted journal's earlier stage");
+var changedLock = resumeManifest with { PythonConstraints = resumeManifest.PythonConstraints.Append("new-test-dependency==1.0").ToArray() };
+var changedResumePlan = InstallationPlanner.Create(resumedConfig, changedLock, resumeState, true);
+Check(changedResumePlan.EnvironmentBytes > completedResumePlan.EnvironmentBytes + 8L * 1024 * 1024 * 1024, "changed dependency lock does not reuse another manifest's completion record");
+
+File.WriteAllText(Path.Combine(resumedEnvironment.ComfyRoot, "main.py"), "fixture");
+File.WriteAllText(Path.Combine(resumedEnvironment.ComfyRoot, "folder_paths.py"), "fixture");
+var unrelatedDefaultModel = Path.Combine(resumedEnvironment.ComfyRoot, "models", animaModels[0].Category, animaModels[0].RelativePath);
+Directory.CreateDirectory(Path.GetDirectoryName(unrelatedDefaultModel)!);
+File.WriteAllText(unrelatedDefaultModel, "import must not verify this model");
+var importedPlan = InstallationPlanner.Create(resumedEnvironment, resumeManifest, resumeState, false, models, profiles);
+Check(importedPlan.Downloads.Length == 0 && importedPlan.EstimatedDownloadBytes == 0, "import repair does not reserve optional base models or fresh-install tools");
+var importedPrepared = await InstallationPlanner.PreparePlanAsync(importedPlan, models, profiles, "missing-probe-script.py", default);
+Check(ReferenceEquals(importedPrepared, importedPlan) && (await InstallationPlanner.RefreshSpaceEstimateAsync(importedPlan, default)).EstimatedDownloadBytes == 0, "import planning skips model probes and unrelated corrupt default model files");
+var deferredPathsPreflight = await InstallationPlanner.PreflightAsync(importedPlan with { ModelPathsDeferred = true }, default);
+Check(deferredPathsPreflight.CanInstall && deferredPathsPreflight.Issues.Single(issue => issue.Code == "model_paths_deferred").Blocking == false,
+    "deferred model path discovery remains visible without blocking dependency recovery");
+
+var smallModels = models with { Models = models.Models.Select(m => m with { Size = data.Length, Sha256 = hash }).ToArray() };
+var externalModelRoot = Path.Combine(work, "external-model-paths");
+var existingExternalModel = Path.Combine(externalModelRoot, "diffusion_models", "nested", animaModels[0].RelativePath);
+Directory.CreateDirectory(Path.GetDirectoryName(existingExternalModel)!);
+File.WriteAllBytes(existingExternalModel, corruptWheel);
+var separateVolume = Path.GetPathRoot(work)!.Equals(@"Z:\", StringComparison.OrdinalIgnoreCase) ? @"Y:\" : @"Z:\";
+var separateModelRoot = Path.Combine(separateVolume, "anima-preflight-test-" + Guid.NewGuid().ToString("N"));
+var externalProbe = new ProbeResult(resumedEnvironment.ComfyRoot, resumedEnvironment.Python, new Dictionary<string, string[]>
+{
+    ["diffusion_models"] = [Path.Combine(externalModelRoot, "diffusion_models")],
+    ["text_encoders"] = [Path.Combine(separateModelRoot, "text_encoders")],
+    ["vae"] = [Path.Combine(separateModelRoot, "vae")],
+});
+var relocatedPlan = await InstallationPlanner.ResolveModelDestinationsAsync(
+    InstallationPlanner.Create(resumedConfig, resumeManifest, resumeState, true, smallModels, profiles), externalProbe, smallModels, profiles, default);
+Check(relocatedPlan.Downloads.Single(a => a.Destination == existingExternalModel).InEnvironment && relocatedPlan.EstimatedDownloadBytes == 2 * data.Length, "resumed planning reuses an existing model from effective paths without hashing it twice");
+var relocatedVolumes = InstallationPlanner.EstimateVolumes(relocatedPlan);
+Check(relocatedVolumes.Single(v => v.Volume == separateVolume).RequiredBytes == 2 * data.Length + 256L * 1024 * 1024
+    && relocatedVolumes.Single(v => v.Volume.Equals(Path.GetPathRoot(work), StringComparison.OrdinalIgnoreCase)).RequiredBytes == relocatedPlan.EnvironmentReserveBytes + relocatedPlan.RuntimeReserveBytes + 256L * 1024 * 1024,
+    "each effective model destination is budgeted on its own volume while component reserves stay on their installation volumes");
+await ThrowsType<InvalidDataException>(() => InstallationPlanner.RefreshSpaceEstimateAsync(relocatedPlan, default), "preflight verifies the existing effective model path instead of a hardcoded models directory");
+File.WriteAllBytes(existingExternalModel, data);
+Check((await InstallationPlanner.RefreshSpaceEstimateAsync(relocatedPlan, default)).EstimatedDownloadBytes == 2 * data.Length, "verified external models need no duplicate download allocation");
+
+var metadataRoot = Path.Combine(work, "model-metadata");
+Directory.CreateDirectory(metadataRoot);
+var skippedMetadata = await ModelMetadata.EnsureDefaultAsync(new LauncherConfig { SelectedProfile = "krea2" }, manifest, models, profiles, Path.Combine(metadataRoot, "krea.safetensors"), default);
+Check(!skippedMetadata.Created, "Krea profile never receives automatic Anima metadata");
+var preservedModel = Path.Combine(metadataRoot, "preserved", profiles.Get("anima").ModelName);
+Directory.CreateDirectory(Path.GetDirectoryName(preservedModel)!);
+var preservedSidecar = Path.ChangeExtension(preservedModel, ".metadata.json");
+File.WriteAllText(preservedSidecar, "user-authored metadata");
+var preservedMetadata = await ModelMetadata.EnsureDefaultAsync(new LauncherConfig(), manifest, models, profiles, preservedModel, default);
+Check(!preservedMetadata.Created && File.ReadAllText(preservedSidecar) == "user-authored metadata", "existing model metadata is preserved without reading or rewriting the model");
+var invalidModel = Path.Combine(metadataRoot, profiles.Get("anima").ModelName);
+File.WriteAllText(invalidModel, "incorrect model fixture");
+await ThrowsType<InvalidDataException>(() => ModelMetadata.EnsureDefaultAsync(new LauncherConfig(), manifest, models, profiles, invalidModel, default), "unverified default model cannot receive trusted Anima metadata");
+Check(!File.Exists(Path.ChangeExtension(invalidModel, ".metadata.json")), "invalid default model leaves no metadata sidecar");
+
+using (var cancelledStop = new CancellationTokenSource())
+{
+    cancelledStop.Cancel();
+    var cancelledState = Path.Combine(work, "cancelled-stop");
+    var cancelledManager = new ServiceManager(cancelledState, _ => { });
+    await ThrowsType<OperationCanceledException>(() => cancelledManager.StopOwnedAsync(ct: cancelledStop.Token), "cancelled stop request propagates even with no owned processes");
+    Check(!Directory.Exists(cancelledState), "cancelled empty stop never writes ownership state");
+}
+
+var damagedState = Path.Combine(work, "damaged-process-state");
+Directory.CreateDirectory(damagedState);
+File.WriteAllText(Path.Combine(damagedState, "processes.json"), "{damaged");
+var damagedLogs = new List<string>();
+var recoveredManager = new ServiceManager(damagedState, damagedLogs.Add);
+recoveredManager.RecoverOwned();
+Check(!recoveredManager.IsOwnedRunning("WebUI") && !recoveredManager.IsOwnedRunning("ComfyUI") && !File.Exists(Path.Combine(damagedState, "processes.json")) && Directory.GetFiles(damagedState, "processes.json.corrupt-*").Length == 1, "damaged process record is backed up without acquiring any process ownership");
+Check(damagedLogs.Count == 1, "damaged process record gives an actionable recovery log");
+var invalidOwnerState = Path.Combine(work, "invalid-process-owner");
+JsonFile.Write(Path.Combine(invalidOwnerState, "processes.json"), new[] { new OwnedProcess(Environment.ProcessId, 1, "wrong.exe", "WebUI") });
+var invalidOwner = new ServiceManager(invalidOwnerState, _ => { });
+invalidOwner.RecoverOwned();
+Check(!invalidOwner.IsOwnedRunning("WebUI"), "PID match with wrong start time or executable never acquires ownership");
+
+// An isolated loopback listener intentionally never replies; no user's services
+// are touched and no HTTP installation or GPU work is needed for these checks.
+var silentListener = new TcpListener(IPAddress.Loopback, 0);
+silentListener.Start();
+try
+{
+    var silentPort = ((IPEndPoint)silentListener.LocalEndpoint).Port;
+    var silentUrl = $"http://127.0.0.1:{silentPort}/health";
+    await ThrowsType<TimeoutException>(() => ServiceManager.Json(silentUrl, requestTimeout: TimeSpan.FromMilliseconds(120)), "HTTP deadline is reported as timeout, not user pause");
+    using var userCancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(120));
+    await ThrowsType<OperationCanceledException>(() => ServiceManager.Json(silentUrl, userCancellation.Token, TimeSpan.FromSeconds(5)), "HTTP user cancellation propagates without timeout reclassification");
+    using var stoppedProbe = new CancellationTokenSource();
+    stoppedProbe.Cancel();
+    await ThrowsType<OperationCanceledException>(() => ServiceManager.PortOpen(silentPort, stoppedProbe.Token), "cancelled port probe stops immediately");
+}
+finally { silentListener.Stop(); }
+
+var downloadTimeoutHandler = new FakeHandler { Callback = _ => Task.FromException<HttpResponseMessage>(new TaskCanceledException("simulated response timeout")) };
+using (var timeoutDownload = new Downloads(handler: downloadTimeoutHandler))
+    await ThrowsType<TimeoutException>(() => timeoutDownload.Fetch("timeout", "https://example.com/timeout", Path.Combine(work, "download-timeout.bin"), data.Length, hash, null, default), "exhausted download timeout is distinct from a user pause");
+var expectedVersion = Assembly.GetEntryAssembly()!.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+')[0] ?? Assembly.GetEntryAssembly()!.GetName().Version!.ToString();
+Check(downloadTimeoutHandler.UserAgents.All(agent => agent == "AnimaRandomStudio/" + expectedVersion), "download user agent follows the executable build version");
+
 var cmd = Commands.Find("cmd.exe");
 if (cmd is not null) await Throws(async () => { await Commands.Run(cmd, ["/c", "ping", "-n", "30", "127.0.0.1"], work, null, CancellationToken.None, timeout: TimeSpan.FromMilliseconds(500)); }, "command timeout kills hung process");
 
@@ -319,9 +590,11 @@ sealed class FakeHandler : HttpMessageHandler
 {
     public Func<HttpRequestMessage, Task<HttpResponseMessage>> Callback = null!;
     public List<(string Url, string? Auth)> Seen = [];
+    public List<string> UserAgents = [];
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         Seen.Add((request.RequestUri!.ToString(), request.Headers.Authorization?.ToString()));
+        UserAgents.Add(request.Headers.UserAgent.ToString());
         return Callback(request);
     }
 }

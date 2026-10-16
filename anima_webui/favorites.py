@@ -3,10 +3,15 @@ from __future__ import annotations
 import asyncio
 import copy
 import functools
+import json
+import os
+import tempfile
 import uuid
+from pathlib import Path
 from typing import Any
 
 from .catalog import SECTIONS, CatalogError, PromptCatalog, normalize_text
+from .persistence import StorageProtection
 
 
 MAX_GROUPS = 128
@@ -157,17 +162,80 @@ def _locked(method: Any) -> Any:
     return wrapper
 
 
+class FavoritesExtensionStore(StorageProtection):
+    """Persist categories which the upstream Anima Tools whitelist drops.
+
+    Existing plugin categories remain in their original store. This supplement
+    uses the same section shape, so both workbenches use one FavoritesService.
+    """
+
+    store_name = "favorite_extensions"
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.load_warnings: list[str] = []
+        self.read_only_reason = None
+        self.value = normalize_section({})
+        if self.path.is_file():
+            try:
+                payload = json.loads(self.path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict) or payload.get("version") != 1:
+                    raise ValueError("收藏补充文件版本无效")
+                expression = payload.get("expression")
+                if not isinstance(expression, dict) or not isinstance(expression.get("items"), list) or not isinstance(expression.get("groups"), list):
+                    raise ValueError("表情收藏格式无效")
+                self.value = normalize_section(expression)
+            except (OSError, UnicodeError, ValueError) as error:
+                self._recover_load_failure(error)
+
+    async def save(self, value: dict[str, Any]) -> None:
+        self.ensure_writable()
+        normalized = normalize_section(value)
+        text = json.dumps({"version": 1, "expression": normalized}, ensure_ascii=False, indent=2) + "\n"
+        try:
+            await asyncio.to_thread(self._write_text, text)
+        except OSError as error:
+            self._protect_storage(f"收藏写入失败({error})，已保留原内容")
+            self.ensure_writable()
+        self.value = normalized
+
+    def _write_text(self, text: str) -> None:
+        fd, name = tempfile.mkstemp(prefix="favorites-", suffix=".json", dir=self.path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(name, self.path)
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
+
+
 class FavoritesService:
-    def __init__(self, comfy: Any, catalog: PromptCatalog):
+    def __init__(self, comfy: Any, catalog: PromptCatalog, expression_store: FavoritesExtensionStore | None = None):
         self.comfy = comfy
         self.catalog = catalog
+        self.expression_store = expression_store
         # 所有变更都是「读 ComfyUI 全量 → 内存改 → 整体写回」,
         # 两次操作并发时后写者会覆盖前写者;用锁把读-改-写串行化。
         self._lock = asyncio.Lock()
 
+    async def _read_payload(self, section: str) -> dict[str, Any]:
+        if section == "expression" and self.expression_store is not None:
+            return {section: copy.deepcopy(self.expression_store.value)}
+        return await self.comfy.favorites()
+
+    async def _save_section(self, section: str, value: dict[str, Any]) -> None:
+        if section == "expression" and self.expression_store is not None:
+            await self.expression_store.save(value)
+        else:
+            await self.comfy.save_favorites({section: value})
+
     async def get(self, section: str) -> dict[str, Any]:
         section = _section(section)
-        payload = await self.comfy.favorites()
+        payload = await self._read_payload(section)
         result = normalize_section(payload.get(section))
         return {
             **result,
@@ -179,7 +247,7 @@ class FavoritesService:
 
     async def collection_group_ids(self, section: str, group_id: str) -> set[str]:
         section = _section(section)
-        payload = await self.comfy.favorites()
+        payload = await self._read_payload(section)
         current = normalize_section(payload.get(section))
         if not any(group["id"] == group_id for group in current["groups"]):
             return set()
@@ -194,7 +262,7 @@ class FavoritesService:
         catalog_item = self.catalog.get(item_id)
         if catalog_item is None or catalog_item.get("section") != section:
             raise CatalogError("收藏条目不存在")
-        data = await self.comfy.favorites()
+        data = await self._read_payload(section)
         current = normalize_section(data.get(section))
         key = str(catalog_item.get("favorite_key") or "")
         position = next(
@@ -225,7 +293,7 @@ class FavoritesService:
                     saved["nickname"] = str(existing.get("nickname") or "")
                 current["items"][position] = saved
         self._prune_empty_affected_children(current, old_group_ids)
-        await self.comfy.save_favorites({section: current})
+        await self._save_section(section, current)
         return await self.get(section)
 
     @_locked
@@ -240,7 +308,7 @@ class FavoritesService:
             raise CatalogError("selection.mode 必须是 include 或 all")
         if not isinstance(group_ids, list):
             raise CatalogError("groupIds 必须是数组")
-        data = await self.comfy.favorites()
+        data = await self._read_payload(section)
         current = normalize_section(data.get(section))
         valid_group_ids = {group["id"] for group in current["groups"]}
         selected_groups = list(
@@ -299,7 +367,7 @@ class FavoritesService:
                 existing["groupIds"] = merged_groups
                 updated_count += 1
 
-        await self.comfy.save_favorites({section: current})
+        await self._save_section(section, current)
         return {
             **(await self.get(section)),
             "selectedCount": len(selected_ids),
@@ -312,7 +380,7 @@ class FavoritesService:
     async def create_group(self, section: str, payload: dict[str, Any]) -> dict[str, Any]:
         section = _section(section)
         name = self._group_name(payload)
-        data = await self.comfy.favorites()
+        data = await self._read_payload(section)
         current = normalize_section(data.get(section))
         if len(current["groups"]) >= MAX_GROUPS:
             raise CatalogError("收藏分组数量已达到上限")
@@ -325,7 +393,7 @@ class FavoritesService:
             "sourceCustomGroupId": None,
         }
         current["groups"].append(group)
-        await self.comfy.save_favorites({section: current})
+        await self._save_section(section, current)
         return {"group": group, **(await self.get(section))}
 
     @_locked
@@ -337,7 +405,7 @@ class FavoritesService:
         source_items: list[dict[str, Any]],
     ) -> dict[str, Any]:
         section = _section(section)
-        data = await self.comfy.favorites()
+        data = await self._read_payload(section)
         current = normalize_section(data.get(section))
         if not any(group["id"] == parent_id for group in current["groups"]):
             raise KeyError(parent_id)
@@ -372,7 +440,7 @@ class FavoritesService:
                 current["items"].append(
                     self._favorite_record(section, catalog_item, [group["id"]], "")
                 )
-        await self.comfy.save_favorites({section: current})
+        await self._save_section(section, current)
         return {"group": group, **(await self.get(section))}
 
     @_locked
@@ -381,14 +449,14 @@ class FavoritesService:
         if group_id == "default":
             raise CatalogError("默认收藏分组不能重命名")
         name = self._group_name(payload)
-        data = await self.comfy.favorites()
+        data = await self._read_payload(section)
         current = normalize_section(data.get(section))
         group = next((item for item in current["groups"] if item["id"] == group_id), None)
         if group is None:
             raise KeyError(group_id)
         self._ensure_unique_sibling(current, group.get("parentId"), name, except_id=group_id)
         group["name"] = name
-        await self.comfy.save_favorites({section: current})
+        await self._save_section(section, current)
         return await self.get(section)
 
     @_locked
@@ -398,7 +466,7 @@ class FavoritesService:
         section = _section(section)
         if group_id == "default":
             raise CatalogError("默认收藏分组不能删除")
-        data = await self.comfy.favorites()
+        data = await self._read_payload(section)
         current = normalize_section(data.get(section))
         group = next((item for item in current["groups"] if item["id"] == group_id), None)
         if group is None:
@@ -434,7 +502,7 @@ class FavoritesService:
         current["groups"] = [
             item for item in current["groups"] if item["id"] not in subtree_ids
         ]
-        await self.comfy.save_favorites({section: current})
+        await self._save_section(section, current)
         return {
             **(await self.get(section)),
             "deletedGroupIds": sorted(subtree_ids),
@@ -447,7 +515,7 @@ class FavoritesService:
     @_locked
     async def sync_custom(self, section: str, item: dict[str, Any]) -> None:
         section = _section(section)
-        data = await self.comfy.favorites()
+        data = await self._read_payload(section)
         current = normalize_section(data.get(section))
         key = str(item.get("id") or "")
         saved = next(
@@ -462,12 +530,12 @@ class FavoritesService:
             return
         saved["nickname"] = str(item.get("title") or "")
         saved["customContent"] = str(item.get("prompt") or "")
-        await self.comfy.save_favorites({section: current})
+        await self._save_section(section, current)
 
     async def _update_artist(self, payload: dict[str, Any]) -> dict[str, Any]:
         raw_name = str(payload.get("name") or "").strip()
         name = self._artist_name(raw_name)
-        data = await self.comfy.favorites()
+        data = await self._read_payload("artist")
         current = normalize_section(data.get("artist"))
         position = next(
             (
@@ -599,7 +667,7 @@ class FavoritesService:
         return {
             "id": custom_name,
             "name": custom_name,
-            "nickname": item.get("title") or nickname,
+            "nickname": nickname or item.get("title") or "",
             "customContent": item.get("prompt") or "",
             "groupIds": groups,
             "isCustom": True,

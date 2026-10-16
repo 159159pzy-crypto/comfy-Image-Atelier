@@ -14,7 +14,9 @@
       document.documentElement.dataset.theme = theme;
     })();
   </script>
-  <link rel="stylesheet" href="/static/styles.css?v=20261016-recovery">
+  <link rel="stylesheet" href="/static/styles.css?v=20261017-detail-fill">
+  <link rel="stylesheet" href="/static/single-layout.css?v=20261017-detail-fill">
+  <link rel="stylesheet" href="/static/single-details.css?v=20261017-detail-fill">
 </head>
 <body>
   <div class="ambient" aria-hidden="true"></div>
@@ -22,10 +24,15 @@
   <div id="storageWarning" class="storage-warning" role="status" hidden></div>
 
   <header class="topbar glass">
-    <a class="brand" href="#" aria-label="Anima Random Studio 首页">
+    <a class="brand" href="#" aria-label="Anima Studio 首页">
       <span class="brand-mark">A</span>
       <span class="brand-copy"><strong>Anima</strong><small>创作工作室</small></span>
     </a>
+    <nav id="workbenchSwitch" class="workbench-switch" role="tablist" aria-label="工作台">
+      <span class="workbench-switch-thumb" aria-hidden="true"></span>
+      <button id="singleWorkbenchTab" type="button" role="tab" aria-selected="false" tabindex="-1" data-workbench="single" aria-controls="singleWorkbenchControls">单图 <small>进阶创作</small></button>
+      <button id="randomWorkbenchTab" type="button" role="tab" aria-selected="true" data-workbench="random" aria-controls="randomPromptControls">随机 <small>灵感探索</small></button>
+    </nav>
     <div class="top-meta">
       <span id="connection" class="status-badge offline"><i></i><span>正在连接</span></span>
       <button id="themeToggle" class="icon-button theme-toggle" type="button" title="切换深色主题" aria-label="切换深色主题"><span aria-hidden="true">◐</span></button>
@@ -46,7 +53,9 @@
           
         </div>
 
-        <section class="control-section people-section">
+        <div id="singleWorkbenchControls" role="tabpanel" aria-labelledby="singleWorkbenchTab" hidden></div>
+
+        <section class="control-section people-section" data-random-only>
           <div class="section-heading"><h2>人物构成</h2><output id="peopleTotal">共 1 人</output></div>
           <div class="stepper-grid">
             <label class="stepper"><span>女性</span><input id="female_count" type="number" min="0" max="5" step="1"></label>
@@ -67,7 +76,7 @@
           </div>
         </details>
 
-        <section class="control-section">
+        <section id="randomPromptControls" class="control-section" data-random-only>
           <div class="section-heading"><h2>提示词池</h2><span id="poolOverview">0 项已选</span></div>
           <div id="animaPromptPoolControls">
           <div id="dimensionList" class="dimension-list"></div>
@@ -88,7 +97,7 @@
           </div>
         </section>
 
-        <details class="control-section advanced-section">
+        <details class="control-section advanced-section" data-random-only>
           <summary><span>高级提示词</span><i>+</i></summary>
           <div class="details-content">
             <label class="field"><span>质量词</span><textarea id="quality_prompt" rows="3"></textarea></label>
@@ -138,11 +147,23 @@
             <label class="field"><span>Sampler</span><select id="sampler_name"><option value="">正在读取 Sampler...</option></select></label>
             <label class="field"><span>Scheduler</span><select id="scheduler"><option value="">正在读取 Scheduler...</option></select></label>
             <label class="field"><span>底图模式</span><select id="base_mode"><option value="normal">普通底图</option><option value="dual_sampler">底图－双采样器</option></select><small class="field-hint">两种模式二选一。</small></label>
+            <section id="randomDualSection" class="sampling-stage" hidden>
+              <div class="section-heading"><h2>双采样细项</h2></div>
+              <div class="parameter-grid compact-parameter-grid">
+                <label class="field"><span>第二段起始步</span><input id="random_dual_switch_step" type="number" min="0" max="149" step="1" value="15"></label>
+                <label class="field"><span>中间放大倍率</span><input id="random_dual_scale" type="number" min="1" max="2" step="0.05" value="1"></label>
+                <label class="field"><span>第二段 CFG</span><input id="random_dual_second_cfg" type="number" min="0" max="30" step="0.1" value="4"></label>
+                <label class="field"><span>第二段采样器</span><select id="random_dual_second_sampler_name"><option value="er_sde">er_sde</option></select></label>
+                <label class="field"><span>第二段调度器</span><select id="random_dual_second_scheduler"><option value="simple">simple</option></select></label>
+                <label class="field"><span>中间放大算法</span><select id="random_dual_upscale_method"><option value="sesqui">sesqui</option><option value="bilinear">bilinear</option><option value="bislerp">bislerp</option><option value="nearest-exact">nearest-exact</option><option value="area">area</option><option value="bicubic">bicubic</option></select></label>
+              </div>
+              <p class="field-hint">第一段完整采样，第二段从指定步继续至总步数。</p>
+            </section>
             <div class="sampling-stage sampling-stage-latent">
               <label class="switch-row"><span><strong>潜空间放大</strong><small>放大底图后可选择跟随主模型/LoRA 的二次采样</small></span><input id="latent_upscale_enabled" type="checkbox"></label>
               <div id="latentUpscaleFields" class="repair-parameters">
-                <label class="field"><span>放大倍率</span><input id="latent_upscale_scale" type="number" min="0.01" max="64" step="0.05"></label>
-                <label class="field"><span>放大算法</span><select id="latent_upscale_method"><option value="nearest-exact">nearest-exact</option><option value="bilinear">bilinear</option><option value="area">area</option><option value="bicubic">bicubic</option><option value="bislerp">bislerp</option></select></label>
+                <label class="field"><span>放大倍率</span><input id="latent_upscale_scale" type="number" min="0.01" max="64" step="0.01"></label>
+                <label class="field"><span>放大算法</span><select id="latent_upscale_method"><option value="sesqui">sesqui</option><option value="bilinear">bilinear</option><option value="bislerp">bislerp</option><option value="nearest-exact">nearest-exact</option><option value="area">area</option><option value="bicubic">bicubic</option></select></label>
                 <label class="switch-row"><span><strong>后二次采样</strong><small>使用当前主模型及 LoRA</small></span><input id="latent_second_sampler_enabled" type="checkbox"></label>
                 <div id="latentSecondSamplerFields" class="parameter-grid compact-parameter-grid">
                   <label class="field"><span>步数</span><input id="latent_second_sampler_steps" type="number" min="1" max="150" step="1"></label>
@@ -159,7 +180,7 @@
                 <label class="field"><span>SeedVR2 模型</span><select id="seedvr2_model_name"><option value="">读取中...</option></select></label>
                 <label class="field"><span>SeedVR2 VAE</span><select id="seedvr2_vae_name"><option value="">读取中...</option></select></label>
                 <label class="field"><span>权重类型</span><select id="seedvr2_weight_dtype"><option value="default">default</option><option value="fp8_e4m3fn">fp8_e4m3fn</option><option value="fp8_e4m3fn_fast">fp8_e4m3fn_fast</option></select></label>
-                <label class="field"><span>放大倍率</span><input id="seedvr2_scale_by" type="number" min="0.01" max="64" step="0.05"></label>
+                <label class="field"><span>放大倍率</span><input id="seedvr2_scale_by" type="number" min="0.01" max="64" step="0.01"></label>
                 <label class="field"><span>色彩校正</span><select id="seedvr2_color_correction_method"><option value="lab">lab</option><option value="wavelet">wavelet</option><option value="disabled">disabled</option></select></label>
                 <label class="field"><span>采样步数</span><input id="seedvr2_sampler_steps" type="number" min="1" max="150" step="1"></label>
                 <label class="field"><span>采样 CFG</span><input id="seedvr2_sampler_cfg" type="number" min="0.1" max="30" step="0.1"></label>
@@ -184,8 +205,8 @@
               <label class="switch-row"><span><strong>N 卡放大</strong><small>当前节点没有独立模型输入，不显示虚构的模型项</small></span><input id="nvidia_upscale_enabled" type="checkbox"></label>
               <div id="nvidiaUpscaleFields" class="repair-parameters parameter-grid">
                 <label class="field"><span>缩放方式</span><select id="nvidia_resize_type"><option value="scale by multiplier">scale by multiplier</option></select></label>
-                <label class="field"><span>倍率</span><input id="nvidia_scale" type="number" min="0.01" max="64" step="0.05"></label>
-                <label class="field"><span>质量</span><select id="nvidia_quality"><option value="ULTRA">ULTRA</option></select></label>
+                <label class="field"><span>倍率</span><input id="nvidia_scale" type="number" min="1" max="4" step="0.01"></label>
+                <label class="field"><span>质量</span><select id="nvidia_quality"><option value="LOW">LOW</option><option value="MEDIUM">MEDIUM</option><option value="HIGH">HIGH</option><option value="ULTRA">ULTRA</option></select></label>
               </div>
             </div>
             <div class="sampling-stage sampling-stage-face">
@@ -198,7 +219,7 @@
                 <label class="field"><span>Denoise</span><input id="face_denoise_strength" type="number" min="0" max="1" step="0.01"></label>
                 <label class="field"><span>人脸选择</span><input id="face_selection" type="number" min="0" step="1"></label>
                 <label class="field"><span>检测置信度</span><input id="face_detection_confidence" type="number" min="0" max="1" step="0.01"></label>
-                <label class="field"><span>手动旋转</span><select id="face_manual_rotation"><option value="None">None</option><option value="0">0°</option><option value="90">90°</option><option value="180">180°</option><option value="270">270°</option></select></label>
+                <label class="field"><span>手动旋转</span><select id="face_manual_rotation"><option value="None">None</option><option value="90° CW">90° CW</option><option value="90° CCW">90° CCW</option><option value="180°">180°</option></select></label>
                 <label class="field"><span>处理分辨率</span><input id="face_processing_resolution" type="number" min="64" step="8"></label>
                 <label class="field"><span>放大模型</span><select id="face_upscaler_model"><option value="Fast 4x (Lanczos)">Fast 4x (Lanczos)</option></select></label>
                 <label class="field"><span>裁切留白</span><input id="face_crop_padding" type="number" min="0" max="16" step="0.1"></label>
@@ -228,12 +249,27 @@
     </aside>
 
     <section class="history-panel">
+      <div id="singlePreviewRail">
+      <section id="singlePreview" class="single-preview glass" hidden tabindex="-1" aria-label="单图预览">
+        <div class="single-preview-heading"><span class="kicker">生成预览</span><span id="singlePreviewStatus">下一张作品，从这里开始</span></div>
+        <button id="singlePreviewOpen" class="single-preview-canvas" type="button" disabled aria-label="查看生成详情">
+          <img id="singlePreviewImage" alt="单图生成预览" hidden>
+          <span id="singlePreviewEmpty"><b>一张图，无限可能</b><small>编写提示词，或放入一张参考图</small></span>
+        </button>
+        <p class="single-preview-hint">点击图片查看详情，再点详情图片放大</p>
+        <button id="singlePreviewRetry" class="button ghost compact" type="button" hidden>重试加载历史</button>
+      </section>
+      <div id="singleCommandSlot"></div>
+      </div>
+      <div id="randomArchive">
       <div class="history-header">
         <div><span class="kicker">GENERATED ARCHIVE</span><h1>作品库</h1><p id="historyCount">0 张图片</p></div>
         <div class="pager"><button id="prevPage" class="icon-button" type="button" title="上一页" aria-label="上一页">‹</button><span id="pageLabel">1 / 1</span><button id="nextPage" class="icon-button" type="button" title="下一页" aria-label="下一页">›</button></div>
       </div>
+      <div class="history-filter"><label for="historyWorkbenchFilter">来源</label><select id="historyWorkbenchFilter"><option value="">全部工作台</option><option value="single">单图工作台</option><option value="random">随机工作台</option></select></div>
       <div id="gallery" class="gallery" aria-live="polite"></div>
       <div id="emptyState" class="empty-state"><span class="empty-mark">A</span><strong>等待第一张作品</strong><small>完成生成后会出现在这里</small></div>
+      </div>
     </section>
   </main>
 
@@ -561,6 +597,7 @@
           </fieldset>
           <div class="regeneration-footer"><label class="regeneration-count"><span>生成数量</span><input id="variantDrawerCount" type="number" min="1" max="100" value="4"></label><button id="confirmVariant" class="button primary" type="button" disabled>生成同提示词变体</button></div>
         </section>
+        <div class="history-transfer-actions"><button id="sendToSingle" class="button ghost compact" type="button">送到单图工作台</button><button id="useAsInputImage" class="button ghost compact" type="button">用作图生图</button></div>
         <div class="dialog-actions"><button id="restoreSettings" class="button primary" type="button">载入设置</button><span></span><button id="deleteRecord" class="button danger" type="button">删除记录</button></div>
       </div>
     </div>
@@ -575,12 +612,23 @@
       <h2 id="imagePreviewTitle" class="sr-only">全尺寸图片预览</h2>
       <img id="imagePreviewImage" class="image-preview-image" alt="全尺寸生成结果" draggable="false" tabindex="0" aria-describedby="imagePreviewHelp" hidden>
       <p id="imagePreviewStatus" class="image-preview-status" role="status"></p>
-      <p id="imagePreviewHelp" class="sr-only">滚轮或双指缩放，放大后拖动查看；双击或双触切换适配大小与两倍大小。加减键缩放，0 恢复适配，方向键移动。按 Esc 关闭预览。</p>
+      <div id="singleViewerFeedback" class="single-viewer-feedback" hidden>
+        <p id="singleViewerStatus" role="status"></p>
+        <button id="singleViewerRetry" class="button ghost compact" type="button" hidden>重试</button>
+      </div>
+      <p id="imagePreviewHelp" class="sr-only">滚轮或双指缩放，放大后拖动查看；双击或双触切换适配大小与两倍大小。加减键缩放，0 恢复适配；适配时左右方向键切图，放大后方向键平移。按 Esc 关闭预览。</p>
       <p id="imagePreviewAnnouncement" class="sr-only" role="status" aria-live="polite"></p>
     </div>
   </dialog>
 
   <div id="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20261016-recovery" defer></script>
+  <script src="/static/workbench-parameters.js?v=20261017-detail-fill" defer></script>
+  <script src="/static/single-layout.js?v=20261017-detail-fill" defer></script>
+  <script src="/static/single-gallery.js?v=20261017-detail-fill" defer></script>
+  <script src="/static/single-workbench.js?v=20261017-detail-fill" defer></script>
+  <script src="/static/single-input.js?v=20261017-detail-fill" defer></script>
+  <script src="/static/single-compatibility.js?v=20261017-detail-fill" defer></script>
+  <script src="/static/single-details.js?v=20261017-detail-fill" defer></script>
+  <script src="/static/app.js?v=20261017-detail-fill" defer></script>
 </body>
 </html>

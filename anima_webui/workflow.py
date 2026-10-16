@@ -7,12 +7,16 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .single_workbench import SINGLE_DEFAULTS, validate_single_settings
+from .sampling import (
+    latent_upscale_node, validate_random_dual, validate_resize_options, validate_resize_scale,
+)
+
 from .model_profiles import (
     DEFAULT_MODEL_PROFILE,
     ModelProfileError,
     MODEL_PROFILES,
     get_model_profile,
-    model_profile_defaults,
     normalize_model_profile,
 )
 
@@ -58,6 +62,12 @@ MIN_LORA_STRENGTH = -100.0
 MAX_LORA_STRENGTH = 100.0
 PROMPT_SECTIONS = ("character", "clothing", "pose", "background", "expression")
 DEFAULT_SETTINGS = {
+    "workbench": "random",
+    "generation_mode": "txt2img",
+    "single": copy.deepcopy(SINGLE_DEFAULTS),
+    # Missing/null preserves historical random graphs, including their fixed
+    # template step bounds and the old coupling to the latent repair stage.
+    "dual": None,
     "count": 10,
     "random_character": False,
     "random_clothing": False,
@@ -121,6 +131,8 @@ DEFAULT_SETTINGS = {
             "enabled": False,
             "scale_by": 1.5,
             "upscale_method": "bilinear",
+            "model_format": "Wan 2.1",
+            "half_precision": True,
             # The attached v2 workflow has always sampled after the latent
             # resize. Keep that behavior when users enable the latent stage;
             # the sampler now has an independent switch and full parameters.
@@ -595,7 +607,7 @@ def _validate_upscalers(value: Any, profile_id: str = DEFAULT_MODEL_PROFILE) -> 
             raise WorkflowError(f"upscalers.{key} 必须是对象")
         merged[key].update(copy.deepcopy(item))
     latent = merged["latent"]
-    if set(latent) - {"enabled", "scale_by", "upscale_method", "second_sampler"}:
+    if set(latent) - {"enabled", "scale_by", "upscale_method", "model_format", "half_precision", "second_sampler"}:
         raise WorkflowError("未知潜空间放大参数")
     enabled = _boolean("upscalers.latent.enabled", latent["enabled"])
     scale_by = latent["scale_by"]
@@ -603,9 +615,7 @@ def _validate_upscalers(value: Any, profile_id: str = DEFAULT_MODEL_PROFILE) -> 
         raise WorkflowError("upscalers.latent.scale_by 必须是数字")
     if not math.isfinite(float(scale_by)) or not 0.01 <= float(scale_by) <= 64:
         raise WorkflowError("upscalers.latent.scale_by 必须在 0.01-64 之间")
-    upscale_method = _text("upscalers.latent.upscale_method", latent["upscale_method"])
-    if upscale_method not in {"nearest-exact", "bilinear", "area", "bicubic", "bislerp"}:
-        raise WorkflowError("upscalers.latent.upscale_method 无效")
+    resize_options = validate_resize_options(latent, "upscalers.latent")
     second_sampler = _validate_post_sampler(
         latent["second_sampler"], "upscalers.latent.second_sampler"
     )
@@ -613,7 +623,7 @@ def _validate_upscalers(value: Any, profile_id: str = DEFAULT_MODEL_PROFILE) -> 
         "latent": {
             "enabled": enabled,
             "scale_by": float(scale_by),
-            "upscale_method": upscale_method,
+            **resize_options,
             "second_sampler": second_sampler,
         }
     }
@@ -707,7 +717,7 @@ def _validate_upscalers(value: Any, profile_id: str = DEFAULT_MODEL_PROFILE) -> 
         "denoise_strength": (0.0, 1.0),
         "detection_confidence": (0.0, 1.0),
         "crop_padding": (0.0, 16.0),
-        "sampling_mask_blur_strength": (0.0, 1.0),
+        "sampling_mask_blur_strength": (0.0, 6.0),
     }
     face_int_ranges = {
         "steps": (1, 150),
@@ -808,10 +818,23 @@ def migrate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     profile = get_model_profile(profile_id)
     result = copy.deepcopy(source)
     result["model_profile"] = profile_id
+    workbench = source.get("workbench", "random")
+    if not isinstance(workbench, str) or workbench not in {"random", "single"}:
+        raise WorkflowError("workbench 必须是 random 或 single")
+    generation_mode = source.get("generation_mode", "txt2img")
+    if not isinstance(generation_mode, str) or generation_mode not in {"txt2img", "img2img"}:
+        raise WorkflowError("generation_mode 必须是 txt2img 或 img2img")
+    if workbench == "random" and generation_mode != "txt2img":
+        raise WorkflowError("随机工作台仅支持文生图")
+    result["workbench"] = workbench
+    result["generation_mode"] = generation_mode
+    raw_single = source.get("single", {})
+    if not isinstance(raw_single, dict):
+        raise WorkflowError("single 必须是对象")
+    unlocked = workbench == "single" and raw_single.get("unlock_resources", True) is True
     # A profile switch is authoritative for CLIP/VAE and encoder type.
-    result["clip_name"] = profile["clip_name"]
-    result["vae_name"] = profile["vae_name"]
-    result["clip_type"] = profile["clip_type"]
+    for resource_key in ("clip_name", "vae_name", "clip_type"):
+        result[resource_key] = source.get(resource_key, profile[resource_key]) if unlocked else profile[resource_key]
     # Switching profiles should reset a previous profile's canonical UNet,
     # while a custom explicitly assigned UNet remains selected. Ownership is
     # enforced at the request/resource boundary where the live inventory is
@@ -837,13 +860,17 @@ def migrate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     raw_base = result.get("base_mode")
     if raw_base is None:
         legacy_second = source.get("second_sampler")
-        if isinstance(legacy_second, dict) and legacy_second.get("enabled"):
+        if workbench == "single":
+            raw_base = "normal"
+        elif isinstance(legacy_second, dict) and legacy_second.get("enabled"):
             raw_base = "dual_sampler"
         else:
             raw_base = profile["defaults"]["base_mode"]
-    if raw_base not in {"normal", "dual_sampler"}:
+    if not isinstance(raw_base, str) or raw_base not in {"normal", "dual_sampler"}:
         raise WorkflowError("base_mode 必须是 normal 或 dual_sampler")
     result["base_mode"] = raw_base
+    if workbench == "single":
+        result["count"] = 1
 
     upscalers = copy.deepcopy(DEFAULT_SETTINGS["upscalers"])
     if isinstance(result.get("upscalers"), dict):
@@ -967,9 +994,9 @@ def validate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]
             {
                 "model_profile": profile_id,
                 "model_name": overrides.get("model_name", profile["model_name"]),
-                "clip_name": profile["clip_name"],
-                "vae_name": profile["vae_name"],
-                "clip_type": profile["clip_type"],
+                "clip_name": overrides["clip_name"],
+                "vae_name": overrides["vae_name"],
+                "clip_type": overrides["clip_type"],
             }
         )
         # Sampling defaults are profile controlled only when the caller did
@@ -1013,7 +1040,7 @@ def validate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         if not isinstance(selection, dict):
             raise WorkflowError(f"{section} 随机池设置无效")
         mode = selection.get("mode", "include")
-        if mode not in {"include", "all"}:
+        if not isinstance(mode, str) or mode not in {"include", "all"}:
             raise WorkflowError(f"{section} 随机池模式无效")
         ids = selection.get("ids", [])
         excluded_ids = selection.get("excluded_ids", [])
@@ -1038,7 +1065,7 @@ def validate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         if not settings[name]:
             raise WorkflowError(f"{name} 不能为空")
     base_mode = settings.get("base_mode")
-    if base_mode not in {"normal", "dual_sampler"}:
+    if not isinstance(base_mode, str) or base_mode not in {"normal", "dual_sampler"}:
         raise WorkflowError("base_mode 必须是 normal 或 dual_sampler")
     settings["upscalers"] = _validate_upscalers(settings.get("upscalers"), profile_id)
     settings["loras"] = validate_loras(settings)
@@ -1046,7 +1073,7 @@ def validate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         settings["lora_managed_triggers"]
     )
 
-    if settings["character_detail"] not in {"trigger", "trigger_tags"}:
+    if not isinstance(settings["character_detail"], str) or settings["character_detail"] not in {"trigger", "trigger_tags"}:
         raise WorkflowError("character_detail 必须是 trigger 或 trigger_tags")
 
     settings["manual_artist"] = normalize_artist_tags(settings["manual_artist"])
@@ -1079,6 +1106,15 @@ def validate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         raise WorkflowError("sampler_name 不能为空")
     if not settings["scheduler"]:
         raise WorkflowError("scheduler 不能为空")
+    settings["dual"] = validate_random_dual(settings.get("dual"), settings)
+    latent = settings["upscalers"]["latent"]
+    # Single keeps its existing independent single.latent namespace. Random
+    # legacy dual graphs also use this resize even when postprocessing is off.
+    if settings["workbench"] == "random":
+        resize_active = latent["enabled"] or settings["base_mode"] == "dual_sampler" and settings["dual"] is None
+        validate_resize_scale(latent["scale_by"], latent["upscale_method"],
+                              "upscalers.latent.scale_by", active=resize_active)
+    settings["single"] = validate_single_settings(settings.get("single", {}), settings)
     return settings
 
 
@@ -1764,6 +1800,14 @@ def _render_v2_workflows(
     _v2_set_input(api, "701:1242", "values.a", prompt_seed)
     for sampler_id in ("691:1240", "701:1245", "701:1246", "704:1248"):
         _v2_set_sampler(api, sampler_id, settings, sample_seed)
+    dual = settings.get("dual") if settings.get("workbench") == "random" else None
+    if dual is not None and settings["base_mode"] == "dual_sampler":
+        for node_id, start in (("701:1245", 0), ("701:1246", dual["switch_step"])):
+            _v2_set_input(api, node_id, "start_at_step", start)
+            _v2_set_input(api, node_id, "end_at_step", settings["steps"])
+        for name, value in (("cfg", dual["second_cfg"]), ("sampler_name", dual["second_sampler_name"]),
+                            ("scheduler", dual["second_scheduler"])):
+            _v2_set_input(api, "701:1246", name, value)
     # SeedVR2 and face processing have their own seeds but inherit the public
     # batch seed so replay remains reproducible.
     _v2_set_input(api, "712:1208", "seed", sample_seed)
@@ -1967,12 +2011,16 @@ def _render_v2_workflows(
     # The latent upscale node lives inside the 704: group.  Earlier drafts
     # targeted the group id (``701``), which is not a node in the API export,
     # so the requested scale was silently ignored by ComfyUI.  Write the
-    # actual ``LatentUpscaleBy.scale_by`` widget and keep reduced fixtures
-    # tolerant through _v2_set_input's no-op behavior when the node is absent.
-    _v2_set_input(api, "704:1064", "scale_by", float(latent["scale_by"]))
-    _v2_set_input(api, "704:1064", "upscale_method", latent["upscale_method"])
-    _v2_set_input(api, "701:1450", "scale_by", float(latent["scale_by"]))
-    _v2_set_input(api, "701:1450", "upscale_method", latent["upscale_method"])
+    # actual resize node and keep reduced fixtures tolerant when it is absent.
+    # Explicit random dual settings own their resize; null keeps old coupling.
+    for node_id, source, resize, scale in (
+        ("704:1064", ["704:1182", 0], latent, latent["scale_by"]),
+        ("701:1450", ["701:1245", 0], dual or latent, dual["scale"] if dual else latent["scale_by"]),
+    ):
+        if node_id in api:
+            # Keep existing metadata and reduced fixtures while replacing the
+            # algorithm-specific inputs; Sesqui takes latent/scale, not samples/scale_by.
+            api[node_id] = {**api[node_id], **latent_upscale_node(source, resize, float(scale))}
     nvidia = settings["upscalers"]["nvidia"]
     _v2_set_input(api, "1432:1418", "resize_type", nvidia["resize_type"])
     _v2_set_input(api, "1432:1418", "resize_type.scale", nvidia["scale"])
@@ -2024,6 +2072,8 @@ def render_workflows(
     frozen_positive_prompt: str = "",
     frozen_negative_prompt: str = "",
     resource_paths: dict[str, str] | None = None,
+    *,
+    single_runtime: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     raw_settings = copy.deepcopy(settings)
     settings = validate_settings(settings)
@@ -2036,6 +2086,13 @@ def render_workflows(
     # different node contract.  Keep the mature v1 renderer below intact for
     # old embedded workflows and route only the new export through its adapter.
     if _is_v2_api_template(api_template):
+        if settings["workbench"] == "single":
+            from .single_workbench import render_single_workflows
+            return render_single_workflows(
+                api_template, ui_template, settings, sample_seed, prompt_seed, filename_prefix,
+                single_runtime=single_runtime, frozen_positive_prompt=frozen_positive_prompt,
+                frozen_negative_prompt=frozen_negative_prompt, resource_paths=resource_paths,
+            )
         return _render_v2_workflows(
             api_template,
             ui_template,
@@ -2243,6 +2300,8 @@ def build_submission(
     frozen_positive_prompt: str = "",
     frozen_negative_prompt: str = "",
     resource_paths: dict[str, str] | None = None,
+    *,
+    single_runtime: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     api, ui = render_workflows(
         api_template,
@@ -2257,6 +2316,7 @@ def build_submission(
         frozen_positive_prompt,
         frozen_negative_prompt,
         resource_paths,
+        single_runtime=single_runtime,
     )
     metadata_settings = validate_settings(settings)
     if _is_v2_api_template(api_template):
@@ -2277,10 +2337,22 @@ def build_submission(
         "resolved_prompt_full": final_positive,
         "frozen_positive_prompt": frozen_positive_prompt,
     }
+    if metadata_settings["workbench"] == "single":
+        single_meta = (ui.get("extra") or {}).get("single_workbench") or {}
+        metadata["resolved_prompt_full"] = single_meta.get("positive", "")
+        metadata["single_runtime"] = {
+            "positive": single_meta.get("positive", ""),
+            "negative": single_meta.get("negative", ""),
+            "effective_positive": copy.deepcopy(single_meta.get("effective_positive", {})),
+            **({key: single_runtime[key] for key in ("input_image", "input_image_id", "prompt_job_id") if key in single_runtime} if single_runtime else {}),
+        }
     return {
         "prompt": api,
         "client_id": client_id,
-        "extra_data": {"extra_pnginfo": {"workflow": ui, "anima_random_webui": metadata}},
+        "extra_data": {
+            "extra_pnginfo": {"workflow": ui, "anima_random_webui": metadata},
+            **({"preview_method": "latent2rgb"} if metadata_settings["workbench"] == "single" else {}),
+        },
     }
 
 
@@ -2320,6 +2392,8 @@ class WorkflowTemplates:
         resolved_prompt_full: str = "",
         frozen_positive_prompt: str = "",
         frozen_negative_prompt: str = "",
+        *,
+        single_runtime: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return build_submission(
             self.api,
@@ -2336,4 +2410,5 @@ class WorkflowTemplates:
             frozen_positive_prompt,
             frozen_negative_prompt,
             self.resource_paths,
+            single_runtime=single_runtime,
         )

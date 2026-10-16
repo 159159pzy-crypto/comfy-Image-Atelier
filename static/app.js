@@ -451,10 +451,12 @@ let defaults = null;
 let config = { catalog: { counts: {} } };
 let currentBatch = null;
 let selectedRecord = null;
+let detailContext = null;
 const imagePreview = {
   phase: "closed", token: 0, zoom: 1, x: 0, y: 0, width: 0, height: 0,
   animation: null, pointers: new Map(), gesture: null, tap: null, backdropPointer: null,
   navigationRequest: 0, preloaded: new Map(), swipe: null,
+  context: null,
 };
 let regenerationOptions = null;
 let regenerationRequest = 0;
@@ -463,6 +465,7 @@ let historyPage = 1;
 let historyPages = 1;
 let historyItems = [];
 const historyCache = new Map();
+let historyDirty = false;
 let lastTerminalBatch = "";
 let toastTimer = null;
 let persistTimer = null;
@@ -501,6 +504,8 @@ let editingLoraTrigger = null;
 let promptRules = [];
 let editingPromptRule = null;
 let normalizationUndo = null;
+let promptNormalizationEpoch = 0;
+const promptNormalizationRequests = new Map();
 let favoritesData = { groups: [], items: [], favorite_keys: [] };
 let favoritesAvailable = false;
 let customGroups = [];
@@ -572,9 +577,21 @@ async function request(path, options = {}) {
       config.storage_status[payload.store] = { read_only: true, reason: payload.error, path: payload.path };
       renderStorageStatus();
     }
-    throw new Error(payload.error || `请求失败 (${response.status})`);
+    const error = new Error(payload.error || `请求失败 (${response.status})`);
+    error.status = response.status;
+    error.code = payload.code;
+    throw error;
+  }
+  if (path.startsWith("/api/favorites/") && options.method && options.method !== "GET") {
+    if (typeof singleWorkbenchFavoritesChanged === "function") singleWorkbenchFavoritesChanged();
   }
   return payload;
+}
+
+async function requestFavorites(path, options = {}) {
+  const section = path.match(/\/api\/favorites\/([^/?]+)/)?.[1];
+  const value = await request(path, options);
+  return section === activeSection ? value : favoritesData;
 }
 
 // Protection lasts until restart. Observe new controls and later enable attempts
@@ -701,24 +718,54 @@ function clearNormalizationUndo(message = "编辑结束后自动按 Anima Tag �
   ui.undoPromptNormalization.hidden = true;
   ui.promptNormalizationStatus.textContent = message;
 }
-async function normalizePromptFields(fields, { apply = true, recordUndo = true } = {}) {
+function promptNormalizationContext() {
+  const mode = typeof singleWorkbenchState !== "undefined" && singleWorkbenchState.ready ? singleWorkbenchState.mode : "random";
+  return `${promptNormalizationEpoch}:${currentProfile()}:${mode}`;
+}
+function invalidatePromptNormalization() {
+  promptNormalizationEpoch++;
+  promptNormalizationRequests.clear();
+}
+function promptElementForField(field) {
+  if (field.startsWith("fixed_")) return ui.dimensionList.querySelector(`[data-fixed="${field.slice(6)}"]`);
+  if (field === "custom_prompt") return ui.customPrompt;
+  return ui[field] || document.getElementById(field);
+}
+async function normalizePromptFields(fields, { apply = true, recordUndo = true, elements = {} } = {}) {
+  const context = promptNormalizationContext();
+  const captured = Object.fromEntries(Object.entries(fields).map(([field, value]) => {
+    const revision = (promptNormalizationRequests.get(field) || 0) + 1;
+    promptNormalizationRequests.set(field, revision);
+    return [field, { value, revision, element: elements[field] || promptElementForField(field) }];
+  }));
   const payload = await request("/api/prompts/normalize", {
     method: "POST",
     body: JSON.stringify({ fields, managedTriggers: clone(draft.managedTriggers || []), model_profile: currentProfile() }),
   });
-  if (apply) {
-    for (const [field, value] of Object.entries(payload.fields || {})) applyPromptField(field, value);
-    if (payload.changed && recordUndo) setNormalizationUndo(payload.changes || []);
-    if (payload.changed) schedulePersist();
+  const appliedFields = [];
+  if (apply && context === promptNormalizationContext()) {
+    for (const [field, value] of Object.entries(payload.fields || {})) {
+      const owner = captured[field];
+      const currentValue = owner?.element?.value ?? (field.startsWith("fixed_") ? draft.fixed[field.slice(6)] : undefined);
+      if (!owner || owner.revision !== promptNormalizationRequests.get(field) || currentValue !== owner.value) continue;
+      if (elements[field]) owner.element.value = value;
+      else applyPromptField(field, value);
+      appliedFields.push(field);
+    }
+    const changes = (payload.changes || []).filter(change => appliedFields.includes(change.field));
+    if (changes.length && recordUndo) setNormalizationUndo(changes);
+    if (payload.changed && appliedFields.length) schedulePersist();
   }
-  return payload;
+  return { ...payload, appliedFields };
 }
 async function normalizePromptElement(element) {
   const field = promptFieldForElement(element);
   if (!field) return;
+  const context = promptNormalizationContext();
   try {
     await normalizePromptFields({ [field]: element.value });
   } catch (error) {
+    if (context !== promptNormalizationContext()) return;
     ui.promptNormalizationStatus.textContent = `规范失败：${error.message}`;
     toast(error.message);
   }
@@ -763,10 +810,10 @@ function normalizeProfileId(value) {
 }
 function defaultUpscalers() {
   return {
-    latent: { enabled: false, scale_by: 1.5, upscale_method: "bilinear", second_sampler: { enabled: true, steps: 20, cfg: 4, sampler_name: "er_sde", scheduler: "simple", denoise: 1 } },
+    latent: { enabled: false, scale_by: 1.5, upscale_method: "bilinear", model_format: "Wan 2.1", half_precision: true, second_sampler: { enabled: true, steps: 20, cfg: 4, sampler_name: "er_sde", scheduler: "simple", denoise: 1 } },
     seedvr2: { enabled: false, model_name: "", vae_name: "", scale_by: 2, weight_dtype: "default", color_correction_method: "lab", sampler: { steps: 1, cfg: 1, sampler_name: "euler", scheduler: "simple", denoise: 1 }, encode: { tile_size: 512, overlap: 64, temporal_size: 64, temporal_overlap: 8 }, decode: { tile_size: 512, overlap: 128, temporal_size: 4096, temporal_overlap: 8 } },
     nvidia: { enabled: false, resize_type: "scale by multiplier", scale: 2, quality: "ULTRA" },
-    face_refine: { enabled: false, steps: 8, cfg_scale: 1, sampler: "res_2m_ode", scheduler: "beta57", denoise_strength: 0.3, face_selection: 0, detection_confidence: 0.75, manual_rotation: "None", processing_resolution: 1024, enable_pre_upscale: true, upscaler_model: "Fast 4x (Lanczos)", crop_padding: 1.6, face_positive_prompt: "", replace_positive_prompt: false, face_negative_prompt: "", replace_negative_prompt: false, exclusions: "", blend_softness: 8, mask_expansion: 2, sampling_mask_blur_size: 21, sampling_mask_blur_strength: 1, enable_color_correction: true, enable_segmentation: true, enable_differential_diffusion: true, enable_lightness_rescue: true, enable_final_refinement: true, offload_models_to_cpu: true },
+    face_refine: { enabled: false, steps: 8, cfg_scale: 1, sampler: "er_sde", scheduler: "simple", denoise_strength: 0.3, face_selection: 0, detection_confidence: 0.75, manual_rotation: "None", processing_resolution: 1024, enable_pre_upscale: true, upscaler_model: "Fast 4x (Lanczos)", crop_padding: 1.6, face_positive_prompt: "", replace_positive_prompt: false, face_negative_prompt: "", replace_negative_prompt: false, exclusions: "", blend_softness: 8, mask_expansion: 2, sampling_mask_blur_size: 21, sampling_mask_blur_strength: 1, enable_color_correction: true, enable_segmentation: true, enable_differential_diffusion: true, enable_lightness_rescue: true, enable_final_refinement: true, offload_models_to_cpu: true },
   };
 }
 function normalizeUpscalers(value, fallback = null) {
@@ -843,6 +890,7 @@ function profileSamplingState() {
   return {
     model_name: ui.model_name?.value || "",
     base_mode: ui.base_mode?.value || "normal",
+    dual: typeof readRandomDualControls === "function" ? readRandomDualControls() : null,
     steps: Number(ui.steps?.value || 0),
     cfg: Number(ui.cfg?.value || 0),
     sampler_name: ui.sampler_name?.value || "",
@@ -879,6 +927,7 @@ function restoreProfileDraft(profile, settings = {}, { preferStored = true } = {
     extra_prompt: (preferStored ? stored?.extra_prompt : undefined) ?? settings.extra_prompt ?? "",
     model_name: (preferStored ? stored?.model_name : undefined) ?? (sourceProfile === targetProfile ? settings.model_name : null) ?? profileConfig(profile).model_name ?? "",
     base_mode: (preferStored ? stored?.base_mode : undefined) ?? settings.base_mode,
+    dual: clone((preferStored ? stored?.dual : undefined) ?? settings.dual ?? null),
     steps: (preferStored ? stored?.steps : undefined) ?? settings.steps,
     cfg: (preferStored ? stored?.cfg : undefined) ?? settings.cfg,
     sampler_name: (preferStored ? stored?.sampler_name : undefined) ?? settings.sampler_name,
@@ -899,7 +948,7 @@ function switchProfileDraft(nextProfile, { applyDefaults = true } = {}) {
     ui.krea_prompt_pool_enabled.checked = Boolean(state.kreaPromptPoolEnabled);
     if (typeof state.extra_prompt === "string") ui.extra_prompt.value = state.extra_prompt;
   } else {
-    const source = profileSettingsDefaults(next);
+    const source = typeof randomWorkbenchDefaultSettings === "function" ? randomWorkbenchDefaultSettings(next) : profileSettingsDefaults(next);
     restoreProfileDraft(next, source);
     ui.extra_prompt.value = source.extra_prompt || "";
   }
@@ -918,6 +967,7 @@ function switchProfileDraft(nextProfile, { applyDefaults = true } = {}) {
     normalized.seedvr2.model_name = normalized.seedvr2.model_name || profileConfig(next).seedvr2_model || "";
     normalized.seedvr2.vae_name = normalized.seedvr2.vae_name || profileConfig(next).seedvr2_vae || "";
     setUpscalerControls(normalized);
+    if (typeof setRandomDualControls === "function") setRandomDualControls(profileSettings);
   }
   updateProfileResources();
   renderDimensions();
@@ -1007,16 +1057,21 @@ function readSamplerValues(ids) { return Object.fromEntries(Object.entries(ids).
 function setTileValues(values) { for (const [group, ids] of Object.entries(SEED_TILE_IDS)) for (const [key, id] of Object.entries(ids)) setControl(id, values?.[group]?.[key]); }
 function readTileValues() { return Object.fromEntries(Object.entries(SEED_TILE_IDS).map(([group, ids]) => [group, Object.fromEntries(Object.entries(ids).map(([key, id]) => [key, controlValue(id)]))])); }
 function setUpscalerControls(upscalers) {
+  if (typeof sharedParameterState !== "undefined") sharedParameterState.latent = {
+    model_format: upscalers?.latent?.model_format || "Wan 2.1", half_precision: upscalers?.latent?.half_precision ?? true,
+  };
   for (const [stage, fields] of Object.entries(UPSCALER_CONTROL_FIELDS)) for (const field of fields) setControl(UPSCALER_CONTROL_IDS[stage][field], upscalers?.[stage]?.[field]);
   setSamplerValues(POST_SAMPLER_IDS, upscalers?.latent?.second_sampler);
   setControl("latent_second_sampler_enabled", upscalers?.latent?.second_sampler?.enabled);
   setSamplerValues(SEED_SAMPLER_IDS, upscalers?.seedvr2?.sampler);
   setTileValues(upscalers?.seedvr2);
+  applyNodeResourceControls();
 }
 function readUpscalerControls() {
   const result = {};
   for (const [stage, fields] of Object.entries(UPSCALER_CONTROL_FIELDS)) result[stage] = Object.fromEntries(fields.map((field) => [field, controlValue(UPSCALER_CONTROL_IDS[stage][field])]));
   result.latent.second_sampler = { enabled: controlValue("latent_second_sampler_enabled"), ...readSamplerValues(POST_SAMPLER_IDS) };
+  if (typeof sharedParameterState !== "undefined") Object.assign(result.latent, sharedParameterState.latent);
   result.seedvr2.sampler = readSamplerValues(SEED_SAMPLER_IDS);
   Object.assign(result.seedvr2, readTileValues());
   return result;
@@ -1034,6 +1089,8 @@ function refreshProfileData() {
 }
 
 function applySettings(raw, { useProfileDraft = false } = {}) {
+  invalidatePromptNormalization();
+  clearNormalizationUndo();
   const settings = normalizeSettings(raw || defaults || {});
   const previousProfile = currentProfile();
   activeProfileId = settings.model_profile;
@@ -1050,6 +1107,7 @@ function applySettings(raw, { useProfileDraft = false } = {}) {
   ensureSelectValue(ui.scheduler, settings.scheduler);
   const upscalers = normalizeUpscalers(settings.upscalers);
   setUpscalerControls(upscalers);
+  if (typeof setRandomDualControls === "function") setRandomDualControls(settings);
   restoreProfileDraft(settings.model_profile, useProfileDraft ? (profileDrafts[settings.model_profile] || settings) : settings, { preferStored: useProfileDraft });
   const storedProfileState = profileDrafts[settings.model_profile];
   if (useProfileDraft && storedProfileState) {
@@ -1066,6 +1124,7 @@ function applySettings(raw, { useProfileDraft = false } = {}) {
   updatePeopleTotal();
   updatePoolOverview();
   updateRepairControls();
+  if (typeof singleWorkbenchApply === "function") singleWorkbenchApply(raw || {});
   if (initialized && previousProfile !== settings.model_profile) void refreshProfileData();
 }
 
@@ -1084,6 +1143,7 @@ function readSettings() {
       ids: currentProfile() === "krea2" ? [...(readKreaPoolSelection().ids || [])] : [],
     },
     base_mode: ui.base_mode.value === "dual_sampler" ? "dual_sampler" : "normal",
+    dual: typeof readRandomDualControls === "function" ? readRandomDualControls() : null,
     pools: clone(draft.pools), loras: clone(draft.loras), lora_managed_triggers: clone(draft.managedTriggers || []),
     upscalers: readUpscalerControls(),
   };
@@ -1092,7 +1152,7 @@ function readSettings() {
     settings[`random_${section}_count`] = Number(draft.counts[section] || 1);
     settings[`fixed_${section}`] = draft.modes[section] === "fixed" ? draft.fixed[section] || "" : "";
   }
-  return settings;
+  return typeof singleWorkbenchRead === "function" ? singleWorkbenchRead(settings) : settings;
 }
 
 function formatSavedTime(timestamp) {
@@ -1107,6 +1167,7 @@ function formatSavedTime(timestamp) {
 
 function persistNow() {
   if (!initialized) return;
+  if (typeof singleWorkbenchPersist === "function" && singleWorkbenchPersist()) return;
   const savedAt = new Date().toISOString();
   try {
     localStorage.setItem(DRAFT_KEY, JSON.stringify({ version: 4, savedAt, settings: readSettings(), profileDrafts: clone(profileDrafts) }));
@@ -1279,6 +1340,7 @@ function forgetRemovedManagedTriggers() {
   );
 }
 function reconcileLoraTriggers(addFor = []) {
+  if (typeof singleWorkbenchActive === "function" && singleWorkbenchActive()) return;
   if (!loraInventoryLoaded) return;
   const enabledItems = draft.loras.filter((item) => item.enabled);
   const metadataUnknown = enabledItems.some((item) => {
@@ -1365,7 +1427,7 @@ function generationClassificationIssues(settings = null) {
   const modelIssue = modelSelectionIssue(modelName);
   if (modelIssue) issues.push(`主模型：${modelIssue}`);
   if (!loraInventoryLoaded || loraInventoryProfile !== currentProfile()) issues.push(loraInventoryError || "正在读取 LoRA Manager 分类");
-  else for (const item of settings?.loras || draft.loras || []) {
+  else for (const item of [...(settings?.loras || draft.loras || []), ...(settings?.single?.loras_secondary || (typeof singleWorkbenchActive === "function" && singleWorkbenchActive() ? singleWorkbenchState.single.loras_secondary || [] : []))]) {
     if (!item.enabled) continue;
     const reason = loraSelectionIssue(item.filename);
     if (reason) issues.push(`${item.filename}：${reason}`);
@@ -1375,6 +1437,7 @@ function generationClassificationIssues(settings = null) {
 function updateGenerationAvailability() {
   if (!ui.startButton) return;
   const issues = generationClassificationIssues();
+  if (typeof singleWorkbenchInputBlocked === "function" && singleWorkbenchInputBlocked()) issues.push("参考图正在读取或不可用，请等待、重新添加或移除");
   const storage = config.storage_status?.history;
   ui.startButton.disabled = submitInFlight || !ui.connection.classList.contains("online") || issues.length > 0 || Boolean(storage?.read_only);
   ui.startButton.title = storage?.read_only ? storage.reason || "历史存储已受保护" : issues.join("；");
@@ -1476,6 +1539,7 @@ async function loadLoraInventory({ refresh = false } = {}) {
     renderLoraCatalog();
   }
   updateRepairControls();
+  if (typeof singleWorkbenchResources === "function") singleWorkbenchResources();
 }
 function renderLoraCatalog() {
   if (!ui.loraCatalog) return;
@@ -1650,6 +1714,7 @@ function renderQueue(queue) {
 }
 function renderBatch(batch, queue = currentQueue) {
   currentBatch = batch;
+  if (typeof singleWorkbenchBatch === "function") singleWorkbenchBatch(batch);
   renderQueue(queue);
   const active = Boolean(batch && ["running", "stopping"].includes(batch.status));
   const completed = batch?.completed || 0;
@@ -1698,7 +1763,11 @@ function renderBatch(batch, queue = currentQueue) {
   ui.batchError.textContent = batch?.error || "";
   if (batch && !active && lastTerminalBatch !== `${batch.id}:${batch.status}:${completed}`) {
     lastTerminalBatch = `${batch.id}:${batch.status}:${completed}`;
-    loadHistory(1);
+    if (batch.settings?.workbench === "single") {
+      historyCache.clear();
+      if (typeof singleWorkbenchActive === "function" && singleWorkbenchActive()) historyDirty = true;
+      else loadHistory(historyPage);
+    } else loadHistory(1);
   }
 }
 async function refreshConnection() {
@@ -1716,13 +1785,22 @@ async function refreshConnection() {
 }
 let pollErrorShown = false;
 let pollIdleTicks = 0;
+let pollBatchPending = false;
+let pollBatchLast = 0;
 async function pollBatch() {
-  // 后台标签页不轮询;空闲(无运行中批次)时降频到约 1/4,避免常开高频请求。
-  if (document.hidden) return;
+  if (document.hidden || pollBatchPending) return;
   const batchActive = Boolean(currentBatch && ["running", "stopping"].includes(currentBatch.status));
-  if (!batchActive && pollIdleTicks++ % 4 !== 0) return;
+  const singleActive = batchActive && currentBatch.settings?.workbench === "single" && typeof singleWorkbenchActive === "function" && singleWorkbenchActive();
+  const interval = singleActive ? 400 : batchActive ? 1200 : 4800;
+  if (pollIdleTicks && Date.now() - pollBatchLast < interval) return;
+  pollIdleTicks++; pollBatchLast = Date.now(); pollBatchPending = true;
+  const batchAtStart = currentBatch;
   try {
-    renderBatchPayload(await request("/api/batches/current"));
+    const payload = await request("/api/batches/current");
+    // A submit/stop response can replace the batch while this read is in
+    // flight. Its newer state takes precedence over this older snapshot.
+    if (currentBatch !== batchAtStart) return;
+    renderBatchPayload(payload);
     pollErrorShown = false;
   } catch (error) {
     // 服务端不可达时只提示一次,恢复后自动复位,不再每 1.2 秒刷屏。
@@ -1730,6 +1808,8 @@ async function pollBatch() {
       toast(error.message);
       pollErrorShown = true;
     }
+  } finally {
+    pollBatchPending = false;
   }
 }
 function card(record, index) {
@@ -1738,6 +1818,7 @@ function card(record, index) {
   article.style.animationDelay = `${Math.min(index * 25, 250)}ms`;
   const button = document.createElement("button");
   button.type = "button";
+  button.dataset.recordId = String(record.id);
   button.setAttribute("aria-label", `查看 ${record.filename || "生成结果"}`);
   button.innerHTML = `<img loading="lazy" decoding="async" fetchpriority="low" src="/api/images/${record.id}" alt="Anima 生成结果"><span class="image-failure" hidden>图片加载失败</span><div class="card-copy"><strong>${escapeHtml(record.filename)}</strong><span>#${record.sequence} · Seed ${record.sample_seed}</span></div>`;
   button.addEventListener("click", () => openDetail(record));
@@ -1767,6 +1848,7 @@ function cacheHistoryPage(data) {
 }
 
 function renderHistoryPage(data) {
+  historyDirty = false;
   historyPage = Number(data.page) || 1;
   historyPages = Number(data.pages) || 1;
   historyItems = Array.isArray(data.items) ? data.items : [];
@@ -1789,7 +1871,8 @@ async function loadHistory(page = historyPage) {
   // 与 loadPool 相同的竞态守卫:快速翻页时丢弃乱序到达的旧响应。
   const requestId = ++historyRequest;
   try {
-    const data = await request(`/api/history?page=${page}&limit=24`);
+    const source = document.getElementById("historyWorkbenchFilter")?.value || "";
+    const data = await request(`/api/history?page=${page}&limit=24${source ? `&workbench=${source}` : ""}`);
     if (requestId !== historyRequest) return;
     renderHistoryPage(data);
   } catch (error) {
@@ -1799,12 +1882,17 @@ async function loadHistory(page = historyPage) {
 }
 
 function renderDetail(record) {
-  const settings = normalizeSettings(record.settings || {});
   ui.detailImage.src = `/api/images/${record.id}`;
   ui.detailImage.alt = record.filename ? `生成结果：${record.filename}` : "生成结果";
   ui.detailMeta.textContent = `${record.created_at || ""} · ${record.filename || ""}`;
   ui.detailPositive.value = record.positive_prompt || record.resolved_prompt || "";
   ui.detailNegative.value = record.negative_prompt || "";
+  if ((record.settings?.workbench || record.workbench) === "single" && typeof renderSingleDetail === "function") {
+    renderSingleDetail(record);
+    return;
+  }
+  if (typeof resetSingleDetail === "function") resetSingleDetail();
+  const settings = normalizeSettings(record.settings || {});
   const stats = [
     ["尺寸", `${settings.width} × ${settings.height}`],
     ["采样", `${settings.sampler_name} / ${settings.scheduler} / ${settings.steps} steps / CFG ${settings.cfg}`],
@@ -1823,14 +1911,40 @@ function renderDetail(record) {
   ui.detailSelection.innerHTML = `<span class="kicker">ACTUAL DRAW</span><div>${SECTIONS.map((section) => `<span><b>${SECTION_META[section].label}</b>${(selected[section] || []).map((item) => escapeHtml(item.title)).join("、") || "未使用"}</span>`).join("")}<span><b>LoRA</b>${loraText}</span></div>`;
 }
 
-function openDetail(record) {
-  closeImagePreview({ immediate: true, restoreFocus: false });
+function updateDetailRecord(record) {
   selectedRecord = record;
+  ++regenerationRequest;
   regenerationOptions = null;
   closeRegenerationDrawers(false);
   renderDetail(record);
+  if (detailContext?.origin === "single" && typeof singleGalleryState !== "undefined") singleGalleryState.viewerRecord = record;
+}
+function openDetail(record, { origin = "random", returnFocus = null } = {}) {
+  if (!record) return;
+  closeImagePreview({ immediate: true, restoreFocus: false });
+  detailContext = { origin, returnFocus: returnFocus || document.activeElement };
+  updateDetailRecord(record);
   updatePreviewNavigation();
-  ui.detailDialog.showModal();
+  if (!ui.detailDialog.open) ui.detailDialog.showModal();
+}
+function suppressDetailReturnFocus() {
+  if (detailContext) detailContext.returnFocus = null;
+}
+function finishDetailClose() {
+  if (ui.detailDialog.open) return;
+  const context = detailContext;
+  closeImagePreview({ immediate: true, restoreFocus: false });
+  ++regenerationRequest;
+  regenerationOptions = null;
+  detailContext = null;
+  if (context?.origin === "single" && typeof singleGalleryDetailClosed === "function") singleGalleryDetailClosed();
+  if (context?.returnFocus?.isConnected && !context.returnFocus.disabled) context.returnFocus.focus({ preventScroll: true });
+  else if (context?.returnFocus && context.origin === "single") document.getElementById("singlePreview")?.focus({ preventScroll: true });
+  else if (context?.returnFocus && context.origin === "random") {
+    // Crossing random archive pages replaces the original thumbnail element.
+    const target = ui.gallery.querySelector(`button[data-record-id="${selectedRecord?.id}"]`) || ui.gallery.querySelector("button") || document.getElementById("historyWorkbenchFilter");
+    target?.focus({ preventScroll: true });
+  }
 }
 
 const IMAGE_PREVIEW_MAX_ZOOM = 4;
@@ -1842,12 +1956,21 @@ const previewMotion = (name, fallback) => {
   return Number.isFinite(duration) ? duration : fallback;
 };
 
+function currentPreviewRecord() {
+  return imagePreview.context?.kind === "single" ? imagePreview.context.record : selectedRecord;
+}
+function setCurrentPreviewRecord(record) {
+  if (imagePreview.context?.kind === "single") imagePreview.context.record = record;
+  else { selectedRecord = record; if (record) renderDetail(record); }
+}
+
 function previewRecordIndex(record, items = historyItems) {
   if (!record || !Array.isArray(items)) return -1;
   return items.findIndex((item) => String(item.id) === String(record.id));
 }
 
 function selectedHistoryLocation() {
+  if (imagePreview.context?.kind === "single") return imagePreview.context.history.location();
   const currentIndex = previewRecordIndex(selectedRecord);
   if (currentIndex >= 0) return { page: historyPage, items: historyItems, index: currentIndex };
   for (const [page, data] of historyCache) {
@@ -1859,6 +1982,7 @@ function selectedHistoryLocation() {
 }
 
 function previewNeighborAvailable(direction) {
+  if (imagePreview.context?.kind === "single") return imagePreview.context.history.available(direction);
   const location = selectedHistoryLocation();
   if (location.index >= 0 && location.index + direction >= 0 && location.index + direction < location.items.length) return true;
   const targetPage = location.page + (direction > 0 ? 1 : -1);
@@ -1866,7 +1990,7 @@ function previewNeighborAvailable(direction) {
 }
 
 function updatePreviewNavigation() {
-  const active = Boolean(selectedRecord && imagePreview.phase !== "closed");
+  const active = Boolean((currentPreviewRecord() || imagePreview.context?.kind === "single") && imagePreview.phase !== "closed");
   const locked = ["loading", "switching", "closing"].includes(imagePreview.phase);
   const previousAvailable = active && previewNeighborAvailable(-1);
   const nextAvailable = active && previewNeighborAvailable(1);
@@ -1879,7 +2003,8 @@ function announcePreview(message) {
   ui.imagePreviewAnnouncement.textContent = message;
 }
 
-function previewPositionLabel(record = selectedRecord) {
+function previewPositionLabel(record = currentPreviewRecord()) {
+  if (imagePreview.context?.kind === "single") return imagePreview.context.history.label(record);
   const location = previewRecordIndex(record) >= 0
     ? { page: historyPage, items: historyItems, index: previewRecordIndex(record) }
     : selectedHistoryLocation();
@@ -1900,21 +2025,43 @@ function previewPositionLabel(record = selectedRecord) {
   return `${record?.filename || "当前图片"}，第 ${position} 张${total ? `，共 ${total} 张` : ""}`;
 }
 
+function clearPreviewCache() {
+  imagePreview.cacheEpoch = (imagePreview.cacheEpoch || 0) + 1;
+  for (const promise of imagePreview.preloaded.values()) promise.release?.();
+  imagePreview.preloaded.clear();
+}
+function trimPreviewCache() {
+  const current = String(currentPreviewRecord()?.id);
+  for (const [key, promise] of imagePreview.preloaded) {
+    if (imagePreview.preloaded.size <= 5) break;
+    if (key === current) continue;
+    imagePreview.preloaded.delete(key);
+    promise.release?.();
+  }
+}
 function preloadRecord(record) {
   if (!record) return Promise.resolve(null);
   const key = String(record.id);
   const cached = imagePreview.preloaded.get(key);
-  if (cached) return cached;
+  if (cached) {
+    imagePreview.preloaded.delete(key);
+    imagePreview.preloaded.set(key, cached);
+    return cached;
+  }
   const image = new Image();
+  const context = imagePreview.context, epoch = imagePreview.cacheEpoch || 0;
+  let released = false;
   image.decoding = "async";
   image.src = `/api/images/${record.id}`;
   const promise = image.decode()
-    .then(() => image)
+    .then(() => !released && context === imagePreview.context && epoch === (imagePreview.cacheEpoch || 0) && imagePreview.preloaded.get(key) === promise ? image : null)
     .catch(() => {
-      imagePreview.preloaded.delete(key);
+      if (imagePreview.preloaded.get(key) === promise) imagePreview.preloaded.delete(key);
       return null;
     });
+  promise.release = () => { released = true; image.src = ""; };
   imagePreview.preloaded.set(key, promise);
+  trimPreviewCache();
   return promise;
 }
 
@@ -1930,7 +2077,8 @@ function preloadPreviewNeighbors() {
 async function loadHistoryPageForPreview(page) {
   const cached = historyCache.get(page);
   if (cached) return cached;
-  const data = await request(`/api/history?page=${page}&limit=24`);
+  const source = document.getElementById("historyWorkbenchFilter")?.value || "";
+  const data = await request(`/api/history?page=${page}&limit=24${source ? `&workbench=${source}` : ""}`);
   cacheHistoryPage(data);
   return data;
 }
@@ -1963,18 +2111,19 @@ function playPreviewAnimation(from, to, duration) {
   }).catch(() => false);
 }
 
-async function switchPreviewImage(record, requestId) {
-  const previousRecord = selectedRecord;
+async function switchPreviewImage(record, requestId, { src = null, label = null } = {}) {
+  const context = imagePreview.context;
+  const current = () => requestId === imagePreview.navigationRequest && imagePreview.context === context;
+  const previousRecord = currentPreviewRecord();
   const previousSrc = ui.imagePreviewImage.currentSrc || ui.imagePreviewImage.src;
-  const image = await preloadRecord(record);
-  if (!image || requestId !== imagePreview.navigationRequest || imagePreview.phase !== "switching") return false;
+  const image = src ? await new Promise(resolve => { const value = new Image(); value.src = src; value.decode().then(() => resolve(value)).catch(() => resolve(null)); }) : await preloadRecord(record);
+  if (!image || !current() || imagePreview.phase !== "switching") return false;
   const fadeOut = await playPreviewAnimation(liveImagePreviewFrame(), { ...liveImagePreviewFrame(), opacity: 0 }, previewMotion("--motion-fast", 150));
-  if (!fadeOut || requestId !== imagePreview.navigationRequest || imagePreview.phase !== "switching") return false;
+  if (!fadeOut || !current() || imagePreview.phase !== "switching") return false;
 
-  selectedRecord = record;
-  renderDetail(record);
-  ui.imagePreviewImage.src = `/api/images/${record.id}`;
-  ui.imagePreviewImage.alt = `生成结果全尺寸预览：${record.filename || "当前图片"}`;
+  setCurrentPreviewRecord(record);
+  ui.imagePreviewImage.src = src || `/api/images/${record.id}`;
+  ui.imagePreviewImage.alt = `生成结果全尺寸预览：${label || record?.filename || "当前图片"}`;
   ui.imagePreviewImage.hidden = false;
   ui.imagePreviewImage.style.opacity = "0";
   imagePreview.zoom = 1;
@@ -1985,9 +2134,8 @@ async function switchPreviewImage(record, requestId) {
   } catch {
     decoded = false;
   }
-  if (!decoded && requestId === imagePreview.navigationRequest && imagePreview.phase === "switching") {
-    selectedRecord = previousRecord;
-    renderDetail(previousRecord);
+  if (!decoded && current() && imagePreview.phase === "switching") {
+    setCurrentPreviewRecord(previousRecord);
     ui.imagePreviewImage.src = previousSrc;
     ui.imagePreviewImage.alt = `生成结果全尺寸预览：${previousRecord?.filename || "当前图片"}`;
     ui.imagePreviewImage.hidden = false;
@@ -1998,23 +2146,29 @@ async function switchPreviewImage(record, requestId) {
     layoutImagePreview();
     ui.imagePreviewTitle.textContent = previousRecord?.filename || "全尺寸图片预览";
   }
-  if (requestId !== imagePreview.navigationRequest || imagePreview.phase !== "switching") return false;
+  if (!current() || imagePreview.phase !== "switching") return false;
+  // Commit the detail at the same time the decoded new bitmap is displayed.
+  // Esc during its entry animation must return to this image's details.
+  if (decoded) imagePreview.context?.onRecordCommit?.(record);
   layoutImagePreview();
   const target = imagePreviewFrame();
-  const enter = { ...target, opacity: 0, transform: `${target.transform} scale(.985)` };
+  const enter = imagePreviewReducedMotion() ? { ...target, opacity: 0 } : { ...target, opacity: 0, transform: `${target.transform} scale(.985)` };
   imagePreview.phase = "opening";
-  await playPreviewAnimation(enter, target, previewMotion("--motion-medium", 240));
-  if (requestId !== imagePreview.navigationRequest) return false;
+  const entered = await playPreviewAnimation(enter, target, previewMotion("--motion-medium", 240));
+  if (!entered || !current() || imagePreview.phase !== "opening") return false;
   imagePreview.phase = "open";
-  ui.imagePreviewTitle.textContent = record.filename || "全尺寸图片预览";
+  ui.imagePreviewTitle.textContent = decoded ? (label || record?.filename || "全尺寸图片预览") : previousRecord?.filename || "全尺寸图片预览";
+  ui.imagePreviewStatus.hidden = true;
   announcePreview(previewPositionLabel(record));
   updatePreviewNavigation();
   ui.imagePreviewDialog.classList.remove("is-navigating");
   preloadPreviewNeighbors();
-  return true;
+  return decoded;
 }
 
 async function navigatePreview(direction, focusTarget = null) {
+  if (imagePreview.context?.kind === "single") return imagePreview.context.history.navigate(direction, focusTarget);
+  const context = imagePreview.context;
   const restoreFocus = () => {
     if (!focusTarget?.isConnected) return;
     if (!focusTarget.disabled) focusTarget.focus({ preventScroll: true });
@@ -2040,6 +2194,7 @@ async function navigatePreview(direction, focusTarget = null) {
       const items = Array.isArray(target.data.items) ? target.data.items : [];
       target.record = items[direction > 0 ? 0 : items.length - 1];
     } catch (error) {
+      if (requestId !== imagePreview.navigationRequest || imagePreview.context !== context) return;
       imagePreview.phase = "open";
       ui.imagePreviewDialog.classList.remove("is-navigating");
       updatePreviewNavigation();
@@ -2047,8 +2202,8 @@ async function navigatePreview(direction, focusTarget = null) {
       restoreFocus();
       return;
     }
-    if (!target.record || requestId !== imagePreview.navigationRequest) {
-      if (requestId === imagePreview.navigationRequest) {
+    if (!target.record || requestId !== imagePreview.navigationRequest || imagePreview.context !== context) {
+      if (requestId === imagePreview.navigationRequest && imagePreview.context === context) {
         imagePreview.phase = "open";
         ui.imagePreviewDialog.classList.remove("is-navigating");
         updatePreviewNavigation();
@@ -2062,6 +2217,7 @@ async function navigatePreview(direction, focusTarget = null) {
   }
   updatePreviewNavigation();
   const switched = await switchPreviewImage(target.record, requestId);
+  if (requestId !== imagePreview.navigationRequest || imagePreview.context !== context) return;
   if (switched && target.data) renderHistoryPage(target.data);
   if (switched) restoreFocus();
   if (!switched && requestId === imagePreview.navigationRequest && imagePreview.phase === "switching") {
@@ -2143,8 +2299,11 @@ function layoutImagePreview() {
 
 // Reproduce object-fit:cover without stretching; reveal the cropped edges as it opens.
 function imagePreviewSourceFrame() {
-  const source = ui.detailImage.getBoundingClientRect();
-  const dialog = ui.detailDialog.getBoundingClientRect();
+  const sourceElement = imagePreview.context?.sourceElement || ui.detailImage;
+  const sourceContainer = imagePreview.context?.sourceContainer || ui.detailDialog;
+  if (!sourceElement?.isConnected) return { ...imagePreviewFrame(), opacity: 0 };
+  const source = sourceElement.getBoundingClientRect();
+  const dialog = sourceContainer.getBoundingClientRect();
   const stage = ui.imagePreviewStage.getBoundingClientRect();
   const scale = Math.max(source.width / imagePreview.width, source.height / imagePreview.height);
   const left = Math.max(source.left, dialog.left + 1, stage.left);
@@ -2169,9 +2328,16 @@ function imagePreviewSourceFrame() {
   };
 }
 
-async function openImagePreview(event) {
+async function openImagePreview(event, context = null) {
   event?.stopPropagation(); // Preserve any expanded replay/variant controls underneath.
-  if (!selectedRecord || !ui.detailImage.getAttribute("src")) return;
+  if (imagePreview.phase === "closed") clearPreviewCache();
+  if (context && imagePreview.phase === "closed") imagePreview.context = context;
+  if (!imagePreview.context && imagePreview.phase === "closed") imagePreview.context = detailContext?.origin === "single" && typeof singleGalleryContext === "function"
+    ? singleGalleryContext()
+    : { kind: "random", sourceElement: ui.detailImage, sourceContainer: ui.detailDialog, returnFocus: ui.detailImage, isValid: () => ui.detailDialog.open };
+  const record = currentPreviewRecord();
+  const source = imagePreview.context?.src || (record ? `/api/images/${record.id}` : "");
+  if (!record || !source || !ui.detailDialog.open) return;
 
   // Reverse-reopen: if the exit animation is still in flight, bounce back from
   // the live frame instead of ignoring the click (previously felt like a hang).
@@ -2189,7 +2355,11 @@ async function openImagePreview(event) {
     applyImagePreviewTransform();
     animateImagePreviewVeil(1, previewMotion("--motion-medium", 240));
     animateImagePreview(from, imagePreviewFrame(), previewMotion("--motion-medium", 240), () => {
-      if (imagePreview.phase === "opening") imagePreview.phase = "open";
+      if (imagePreview.phase === "opening") {
+        imagePreview.phase = "open";
+        updatePreviewNavigation();
+        imagePreview.context?.onReady?.();
+      }
     });
     return;
   }
@@ -2200,24 +2370,26 @@ async function openImagePreview(event) {
   imagePreview.zoom = 1;
   imagePreview.x = imagePreview.y = 0;
   imagePreview.tap = null;
-  // Keep the decoded bitmap between openings. Clearing src here forced a
-  // multi-megabyte refetch and decode on every click after the first close.
+  // The browser's HTTP cache can reuse the source; decoded preview resources
+  // belong to the open viewer and are released when it closes.
   ui.imagePreviewImage.hidden = true;
   ui.imagePreviewStatus.hidden = false;
   ui.imagePreviewStatus.textContent = "正在加载原图…";
-  ui.imagePreviewImage.src = ui.detailImage.currentSrc || ui.detailImage.src;
-  ui.imagePreviewImage.alt = `生成结果全尺寸预览：${selectedRecord.filename || "当前图片"}`;
-  ui.imagePreviewTitle.textContent = selectedRecord.filename || "全尺寸图片预览";
+  if (source) ui.imagePreviewImage.src = source;
+  ui.imagePreviewImage.alt = `生成结果全尺寸预览：${record?.filename || "当前图片"}`;
+  ui.imagePreviewTitle.textContent = record?.filename || "全尺寸图片预览";
+  ui.imagePreviewDialog.dataset.context = imagePreview.context.kind;
   document.documentElement.classList.add("image-preview-open");
   ui.imagePreviewDialog.showModal();
-  ui.detailImage.setAttribute("aria-expanded", "true");
+  imagePreview.context?.sourceElement?.setAttribute("aria-expanded", "true");
   ui.closeImagePreview.focus({ preventScroll: true });
   updatePreviewNavigation();
-  announcePreview(`正在打开${previewPositionLabel(selectedRecord)}`);
+  announcePreview(`正在打开${previewPositionLabel(record)}`);
+  imagePreview.context?.onOpen?.();
   animateImagePreviewVeil(1, previewMotion("--motion-slow", 360));
   try {
     await ui.imagePreviewImage.decode();
-    if (token !== imagePreview.token || !ui.detailDialog.open) return;
+    if (token !== imagePreview.token || imagePreview.context?.isValid?.() === false) return;
     // If a close was requested while decoding, keep the image hidden and let
     // the in-flight close animation finish instead of starting a new entry.
     if (imagePreview.phase === "closing") return;
@@ -2229,18 +2401,23 @@ async function openImagePreview(event) {
       if (imagePreview.phase === "opening") {
         imagePreview.phase = "open";
         updatePreviewNavigation();
-        announcePreview(previewPositionLabel(selectedRecord));
+        announcePreview(previewPositionLabel(record));
         preloadPreviewNeighbors();
+        imagePreview.context?.onReady?.();
       }
     });
   } catch {
     if (token !== imagePreview.token) return;
     imagePreview.phase = "error";
     ui.imagePreviewStatus.textContent = "图片加载失败，请关闭后重试。";
+    imagePreview.context?.onError?.(record);
   }
 }
 
 function finishImagePreviewClose(restoreFocus = true) {
+  const context = imagePreview.context;
+  clearPreviewCache();
+  imagePreview.pendingReturnFocus = restoreFocus ? context : null;
   ++imagePreview.token;
   imagePreview.phase = "closed";
   cancelImagePreviewAnimation();
@@ -2250,13 +2427,29 @@ function finishImagePreviewClose(restoreFocus = true) {
   ui.imagePreviewVeil.getAnimations().forEach(animation => animation.cancel());
   ui.imagePreviewImage.classList.remove("is-interacting", "is-zoomed");
   ui.imagePreviewImage.hidden = true;
+  ui.imagePreviewImage.removeAttribute("src");
   ui.imagePreviewStatus.hidden = true;
   ui.imagePreviewAnnouncement.textContent = "";
   ui.imagePreviewDialog.classList.remove("has-navigation", "is-navigating");
   document.documentElement.classList.remove("image-preview-open");
-  ui.detailImage.setAttribute("aria-expanded", "false");
+  context?.sourceElement?.setAttribute("aria-expanded", "false");
   if (ui.imagePreviewDialog.open) ui.imagePreviewDialog.close();
-  if (restoreFocus && ui.detailDialog.open) ui.detailImage.focus({ preventScroll: true });
+  imagePreview.context = null;
+  delete ui.imagePreviewDialog.dataset.context;
+  context?.onClose?.();
+}
+
+function restoreImagePreviewCloseFocus() {
+  const context = imagePreview.pendingReturnFocus;
+  if (!context?.returnFocus) return;
+  // Run after the native close event and a rendered frame: the closed modal
+  // can retain focus until it has actually left the browser's top layer.
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (imagePreview.pendingReturnFocus !== context) return;
+    imagePreview.pendingReturnFocus = null;
+    if (imagePreview.phase === "closed" && context.isValid?.() !== false && context.returnFocus.isConnected)
+      context.returnFocus.focus({ preventScroll: true });
+  }));
 }
 
 function closeImagePreview({ immediate = false, restoreFocus = true } = {}) {
@@ -2264,6 +2457,7 @@ function closeImagePreview({ immediate = false, restoreFocus = true } = {}) {
   if (immediate) return finishImagePreviewClose(restoreFocus);
   if (imagePreview.phase === "closing") return;
   ++imagePreview.token; // Invalidate an in-flight decode before starting the exit.
+  ++imagePreview.navigationRequest;
   const hasImage = !ui.imagePreviewImage.hidden;
   imagePreview.phase = "closing";
   if (hasImage) {
@@ -2430,7 +2624,8 @@ function renderRegenerationOptions() {
   ui.replayStatus.innerHTML = issueText;
   ui.variantStatus.dataset.state = issues.length ? "error" : "ok";
   ui.variantStatus.innerHTML = issueText;
-  ui.replaySeedSummary.innerHTML = `<span><b>图像种子</b>${escapeHtml(selectedRecord.sample_seed)}</span><span><b>提示词种子</b>${escapeHtml(selectedRecord.prompt_seed)}</span>`;
+  const singleRecord = (selectedRecord.settings?.workbench || selectedRecord.workbench) === "single";
+  ui.replaySeedSummary.innerHTML = `<span><b>图像种子</b>${escapeHtml(selectedRecord.sample_seed)}</span>${singleRecord ? "" : `<span><b>提示词种子</b>${escapeHtml(selectedRecord.prompt_seed)}</span>`}`;
   ui.confirmReplay.disabled = !regenerationOptions.modes?.replay?.available;
   for (const input of ui.redrawSections.querySelectorAll("input")) {
     const section = regenerationOptions.sections?.[input.value];
@@ -2555,6 +2750,7 @@ async function submitRegeneration(mode, count = 1, sections = []) {
     });
     toast(state.status === "queued" ? `已加入队列,第 ${state.position} 位` : "批次已开始");
     closeRegenerationDrawers(false);
+    suppressDetailReturnFocus();
     ui.detailDialog.close();
     return true;
   } catch (error) {
@@ -2608,11 +2804,16 @@ function isFavorite(item) {
   return Boolean(favoriteMap().get(favoriteKey(item))?.groupIds?.length);
 }
 
+let favoritesRequest = 0;
 async function loadFavorites(section = activeSection) {
+  const requestId = ++favoritesRequest;
   try {
-    favoritesData = await request(`/api/favorites/${section}`);
+    const payload = await request(`/api/favorites/${section}`);
+    if (requestId !== favoritesRequest || section !== activeSection) return;
+    favoritesData = payload;
     favoritesAvailable = true;
   } catch (error) {
+    if (requestId !== favoritesRequest || section !== activeSection) return;
     favoritesData = { groups: [], items: [], favorite_keys: [] };
     favoritesAvailable = false;
     if (currentView().filters.collection) currentView().filters.collection = "";
@@ -3720,7 +3921,7 @@ function reconcileFavoriteCollection() {
 }
 async function toggleFavorite(item, favorite) {
   try {
-    favoritesData = await request(`/api/favorites/${activeSection}/item`, {
+    favoritesData = await requestFavorites(`/api/favorites/${activeSection}/item`, {
       method: "PUT",
       body: JSON.stringify({ id: item.id, favorite }),
     });
@@ -3801,7 +4002,7 @@ async function createFavoriteSelectionGroup() {
   }
   ui.createFavoriteSelectionGroup.disabled = true;
   try {
-    favoritesData = await request(`/api/favorites/${activeSection}/groups`, {
+    favoritesData = await requestFavorites(`/api/favorites/${activeSection}/groups`, {
       method: "POST",
       body: JSON.stringify({ name }),
     });
@@ -3852,7 +4053,7 @@ async function saveFavorite(event) {
   if (!editingFavoriteItem) return;
   const groupIds = [...ui.favoriteGroups.querySelectorAll("input:checked")].map((input) => input.value);
   try {
-    favoritesData = await request(`/api/favorites/${activeSection}/item`, {
+    favoritesData = await requestFavorites(`/api/favorites/${activeSection}/item`, {
       method: "PUT",
       body: JSON.stringify({
         id: editingFavoriteItem.id,
@@ -3875,7 +4076,7 @@ async function saveFavorite(event) {
 async function removeFavorite() {
   if (!editingFavoriteItem) return;
   try {
-    favoritesData = await request(`/api/favorites/${activeSection}/item`, {
+    favoritesData = await requestFavorites(`/api/favorites/${activeSection}/item`, {
       method: "PUT",
       body: JSON.stringify({ id: editingFavoriteItem.id, favorite: false }),
     });
@@ -3904,7 +4105,7 @@ async function saveGroup(event) {
   event.preventDefault();
   const id = ui.groupId.value;
   try {
-    favoritesData = await request(
+    favoritesData = await requestFavorites(
       id
         ? `/api/favorites/${activeSection}/groups/${encodeURIComponent(id)}`
         : `/api/favorites/${activeSection}/groups`,
@@ -3968,7 +4169,7 @@ async function importFavoriteChild(event) {
   ui.confirmChildGroup.disabled = true;
   ui.confirmChildGroup.textContent = "导入中…";
   try {
-    favoritesData = await request(
+    favoritesData = await requestFavorites(
       `/api/favorites/${activeSection}/groups/${encodeURIComponent(childGroupParent.id)}/children/import`,
       { method: "POST", body: JSON.stringify({ customGroupId: selectedChildSource }) },
     );
@@ -4126,6 +4327,7 @@ function selectCurrentPage(checked) {
 }
 
 function openCustom(item = null) {
+  invalidatePromptNormalization();
   editingCustom = item;
   ui.customDialogTitle.textContent = item ? "编辑自定义项" : "新增自定义项";
   ui.customId.value = item?.id || "";
@@ -4375,7 +4577,12 @@ async function commitCustomImport() {
 
 function ensureSelectValue(select, value) {
   if (!select || !value) return;
-  if (![...select.options].some((option) => option.value === value)) select.add(new Option(value, value));
+  if (![...select.options].some((option) => option.value === value)) {
+    const missing = select.dataset?.nodeChoices && !JSON.parse(select.dataset.nodeChoices).includes(value);
+    const option = new Option(missing ? `当前不可用 · ${value}` : value, value);
+    if (missing) option.dataset.missing = "true";
+    select.add(option);
+  }
   select.value = value;
 }
 function populateSelect(select, values, selected) {
@@ -4392,6 +4599,26 @@ function populateResourceSelect(select, values, selected, emptyText) {
   if (!options.length) options.push(new Option(emptyText, ""));
   select.replaceChildren(...options);
   select.value = selected && [...select.options].some((option) => option.value === selected) ? selected : "";
+}
+function applyNodeInputControl(element, spec) {
+  if (!element || !Array.isArray(spec)) return;
+  const options = spec[1] && typeof spec[1] === "object" ? spec[1] : {};
+  const choices = Array.isArray(spec[0]) ? spec[0] : Array.isArray(options.options) && options.options.every(value => typeof value === "string") ? options.options : null;
+  if (choices && element.tagName === "SELECT") {
+    element.dataset.nodeChoices = JSON.stringify(choices);
+    populateResourceSelect(element, choices, element.value, "节点没有可用选项");
+    for (const option of element.options) if (option.dataset.missing) option.textContent = `当前不可用 · ${option.value}`;
+  }
+  if (element.type === "number") for (const key of ["min", "max", "step"]) if (typeof options[key] === "number") element[key] = String(options[key]);
+}
+function applyNodeResourceControls() {
+  const nodeInputs = resources.node_inputs || {};
+  const face = nodeInputs.ForbiddenVisionFaceProcessorIntegrated || {};
+  for (const [key, id] of Object.entries(UPSCALER_CONTROL_IDS.face_refine)) applyNodeInputControl(ui[id], face[key]);
+  const nvidia = nodeInputs.RTXVideoSuperResolution || {};
+  applyNodeInputControl(ui.nvidia_quality, nvidia.quality);
+  const scale = nvidia.resize_type?.[1]?.options?.find(option => option.key === "scale by multiplier")?.inputs?.required?.scale;
+  applyNodeInputControl(ui.nvidia_scale, scale);
 }
 function resolveInventoryPath(selected, values) {
   const requested = String(selected || "").trim().replaceAll("\\", "/");
@@ -4492,16 +4719,13 @@ async function loadResources({ refresh = false } = {}) {
   refreshCurrentModelSelection();
   updateGenerationAvailability();
   ui.model_profile.disabled = true;
-  ui.base_mode.disabled = false;
   ui.sampler_name.disabled = true;
   ui.scheduler.disabled = true;
   ui.seedvr2_model_name.disabled = true;
   ui.seedvr2_vae_name.disabled = true;
   for (const id of ["latent_second_sampler_name", "latent_second_scheduler", "seedvr2_sampler_name", "seedvr2_scheduler", "face_sampler", "face_scheduler"]) ui[id].disabled = true;
-  ui.sampler_name.replaceChildren(new Option("正在读取 Sampler…", ""));
-  ui.scheduler.replaceChildren(new Option("正在读取 Scheduler…", ""));
-  ui.seedvr2_model_name.replaceChildren(new Option("跟随模型档案", ""));
-  ui.seedvr2_vae_name.replaceChildren(new Option("跟随模型档案", ""));
+  // Retain selected values while disabled: autosave and overlapping reads must
+  // not capture placeholder values and silently replace them with defaults.
   try {
     const payload = await request(`/api/resources?model_profile=${encodeURIComponent(selectedProfile)}${refresh ? "&refresh=1" : ""}`);
     if (requestId !== resourceRequest || selectedProfile !== currentProfile()) return;
@@ -4523,6 +4747,8 @@ async function loadResources({ refresh = false } = {}) {
       profiles: modelProfiles,
       nodes: payload.nodes && typeof payload.nodes === "object" ? payload.nodes : {},
       plugins: payload.plugins && typeof payload.plugins === "object" ? payload.plugins : {},
+      prompt_processing: payload.prompt_processing || {},
+      node_inputs: payload.node_inputs || {},
     };
     profileResources = modelProfiles;
     const profileOptions = profileOptionsFromResources();
@@ -4530,13 +4756,12 @@ async function loadResources({ refresh = false } = {}) {
     ensureSelectValue(ui.model_profile, selectedProfile);
     activeProfileId = currentProfile();
     const modelValues = resources.models.length ? resources.models : (resources.profile_models[selectedProfile] || []);
-    populateResourceSelect(ui.sampler_name, resources.samplers, selectedSampler, "没有可用 Sampler");
-    populateResourceSelect(ui.scheduler, resources.schedulers, selectedScheduler, "没有可用 Scheduler");
+    populateResourceSelect(ui.sampler_name, resources.samplers, ui.sampler_name.value || selectedSampler, "没有可用 Sampler");
+    populateResourceSelect(ui.scheduler, resources.schedulers, ui.scheduler.value || selectedScheduler, "没有可用 Scheduler");
     const seedValues = resources.seedvr2_models;
-    populateResourceSelect(ui.seedvr2_model_name, seedValues, resolveInventoryPath(selectedSeed, resources.seedvr2_models), "没有可用 SeedVR2 模型");
+    populateResourceSelect(ui.seedvr2_model_name, seedValues, resolveInventoryPath(ui.seedvr2_model_name.value || selectedSeed, resources.seedvr2_models), "没有可用 SeedVR2 模型");
     const seedVaeValues = resources.seedvr2_vaes;
-    populateResourceSelect(ui.seedvr2_vae_name, seedVaeValues, resolveInventoryPath(selectedSeedVae, resources.seedvr2_vaes), "没有可用 SeedVR2 VAE");
-    populateResourceSelect(ui.face_upscaler_model, resources.upscale_models, resolveInventoryPath(ui.face_upscaler_model.value, resources.upscale_models), "没有可用脸部放大模型");
+    populateResourceSelect(ui.seedvr2_vae_name, seedVaeValues, resolveInventoryPath(ui.seedvr2_vae_name.value || selectedSeedVae, resources.seedvr2_vaes), "没有可用 SeedVR2 VAE");
     for (const id of ["latent_second_sampler_name", "seedvr2_sampler_name", "face_sampler"]) populateResourceSelect(ui[id], resources.samplers, controlValue(id), "没有可用 Sampler");
     for (const id of ["latent_second_scheduler", "seedvr2_scheduler", "face_scheduler"]) populateResourceSelect(ui[id], resources.schedulers, controlValue(id), "没有可用 Scheduler");
     resourcesLoaded = true;
@@ -4547,20 +4772,22 @@ async function loadResources({ refresh = false } = {}) {
     ui.seedvr2_vae_name.disabled = resources.seedvr2_vaes.length === 0;
     for (const id of ["latent_second_sampler_name", "seedvr2_sampler_name", "face_sampler"]) ui[id].disabled = resources.samplers.length === 0;
     for (const id of ["latent_second_scheduler", "seedvr2_scheduler", "face_scheduler"]) ui[id].disabled = resources.schedulers.length === 0;
+    applyNodeResourceControls();
   } catch (error) {
     if (requestId !== resourceRequest || selectedProfile !== currentProfile()) return;
     resources = { models: [], model_items: [], profile_models: {}, model_assignments: {}, seedvr2_models: [], seedvr2_vaes: [], upscale_models: [], samplers: [], schedulers: [], model_profiles: {}, profiles: {}, nodes: {}, plugins: {} };
     profileResources = {};
     resourceError = `模型资源读取失败：${error.message}`;
     ui.model_profile.disabled = false;
-    populateResourceSelect(ui.sampler_name, [], selectedSampler, "Sampler 资源离线");
-    populateResourceSelect(ui.scheduler, [], selectedScheduler, "Scheduler 资源离线");
-    populateResourceSelect(ui.seedvr2_model_name, [], selectedSeed, "SeedVR2 资源离线");
-    populateResourceSelect(ui.seedvr2_vae_name, [], selectedSeedVae, "SeedVR2 VAE 资源离线");
+    populateResourceSelect(ui.sampler_name, [], ui.sampler_name.value || selectedSampler, "Sampler 资源离线");
+    populateResourceSelect(ui.scheduler, [], ui.scheduler.value || selectedScheduler, "Scheduler 资源离线");
+    populateResourceSelect(ui.seedvr2_model_name, [], ui.seedvr2_model_name.value || selectedSeed, "SeedVR2 资源离线");
+    populateResourceSelect(ui.seedvr2_vae_name, [], ui.seedvr2_vae_name.value || selectedSeedVae, "SeedVR2 VAE 资源离线");
     populateResourceSelect(ui.face_upscaler_model, [], ui.face_upscaler_model.value, "脸部放大模型资源离线");
   }
   updateProfileResources();
   updateRepairControls();
+  if (typeof singleWorkbenchResources === "function") singleWorkbenchResources();
 }
 function updateRepairControls() {
   refreshCurrentModelSelection();
@@ -4581,11 +4808,14 @@ function updateRepairControls() {
   ui.latent_upscale_scale.disabled = !upscalers.latent;
   ui.latent_upscale_method.disabled = !upscalers.latent;
   ui.latent_second_sampler_enabled.disabled = !upscalers.latent;
+  for (const id of Object.values(POST_SAMPLER_IDS)) ui[id].disabled = !upscalers.latent || !ui.latent_second_sampler_enabled.checked;
   ui.seedvr2_model_name.disabled = !upscalers.seedvr2 || !resourcesLoaded;
   ui.seedvr2_vae_name.disabled = !upscalers.seedvr2 || !resourcesLoaded;
   for (const id of ["seedvr2_weight_dtype", "seedvr2_scale_by", "seedvr2_color_correction_method", ...Object.values(SEED_SAMPLER_IDS), ...Object.values(SEED_TILE_IDS.encode), ...Object.values(SEED_TILE_IDS.decode)]) ui[id].disabled = !upscalers.seedvr2;
   for (const id of ["nvidia_resize_type", "nvidia_scale", "nvidia_quality"]) ui[id].disabled = !upscalers.nvidia;
   for (const id of Object.values(UPSCALER_CONTROL_IDS.face_refine).filter((id) => id !== "face_refine_enabled")) ui[id].disabled = !upscalers.face;
+  if (typeof sharedParameterVisibility === "function") sharedParameterVisibility();
+  if (typeof singleWorkbenchLayout === "function" && typeof singleWorkbenchState !== "undefined" && singleWorkbenchState.ready) singleWorkbenchLayout();
   const settings = readSettings();
   const profile = profileConfig(currentProfile());
   const warnings = [];
@@ -4707,10 +4937,12 @@ async function refreshResourceClassification() {
 }
 
 const PRESET_SETTING_KEYS = [
+  "workbench", "generation_mode", "single", "clip_name", "vae_name", "clip_type",
   "model_profile",
   "model_name",
   "krea_prompt_pool",
   "base_mode",
+  "dual",
   "upscalers",
   "loras",
   "lora_managed_triggers",
@@ -4727,7 +4959,7 @@ const PRESET_SETTING_KEYS = [
 ];
 function presetSnapshot() {
   const settings = readSettings();
-  return Object.fromEntries(PRESET_SETTING_KEYS.map((key) => [key, clone(settings[key])]));
+  return Object.fromEntries(PRESET_SETTING_KEYS.filter(key => settings[key] !== undefined).map((key) => [key, clone(settings[key])]));
 }
 async function loadStylePresets() {
   const requestedProfile = currentProfile();
@@ -4773,7 +5005,8 @@ function renderStylePresets() {
       if (activeLoras) metaParts.push(`${activeLoras} LoRA`);
       row.innerHTML = `<button class="preset-apply" type="button" title="${escapeHtml(settings.model_profile || "anima")}"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(metaParts.join(" · "))}</small></button><div class="preset-actions"><button type="button" data-preset-favorite title="${item.favorite ? "取消收藏" : "收藏"}" aria-label="${item.favorite ? "取消收藏" : "收藏"}">${item.favorite ? "★" : "☆"}</button><button type="button" data-preset-update title="用当前设置覆盖" aria-label="用当前设置覆盖">↻</button><button type="button" data-preset-rename title="重命名" aria-label="重命名">✎</button><button type="button" data-preset-delete title="删除" aria-label="删除">×</button></div>`;
       row.querySelector(".preset-apply").addEventListener("click", () => {
-        applySettings({ ...readSettings(), ...item.settings });
+        if (typeof singleWorkbenchApplyPreset === "function") singleWorkbenchApplyPreset(item);
+        else applySettings({ ...readSettings(), ...item.settings });
         schedulePersist();
         toast(`已应用预设：${item.name}`);
       });
@@ -5109,6 +5342,8 @@ async function removeArtistFavorite(name) {
 async function submitBatch(settings, seeds = null) {
   // 统一的批次提交入口:主表单、复现、变体共用;in-flight 守卫防双击重复入队。
   if (submitInFlight) return false;
+  settings = clone(settings);
+  seeds = seeds ? clone(seeds) : null;
   const classificationIssues = generationClassificationIssues(settings);
   if (classificationIssues.length) {
     updateGenerationAvailability();
@@ -5118,7 +5353,7 @@ async function submitBatch(settings, seeds = null) {
   submitInFlight = true;
   ui.startButton.disabled = true;
   try {
-    settings = await normalizeSettingsPayload(settings);
+    if (settings.workbench !== "single") settings = await normalizeSettingsPayload(settings);
     const body = seeds ? { ...settings, seeds } : settings;
     const state = await request("/api/batches", { method: "POST", body: JSON.stringify(body) });
     if (state.status === "queued") toast(`已加入队列,第 ${state.position} 位`);
@@ -5129,20 +5364,28 @@ async function submitBatch(settings, seeds = null) {
     await refreshConnection();
     return false;
   } finally {
-    submitInFlight = false;
     try {
       renderBatchPayload(await request("/api/batches/current"));
     } catch {
+      // The submission outcome remains valid if its follow-up status read fails.
+    } finally {
+      submitInFlight = false;
       updateGenerationAvailability();
     }
   }
 }
 ui.settingsForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (submitInFlight) return;
   try {
-    await normalizePromptFields(currentPromptFields());
+    const single = typeof singleWorkbenchActive === "function" && singleWorkbenchActive();
+    if (single && singleWorkbenchInputBlocked()) throw new Error("参考图正在读取或不可用，请等待、重新添加或移除");
+    // Capture the workbench, profile and seeds before the first await. The
+    // submit entry owns normalization and its lock for the entire request.
+    const settings = readSettings();
+    const seeds = single ? singleWorkbenchSeeds() : null;
     persistNow();
-    await submitBatch(readSettings());
+    await submitBatch(settings, seeds);
   } catch (error) {
     toast(error.message);
   }
@@ -5151,6 +5394,9 @@ ui.settingsForm.addEventListener("input", (event) => {
   if (event.target.matches("input, textarea, select")) schedulePersist();
 });
 ui.settingsForm.addEventListener("change", schedulePersist);
+document.addEventListener("input", (event) => {
+  if (promptFieldForElement(event.target) || event.target.matches?.("[data-single-prompt]")) invalidatePromptNormalization();
+});
 ui.stopButton.addEventListener("click", async () => {
   if (!currentBatch) return;
   try {
@@ -5167,7 +5413,7 @@ for (const details of document.querySelectorAll("details.advanced-section, detai
   const content = details.querySelector(".details-content, .artist-favorites-content, summary + *");
   if (!summary || !content) continue;
   summary.addEventListener("click", (event) => {
-    if (!details.open || details.dataset.collapsing) return;
+    if (details.classList.contains("single-fixed-open") || !details.open || details.dataset.collapsing) return;
     event.preventDefault();
     details.dataset.collapsing = "1";
     const animation = content.animate(
@@ -5224,7 +5470,7 @@ ui.imagePreviewImage.addEventListener("pointermove", imagePreviewPointerMove);
 ui.imagePreviewImage.addEventListener("pointerup", imagePreviewPointerUp);
 ui.imagePreviewImage.addEventListener("pointercancel", imagePreviewPointerUp);
 ui.imagePreviewImage.addEventListener("lostpointercapture", imagePreviewPointerUp);
-ui.imagePreviewDialog.addEventListener("wheel", imagePreviewWheel, { passive: false });
+ui.imagePreviewStage.addEventListener("wheel", imagePreviewWheel, { passive: false });
 ui.imagePreviewImage.addEventListener("dblclick", (event) => {
   event.preventDefault();
   setImagePreviewZoom(imagePreview.zoom < 1.01 ? 2 : 1, event, true);
@@ -5272,12 +5518,13 @@ ui.imagePreviewDialog.addEventListener("cancel", (event) => {
   closeImagePreview();
 });
 ui.imagePreviewDialog.addEventListener("close", () => {
-  if (ui.imagePreviewDialog.open || imagePreview.phase === "closed") return;
+  if (ui.imagePreviewDialog.open) return;
   // External close (e.g. detail dialog closing) while opening/open: reset now
   // rather than letting a half-finished entry animation keep the veil alive.
-  finishImagePreviewClose(false);
+  if (imagePreview.phase !== "closed") finishImagePreviewClose(false);
+  restoreImagePreviewCloseFocus();
 });
-ui.detailDialog.addEventListener("close", () => closeImagePreview({ immediate: true, restoreFocus: false }));
+ui.detailDialog.addEventListener("close", finishDetailClose);
 new ResizeObserver(() => {
   if (imagePreview.phase === "open") {
     cancelImagePreviewAnimation();
@@ -5313,24 +5560,40 @@ ui.detailDialog.addEventListener("cancel", (event) => {
 });
 ui.restoreSettings.addEventListener("click", () => {
   if (!selectedRecord) return;
+  suppressDetailReturnFocus();
   closeImagePreview({ immediate: true, restoreFocus: false });
-  applySettings(selectedRecord.settings);
+  if (typeof singleWorkbenchRestoreHistory === "function") singleWorkbenchRestoreHistory(selectedRecord);
+  else applySettings(selectedRecord.settings);
   ui.detailDialog.close();
   schedulePersist();
   toast("已载入历史设置");
 });
-ui.deleteRecord.addEventListener("click", async () => {
+async function deleteSelectedHistoryRecord() {
   if (!selectedRecord || !confirm("只删除 WebUI 历史记录，图片文件会保留。继续吗？")) return;
+  const deletedId = selectedRecord.id;
+  const owner = detailContext;
+  const fromSingleViewer = owner?.origin === "single";
+  ui.deleteRecord.disabled = true;
   try {
-    await request(`/api/history/${selectedRecord.id}`, { method: "DELETE" });
-    closeImagePreview({ immediate: true, restoreFocus: false });
-    ui.detailDialog.close();
-    selectedRecord = null;
-    await loadHistory(historyPage);
+    await request(`/api/history/${deletedId}`, { method: "DELETE" });
+    if (detailContext === owner && String(selectedRecord?.id) === String(deletedId)) closeImagePreview({ immediate: true, restoreFocus: false });
+    const neighbor = typeof singleGalleryDeleted === "function" ? await singleGalleryDeleted(deletedId) : null;
+    if (detailContext === owner && String(selectedRecord?.id) === String(deletedId)) {
+      if (fromSingleViewer && neighbor && ui.detailDialog.open) {
+        updateDetailRecord(neighbor);
+        ui.detailImage.focus({ preventScroll: true });
+      } else { ui.detailDialog.close(); selectedRecord = null; }
+    }
+    historyCache.clear();
+    if (fromSingleViewer) historyDirty = true;
+    else await loadHistory(historyPage);
   } catch (error) {
     toast(error.message);
+  } finally {
+    ui.deleteRecord.disabled = false;
   }
-});
+}
+ui.deleteRecord.addEventListener("click", deleteSelectedHistoryRecord);
 ui.closePool.addEventListener("click", closePool);
 ui.confirmPool.addEventListener("click", closePool);
 ui.drawerBackdrop.addEventListener("click", closePool);
@@ -5468,6 +5731,7 @@ for (const input of [ui.quality_prompt, ui.extra_prompt, ui.negative_prompt, ui.
   input.addEventListener("blur", () => normalizePromptElement(input));
 ui.undoPromptNormalization.addEventListener("click", () => {
   if (!normalizationUndo) return;
+  invalidatePromptNormalization();
   for (const [field, value] of Object.entries(normalizationUndo)) applyPromptField(field, value);
   clearNormalizationUndo("已撤销上次提示词规范。");
   schedulePersist();
@@ -5480,6 +5744,7 @@ ui.closePromptRules.addEventListener("click", () => ui.promptRuleDialog.close())
 ui.cancelPromptRules.addEventListener("click", () => ui.promptRuleDialog.close());
 ui.model_profile.addEventListener("change", () => {
   const next = normalizeProfileId(ui.model_profile.value);
+  if (typeof singleWorkbenchState !== "undefined" && singleWorkbenchState.ready) { singleWorkbenchSwitch(singleWorkbenchState.mode, next); return; }
   switchProfileDraft(next);
   updateProfileResources();
   updateRepairControls();
@@ -5679,21 +5944,23 @@ ui.male_count.addEventListener("input", updatePeopleTotal);
 ui.resetSettings.addEventListener("click", () => {
   if (!confirm("恢复全部模板默认设置？")) return;
   const profile = currentProfile();
-  applySettings({ ...profileSettingsDefaults(profile), model_profile: profile });
+  if (typeof singleWorkbenchActive === "function" && singleWorkbenchActive()) applySettings(singleWorkbenchDefaultSettings(profile));
+  else applySettings(typeof randomWorkbenchDefaultSettings === "function" ? randomWorkbenchDefaultSettings(profile) : { ...profileSettingsDefaults(profile), model_profile: profile });
   schedulePersist();
   toast("已恢复当前模型档案默认设置");
 });
 ui.clearDraft.addEventListener("click", () => {
   if (!confirm("清除本地草稿并恢复默认设置？收藏不会被删除。")) return;
   localStorage.removeItem(DRAFT_KEY);
+  if (typeof singleWorkbenchState !== "undefined" && singleWorkbenchState.ready) { localStorage.removeItem(WORKBENCH_DRAFT_KEY); singleWorkbenchState.drafts = { random: {}, single: {} }; singleWorkbenchState.mode = "random"; }
   for (const key of LEGACY_DRAFT_KEYS) localStorage.removeItem(key);
   localStorage.removeItem(VIEW_KEY);
   poolViews = Object.fromEntries(SECTIONS.map((section) => [section, defaultView()]));
-  applySettings(defaults);
+  applySettings(typeof randomWorkbenchDefaultSettings === "function" ? randomWorkbenchDefaultSettings(defaults.model_profile) : defaults);
   ui.draftStatus.textContent = "本地草稿已清除";
   toast("已清除本地草稿");
 });
-document.querySelectorAll("[data-mobile-view]").forEach((button) =>
+document.querySelectorAll(".mobile-tabs button[data-mobile-view]").forEach((button) =>
   button.addEventListener("click", () => {
     const view = button.dataset.mobileView;
     document
@@ -5720,9 +5987,10 @@ async function initialize() {
     loadStoredView();
     const restored = loadStoredDraft();
     if (!restored) {
-      applySettings(defaults);
+      applySettings(typeof randomWorkbenchDefaultSettings === "function" ? randomWorkbenchDefaultSettings(defaults.model_profile) : defaults);
       ui.draftStatus.textContent = "使用模板默认设置";
     }
+    if (typeof initializeSingleWorkbench === "function") initializeSingleWorkbench();
     initialized = true;
   } catch (error) {
     const message = `界面初始化失败：${error.message}`;
@@ -5741,7 +6009,7 @@ async function initialize() {
     loadArtistFavorites(),
     loadStylePresets(),
   ]);
-  setInterval(pollBatch, 1200);
+  setInterval(pollBatch, 400);
   setInterval(refreshConnection, 5000);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {

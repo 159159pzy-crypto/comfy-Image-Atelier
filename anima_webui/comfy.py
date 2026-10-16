@@ -287,6 +287,20 @@ class ComfyClient:
                 "nvidia_upscale": bool(nvidia_nodes),
                 "forbidden_vision_face": face_node in node_names,
             },
+            "prompt_processing": {
+                "available": "PromptExpand" in node_names and "PreviewAny" in node_names,
+                "rules": choices("PromptExpand", "rule"),
+                "services": choices("PromptExpand", "llm_service"),
+            },
+            "node_inputs": {
+                name: (object_info[name].get("input") or {}).get("required", {})
+                for name in ("UNETLoader", "CLIPLoader", "VAELoader", "KSampler", "KSamplerAdvanced",
+                             "VAEDecodeTiled", "VAEEncodeTiled", "VAEDecode", "VAEEncode", "LoadImage",
+                             "SesquiLatentUpscale", "LatentUpscaleBy", "DLSS5NeuralRender", "KreaSeedVarianceEnhancer",
+                             "ForbiddenVisionFaceProcessorIntegrated", "RTXVideoSuperResolution", "SeedVR2PostProcessing", "PromptExpand")
+                if name in object_info
+            },
+            "node_types": sorted(node_names),
         }
         # Preserve the compact inventory shape used by stock/legacy test
         # clients which do not expose CLIP/VAE or optional plugin nodes.  A
@@ -314,18 +328,57 @@ class ComfyClient:
             raise ComfyError("ComfyUI 未返回 prompt_id")
         return str(prompt_id)
 
+    async def upload_image(self, body: bytes, filename: str) -> str:
+        """Upload a server-owned image; callers never supply a filesystem path."""
+        form = aiohttp.FormData()
+        form.add_field("image", body, filename=filename, content_type="image/png")
+        form.add_field("type", "input")
+        form.add_field("subfolder", "AnimaStudio")
+        form.add_field("overwrite", "true")
+        data = await self._json("POST", "/upload/image", data=form)
+        name = data.get("name")
+        folder = data.get("subfolder", "")
+        if not isinstance(name, str) or not name or any(char in name for char in ("/", "\\", ":")):
+            raise ComfyError("ComfyUI 返回无效的输入图片名称")
+        if not isinstance(folder, str) or folder not in {"", "AnimaStudio"}:
+            raise ComfyError("ComfyUI 返回无效的输入图片目录")
+        return f"{folder}/{name}" if folder else name
+
+    async def cancel_prompt(self, prompt_id: str) -> None:
+        """Cancel only our own Comfy job, including jobs waiting behind others."""
+        try:
+            await self._cancel_prompt(prompt_id)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+            raise ComfyError(f"取消任务失败: {error}") from error
+
+    async def _cancel_prompt(self, prompt_id: str) -> None:
+        session = await self._get_session()
+        async with session.post(f"{self.base_url}/api/jobs/{prompt_id}/cancel") as response:
+            if response.status not in {404, 405}:
+                if response.status >= 400:
+                    raise ComfyError(f"取消任务失败: HTTP {response.status}")
+                await response.read()
+                return
+        # Older servers support deleting pending ids and targeted interruption.
+        for path, payload in (("/queue", {"delete": [prompt_id]}), ("/interrupt", {"prompt_id": prompt_id})):
+            async with session.post(f"{self.base_url}{path}", json=payload) as response:
+                await response.read()
+                if response.status >= 400:
+                    raise ComfyError(f"取消任务失败: HTTP {response.status}")
+
     async def progress_stream(self, client_id: str) -> AsyncIterator[dict[str, Any]]:
         """连接 ComfyUI 的 websocket,产出进度事件与预览帧。
 
         文本消息 → {"kind": "event", "payload": {...}}(progress/executing 等);
-        二进制消息(类型 1 = 预览图,前 8 字节为类型+格式头)→
-        {"kind": "preview", "format": "jpeg"|"png", "bytes": ...}。
+        二进制类型 4 携带 prompt/node 元数据;旧服务的类型 1 仍兼容。
+        帧使用同一个 preview 结构,新协议额外提供 prompt_id/node_id。
         连接失败或断开由调用方处理重连;本方法只负责单次连接的读取。
         """
         session = await self._get_session()
         async with session.ws_connect(
             f"{self.base_url}/ws?clientId={client_id}", heartbeat=30, max_msg_size=32 * 1024 * 1024
         ) as ws:
+            await ws.send_json({"type": "feature_flags", "data": {"supports_preview_metadata": True}})
             async for message in ws:
                 if message.type == aiohttp.WSMsgType.TEXT:
                     try:
@@ -336,12 +389,40 @@ class ComfyClient:
                         yield {"kind": "event", "payload": payload}
                 elif message.type == aiohttp.WSMsgType.BINARY:
                     raw = message.data
-                    if len(raw) >= 8 and int.from_bytes(raw[:4], "big") == 1:
+                    if len(raw) <= 8:
+                        continue
+                    event_type = int.from_bytes(raw[:4], "big")
+                    if event_type == 1:
                         image_format = int.from_bytes(raw[4:8], "big")
+                        if image_format not in (1, 2):
+                            continue
                         yield {
                             "kind": "preview",
                             "format": "png" if image_format == 2 else "jpeg",
                             "bytes": raw[8:],
+                        }
+                    elif event_type == 4:
+                        metadata_size = int.from_bytes(raw[4:8], "big")
+                        if not 0 < metadata_size <= 65536 or 8 + metadata_size >= len(raw):
+                            continue
+                        try:
+                            metadata = json.loads(raw[8:8 + metadata_size])
+                        except (ValueError, UnicodeDecodeError):
+                            continue
+                        if not isinstance(metadata, dict):
+                            continue
+                        prompt_id, node_id = metadata.get("prompt_id"), metadata.get("node_id")
+                        image_type = metadata.get("image_type")
+                        if not isinstance(prompt_id, str) or not prompt_id or not isinstance(node_id, str) or not node_id:
+                            continue
+                        if image_type not in ("image/jpeg", "image/png"):
+                            continue
+                        yield {
+                            "kind": "preview", "format": image_type.removeprefix("image/"),
+                            "bytes": raw[8 + metadata_size:], "prompt_id": prompt_id,
+                            "node_id": node_id,
+                            "display_node_id": metadata.get("display_node_id"),
+                            "parent_node_id": metadata.get("parent_node_id"),
                         }
                 elif message.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
                     break
@@ -385,7 +466,21 @@ class ComfyClient:
                 status = entry.get("status") or {}
                 if status.get("status_str") == "error" or status.get("completed") is False:
                     messages = status.get("messages") or []
-                    raise ComfyError(f"ComfyUI 执行失败: {messages[-1] if messages else '未知错误'}")
+                    detail = "未知错误"
+                    for message in reversed(messages):
+                        if isinstance(message, (list, tuple)) and len(message) > 1 and isinstance(message[1], dict):
+                            data = message[1]
+                            if message[0] == "execution_interrupted":
+                                detail = "任务已中断"
+                                break
+                            if data.get("exception_message"):
+                                node = str(data.get("node_type") or data.get("node_id") or "节点")
+                                summary = str(data["exception_message"]).strip().splitlines()[0][:600]
+                                detail = f"{node}: {summary}"
+                                break
+                        elif isinstance(message, str):
+                            detail = message[:600]
+                    raise ComfyError(f"ComfyUI 执行失败: {detail}")
                 return entry
             # 任务既不在 history 也不在队列时(历史被清空、ComfyUI 重启丢任务),
             # 持续 missing_timeout 秒即放弃,避免批次永久卡死。

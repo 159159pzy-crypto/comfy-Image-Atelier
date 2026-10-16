@@ -66,6 +66,7 @@ STORE_FILES = {
     "lora_triggers": "lora_trigger_overrides.json",
     "prompt_rules": "prompt_replacements.json",
     "prompt_pools": "prompt_pools.json",
+    "favorite_extensions": "favorite_extensions.json",
 }
 STORE_KEYS = {
     "history": HISTORY_KEY,

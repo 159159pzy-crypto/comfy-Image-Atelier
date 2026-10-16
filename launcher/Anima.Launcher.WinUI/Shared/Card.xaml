@@ -8,11 +8,11 @@
     mc:Ignorable="d">
 
     <Border
-        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+        Background="{ThemeResource StudioSurfaceBrush}"
+        BorderBrush="{ThemeResource StudioSeparatorBrush}"
         BorderThickness="1"
-        CornerRadius="8"
-        Padding="16,14">
+        CornerRadius="18"
+        Padding="20,18">
         <VisualStateManager.VisualStateGroups>
             <VisualStateGroup x:Name="CardSizeStates">
                 <VisualState x:Name="Wide" />
@@ -21,8 +21,8 @@
                         <Setter Target="ActionHost.(Grid.Row)" Value="1" />
                         <Setter Target="ActionHost.(Grid.Column)" Value="0" />
                         <Setter Target="ActionHost.(Grid.ColumnSpan)" Value="3" />
-                        <Setter Target="ActionHost.HorizontalAlignment" Value="Left" />
-                        <Setter Target="ActionHost.Margin" Value="0,8,0,0" />
+                        <Setter Target="ActionHost.HorizontalAlignment" Value="Stretch" />
+                        <Setter Target="ActionHost.Margin" Value="0,14,0,0" />
                     </VisualState.Setters>
                 </VisualState>
             </VisualStateGroup>
@@ -40,15 +40,15 @@
             </Grid.RowDefinitions>
 
             <Viewbox x:Name="IconHost" Width="20" Height="20" VerticalAlignment="Top" Margin="0,2,0,0" Visibility="Collapsed">
-                <FontIcon x:Name="CardIcon" FontSize="16" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                <FontIcon x:Name="CardIcon" FontSize="16" Foreground="{ThemeResource StudioAccentBrush}" />
             </Viewbox>
 
             <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
-                <TextBlock x:Name="HeaderText" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                <TextBlock x:Name="HeaderText" Style="{StaticResource BodyStrongTextBlockStyle}" TextWrapping="Wrap" Foreground="{ThemeResource StudioTextBrush}" />
                 <TextBlock x:Name="DescriptionText" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
             </StackPanel>
 
-            <ContentPresenter x:Name="ActionHost" Grid.Column="2" VerticalAlignment="Center" />
+            <ContentPresenter x:Name="ActionHost" Grid.Column="2" VerticalAlignment="Center" HorizontalContentAlignment="Stretch" />
         </Grid>
     </Border>
 </UserControl>

@@ -19,6 +19,9 @@ MAX_CUSTOM_RULES = 512
 MAX_RULE_TEXT = 500
 
 FIELD_SCOPES = {
+    "single_positive_prompt": "positive",
+    "single_prefix": "positive",
+    "single_suffix": "positive",
     "quality_prompt": "positive",
     "manual_artist": "positive",
     "fixed_character": "positive",

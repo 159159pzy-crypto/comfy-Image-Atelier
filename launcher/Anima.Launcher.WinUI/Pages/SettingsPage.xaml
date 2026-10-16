@@ -9,8 +9,19 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <ScrollViewer HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled">
-        <StackPanel Spacing="12" Margin="24,0,24,24" MaxWidth="880">
+    <ScrollViewer x:Name="SettingsPanel" HorizontalContentAlignment="Stretch" HorizontalAlignment="Stretch" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Spacing="14" Margin="4,4,4,16" HorizontalAlignment="Stretch">
+            <StackPanel Spacing="5" Margin="8,0,8,8">
+                <TextBlock Text="MAKE IT YOURS" Style="{StaticResource StudioKickerStyle}" />
+                <TextBlock Text="让工作台更合你意。" Style="{StaticResource StudioHeadingStyle}" />
+                <TextBlock Text="主题、启动偏好与高级设置。切换页面会保留未保存的选项。" Style="{StaticResource StudioBodyStyle}" />
+            </StackPanel>
+
+            <launch:Card Header="自动启动服务" IconGlyph="&#xE768;" Description="默认关闭。启用后，打开启动器即启动服务并打开工作台。">
+                <launch:Card.ActionContent>
+                    <ToggleSwitch x:Name="StartOnLaunchBox" OnContent="已开启" OffContent="手动启动" Toggled="Startup_Changed" />
+                </launch:Card.ActionContent>
+            </launch:Card>
 
             <Expander HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
                 <Expander.Header>
@@ -19,12 +30,12 @@
                 <StackPanel Spacing="8" Margin="0,8,0,0">
                     <launch:Card Header="ComfyUI 端口" Description="默认 8188">
                         <launch:Card.ActionContent>
-                            <NumberBox x:Name="ComfyPortBox" Minimum="1024" Maximum="65535" SpinButtonPlacementMode="Inline" SmallChange="1" LargeChange="10" Width="160" />
+                            <NumberBox x:Name="ComfyPortBox" Minimum="1024" Maximum="65535" SpinButtonPlacementMode="Inline" SmallChange="1" LargeChange="10" Width="160" ValueChanged="Port_Changed" />
                         </launch:Card.ActionContent>
                     </launch:Card>
                     <launch:Card Header="工作台端口" Description="默认 8190">
                         <launch:Card.ActionContent>
-                            <NumberBox x:Name="WebPortBox" Minimum="1024" Maximum="65535" SpinButtonPlacementMode="Inline" SmallChange="1" LargeChange="10" Width="160" />
+                            <NumberBox x:Name="WebPortBox" Minimum="1024" Maximum="65535" SpinButtonPlacementMode="Inline" SmallChange="1" LargeChange="10" Width="160" ValueChanged="Port_Changed" />
                         </launch:Card.ActionContent>
                     </launch:Card>
                 </StackPanel>
@@ -42,7 +53,7 @@
 
             <launch:Card Header="保存设置" IconGlyph="&#xE74E;">
                 <launch:Card.ActionContent>
-                    <Button Content="保存设置" Click="Save_Click" Style="{StaticResource AccentButtonStyle}" />
+                    <Button Content="保存设置" Click="Save_Click" Style="{StaticResource StudioPrimaryButtonStyle}" />
                 </launch:Card.ActionContent>
             </launch:Card>
 
@@ -62,9 +73,9 @@
                     </launch:Card>
                     <launch:Card Header="令牌（空值为删除）">
                         <launch:Card.ActionContent>
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <PasswordBox x:Name="CredTokenBox" MinWidth="240" />
-                                <Button Content="安全保存" Click="CredSave_Click" />
+                            <StackPanel Spacing="8" MaxWidth="420">
+                                <PasswordBox x:Name="CredTokenBox" MinWidth="180" />
+                                <Button Content="安全保存" Click="CredSave_Click" HorizontalAlignment="Right" />
                             </StackPanel>
                         </launch:Card.ActionContent>
                     </launch:Card>

@@ -30,7 +30,7 @@ public static class Inventory
     }
     public static async Task<ProbeResult> Probe(string root, string python, string script, CancellationToken ct)
     {
-        var result = await Commands.Run(python, [script, root], root, null, ct);
+        var result = await Commands.Run(python, [script, root], root, null, ct, timeout: TimeSpan.FromSeconds(30));
         return JsonSerializer.Deserialize<ProbeResult>(result, JsonFile.Options) ?? throw new InvalidDataException("模型路径探测失败。");
     }
     public static async Task<List<ModelStatus>> Scan(ProbeResult probe, ModelManifest manifest, bool hashes, CancellationToken ct)
@@ -96,7 +96,7 @@ public static class Inventory
             var folder = paths[repo.Id];
             if (!Directory.Exists(folder)) { results.Add(new(repo.Id, "缺失", "", folder)); continue; }
             if (!Directory.Exists(Path.Combine(folder, ".git")) || git is null) { results.Add(new(repo.Id, "已有安装，版本未验证", "", folder)); continue; }
-            var commit = (await Commands.Run(git, ["rev-parse", "HEAD"], folder, null, ct)).Trim();
+            var commit = (await Commands.Run(git, ["rev-parse", "HEAD"], folder, null, ct, timeout: TimeSpan.FromSeconds(10))).Trim();
             results.Add(new(repo.Id, commit == repo.Commit ? "锁定版本" : "已有其他版本（保留）", commit, folder));
         }
         return results;

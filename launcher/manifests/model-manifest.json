@@ -4,45 +4,50 @@
     {
       "id": "qwen-text",
       "name": "Qwen 文本编码器",
-      "group": "基础生成",
+      "group": "Anima 基础生成",
       "category": "text_encoders",
       "relativePath": "qwen_3_06b_base.safetensors",
       "aliases": [],
       "size": 1192135096,
       "sha256": "cd2a512003e2f9f3cd3c32a9c3573f820bb28c940f73c57b1ddaa983d9223eba",
       "urls": [
-        "https://huggingface.co/circlestone-labs/Anima/resolve/main/split_files/text_encoders/qwen_3_06b_base.safetensors"
+        "https://huggingface.co/circlestone-labs/Anima/resolve/f973fc41ec7545364ac9776c2440285f43ff2a30/split_files/text_encoders/qwen_3_06b_base.safetensors"
       ],
       "license": "Anima 仓库 LICENSE.md",
-      "licenseUrl": "https://huggingface.co/circlestone-labs/Anima/blob/main/LICENSE.md"
+      "licenseUrl": "https://huggingface.co/circlestone-labs/Anima/blob/f973fc41ec7545364ac9776c2440285f43ff2a30/LICENSE.md",
+      "revision": "f973fc41ec7545364ac9776c2440285f43ff2a30"
     },
     {
       "id": "qwen-vae",
       "name": "Qwen VAE",
-      "group": "基础生成",
+      "group": "共享 VAE",
       "category": "vae",
       "relativePath": "qwen_image_vae.safetensors",
       "aliases": [],
       "size": 253806246,
       "sha256": "a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f",
       "urls": [
-        "https://huggingface.co/circlestone-labs/Anima/resolve/main/split_files/vae/qwen_image_vae.safetensors"
+        "https://huggingface.co/circlestone-labs/Anima/resolve/f973fc41ec7545364ac9776c2440285f43ff2a30/split_files/vae/qwen_image_vae.safetensors"
       ],
       "license": "Anima 仓库 LICENSE.md",
-      "licenseUrl": "https://huggingface.co/circlestone-labs/Anima/blob/main/LICENSE.md"
+      "licenseUrl": "https://huggingface.co/circlestone-labs/Anima/blob/f973fc41ec7545364ac9776c2440285f43ff2a30/LICENSE.md",
+      "revision": "f973fc41ec7545364ac9776c2440285f43ff2a30"
     },
     {
       "aliases": [],
-      "size": 0,
-      "sha256": "",
-      "urls": [],
-      "license": "仅检测；请从模型作者提供的合法来源手动安装",
-      "licenseUrl": "",
+      "size": 4182218328,
+      "sha256": "bd43b7cffe1ed1153d9c41e7beb2f18cb1273eafbaa3af3edd6a173dc90a006e",
+      "urls": [
+        "https://huggingface.co/circlestone-labs/Anima/resolve/f973fc41ec7545364ac9776c2440285f43ff2a30/split_files/diffusion_models/anima-base-v1.0.safetensors"
+      ],
+      "license": "Anima 仓库 LICENSE.md",
+      "licenseUrl": "https://huggingface.co/circlestone-labs/Anima/blob/f973fc41ec7545364ac9776c2440285f43ff2a30/LICENSE.md",
       "id": "anima-base-v1",
       "name": "Anima v1 基础模型",
-      "group": "基础生成",
+      "group": "Anima 基础生成",
       "category": "diffusion_models",
-      "relativePath": "anima-base-v1.0.safetensors"
+      "relativePath": "anima-base-v1.0.safetensors",
+      "revision": "f973fc41ec7545364ac9776c2440285f43ff2a30"
     },
     {
       "aliases": [],
@@ -52,8 +57,9 @@
       "license": "仅检测；请从模型作者提供的合法来源手动安装",
       "licenseUrl": "",
       "id": "krea2-turbo",
+      "sourceUrl": "https://huggingface.co/Comfy-Org/Krea-2/blob/main/diffusion_models/krea2_turbo_int8_convrot.safetensors",
       "name": "Krea 2 Turbo INT8",
-      "group": "基础生成",
+      "group": "Krea 2（可选）",
       "category": "diffusion_models",
       "relativePath": "krea2_turbo_int8_convrot.safetensors"
     },
@@ -65,8 +71,9 @@
       "license": "仅检测；请从模型作者提供的合法来源手动安装",
       "licenseUrl": "",
       "id": "qwen3vl-krea2",
+      "sourceUrl": "https://huggingface.co/Comfy-Org/Krea-2/blob/main/text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
       "name": "Qwen3 VL 4B FP8（Krea 2）",
-      "group": "基础生成",
+      "group": "Krea 2（可选）",
       "category": "text_encoders",
       "relativePath": "qwen3vl_4b_fp8_scaled.safetensors"
     },
@@ -78,8 +85,9 @@
       "license": "仅检测；请从模型作者提供的合法来源手动安装",
       "licenseUrl": "",
       "id": "seedvr2-model",
+      "sourceUrl": "https://huggingface.co/Comfy-Org/SeedVR2/blob/main/diffusion_models/seedvr2_3b_int8_convrot.safetensors",
       "name": "SeedVR2 3B INT8",
-      "group": "SeedVR2 修复放大",
+      "group": "SeedVR2 修复放大（可选）",
       "category": "diffusion_models",
       "relativePath": "seedvr2_3b_int8_convrot.safetensors"
     },
@@ -91,8 +99,9 @@
       "license": "仅检测；请从模型作者提供的合法来源手动安装",
       "licenseUrl": "",
       "id": "seedvr2-vae",
+      "sourceUrl": "https://huggingface.co/Comfy-Org/SeedVR2/blob/main/vae/ema_vae_fp16.safetensors",
       "name": "SeedVR2 EMA VAE FP16",
-      "group": "SeedVR2 修复放大",
+      "group": "SeedVR2 修复放大（可选）",
       "category": "vae",
       "relativePath": "ema_vae_fp16.safetensors"
     }

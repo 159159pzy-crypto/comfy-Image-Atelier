@@ -1,99 +1,92 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Window
-    x:Class="Anima.Launcher.MainWindow"
+<Window x:Class="Anima.Launcher.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
-    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    mc:Ignorable="d">
-
-    <Grid>
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid x:Name="RootGrid" Background="{ThemeResource StudioBackgroundBrush}">
         <Grid.RowDefinitions>
+            <RowDefinition Height="32" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
-
-        <!-- Custom title bar (caption buttons drawn by the system to the right) -->
-        <Grid x:Name="AppTitleBar" Height="48">
-            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0,0,0">
-                <FontIcon Glyph="&#xE80F;" FontSize="16" Margin="0,0,10,0" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
-                <TextBlock Text="Anima Random Studio" VerticalAlignment="Center" Style="{StaticResource CaptionTextBlockStyle}" FontWeight="SemiBold" />
-                <TextBlock Text="安装与启动" VerticalAlignment="Center" Margin="8,0,0,0" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-            </StackPanel>
+        <Grid Grid.RowSpan="4" IsHitTestVisible="False">
+            <Rectangle HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                <Rectangle.Fill>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                        <GradientStop Color="#150071E3" Offset="0" />
+                        <GradientStop Color="Transparent" Offset="1" />
+                    </LinearGradientBrush>
+                </Rectangle.Fill>
+            </Rectangle>
+            <Rectangle HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                <Rectangle.Fill>
+                    <LinearGradientBrush StartPoint="1,1" EndPoint="0,0">
+                        <GradientStop Color="#0D785AFF" Offset="0" />
+                        <GradientStop Color="Transparent" Offset="1" />
+                    </LinearGradientBrush>
+                </Rectangle.Fill>
+            </Rectangle>
         </Grid>
-
-        <NavigationView
-            x:Name="Nav"
-            Grid.Row="1"
-            PaneDisplayMode="Left"
-            OpenPaneLength="200"
-            IsBackButtonVisible="Collapsed"
-            IsSettingsVisible="True"
-            IsPaneToggleButtonVisible="True"
-            SelectionChanged="Nav_SelectionChanged">
-            <NavigationView.MenuItems>
-                <NavigationViewItem Content="服务" Tag="home">
-                    <NavigationViewItem.Icon><FontIcon Glyph="&#xE80F;" /></NavigationViewItem.Icon>
-                </NavigationViewItem>
-                <NavigationViewItem Content="环境" Tag="env">
-                    <NavigationViewItem.Icon><FontIcon Glyph="&#xE80F;" /></NavigationViewItem.Icon>
-                </NavigationViewItem>
-                <NavigationViewItem Content="模型与节点" Tag="models">
-                    <NavigationViewItem.Icon><FontIcon Glyph="&#xE8F1;" /></NavigationViewItem.Icon>
-                </NavigationViewItem>
-                <NavigationViewItem Content="日志" Tag="logs">
-                    <NavigationViewItem.Icon><FontIcon Glyph="&#xE70B;" /></NavigationViewItem.Icon>
-                </NavigationViewItem>
-            </NavigationView.MenuItems>
-            <Frame x:Name="ContentFrame" />
-        </NavigationView>
-
-        <InfoBar
-            x:Name="StatusBar"
-            Grid.Row="2"
-            IsOpen="True"
-            Severity="Informational"
-            IsClosable="False"
-            Message="首次配置：选择目录 → 检查/安装环境 → 勾选模型 → 启动工作台" />
-
-        <CommandBar Grid.Row="3" DefaultLabelPosition="Right" HorizontalContentAlignment="Stretch">
-            <CommandBar.Content>
-                <Grid />
-            </CommandBar.Content>
-            <AppBarButton x:Name="StartButton" Label="启动并打开工作台" Click="Start_Click">
-                <AppBarButton.Icon><FontIcon Glyph="&#xE768;" /></AppBarButton.Icon>
-            </AppBarButton>
-            <AppBarButton x:Name="StopButton" Label="停止本程序服务" Click="Stop_Click">
-                <AppBarButton.Icon><FontIcon Glyph="&#xE71A;" /></AppBarButton.Icon>
-            </AppBarButton>
-            <AppBarButton x:Name="PauseButton" Label="暂停任务" Click="Pause_Click" IsEnabled="False">
-                <AppBarButton.Icon><FontIcon Glyph="&#xE769;" /></AppBarButton.Icon>
-            </AppBarButton>
-            <AppBarButton x:Name="CancelButton" Label="取消下载" Click="Cancel_Click" IsEnabled="False">
-                <AppBarButton.Icon><FontIcon Glyph="&#xE711;" /></AppBarButton.Icon>
-            </AppBarButton>
-            <AppBarButton Label="更多">
-                <AppBarButton.Icon><FontIcon Glyph="&#xE712;" /></AppBarButton.Icon>
-                <AppBarButton.Flyout>
-                    <MenuFlyout>
-                        <MenuFlyoutItem Text="打开工作台" Click="OpenWebUI_Click" />
-                        <MenuFlyoutItem Text="打开 ComfyUI" Click="OpenComfy_Click" />
-                        <MenuFlyoutSeparator />
-                        <MenuFlyoutItem Text="重新检查模型和节点" Click="Rescan_Click" />
-                        <MenuFlyoutItem Text="打开环境 / 安装页面" Click="GoEnvironment_Click" />
-                        <MenuFlyoutItem Text="设置" Click="GoSettings_Click" />
-                        <MenuFlyoutItem Text="打开日志目录" Click="OpenLogs_Click" />
-                        <MenuFlyoutSeparator />
-                        <MenuFlyoutItem Text="退出（保留服务）" Click="ExitKeep_Click" />
-                        <MenuFlyoutItem Text="停止服务并退出" Click="ExitStop_Click" />
-                    </MenuFlyout>
-                </AppBarButton.Flyout>
-            </AppBarButton>
-        </CommandBar>
-
-        <ProgressBar x:Name="TaskProgress" Grid.Row="4" Height="4" Minimum="0" Maximum="100" Value="0" />
+        <Grid x:Name="AppTitleBar" Background="Transparent">
+            <TextBlock Text="Anima Random Studio" Margin="22,0,140,0" VerticalAlignment="Center" FontSize="11" Foreground="{ThemeResource StudioTertiaryBrush}" />
+        </Grid>
+        <Border Grid.Row="1" Background="{ThemeResource StudioChromeBrush}" BorderBrush="{ThemeResource StudioEdgeBrush}" BorderThickness="1" CornerRadius="32" Margin="16,4,16,16" Padding="14,9">
+            <Grid ColumnSpacing="14">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                <StackPanel Orientation="Horizontal" Spacing="11" VerticalAlignment="Center">
+                    <Border Background="{ThemeResource StudioAccentBrush}" CornerRadius="13" Width="40" Height="40">
+                        <TextBlock Text="A" FontFamily="Georgia" FontSize="25" FontWeight="Bold" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <StackPanel x:Name="BrandCopy" VerticalAlignment="Center" Spacing="2">
+                        <TextBlock Text="Anima" FontSize="15" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
+                        <TextBlock Text="创作，从这里开始" FontSize="10" Foreground="{ThemeResource StudioSecondaryBrush}" />
+                    </StackPanel>
+                </StackPanel>
+                <Border Grid.Column="1" Background="{ThemeResource StudioMutedBrush}" BorderBrush="{ThemeResource StudioSeparatorBrush}" BorderThickness="1" CornerRadius="25" Padding="3">
+                    <StackPanel Orientation="Horizontal" Spacing="2">
+                        <Button x:Name="HomeNav" Content="概览" Tag="0" Style="{StaticResource StudioNavButtonStyle}" Click="Nav_Click" />
+                        <Button x:Name="EnvironmentNav" Content="安装环境" Tag="1" Style="{StaticResource StudioNavButtonStyle}" Click="Nav_Click" />
+                        <Button x:Name="ModelsNav" Content="模型资源" Tag="2" Style="{StaticResource StudioNavButtonStyle}" Click="Nav_Click" />
+                        <Button x:Name="LogsNav" Content="日志" Tag="3" Style="{StaticResource StudioNavButtonStyle}" Click="Nav_Click" />
+                        <Button x:Name="SettingsNav" Tag="4" Style="{StaticResource StudioNavButtonStyle}" Click="Nav_Click" AutomationProperties.Name="设置" ToolTipService.ToolTip="设置">
+                            <FontIcon Glyph="&#xE713;" FontSize="15" />
+                        </Button>
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </Border>
+        <Frame x:Name="ContentFrame" Grid.Row="2" Margin="16,0,16,12" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
+        <Border Grid.Row="3" Background="{ThemeResource StudioChromeBrush}" BorderBrush="{ThemeResource StudioSeparatorBrush}" BorderThickness="1" CornerRadius="22" Margin="16,0,16,16" Padding="18,12">
+            <Grid RowSpacing="8" ColumnSpacing="12">
+                <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                <StackPanel Spacing="3" VerticalAlignment="Center">
+                    <TextBlock x:Name="StatusText" Text="准备就绪 · 选择安装环境，或打开已有工作台。" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource StudioSecondaryBrush}" />
+                    <TextBlock x:Name="ProgressDetail" Text="" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource StudioTertiaryBrush}" Visibility="Collapsed" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <Button x:Name="RetryButton" Content="继续 / 重试" Click="Retry_Click" Visibility="Collapsed" />
+                    <Button x:Name="PauseButton" Content="暂停" Click="Pause_Click" Visibility="Collapsed" />
+                    <Button x:Name="CancelButton" Content="取消下载" Click="Cancel_Click" Visibility="Collapsed" />
+                    <Button AutomationProperties.Name="更多操作" ToolTipService.ToolTip="更多操作" Padding="11,9">
+                        <FontIcon Glyph="&#xE712;" FontSize="14" />
+                        <Button.Flyout>
+                            <MenuFlyout>
+                                <MenuFlyoutItem Text="打开工作台" Click="OpenWebUI_Click" />
+                                <MenuFlyoutItem Text="打开 ComfyUI" Click="OpenComfy_Click" />
+                                <MenuFlyoutItem Text="停止本程序服务" Click="Stop_Click" />
+                                <MenuFlyoutSeparator />
+                                <MenuFlyoutItem Text="重新检查模型和节点" Click="Rescan_Click" />
+                                <MenuFlyoutItem Text="打开日志目录" Click="OpenLogs_Click" />
+                                <MenuFlyoutSeparator />
+                                <MenuFlyoutItem Text="退出（保留服务）" Click="ExitKeep_Click" />
+                                <MenuFlyoutItem Text="停止服务并退出" Click="ExitStop_Click" />
+                            </MenuFlyout>
+                        </Button.Flyout>
+                    </Button>
+                </StackPanel>
+                <ProgressBar x:Name="TaskProgress" Grid.Row="1" Grid.ColumnSpan="2" Height="4" Minimum="0" Maximum="100" Value="0" Foreground="{ThemeResource StudioAccentBrush}" Background="{ThemeResource StudioMutedBrush}" />
+            </Grid>
+        </Border>
     </Grid>
 </Window>

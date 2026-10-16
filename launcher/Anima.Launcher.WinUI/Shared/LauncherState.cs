@@ -1,6 +1,6 @@
 using Anima.Launcher.Core;
-using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using System.Collections.ObjectModel;
 using System.Text.Json;
 
@@ -24,14 +24,28 @@ internal sealed class LauncherState : IDisposable
     public ObservableCollection<ModelGroup> Groups { get; } = [];
 
     private CancellationTokenSource? task;
-    private readonly DispatcherQueue? uiQueue;
     private List<ModelStatus> downloadQueue = [];
     private bool cancelDownloads;
     private bool upgradeOffered;
+    private string? configWriteError;
+    private Func<CancellationToken, Task>? retryAction;
+    private bool retryable;
+    private LauncherConfig? retryConfig;
+    private bool retryFresh;
+    private string? startingRole;
+    private long progressBytes;
+    private string progressName = "";
+    private DateTime progressAt = DateTime.UtcNow;
+    public bool CanRetry => !Busy && retryable && retryAction is not null && retryAction.Method.Name != nameof(PreviewInstallAsync);
+    public string ProgressText { get; private set; } = "";
+    public event Action? TaskStateChanged;
+    public event Action<string>? TaskProgressChanged;
+    public string InstallSummaryText { get; private set; } = "选择安装方式与目录，然后检查安装内容。";
+    public event Action<string>? InstallSummaryChanged;
 
     /// <summary>Fired on the UI thread when a status message changes.</summary>
     public event Action<string>? StatusChanged;
-    /// <summary>Fired on the UI thread with a log line.</summary>
+    /// <summary>May run on a process-output thread; subscribers enqueue for batched UI updates.</summary>
     public event Action<string>? LogAppended;
     /// <summary>Fired on the UI thread when a task begins/ends (busy state).</summary>
     public event Action<bool>? BusyChanged;
@@ -51,9 +65,8 @@ internal sealed class LauncherState : IDisposable
     {
         root = getRoot;
         showWindow = showWindowAction;
-        // Created on the UI thread; worker callbacks (process output, downloads) marshal UI events through this.
-        uiQueue = DispatcherQueue.GetForCurrentThread();
         Config = File.Exists(configFile) ? LoadConfig() : new LauncherConfig { AppRoot = Program.AppRoot, DataDir = Path.Combine(Program.StateDir, "data") };
+        FreshInstallRequested = Config.InstallPending;
         Program.Log("配置已读取");
         Services = new ServiceManager(Program.StateDir, AppendLog);
         Services.RecoverOwned();
@@ -62,9 +75,19 @@ internal sealed class LauncherState : IDisposable
     private LauncherConfig LoadConfig()
     {
         try { var loaded = JsonFile.Read<LauncherConfig>(configFile); loaded.Validate(); return loaded; }
-        catch
+        catch (Exception ex)
         {
-            File.Copy(configFile, configFile + ".corrupt-" + DateTime.Now.ToString("yyyyMMddHHmmss"), true);
+            try
+            {
+                var backup = configFile + ".corrupt-" + DateTime.Now.ToString("yyyyMMddHHmmssfff");
+                File.Copy(configFile, backup, false);
+                Program.Log("配置无法读取，已备份至 " + backup + "：" + ex.Message);
+            }
+            catch (Exception backupError)
+            {
+                configWriteError = "配置损坏且无法备份，暂不覆盖原文件：" + configFile + "。" + backupError.Message;
+                Program.Log(configWriteError);
+            }
             return new() { AppRoot = Program.AppRoot, DataDir = Path.Combine(Program.StateDir, "data") };
         }
     }
@@ -76,17 +99,20 @@ internal sealed class LauncherState : IDisposable
     public void AppendLog(string text)
     {
         Program.Log(text);
-        var line = DateTime.Now.ToString("HH:mm:ss ") + text;
+        var line = DateTime.Now.ToString("HH:mm:ss ") + (text.Length > 20000 ? text[..20000] + " …" : text);
         // Called from worker threads (process output callbacks); keep the list and UI event safe.
         lock (LogLines)
         {
             LogLines.Add(line);
             if (LogLines.Count > 2000) LogLines.RemoveRange(0, LogLines.Count - 2000);
         }
-        if (uiQueue is not null) uiQueue.TryEnqueue(() => LogAppended?.Invoke(line));
-        else LogAppended?.Invoke(line);
+        LogAppended?.Invoke(line);
     }
-    public void Save() => JsonFile.Write(configFile, Config);
+    public void Save()
+    {
+        if (configWriteError is not null) throw new IOException(configWriteError);
+        JsonFile.Write(configFile, Config);
+    }
     public void Reloaded() => FieldsReloaded?.Invoke();
     public void GoTo(int page) => NavigateRequested?.Invoke(page);
     public void Show() => showWindow();
@@ -100,32 +126,69 @@ internal sealed class LauncherState : IDisposable
 
     public void SyncFromUi(EnvironmentFields e, SettingsFields s)
     {
-        Config.ComfyRoot = e.ComfyRoot.Trim();
-        Config.Python = e.Python.Trim();
-        Config.SourceId = e.SourceId;
-        Config.GitMirror = e.GitMirror.Trim();
-        Config.ModelMirror = e.HfMirror.Trim();
-        Config.PipIndex = e.PipIndex.Trim();
-        Config.CustomRepository = e.CustomRepository.Trim();
-        Config.ComfyPort = s.ComfyPort;
-        Config.WebPort = s.WebPort;
-        Config.Theme = s.Theme;
-        if (Config.AppRoot.Length == 0) Config.AppRoot = Program.AppRoot;
-        if (Config.DataDir.Length == 0) Config.DataDir = Path.Combine(Program.StateDir, "data");
-        Config.Validate();
+        var next = Config.Clone();
+        var chosen = e.ComfyRoot.Trim().Trim('"');
+        var newRoot = e.Fresh && chosen.Length > 0 ? Path.Combine(chosen, "ComfyUI") : chosen;
+        if (!e.Fresh && chosen.Length > 0 && (File.Exists(Path.Combine(chosen, "main.py")) || File.Exists(Path.Combine(chosen, "ComfyUI", "main.py"))))
+            newRoot = Inventory.NormalizeRoot(chosen);
+        var environmentChanged = !SamePath(next.ComfyRoot, newRoot);
+        if (!e.Fresh && !environmentChanged && Config.InstallPending)
+            throw new InvalidOperationException("此目录的安装尚未完成。请选择“新建环境”继续安装，或导入另一个完整环境。");
+        // An unchanged interpreter in a different environment was auto-discovered,
+        // not an explicit request to reuse the old environment's interpreter.
+        var python = e.Python.Trim();
+        if (environmentChanged && !e.PythonExplicit) python = "";
+        if (environmentChanged)
+        {
+            // Ownership and setup belong to an environment, not the launcher session.
+            // Carrying these across an import would override its cache configuration.
+            next.ManagedComfy = newRoot.Length > 0 && File.Exists(Path.Combine(newRoot, ".anima-revision.json"));
+            next.SetupComplete = false;
+        }
+        next.ComfyRoot = newRoot;
+        next.Python = python;
+        next.PythonExplicit = e.PythonExplicit;
+        next.InstallPending = e.Fresh && chosen.Length > 0;
+        if (e.Fresh && chosen.Length > 0)
+        {
+            next.InstallRoot = Path.GetFullPath(chosen);
+            next.RuntimeRoot = Path.Combine(next.InstallRoot, "runtime");
+            next.SelectedProfile = "anima";
+        }
+        else if (environmentChanged && newRoot.Length > 0)
+        {
+            next.InstallRoot = "";
+            next.RuntimeRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(newRoot)) + ".anima-runtime";
+        }
+        next.SourceId = e.SourceId;
+        next.GitMirror = e.GitMirror.Trim();
+        next.ModelMirror = e.HfMirror.Trim();
+        next.PipIndex = e.PipIndex.Trim();
+        next.CustomRepository = e.CustomRepository.Trim();
+        next.ComfyPort = s.ComfyPort;
+        next.WebPort = s.WebPort;
+        next.Theme = s.Theme;
+        next.StartOnLaunch = s.StartOnLaunch;
+        if (next.AppRoot.Length == 0) next.AppRoot = Program.AppRoot;
+        if (next.DataDir.Length == 0) next.DataDir = Path.Combine(Program.StateDir, "data");
+        next.Validate();
+        Config = next;
+        FreshInstallRequested = e.Fresh;
     }
 
     /// <summary>Apply any pending field edits into <see cref="Config"/>. Unset pages keep prior values.</summary>
     public void ApplyPendingFields()
     {
-        var e = PendingEnvironmentFields ?? new EnvironmentFields(Config.ComfyRoot, Config.Python, Config.SourceId, Config.GitMirror, Config.ModelMirror, Config.PipIndex, Config.CustomRepository);
-        var s = PendingSettingsFields ?? new SettingsFields(Config.ComfyPort, Config.WebPort, Config.Theme);
+        var e = PendingEnvironmentFields ?? new EnvironmentFields(FreshInstallRequested && Config.InstallRoot.Length > 0 ? Config.InstallRoot : Config.ComfyRoot, Config.Python, Config.SourceId, Config.GitMirror, Config.ModelMirror, Config.PipIndex, Config.CustomRepository, FreshInstallRequested, Config.PythonExplicit);
+        var s = PendingSettingsFields ?? new SettingsFields(Config.ComfyPort, Config.WebPort, Config.Theme, Config.StartOnLaunch);
         SyncFromUi(e, s);
+        PendingEnvironmentFields = null;
+        PendingSettingsFields = null;
     }
 
     // --- Task gating ---
 
-    public async Task Run(Func<CancellationToken, Task> action)
+    public async Task Run(Func<CancellationToken, Task> action, bool applyDrafts = true, LauncherConfig? resumeConfig = null, bool resumeFresh = false)
     {
         if (task is not null)
         {
@@ -134,31 +197,82 @@ internal sealed class LauncherState : IDisposable
             return;
         }
         task = new CancellationTokenSource();
+        retryAction = action;
+        retryConfig = null;
+        retryable = false;
+        cancelDownloads = false;
+        ResetTransferProgress();
         BusyChanged?.Invoke(true);
-        try { await action(task.Token); }
-        catch (OperationCanceledException)
+        TaskStateChanged?.Invoke();
+        try
         {
-            SetStatus("任务已暂停，可继续或重试。");
-            AppendLog("任务已暂停，可继续或重试。");
+            if (resumeConfig is not null)
+            {
+                Config = resumeConfig.Clone();
+                FreshInstallRequested = resumeFresh;
+            }
+            else if (applyDrafts) ApplyPendingFields();
+            // Tasks own a snapshot. Pages only edit drafts until the next task.
+            Config = Config.Clone();
+            retryConfig = Config.Clone();
+            retryFresh = FreshInstallRequested;
+            await action(task.Token);
         }
-        catch (Exception ex) { TaskFailed?.Invoke(ex); }
+        catch (OperationCanceledException) when (task.IsCancellationRequested)
+        {
+            retryable = true;
+            var message = cancelDownloads ? "下载已取消，所选临时文件已清理。" : "任务已暂停，点击继续可从已完成步骤恢复。";
+            SetStatus(message);
+            AppendLog(message);
+        }
+        catch (OperationCanceledException ex) { retryable = true; TaskFailed?.Invoke(new TimeoutException("网络或服务响应超时，请检查连接后重试。", ex)); }
+        catch (Exception ex) { retryable = true; TaskFailed?.Invoke(ex); }
         finally
         {
             task.Dispose();
             task = null;
             BusyChanged?.Invoke(false);
+            TaskStateChanged?.Invoke();
+            Reloaded();
         }
     }
+
+    // Resume always uses the original task's snapshot. To change install sources
+    // or paths, review a new plan on the environment page instead.
+    public Task ResumeTaskAsync() => CanRetry ? Run(retryAction!, retryConfig is null, retryConfig, retryFresh) : Task.CompletedTask;
 
     public void PauseTask() => task?.Cancel();
     public void CancelTaskAndDownloads() { cancelDownloads = true; task?.Cancel(); }
     public bool CancelDownloadsRequested => cancelDownloads;
 
+    private void ResetTransferProgress()
+    {
+        ProgressText = "";
+        progressName = "";
+        progressBytes = 0;
+        progressAt = DateTime.UtcNow;
+        TaskProgressChanged?.Invoke(ProgressText);
+    }
+
+    private void InstallStageChanged(string stage)
+    {
+        ResetTransferProgress();
+        ProgressChanged?.Invoke(-1); // Dependency stages have no byte total.
+        SetStatus(stage);
+    }
+
     public IProgress<DownloadProgress> DownloadProgress() => new Progress<DownloadProgress>(p =>
     {
         var percent = (int)Math.Clamp(p.Received * 100d / Math.Max(1, p.Total), 0, 100);
         ProgressChanged?.Invoke(percent);
-        SetStatus($"{p.Name} · {p.Stage} · {p.Received / 1048576d:N1} / {p.Total / 1048576d:N1} MiB");
+        var now = DateTime.UtcNow;
+        var seconds = (now - progressAt).TotalSeconds;
+        var speed = progressName == p.Name && p.Received >= progressBytes && seconds > 0
+            ? (p.Received - progressBytes) / seconds / 1048576d : 0;
+        ProgressText = $"{p.Received / 1048576d:N1} / {p.Total / 1048576d:N1} MiB" + (speed > 0 ? $" · {speed:N1} MiB/s" : "");
+        progressAt = now; progressBytes = p.Received; progressName = p.Name;
+        TaskProgressChanged?.Invoke(ProgressText);
+        SetStatus($"{p.Name} · {p.Stage}");
     });
     public event Action<int>? ProgressChanged;
 
@@ -182,12 +296,45 @@ internal sealed class LauncherState : IDisposable
 
     public async Task CheckImportAsync(CancellationToken ct)
     {
+        FreshInstallRequested = false;
         // Called after ReadFields; normalize and rescan.
         Config.ComfyRoot = Inventory.NormalizeRoot(Config.ComfyRoot);
         Config.Python = Inventory.FindPython(Config.ComfyRoot, Config.Python);
         Save();
         Reloaded();
         await Scan(ct);
+    }
+
+    public async Task PreviewInstallAsync(CancellationToken ct)
+    {
+        InstallPreviewReady = false;
+        RequireRoot();
+        if (!FreshInstallRequested)
+        {
+            Config.ComfyRoot = Inventory.NormalizeRoot(Config.ComfyRoot);
+            Config.Python = Inventory.FindPython(Config.ComfyRoot, Config.Python);
+        }
+        var plan = await PlanInstallationAsync(FreshInstallRequested, ct);
+        SetStatus("正在检查系统、安装目录和磁盘空间…");
+        var preflight = await InstallationPlanner.PreflightAsync(plan, ct);
+        InstallPreviewReady = preflight.CanInstall;
+        InstallSummaryText = plan.Describe() + "\n\n" + string.Join("\n", preflight.Issues.Select(i => i.Message));
+        if (preflight.CanInstall) InstallSummaryText += "\n检查通过，可以开始安装。";
+        InstallSummaryChanged?.Invoke(InstallSummaryText);
+        if (!preflight.CanInstall) throw new InvalidOperationException(string.Join("\n", preflight.Issues.Where(i => i.Blocking).Select(i => i.Message)));
+        SetStatus("检查完成，请确认安装内容后开始安装。");
+    }
+
+    public bool InstallPreviewReady { get; private set; }
+
+    private async Task<InstallationPlan> PlanInstallationAsync(bool fresh, CancellationToken ct)
+    {
+        var snapshot = Config.Clone();
+        // Counting an existing environment can touch thousands of package files.
+        // Keep it off the UI thread, then resolve ComfyUI's configured model roots.
+        var plan = await Task.Run(() => InstallationPlanner.Create(snapshot, Program.Runtime, Program.StateDir, fresh, Program.Models, Program.ModelProfiles), ct);
+        return await InstallationPlanner.PreparePlanAsync(plan, Program.Models, Program.ModelProfiles,
+            Path.Combine(Program.Assets, "probe_comfy.py"), ct);
     }
 
     public async Task InstallAsync(CancellationToken ct)
@@ -201,15 +348,40 @@ internal sealed class LauncherState : IDisposable
             Config.ComfyRoot = Inventory.NormalizeRoot(Config.ComfyRoot);
             Config.Python = Inventory.FindPython(Config.ComfyRoot, Config.Python);
         }
+        var plan = await PlanInstallationAsync(fresh, ct);
+        InstallSummaryText = plan.Describe();
+        InstallSummaryChanged?.Invoke(InstallSummaryText);
+        Config.InstallPending = fresh;
+        // Journal the new-install mode before the first side effect so a launcher
+        // restart resumes CUDA/dependency stages, not an incomplete import.
         Save();
-        var x = root();
-        if (x is not null && !await Dialogs.ConfirmCancel(x, "安装确认", "将安装缺失节点和所需 Python 包。已有节点版本保留；模型另行勾选。继续安装？", "继续安装")) return;
-        var installer = new Installer(Program.StateDir, Program.Runtime, Downloads, AppendLog, DownloadProgress());
-        await installer.Install(Config, fresh, ct);
+        SetStatus("正在安装环境；已完成的下载和步骤会自动复用…");
+        var installer = new Installer(Program.StateDir, Program.Runtime, Downloads, AppendLog, DownloadProgress(), InstallStageChanged);
+        Config = await installer.Install(plan, ct);
+        Config.InstallPending = fresh;
         Save();
         Reloaded();
+        if (fresh)
+        {
+            SetStatus("环境已安装，正在准备 Anima 基础模型…");
+            var probe = await Inventory.Probe(Config.ComfyRoot, Config.Python, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
+            var selected = Program.ModelProfiles.RequiredModels(Program.Models, Config.SelectedProfile).Select(m => m.Id).ToHashSet();
+            var inventory = await Inventory.Scan(probe, Program.Models, false, ct);
+            var pending = inventory.Where(m => selected.Contains(m.Model.Id) && m.Missing).ToList();
+            await DownloadModelsAsync(pending, ct);
+            // A resumed install may already have the verified model, but may have
+            // stopped before its first LoRA Manager classification was written.
+            foreach (var item in inventory.Where(m => selected.Contains(m.Model.Id) && m.Model.Category == "diffusion_models"))
+                await ModelMetadata.EnsureDefaultAsync(Config, Program.Runtime, Program.Models, Program.ModelProfiles,
+                    item.FoundPath ?? item.Destination, ct, AppendLog);
+        }
         await Scan(ct);
-        GoTo(2); // 模型与节点
+        FreshInstallRequested = false;
+        Config.InstallPending = false;
+        Save();
+        Reloaded();
+        GoTo(0);
+        SetStatus("安装完成。点击“启动工作台”开始创作；可选资源可在模型页添加。");
     }
 
     /// <summary>Pages set this before calling Install to choose fresh/import.</summary>
@@ -260,19 +432,70 @@ internal sealed class LauncherState : IDisposable
 
     public void SelectBaseGroup()
     {
-        foreach (var row in Rows) row.Selected = row.Status.Model.Group == "基础生成" && row.CanSelect;
+        var required = Program.ModelProfiles.RequiredModels(Program.Models, Config.SelectedProfile).Select(m => m.Id).ToHashSet();
+        foreach (var row in Rows) row.Selected = required.Contains(row.Status.Model.Id) && row.CanSelect;
     }
 
-    public async Task DownloadSelectedAsync(CancellationToken ct)
+    public Func<CancellationToken, Task> CaptureSelectedModelDownload()
     {
-        var selected = Rows.Where(r => r.Selected).Select(r => r.Status).ToList();
-        if (selected.Count == 0)
+        var selectedIds = Rows.Where(r => r.Selected).Select(r => r.Status.Model.Id).Distinct().ToArray();
+        // Rows can belong to a previously scanned environment. Retain only model
+        // identities before Run applies drafts, so even configuration validation
+        // failures retain the original selection when the task is retried.
+        return token => DownloadModelIdsAsync(selectedIds, token);
+    }
+
+    private async Task<List<ModelStatus>> ResolveModelIdsAsync(string[] modelIds, bool hashes, CancellationToken ct)
+    {
+        ResolvePaths();
+        var models = modelIds.Select(id => Program.Models.Models.SingleOrDefault(model => model.Id == id)
+            ?? throw new InvalidDataException("模型清单中已不存在此资源，请重新扫描：" + id)).ToArray();
+        var probe = await Inventory.Probe(Config.ComfyRoot, Config.Python, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
+        return await Task.Run(() => Inventory.Scan(probe, new ModelManifest(Program.Models.SchemaVersion, models), hashes, ct), ct);
+    }
+
+    private async Task DownloadModelIdsAsync(string[] modelIds, CancellationToken ct)
+    {
+        if (modelIds.Length == 0)
         {
             SetStatus("请勾选缺失模型。已有异常文件请先手动备份；未核实来源的模型请手动导入。");
             return;
         }
+        SetStatus("正在重新确认当前环境中的模型位置与已有文件…");
+        var resolved = await ResolveModelIdsAsync(modelIds, true, ct);
+        var missing = resolved.Where(item => item.Missing).ToList();
+        // DownloadModelsAsync rejects abnormal existing files before any download;
+        // verified files in the current environment are reused without overwriting.
+        if (missing.Count > 0) await DownloadModelsAsync(missing, ct);
+        // A previous attempt can finish the model file before its metadata stage.
+        foreach (var item in resolved.Where(item => !item.Missing && item.Model.Category == "diffusion_models"))
+            await ModelMetadata.EnsureDefaultAsync(Config, Program.Runtime, Program.Models, Program.ModelProfiles,
+                item.FoundPath!, ct, AppendLog);
+        await Scan(ct);
+        SetStatus(missing.Count == 0 ? "当前环境已有所选模型，校验通过，无需下载。"
+            : "所选模型下载并校验完成。若 ComfyUI 已运行，请在任务空闲时重新启动以刷新清单。");
+    }
+
+    public async Task OpenModelLocationAsync(string modelId, CancellationToken ct)
+    {
+        var model = (await ResolveModelIdsAsync([modelId], false, ct)).Single();
+        var dir = Path.GetDirectoryName(model.FoundPath ?? model.Destination);
+        if (string.IsNullOrWhiteSpace(dir)) throw new IOException("该模型没有可打开的目录。");
+        ct.ThrowIfCancellationRequested();
+        Directory.CreateDirectory(dir);
+        Program.Open(dir);
+        SetStatus(model.FoundPath is null ? "当前环境尚无此模型，已打开其下载目录。" : "已打开当前环境中的模型实际位置。");
+    }
+
+    private async Task DownloadModelsAsync(List<ModelStatus> selected, CancellationToken ct)
+    {
+        foreach (var item in selected)
+        {
+            if (!item.Model.CanDownload) throw new InvalidOperationException($"{item.Model.Name} 暂无可验证下载，请从资源页的来源手动安装。");
+            if (item.FoundPath is not null) throw new IOException($"已有文件校验异常，已保留原文件：{item.FoundPath}。请备份处理后重试。");
+        }
         foreach (var volume in selected.GroupBy(s => Path.GetPathRoot(s.Destination)))
-            Safety.FreeSpace(volume.Key!, volume.Sum(s => s.Model.Size));
+            Safety.FreeSpace(volume.Key!, volume.Sum(s => Downloads.RemainingBytes(s.Destination, s.Model.Size, s.Model.Sha256)));
         downloadQueue = selected;
         cancelDownloads = false;
         DownloadCancelable?.Invoke(true);
@@ -298,9 +521,10 @@ internal sealed class LauncherState : IDisposable
                     }
                 }
                 if (!done) throw failure ?? new InvalidOperationException($"{item.Model.Name} 没有可用下载来源。");
+                if (item.Model.Category == "diffusion_models")
+                    await ModelMetadata.EnsureDefaultAsync(Config, Program.Runtime, Program.Models, Program.ModelProfiles,
+                        item.Destination, ct, AppendLog);
             }
-            await Scan(ct);
-            SetStatus("所选模型下载并校验完成。若 ComfyUI 已运行，请在任务空闲时重新启动以刷新清单。");
         }
         finally
         {
@@ -309,6 +533,35 @@ internal sealed class LauncherState : IDisposable
         }
     }
     public event Action<bool>? DownloadCancelable;
+
+    public async Task OpenModelFolderAsync(string category, FrameworkElement? anchor = null)
+    {
+        if (Busy) { SetStatus("任务进行中，请稍后打开模型目录。"); return; }
+        await Run(async ct =>
+        {
+            if (string.IsNullOrWhiteSpace(Config.ComfyRoot)) { GoTo(1); SetStatus("先选择并检查 ComfyUI 目录，即可打开模型文件夹。"); return; }
+            ResolvePaths();
+            var probe = await Inventory.Probe(Config.ComfyRoot, Config.Python, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
+            var paths = (probe.Paths.GetValueOrDefault(category) ?? []).Where(p => !string.IsNullOrWhiteSpace(p))
+                .Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            if (paths.Length == 0) throw new IOException("此环境没有配置该类型的模型目录，请先检查 ComfyUI 路径配置。");
+            void OpenFolder(string path)
+            {
+                try { Directory.CreateDirectory(path); Program.Open(path); SetStatus("复制模型文件后点击重新扫描；运行中的 ComfyUI 可能需要重启以刷新列表。"); }
+                catch (Exception ex) { TaskFailed?.Invoke(new IOException("无法打开模型目录：" + path + "\n" + ex.Message, ex)); }
+            }
+            if (paths.Length == 1 || anchor is null) { OpenFolder(paths[0]); return; }
+            var menu = new MenuFlyout();
+            for (var i = 0; i < paths.Length; i++)
+            {
+                var path = paths[i];
+                var item = new MenuFlyoutItem { Text = (i == 0 ? "默认 · " : "") + path };
+                item.Click += (_, _) => OpenFolder(path);
+                menu.Items.Add(item);
+            }
+            menu.ShowAt(anchor);
+        });
+    }
 
     // --- Services ---
 
@@ -323,34 +576,32 @@ internal sealed class LauncherState : IDisposable
     /// <summary>Start (or reuse) ComfyUI only.</summary>
     public async Task StartComfyAsync(CancellationToken ct)
     {
+        RequireCompletedInstallation();
         ResolvePaths();
-        await Services.StartComfy(Config, Program.Runtime, ct);
+        startingRole = "ComfyUI";
+        try { await Services.StartComfy(Config, Program.Runtime, ct); }
+        finally { startingRole = null; }
         SetStatus("ComfyUI 已就绪：" + Config.ComfyUrl);
     }
 
     /// <summary>Start ComfyUI (if needed) and the Studio workbench.</summary>
     public async Task StartWebUIAsync(CancellationToken ct)
     {
+        RequireCompletedInstallation();
         ResolvePaths();
-        await EnsureBaseModels(ct);
-        await Services.StartWebUI(Config, Program.Runtime, ct);
+        startingRole = "WebUI";
+        try { await Services.StartWebUI(Config, Program.Runtime, ct); }
+        finally { startingRole = null; }
         Config.SetupComplete = true;
         Save();
         SetStatus("服务已就绪：" + Config.WebUrl);
     }
 
-    /// <summary>Ensure base-generation models exist before starting the workbench.</summary>
-    private async Task EnsureBaseModels(CancellationToken ct)
+    private void RequireCompletedInstallation()
     {
-        var probe = await Inventory.Probe(Config.ComfyRoot, Config.Python, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
-        var inventory = await Inventory.Scan(probe, Program.Models, false, ct);
-        var required = inventory.Where(x => x.Model.Group == "基础生成" && x.Missing).ToArray();
-        if (required.Length > 0)
-        {
-            GoTo(2); // 模型与节点
-            await Scan(ct);
-            throw new InvalidOperationException("基础模型未就绪：" + string.Join("、", required.Select(x => x.Model.Name)) + "。请先下载或手动导入。");
-        }
+        if (!FreshInstallRequested && !Config.InstallPending) return;
+        GoTo(1);
+        throw new InvalidOperationException("安装尚未完成，请先继续准备环境与模型，再启动工作台。");
     }
 
     /// <summary>Set while a bundled upgrade waits for the workbench to go idle.</summary>
@@ -379,9 +630,9 @@ internal sealed class LauncherState : IDisposable
     public async Task<bool> IsWorkbenchBusyAsync(CancellationToken ct)
     {
         var current = await ServiceManager.Json(Config.WebUrl + "/api/batches/current", ct);
-        if (current is null || current.Value.ValueKind != JsonValueKind.Object) return false;
-        if (current.Value.TryGetProperty("batch", out var batch) && batch.ValueKind == JsonValueKind.Object) return true;
-        return current.Value.TryGetProperty("queue", out var queue) && queue.ValueKind == JsonValueKind.Array && queue.GetArrayLength() > 0;
+        var activity = RuntimePolicies.WorkbenchActivity(current);
+        if (activity == WorkbenchActivity.Unknown) throw new IOException("无法确认工作台是否空闲，请检查连接后重试；现有服务保持运行。");
+        return activity == WorkbenchActivity.Busy;
     }
 
     /// <summary>
@@ -394,64 +645,99 @@ internal sealed class LauncherState : IDisposable
     public async Task<bool> EnsureCurrentVersionAsync(CancellationToken ct)
     {
         if (!Config.SetupComplete || DevAppRoot) return false;
-        var health = await ServiceManager.PortOpen(Config.WebPort) ? await ServiceManager.Json(Config.WebUrl + "/api/launcher-health", ct) : null;
-        var runningOurs = ServiceManager.IsWorkbenchHealth(health);
-        var runningDir = runningOurs && health!.Value.TryGetProperty("app_dir", out var dir) && dir.ValueKind == JsonValueKind.String ? dir.GetString()! : "";
-        if (runningDir.Length > 0 && SamePath(runningDir, Program.AppRoot))
+        var desired = Config.PinnedAppRoot.Length > 0 ? Config.PinnedAppRoot : Program.AppRoot;
+        var health = await ServiceManager.PortOpen(Config.WebPort, ct) ? await ServiceManager.Json(Config.WebUrl + "/api/launcher-health", ct) : null;
+        var runningDir = ServiceManager.IsWorkbenchHealth(health) && health!.Value.TryGetProperty("app_dir", out var dir) && dir.ValueKind == JsonValueKind.String ? dir.GetString()! : "";
+        var staleRunning = PathUnderVersionsRoot(runningDir) && !SamePath(runningDir, desired);
+        var shouldSwitch = RuntimePolicies.ShouldSwitchBundledVersion(Config.AppRoot, desired, Path.Combine(Program.StateDir, "versions"), Config.SetupComplete, Config.PinnedAppRoot.Length > 0);
+        if (!shouldSwitch && !staleRunning) return false;
+        if (runningDir.Length > 0 && await IsWorkbenchBusyAsync(ct))
         {
-            // The port already serves the bundled build (e.g. config was stale); just repoint.
-            if (!SamePath(Config.AppRoot, Program.AppRoot))
-            {
-                AppendLog("运行中的工作台已是最新版本，正在修正配置。");
-                Config.AppRoot = Program.AppRoot;
-                Save();
-                Reloaded();
-            }
+            var runningConfig = Config.Clone();
+            runningConfig.AppRoot = runningDir;
+            if (!PathUnderVersionsRoot(runningDir) || !ServiceManager.IsOurWebUi(health, runningConfig))
+                throw new PortConflictException(Config.WebPort);
+            // The persisted pointer can be newer than the process after an
+            // interrupted upgrade. Reuse the proven live context until idle.
+            Config.AppRoot = runningDir;
+            Save();
+            UpgradePending = true;
+            SetStatus("工作台正在生成，继续使用当前版本；空闲后可应用新版。");
             return false;
         }
-        var stoppedStale = false;
-        // A stale workbench instance (ours but an old app dir) holds the port.
-        if (runningOurs)
-        {
-            AppendLog("检测到旧版本工作台实例：" + runningDir);
-            if (await IsWorkbenchBusyAsync(ct))
-            {
-                UpgradePending = true;
-                SetStatus("检测到工作台新版本；当前有生成任务，本次继续使用旧版，下次启动自动切换。");
-                AppendLog("工作台忙，版本切换延后到下次启动。");
-                return false;
-            }
-            if (!await Services.TryStopWebUiAsync(Config, Path.Combine(Program.StateDir, "versions"), ct))
-                throw new InvalidOperationException("旧版本工作台无法停止（可能正在生成或为外部进程）；请先停止该实例后重试。");
-            stoppedStale = true;
-        }
-        // A foreign service may still hold the port — leave that to the conflict
-        // flow — but switch the config now so the new instance runs the bundled build.
-        if (!SamePath(Config.AppRoot, Program.AppRoot)) SwitchAppRoot();
-        return stoppedStale;
+        await TransitionVersionAsync(desired, Config.PinnedAppRoot, ct);
+        return true;
     }
 
-    /// <summary>Point config at the bundled app dir, keeping the previous root for rollback.</summary>
-    private void SwitchAppRoot()
+    private async Task TransitionVersionAsync(string target, string pin, CancellationToken ct)
     {
-        var previous = JsonSerializer.Deserialize<LauncherConfig>(JsonSerializer.Serialize(Config, JsonFile.Options), JsonFile.Options)!;
-        JsonFile.Write(Path.Combine(Program.StateDir, "launcher.previous.json"), previous);
-        Config.AppRoot = Program.AppRoot;
-        Save();
-        UpgradePending = false;
-        AppendLog("工作台版本已切换到内嵌版本：" + Program.AppRoot);
-        Reloaded();
+        if (!File.Exists(Path.Combine(target, "run.py"))) throw new IOException("目标工作台版本资源不存在。");
+        var previous = Config.Clone();
+        var wasRunning = await ServiceManager.PortOpen(Config.WebPort, ct);
+        if (wasRunning)
+        {
+            var health = await ServiceManager.Json(Config.WebUrl + "/api/launcher-health", ct);
+            if (!ServiceManager.IsWorkbenchHealth(health)) throw new PortConflictException(Config.WebPort);
+            if (health!.Value.TryGetProperty("app_dir", out var liveDir) && liveDir.ValueKind == JsonValueKind.String && PathUnderVersionsRoot(liveDir.GetString()!))
+            {
+                var liveConfig = previous.Clone();
+                liveConfig.AppRoot = liveDir.GetString()!;
+                if (!ServiceManager.IsOurWebUi(health, liveConfig)) throw new PortConflictException(Config.WebPort);
+                previous.AppRoot = liveConfig.AppRoot;
+            }
+            if (await IsWorkbenchBusyAsync(ct)) throw new IOException("工作台正在生成，请等待任务完成后切换版本。");
+            if (!await Services.TryStopWebUiAsync(previous, Path.Combine(Program.StateDir, "versions"), ct))
+                throw new IOException("当前工作台无法安全停止，请先停止占用端口的程序。");
+        }
+        Config = previous.Clone();
+        Config.AppRoot = target;
+        Config.PinnedAppRoot = pin;
+        var newStarted = false;
+        try
+        {
+            await Services.Start(Config, Program.Runtime, ct);
+            newStarted = true;
+            // Publish the new pointer only after both services are healthy.
+            JsonFile.Write(Path.Combine(Program.StateDir, "launcher.previous.json"), previous);
+            Save();
+            UpgradePending = false;
+            Reloaded();
+        }
+        catch
+        {
+            if (newStarted)
+            {
+                try { await Services.StopOwnedAsync("WebUI"); }
+                catch (Exception ex) { AppendLog("新版服务清理失败：" + ex.Message); }
+            }
+            Config = previous;
+            try { Save(); }
+            catch (Exception ex) { AppendLog("原版本配置恢复写入失败：" + ex.Message); }
+            Reloaded();
+            if (wasRunning)
+            {
+                using var recovery = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+                try { await Services.Start(Config, Program.Runtime, recovery.Token); AppendLog("新版本启动失败，已恢复原工作台服务。"); }
+                catch (Exception ex) { AppendLog("已恢复原版本配置；服务恢复失败，请重试启动：" + ex.Message); }
+            }
+            throw;
+        }
     }
 
     /// <summary>Start everything, handle port conflicts (bounded retries), open the workbench, hide unless forced.</summary>
     public async Task StartServicesAsync(CancellationToken ct)
     {
-        await EnsureCurrentVersionAsync(ct);
+        if (FreshInstallRequested || Config.InstallPending)
+        {
+            GoTo(1);
+            SetStatus("安装尚未完成，请检查安装内容后继续准备环境与模型。");
+            return;
+        }
         // A second conflict is common when both ports are taken, or a freed port is raced;
         // offer auto-assign up to three times instead of failing on the second conflict.
         for (var attempt = 0; ; attempt++)
         {
-            try { await StartWebUIAsync(ct); break; }
+            try { await EnsureCurrentVersionAsync(ct); await StartWebUIAsync(ct); break; }
             catch (PortConflictException ex) when (attempt < 2)
             {
                 showWindow();
@@ -459,7 +745,8 @@ internal sealed class LauncherState : IDisposable
                 var x = root();
                 if (x is null || !await Dialogs.ConfirmCancel(x, "端口冲突", $"{ex.Message}\n是否自动寻找并保存空闲端口，然后重新启动？", "自动分配")) throw;
                 var port = ex.Port + 1;
-                while (port < 65535 && (port == Config.ComfyPort || port == Config.WebPort || await ServiceManager.PortOpen(port))) port++;
+                while (port < 65535 && (port == Config.ComfyPort || port == Config.WebPort || await ServiceManager.PortOpen(port, ct))) port++;
+                ct.ThrowIfCancellationRequested();
                 if (port >= 65535) throw new InvalidOperationException("没有可用空闲端口，请手动修改端口后重试。");
                 if (ex.Port == Config.ComfyPort) Config.ComfyPort = port; else Config.WebPort = port;
                 Save();
@@ -469,7 +756,7 @@ internal sealed class LauncherState : IDisposable
         Save();
         Program.Open(Config.WebUrl);
         SetStatus("服务已就绪：" + Config.WebUrl);
-        if (!ForceShow) HideWindow?.Invoke();
+        if (Config.StartOnLaunch && !ForceShow) HideWindow?.Invoke();
     }
 
     /// <summary>Stop one managed service by role ("ComfyUI" or "WebUI"). Confirms when stopping ComfyUI while the workbench runs.</summary>
@@ -483,48 +770,60 @@ internal sealed class LauncherState : IDisposable
             ? "停止本程序拥有的 ComfyUI？工作台将失去后端而不可用，正在执行的生成会中断。"
             : $"停止本程序拥有的{label}？正在执行的任务会中断。";
         if (!await Dialogs.ConfirmCancel(x, "停止" + label, message, "停止")) return;
-        await Run(_ =>
+        await Run(async ct =>
         {
-            Services.StopOwned(role);
+            await Services.StopOwnedAsync(role, ct);
             SetStatus($"已停止启动器拥有的{label}；外部服务保持运行。");
-            return Task.CompletedTask;
-        });
+        }, applyDrafts: false);
     }
 
-    /// <summary>Probe ComfyUI reachability and ownership.</summary>
+    /// <summary>Reachability and ownership are separate; a live PID is not ready.</summary>
     public async Task<ServiceInfo> ProbeComfyAsync()
     {
         var info = new ServiceInfo { Url = Config.ComfyUrl };
         if (string.IsNullOrWhiteSpace(Config.ComfyRoot)) return info;
         info.Configured = true;
         info.Managed = Services.IsOwnedRunning("ComfyUI");
-        if (await ServiceManager.PortOpen(Config.ComfyPort))
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+        try
         {
-            var stats = await ServiceManager.Json(Config.ComfyUrl + "/system_stats");
-            info.Running = stats is not null;
-            info.Ours = stats is not null && ServiceManager.SameRoot(stats.Value, Config.ComfyRoot);
+            if (await ServiceManager.PortOpen(Config.ComfyPort, timeout.Token))
+            {
+                var stats = await ServiceManager.Json(Config.ComfyUrl + "/system_stats", timeout.Token);
+                info.Ours = stats is not null && ServiceManager.SameRoot(stats.Value, Config.ComfyRoot);
+                info.Running = info.Ours;
+                info.Status = info.Ours ? info.Managed ? "ready" : "external" : "conflict";
+            }
+            else info.Status = startingRole is "ComfyUI" or "WebUI" ? "starting" : info.Managed ? "error" : "stopped";
         }
+        catch (Exception ex) { info.Status = startingRole is not null ? "starting" : "error"; info.Detail = ex.Message; }
         return info;
     }
 
-    /// <summary>Probe the Studio workbench reachability and ownership.</summary>
     public async Task<ServiceInfo> ProbeWebUIAsync()
     {
         var info = new ServiceInfo { Url = Config.WebUrl };
-        if (string.IsNullOrWhiteSpace(Config.AppRoot)) return info;
+        if (string.IsNullOrWhiteSpace(Config.ComfyRoot)) return info;
         info.Configured = true;
         info.Managed = Services.IsOwnedRunning("WebUI");
-        if (await ServiceManager.PortOpen(Config.WebPort))
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+        try
         {
-            var health = await ServiceManager.Json(Config.WebUrl + "/api/launcher-health");
-            info.Ours = ServiceManager.IsOurWebUi(health, Config);
-            if (info.Ours)
+            if (await ServiceManager.PortOpen(Config.WebPort, timeout.Token))
             {
-                var status = await ServiceManager.Json(Config.WebUrl + "/api/status");
-                info.Running = status is not null && status.Value.TryGetProperty("online", out var online) && online.GetBoolean();
+                var health = await ServiceManager.Json(Config.WebUrl + "/api/launcher-health", timeout.Token);
+                info.Ours = ServiceManager.IsOurWebUi(health, Config);
+                if (info.Ours)
+                {
+                    var status = await ServiceManager.Json(Config.WebUrl + "/api/status", timeout.Token);
+                    info.Running = status is not null && status.Value.TryGetProperty("online", out var online) && online.ValueKind == JsonValueKind.True;
+                    info.Status = info.Running ? info.Managed ? "ready" : "external" : startingRole is not null ? "starting" : "error";
+                }
+                else info.Status = "conflict";
             }
-            else info.Running = health is not null;
+            else info.Status = startingRole == "WebUI" ? "starting" : info.Managed ? "error" : "stopped";
         }
+        catch (Exception ex) { info.Status = startingRole is not null ? "starting" : "error"; info.Detail = ex.Message; }
         return info;
     }
 
@@ -533,12 +832,11 @@ internal sealed class LauncherState : IDisposable
         showWindow();
         var x = root();
         if (x is null || !await Dialogs.ConfirmCancel(x, "停止服务", "停止启动器拥有的服务？正在执行的生成会中断。", "停止服务")) return;
-        await Run(_ =>
+        await Run(async ct =>
         {
-            Services.StopOwned();
+            await Services.StopOwnedAsync(ct: ct);
             SetStatus("已停止启动器拥有的服务。");
-            return Task.CompletedTask;
-        });
+        }, applyDrafts: false);
     }
 
     public async Task TestGenerationAsync(CancellationToken ct)
@@ -575,37 +873,24 @@ internal sealed class LauncherState : IDisposable
 
     public async Task ApplyBundledVersionAsync(CancellationToken ct)
     {
-        if (SamePath(Config.AppRoot, Program.AppRoot)) { SetStatus("当前已经是此 EXE 内置版本。"); return; }
-        if (await ServiceManager.PortOpen(Config.WebPort))
+        if (SamePath(Config.AppRoot, Program.AppRoot))
         {
-            if (await IsWorkbenchBusyAsync(ct)) throw new IOException("工作台正在生成，请等待批次结束后再应用新版本。");
-            if (!await Services.TryStopWebUiAsync(Config, Path.Combine(Program.StateDir, "versions"), ct)) throw new IOException("请先停止占用工作台端口的程序再更新。");
-        }
-        var previousRoot = Config.AppRoot;
-        SwitchAppRoot();
-        try
-        {
-            await Services.Start(Config, Program.Runtime, ct);
+            Config.PinnedAppRoot = "";
             Save();
-            SetStatus("新版本健康检查通过；旧应用资源和用户数据已保留。");
+            SetStatus("当前已经是此启动器内置版本。");
+            return;
         }
-        catch { Config.AppRoot = previousRoot; Save(); throw; }
+        await TransitionVersionAsync(Program.AppRoot, "", ct);
+        SetStatus("新版本健康检查通过；旧版本与用户数据已保留。");
     }
 
     public async Task RollbackVersionAsync(CancellationToken ct)
     {
-        if (await ServiceManager.PortOpen(Config.WebPort)) throw new IOException("请先停止工作台服务再回退。");
-        var previous = JsonFile.Read<LauncherConfig>(Path.Combine(Program.StateDir, "launcher.previous.json"));
-        if (!File.Exists(Path.Combine(previous.AppRoot, "run.py"))) throw new IOException("上一版本资源已不存在。");
-        var current = Config.AppRoot;
-        Config.AppRoot = previous.AppRoot;
-        try
-        {
-            await Services.Start(Config, Program.Runtime, ct);
-            Save();
-            SetStatus("已恢复上一工作台版本；用户数据保留。");
-        }
-        catch { Config.AppRoot = current; Save(); throw; }
+        var previousFile = Path.Combine(Program.StateDir, "launcher.previous.json");
+        if (!File.Exists(previousFile)) throw new IOException("还没有可回退的上一工作台版本。");
+        var previous = JsonFile.Read<LauncherConfig>(previousFile);
+        await TransitionVersionAsync(previous.AppRoot, previous.AppRoot, ct);
+        SetStatus("已恢复上一版本并固定使用；主动应用新版后才解除固定。");
     }
 
     // --- Misc ---
@@ -627,10 +912,10 @@ internal sealed class LauncherState : IDisposable
 
     public void OfferUpgradeIfNeeded()
     {
-        if (Config.SetupComplete && !DevAppRoot && !SamePath(Config.AppRoot, Program.AppRoot) && !upgradeOffered)
+        if (Config.SetupComplete && !DevAppRoot && Config.PinnedAppRoot.Length == 0 && !SamePath(Config.AppRoot, Program.AppRoot) && !upgradeOffered)
         {
             upgradeOffered = true;
-            SetStatus("检测到工作台新版本；服务空闲时将自动切换到内嵌版本。");
+            SetStatus("检测到工作台新版本；下次主动启动时检查并应用，可在设置中管理版本。");
         }
     }
 
@@ -642,8 +927,8 @@ internal sealed class LauncherState : IDisposable
     public void Dispose() => Downloads.Dispose();
 }
 
-public sealed record EnvironmentFields(string ComfyRoot, string Python, string SourceId, string GitMirror, string HfMirror, string PipIndex, string CustomRepository);
-public sealed record SettingsFields(int ComfyPort, int WebPort, string Theme);
+public sealed record EnvironmentFields(string ComfyRoot, string Python, string SourceId, string GitMirror, string HfMirror, string PipIndex, string CustomRepository, bool Fresh = false, bool PythonExplicit = false);
+public sealed record SettingsFields(int ComfyPort, int WebPort, string Theme, bool StartOnLaunch = false);
 
 /// <summary>Reachability/ownership snapshot for one managed service.</summary>
 public sealed class ServiceInfo
@@ -653,6 +938,8 @@ public sealed class ServiceInfo
     public bool Managed { get; set; }
     public bool Ours { get; set; }
     public string Url { get; set; } = "";
+    public string Status { get; set; } = "unconfigured";
+    public string Detail { get; set; } = "";
 }
 
 /// <summary>Group header + items for the model ListView grouping.</summary>

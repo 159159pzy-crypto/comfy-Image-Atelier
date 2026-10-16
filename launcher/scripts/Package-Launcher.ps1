@@ -1,6 +1,26 @@
 # Pure packaging helpers; dot-source from the build and its offline regression test.
 Set-StrictMode -Version Latest
 
+function Get-LauncherSourceInfo([string]$Repository) {
+    $result = [ordered]@{ sourceCommit = 'unknown'; sourceKind = 'source-archive'; sourceDirty = $null; sourceChanges = @() }
+    # Test this directory itself, so a source ZIP unpacked inside another Git repo
+    # cannot accidentally claim the containing repository's commit.
+    if (Test-Path -LiteralPath (Join-Path $Repository '.git')) {
+        $git = Get-Command git -ErrorAction SilentlyContinue
+        if ($git) {
+            $head = (& $git.Source -C $Repository rev-parse HEAD).Trim()
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot identify the source commit.' }
+            $changes = @(& $git.Source -C $Repository status --porcelain=v1 --untracked-files=normal)
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the source working tree.' }
+            $result.sourceCommit = $head
+            $result.sourceKind = 'git-checkout'
+            $result.sourceDirty = $changes.Count -gt 0
+            $result.sourceChanges = $changes
+        }
+    }
+    return [pscustomobject]$result
+}
+
 function Get-LauncherPackageFiles([string]$Directory) {
     $root = [System.IO.Path]::GetFullPath($Directory).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
     foreach ($folder in @(Get-ChildItem -LiteralPath $root -Directory -Recurse -Force)) {

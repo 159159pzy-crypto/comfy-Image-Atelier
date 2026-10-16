@@ -18,14 +18,16 @@ from .comfy import ComfyClient, ComfyError
 from .catalog import CatalogError, PromptCatalog, SECTIONS, resolve_history_selection
 from .persistence import StorageReadOnlyError
 from .custom_prompts import CustomPromptStore
-from .favorites import FavoritesService, favorite_key
+from .favorites import FavoritesService, FavoritesExtensionStore, favorite_key
+from .input_images import InputImageStore, MAX_IMAGE_BYTES
+from .single_workbench import SINGLE_DEFAULTS, active_lora_pipelines
 from .history import HistoryStore
 from .lora_triggers import LoraTriggerOverrideStore
 from .prompt_rules import PromptRuleStore
 from .prompt_pools import PromptPoolStore, parse_prompt_import, parse_prompt_import_details
 from .runner import BatchConflict, BatchManager
 from .style_presets import StylePresetStore
-from .workflow import WorkflowError, WorkflowTemplates, normalize_lora_path
+from .workflow import WorkflowError, WorkflowTemplates, normalize_lora_path, validate_settings
 from .model_profiles import (
     MODEL_PROFILE_IDS,
     model_profile_defaults,
@@ -50,6 +52,7 @@ STYLE_PRESETS_KEY: web.AppKey[Any] = web.AppKey("style_presets", object)
 LORA_TRIGGER_OVERRIDES_KEY: web.AppKey[Any] = web.AppKey("lora_trigger_overrides", object)
 PROMPT_RULES_KEY: web.AppKey[Any] = web.AppKey("prompt_rules", object)
 PROMPT_POOLS_KEY: web.AppKey[Any] = web.AppKey("prompt_pools", object)
+INPUT_IMAGES_KEY: web.AppKey[Any] = web.AppKey("input_images", object)
 ALLOWED_HOSTNAMES_KEY: web.AppKey[frozenset[str]] = web.AppKey(
     "allowed_hostnames", frozenset
 )
@@ -217,7 +220,9 @@ def create_app(
     custom_prompts = CustomPromptStore(
         custom_prompts_path or storage / "custom_prompts.json", catalog
     )
-    favorites = FavoritesService(client, catalog)
+    favorite_extensions = FavoritesExtensionStore(storage / "favorite_extensions.json")
+    favorites = FavoritesService(client, catalog, expression_store=favorite_extensions)
+    input_images = InputImageStore(storage / "input-images")
     prompt_rules = PromptRuleStore(
         prompt_replacements_path or storage / "prompt_replacements.json"
     )
@@ -233,7 +238,7 @@ def create_app(
     templates = WorkflowTemplates.load(root / "templates")
     startup_defaults = configure_resources(templates, resource_paths)
     manager = BatchManager(
-        templates, history, client, catalog, prompt_rules, prompt_pools
+        templates, history, client, catalog, prompt_rules, prompt_pools, input_images
     )
 
     startup_warnings = [
@@ -244,9 +249,10 @@ def create_app(
         *lora_trigger_overrides.load_warnings,
         *prompt_rules.load_warnings,
         *prompt_pools.load_warnings,
+        *favorite_extensions.load_warnings,
     ]
 
-    app = web.Application(middlewares=[error_middleware, local_only_middleware])
+    app = web.Application(middlewares=[error_middleware, local_only_middleware], client_max_size=MAX_IMAGE_BYTES + 1024 * 1024)
     normalized_trusted_hostnames = {
         hostname
         for value in trusted_hostnames or set()
@@ -263,6 +269,7 @@ def create_app(
     app[LORA_TRIGGER_OVERRIDES_KEY] = lora_trigger_overrides
     app[PROMPT_RULES_KEY] = prompt_rules
     app[PROMPT_POOLS_KEY] = prompt_pools
+    app[INPUT_IMAGES_KEY] = input_images
 
     async def favorite_keys(section: str, collection: str = "") -> set[str] | None:
         if not collection:
@@ -291,6 +298,7 @@ def create_app(
         return web.json_response(
             {
                 "defaults": startup_defaults,
+                "single_defaults": SINGLE_DEFAULTS,
                 "comfy_url": getattr(client, "base_url", "local"),
                 "catalog": {
                     "available": catalog.available,
@@ -300,7 +308,7 @@ def create_app(
                 },
                 "storage_status": {
                     store.store_name: {**store.storage_status(), "path": str(store.path)}
-                    for store in (history, custom_prompts, style_presets, lora_trigger_overrides, prompt_rules, prompt_pools)
+                    for store in (history, custom_prompts, style_presets, lora_trigger_overrides, prompt_rules, prompt_pools, favorite_extensions)
                 },
                 "warnings": startup_warnings,
             }
@@ -904,11 +912,13 @@ def create_app(
             model_name, model_names, model_owners, profile, classifications
         )
 
-        lora_items = [
-            item
-            for item in (settings.get("loras") or [])
-            if isinstance(item, dict) and item.get("enabled")
-        ]
+        active = active_lora_pipelines(validate_settings(settings))
+        stacks = []
+        if "primary" in active:
+            stacks.extend(settings.get("loras") or [])
+        if "secondary" in active:
+            stacks.extend((settings.get("single") or {}).get("loras_secondary") or [])
+        lora_items = [item for item in stacks if isinstance(item, dict) and item.get("enabled")]
         if not lora_items:
             return
         lora_inventory = await client.resource_classifications("loras", refresh=True)
@@ -922,16 +932,101 @@ def create_app(
                 reason = classified.get("classification_reason") or f"插件分类为 {classified.get('base_model') or 'Unknown'}"
                 raise WorkflowError(f"LoRA 不适用于 {profile} 档案: {name}；{reason}，请在 LoRA Manager 中检查分类")
 
+    async def hydrate_single_triggers(settings: dict[str, Any]) -> None:
+        if settings.get("workbench") != "single":
+            return
+        single = settings.setdefault("single", {})
+        primary = [item for item in settings.get("loras", []) if isinstance(item, dict) and item.get("enabled")]
+        secondary = [item for item in single.get("loras_secondary", []) if isinstance(item, dict) and item.get("enabled")]
+        active = active_lora_pipelines(validate_settings(settings))
+        if not primary:
+            settings["lora_managed_triggers"] = []
+        if not secondary:
+            single["secondary_managed_triggers"] = []
+        if not (("primary" in active and primary) or ("secondary" in active and secondary)):
+            return
+        inventory = await client.resource_classifications("loras", refresh=True)
+        lookup = {normalize_lora_path(item.get("filename") or item.get("name")).casefold(): item for item in inventory["items"]}
+        profile = settings.get("model_profile", "anima")
+        for name, selected, target, key in (("primary", primary, settings, "lora_managed_triggers"), ("secondary", secondary, single, "secondary_managed_triggers")):
+            if name not in active:
+                continue
+            words = []
+            for selection in selected:
+                item = lookup.get(normalize_lora_path(selection.get("filename")).casefold())
+                if item:
+                    public = _public_lora_item(item, profile)
+                    for word in public.get("trigger_words") or []:
+                        if isinstance(word, str) and word.strip() and word.casefold() not in {value.casefold() for value in words}:
+                            words.append(word.strip())
+            target[key] = words
+
     async def start_batch(request: web.Request) -> web.Response:
         history.ensure_writable()
-        await client.status()
         body = await _json_body(request)
         seeds = body.pop("seeds", None)  # 复现历史图片时携带固定种子,不属于 settings
         if resource_paths is not None:
             body = {**startup_defaults, **body}
+        # Validate the public shape before resource helpers traverse nested
+        # fields. Keep the original payload so legacy migration semantics at
+        # the runner boundary remain unchanged.
+        validate_settings(body)
+        await client.status()
         await validate_resource_ownership(body)
+        await hydrate_single_triggers(body)
         state = await manager.start(body, seeds=seeds)
         return web.json_response(state, status=201)
+
+    async def upload_input_image(request: web.Request) -> web.Response:
+        if not request.content_type.startswith("multipart/"):
+            raise WorkflowError("请以 multipart image 字段上传图片")
+        reader = await request.multipart()
+        found = None
+        async for part in reader:
+            if part.name != "image" or found is not None:
+                raise WorkflowError("上传请求只能包含一个 image 字段")
+            data = bytearray()
+            while chunk := await part.read_chunk():
+                data.extend(chunk)
+                if len(data) > MAX_IMAGE_BYTES:
+                    raise WorkflowError("输入图片不能超过 20 MiB")
+            found = (bytes(data), part.filename or "image")
+        if found is None:
+            raise WorkflowError("缺少 image 文件")
+        result = await asyncio.to_thread(input_images.add, found[0], filename=found[1])
+        return web.json_response(result, status=201)
+
+    async def input_image_from_history(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        image_id = body.get("image_id")
+        if set(body) != {"image_id"} or isinstance(image_id, bool) or not isinstance(image_id, int) or image_id <= 0:
+            raise WorkflowError("image_id 必须为有效作品 ID")
+        record = await history.get_image(image_id)
+        content, _ = await client.image_bytes(record)
+        result = await asyncio.to_thread(input_images.add, content, filename=record["filename"], source_image_id=image_id)
+        return web.json_response(result, status=201)
+
+    async def input_image_metadata(request: web.Request) -> web.Response:
+        return web.json_response(await asyncio.to_thread(input_images.get, request.match_info["asset_id"]))
+
+    async def input_image_content(request: web.Request) -> web.FileResponse:
+        path = await asyncio.to_thread(input_images.image_path, request.match_info["asset_id"])
+        return web.FileResponse(path, headers={"Content-Type": "image/png", "X-Content-Type-Options": "nosniff"})
+
+    async def create_prompt_job(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        if set(body) - {"settings", "force"} or not isinstance(body.get("settings"), dict) or not isinstance(body.get("force", False), bool):
+            raise WorkflowError("提示词预览需要 settings 对象及可选 force 布尔值")
+        validate_settings(body["settings"])
+        await hydrate_single_triggers(body["settings"])
+        result = await manager.start_prompt_preview(body["settings"], force=body.get("force", False))
+        return web.json_response(result, status=201)
+
+    async def get_prompt_job(request: web.Request) -> web.Response:
+        return web.json_response(await manager.prompt_jobs.get(request.match_info["job_id"]))
+
+    async def cancel_prompt_job(request: web.Request) -> web.Response:
+        return web.json_response(await manager.cancel_prompt_preview(request.match_info["job_id"]))
 
     async def current_batch(_: web.Request) -> web.Response:
         return web.json_response({"batch": manager.snapshot(), "queue": manager.queue_snapshot()})
@@ -944,16 +1039,33 @@ def create_app(
         return web.json_response({"batch": state, "queue": manager.queue_snapshot()})
 
     async def remove_queued_batch(request: web.Request) -> web.Response:
+        entry = next((item for item in manager.queue if item["queue_id"] == request.match_info["queue_id"]), None)
+        if entry and entry.get("kind") == "prompt_preview":
+            await manager.cancel_prompt_preview(entry["job_id"])
+            return web.json_response({"queue": manager.queue_snapshot()})
         if not manager.remove_queued(request.match_info["queue_id"]):
             raise KeyError(request.match_info["queue_id"])
         return web.json_response({"queue": manager.queue_snapshot()})
 
-    async def batch_preview(_: web.Request) -> web.Response:
+    async def batch_preview(request: web.Request) -> web.Response:
         preview = manager.preview
+        owner = manager.preview_metadata
+        headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
         if preview is None:
-            return web.Response(status=204)
-        _seq, content_type, body = preview
-        return web.Response(body=body, content_type=content_type, headers={"Cache-Control": "no-store"})
+            return web.Response(status=204, headers=headers)
+        for key in ("batch_id", "prompt_id", "node_id"):
+            if key in request.query and (owner is None or request.query[key] != owner[key]):
+                return web.Response(status=204, headers=headers)
+        if owner is not None:
+            state = manager.state or {}
+            if (owner["batch_id"] != state.get("id") or owner["prompt_id"] != state.get("prompt_id")
+                    or state.get("stage") != "generating" or state.get("status") not in ("running", "stopping")):
+                return web.Response(status=204, headers=headers)
+            headers.update({"X-Preview-Batch-Id": owner["batch_id"], "X-Preview-Prompt-Id": owner["prompt_id"],
+                            "X-Preview-Node-Id": owner["node_id"]})
+        seq, content_type, body = preview
+        headers["X-Preview-Id"] = str(seq)
+        return web.Response(body=body, content_type=content_type, headers=headers)
 
     async def list_history(request: web.Request) -> web.Response:
         try:
@@ -961,7 +1073,24 @@ def create_app(
             limit = int(request.query.get("limit", "24"))
         except ValueError as error:
             raise WorkflowError("分页参数无效") from error
-        return web.json_response({**await history.list_images(page, limit), "available": history.available})
+        before_id = None
+        if "before_id" in request.query:
+            raw_before_id = request.query["before_id"]
+            if not raw_before_id.isascii() or not raw_before_id.isdecimal():
+                raise WorkflowError("before_id 必须为正整数图片 ID")
+            try:
+                before_id = int(raw_before_id)
+            except ValueError as error:
+                raise WorkflowError("before_id 必须为正整数图片 ID") from error
+            if not 1 <= before_id <= 2**63 - 1:
+                raise WorkflowError("before_id 必须为正整数图片 ID")
+        workbench = request.query.get("workbench") or None
+        if workbench not in {None, "random", "single"}:
+            raise WorkflowError("workbench 必须为 random 或 single")
+        return web.json_response({
+            **await history.list_images(page, limit, workbench, before_id=before_id),
+            "available": history.available,
+        })
 
     async def _regeneration_context(image_id: int) -> tuple[dict[str, Any], dict[str, Any]]:
         record = await history.get_image(image_id)
@@ -1096,7 +1225,7 @@ def create_app(
                 f"再生成请求包含未知参数: {', '.join(sorted(unknown))}"
             )
         mode = body.get("mode")
-        if mode not in {"replay", "prompt_variant", "content_redraw", "settings_reroll"}:
+        if not isinstance(mode, str) or mode not in {"replay", "prompt_variant", "content_redraw", "settings_reroll"}:
             raise WorkflowError("mode 无效")
         if context["resourceIssues"]:
             missing = "；".join(
@@ -1183,6 +1312,11 @@ def create_app(
                     "original_selection": context["selected"],
                 }
         await validate_resource_ownership(settings)
+        if settings.get("workbench") == "single" and mode in {"replay", "prompt_variant"}:
+            runtime = record.get("single_runtime") or {}
+            if not runtime.get("effective_positive"):
+                runtime = {"positive": context["positive"], "effective_positive": {"primary": context["positive"], "secondary": context["positive"]}, "negative": context["negative"]}
+            regeneration["single_runtime"] = runtime
         state = await manager.start(settings, seeds=seeds, regeneration=regeneration)
         return web.json_response(state, status=201)
 
@@ -1277,6 +1411,13 @@ def create_app(
     app.router.add_put("/api/custom-groups/{section}/{group_id}", update_custom_group)
     app.router.add_delete("/api/custom-groups/{section}/{group_id}", delete_custom_group)
     app.router.add_post("/api/batches", start_batch)
+    app.router.add_post("/api/input-images", upload_input_image)
+    app.router.add_post("/api/input-images/from-history", input_image_from_history)
+    app.router.add_get("/api/input-images/{asset_id}/image", input_image_content)
+    app.router.add_get("/api/input-images/{asset_id}", input_image_metadata)
+    app.router.add_post("/api/prompt-jobs", create_prompt_job)
+    app.router.add_get("/api/prompt-jobs/{job_id}", get_prompt_job)
+    app.router.add_post("/api/prompt-jobs/{job_id}/cancel", cancel_prompt_job)
     app.router.add_get("/api/batches/current", current_batch)
     app.router.add_get("/api/batches/current/preview", batch_preview)
     app.router.add_post("/api/batches/{batch_id}/stop", stop_batch)

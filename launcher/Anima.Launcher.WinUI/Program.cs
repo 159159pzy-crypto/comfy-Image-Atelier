@@ -10,16 +10,21 @@ namespace Anima.Launcher;
 
 internal static class Program
 {
-    internal static readonly string StateDir = Environment.GetEnvironmentVariable("ANIMA_LAUNCHER_HOME") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AnimaRandomStudio");
+    private static readonly string DefaultStateDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AnimaRandomStudio");
+    internal static readonly string StateDir = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Environment.GetEnvironmentVariable("ANIMA_LAUNCHER_HOME") ?? DefaultStateDir));
     internal static string Assets = "";
     internal static string AppRoot = "";
     internal static RuntimeManifest Runtime = null!;
     internal static ModelManifest Models = null!;
     internal static SourceManifest Sources = null!;
+    internal static ModelProfilesManifest ModelProfiles = null!;
+    internal static string Version => Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+')[0]
+        ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "unknown";
     private static readonly object LogLock = new();
 
     /// <summary>Named auto-reset event: a second instance signals it to surface the hidden window.</summary>
-    internal const string ShowEventName = "Local\\AnimaRandomStudioShow";
+    private static string InstanceSuffix => StateDir.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(DefaultStateDir)), StringComparison.OrdinalIgnoreCase) ? "" : "-" + Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(StateDir.ToUpperInvariant())))[..12];
+    internal static string ShowEventName => "Local\\AnimaRandomStudioShow" + InstanceSuffix;
     /// <summary>Owned by the first instance; created before the window so early second instances can wait on it.</summary>
     internal static EventWaitHandle? ShowSignal;
 
@@ -54,12 +59,12 @@ internal static class Program
     {
         try
         {
-            return new Mutex(true, "Local\\AnimaRandomStudioLauncher", out first);
+            return new Mutex(true, "Local\\AnimaRandomStudioLauncher" + InstanceSuffix, out first);
         }
         catch (AbandonedMutexException)
         {
             // A previous instance died holding the mutex; take ownership through WaitOne.
-            var recovered = new Mutex(false, "Local\\AnimaRandomStudioLauncher");
+            var recovered = new Mutex(false, "Local\\AnimaRandomStudioLauncher" + InstanceSuffix);
             recovered.WaitOne();
             first = true;
             return recovered;
@@ -89,6 +94,12 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Contains("--version"))
+        {
+            AttachConsole(0xFFFFFFFF);
+            Console.WriteLine(Version);
+            return 0;
+        }
         var diagnose = args.Contains("--diagnose");
         if (diagnose) AttachConsole(0xFFFFFFFF); // Attach to the parent console; EXE stays a GUI app.
         try
@@ -97,7 +108,7 @@ internal static class Program
             Log("启动器初始化");
             // Resource extraction is serialized across GUI launches and concurrent --diagnose
             // runs before the single-instance mutex decides who owns the window.
-            using var extract = new Mutex(false, "Local\\AnimaRandomStudioExtract");
+            using var extract = new Mutex(false, "Local\\AnimaRandomStudioExtract" + InstanceSuffix);
             var acquired = false;
             try { acquired = extract.WaitOne(TimeSpan.FromSeconds(60)); }
             catch (AbandonedMutexException) { acquired = true; }
@@ -140,7 +151,17 @@ internal static class Program
     private static void ExtractResources()
     {
         var assembly = Assembly.GetExecutingAssembly();
-        Assets = Path.Combine(StateDir, "versions", assembly.GetName().Version!.ToString());
+        // Manifests and payload form one immutable bundle. Two builds sharing a
+        // version number must never overwrite each other's running resources.
+        using var identityHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        foreach (var resource in assembly.GetManifestResourceNames().Order(StringComparer.Ordinal))
+        {
+            using var source = assembly.GetManifestResourceStream(resource)!;
+            identityHash.AppendData(System.Text.Encoding.UTF8.GetBytes(resource));
+            identityHash.AppendData(SHA256.HashData(source));
+        }
+        var bundleId = Convert.ToHexString(identityHash.GetHashAndReset())[..16].ToLowerInvariant();
+        Assets = Path.Combine(StateDir, "versions", Version + "-" + bundleId);
         Directory.CreateDirectory(Assets);
         foreach (var resource in assembly.GetManifestResourceNames())
         {
@@ -151,15 +172,19 @@ internal static class Program
                 : resource.EndsWith("launcher-manifest.json") ? "launcher-manifest.json"
                 : resource.EndsWith("model-manifest.json") ? "model-manifest.json"
                 : resource.EndsWith("source-profiles.json") ? "source-profiles.json"
+                : resource.EndsWith("model-profiles.json") ? "model-profiles.json"
                 : null;
             if (name is null) continue;
-            using var stream = assembly.GetManifestResourceStream(resource)!;
-            using var file = File.Create(Path.Combine(Assets, name));
-            stream.CopyTo(file);
+            var target = Path.Combine(Assets, name);
+            if (File.Exists(target)) continue;
+            using (var stream = assembly.GetManifestResourceStream(resource)!)
+            using (var file = File.Create(target + ".tmp")) stream.CopyTo(file);
+            File.Move(target + ".tmp", target, true);
         }
         Runtime = JsonFile.Read<RuntimeManifest>(Path.Combine(Assets, "launcher-manifest.json"));
         Models = JsonFile.Read<ModelManifest>(Path.Combine(Assets, "model-manifest.json"));
         Sources = JsonFile.Read<SourceManifest>(Path.Combine(Assets, "source-profiles.json"));
+        ModelProfiles = JsonFile.Read<ModelProfilesManifest>(Path.Combine(Assets, "model-profiles.json"));
         Safety.Validate(Runtime, Models);
         var zip = Path.Combine(Assets, "payload.zip");
         if (File.Exists(zip))
@@ -170,7 +195,11 @@ internal static class Program
             if (!Directory.Exists(bundled))
             {
                 var staging = bundled + ".extracting";
-                if (Directory.Exists(staging)) Directory.Delete(staging, true);
+                if (Directory.Exists(staging))
+                {
+                    if (!Path.GetDirectoryName(Path.GetFullPath(staging))!.Equals(Path.GetFullPath(Assets), StringComparison.OrdinalIgnoreCase)) throw new IOException("临时资源目录超出版本目录。");
+                    Directory.Delete(staging, true);
+                }
                 Installer.ExtractZip(zip, staging);
                 Directory.Move(staging, bundled);
             }
@@ -186,7 +215,7 @@ internal static class Program
 
     private static async Task<int> Diagnose(string[] args)
     {
-        string Arg(string flag, string fallback = "") { var i = Array.IndexOf(args, flag); return i >= 0 && i + 1 < args.Length ? args[i + 1] : fallback; }
+        string Arg(string flag, string fallback = "") { var i = Array.IndexOf(args, flag); return i >= 0 && i + 1 < args.Length && !args[i + 1].StartsWith("--") ? args[i + 1] : fallback; }
         var target = Arg("--diagnose");
         if (target.Length == 0)
         {
@@ -198,7 +227,17 @@ internal static class Program
         var probe = await Inventory.Probe(root, python, Path.Combine(Assets, "probe_comfy.py"), CancellationToken.None);
         var models = await Inventory.Scan(probe, Models, args.Contains("--hashes"), CancellationToken.None);
         var nodes = await Inventory.Nodes(root, Runtime, Commands.Find("git.exe"), CancellationToken.None);
-        var report = new { root, python, models, nodes, loras = Inventory.Loras(probe), comfy = await ServiceManager.Json("http://127.0.0.1:8188/system_stats") };
+        var warnings = new List<string>();
+        var configuration = new LauncherConfig();
+        try { if (File.Exists(Path.Combine(StateDir, "launcher.json"))) configuration = JsonFile.Read<LauncherConfig>(Path.Combine(StateDir, "launcher.json")); }
+        catch (Exception ex) { warnings.Add("启动器配置无法读取：" + ex.Message); }
+        var portText = Arg("--comfy-port", configuration.ComfyPort.ToString());
+        if (!int.TryParse(portText, out var port) || port is < 1024 or > 65535) throw new ArgumentException("无效的 ComfyUI 端口。");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        JsonElement? comfy = null;
+        try { comfy = await ServiceManager.Json($"http://127.0.0.1:{port}/system_stats", timeout.Token); }
+        catch (Exception ex) { warnings.Add("ComfyUI 接口检查失败：" + ex.Message); }
+        var report = new { launcherVersion = Version, manifestVersion = Runtime.Version, root, python, models, nodes, paths = probe.Paths, loras = Inventory.Loras(probe), comfyPort = port, comfy, warnings };
         JsonFile.Write(Arg("--report", Path.Combine(StateDir, "diagnosis.json")), report);
         return 0;
     }

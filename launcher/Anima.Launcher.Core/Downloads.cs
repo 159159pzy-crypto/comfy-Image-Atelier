@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Reflection;
 using System.Security.Cryptography;
 
 namespace Anima.Launcher.Core;
@@ -14,7 +15,10 @@ public sealed class Downloads : IDisposable
     public Downloads(Func<string, string?>? credential = null, HttpMessageHandler? handler = null)
     {
         client = new HttpClient(handler ?? new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = Timeout.InfiniteTimeSpan };
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("AnimaRandomStudio/0.3");
+        var assembly = Assembly.GetEntryAssembly() ?? typeof(Downloads).Assembly;
+        var version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+')[0]
+            ?? assembly.GetName().Version?.ToString() ?? "unknown";
+        client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("AnimaRandomStudio", version));
         this.credential = credential ?? (_ => null);
     }
     public static async Task<bool> Verify(string file, long size, string sha, CancellationToken ct)
@@ -22,6 +26,23 @@ public sealed class Downloads : IDisposable
         if (!File.Exists(file) || new FileInfo(file).Length != size) return false;
         await using var stream = File.OpenRead(file);
         return Convert.ToHexString(await SHA256.HashDataAsync(stream, ct)).Equals(sha, StringComparison.OrdinalIgnoreCase);
+    }
+    /// <summary>Additional allocation needed for this download; never hashes large files on the UI thread.</summary>
+    public static long RemainingBytes(string destination, long size, string sha)
+    {
+        if (size <= 0) return 0;
+        try
+        {
+            // Fetch verifies a final file or refuses to overwrite it, so its presence
+            // does not require a second allocation. This is not an integrity verdict.
+            if (File.Exists(destination)) return 0;
+            var part = destination + ".part";
+            if (!File.Exists(part) || !File.Exists(part + ".json")) return size;
+            var resume = JsonFile.Read<ResumeInfo>(part + ".json");
+            var length = new FileInfo(part).Length;
+            return resume.Sha256 == sha && resume.Size == size && length <= size ? size - length : size;
+        }
+        catch { return size; }
     }
     public async Task Fetch(string name, string url, string destination, long size, string sha, IProgress<DownloadProgress>? progress, CancellationToken ct)
     {
@@ -40,6 +61,10 @@ public sealed class Downloads : IDisposable
             {
                 progress?.Report(new(name, File.Exists(part) ? new FileInfo(part).Length : 0, size, "连接中断，自动续传"));
                 await Task.Delay(TimeSpan.FromSeconds(attempt + 1), ct);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                throw new TimeoutException($"{name} 下载响应超时，已保留可续传的数据；请重试或切换来源。");
             }
         }
     }

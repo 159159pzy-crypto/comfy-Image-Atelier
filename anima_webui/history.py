@@ -107,6 +107,7 @@ class HistoryStore(StorageProtection):
         if not tables.intersection({"batches", "images"}):
             return
         needs_backup = not {"batches", "images"}.issubset(tables)
+        needs_single_backup = "prompt_jobs" not in tables
         for table in ("batches", "images"):
             if table not in tables:
                 continue
@@ -115,6 +116,8 @@ class HistoryStore(StorageProtection):
                 "resolved_selection_json", "resolved_prompt", "bound_resources_json"
             }.issubset(columns):
                 needs_backup = True
+            if table == "images" and "single_runtime_json" not in columns:
+                needs_single_backup = True
             if "settings_json" not in columns:
                 continue
             for row in connection.execute(f"SELECT settings_json FROM {table}"):
@@ -127,8 +130,49 @@ class HistoryStore(StorageProtection):
                     if profile is None or isinstance(profile, str) and not profile.strip():
                         needs_backup = True
                         break
+        if needs_single_backup:
+            HistoryStore._backup_before_single_workbench(connection)
         if needs_backup:
             HistoryStore._backup_before_migration(connection)
+
+    @staticmethod
+    def _backup_before_single_workbench(connection: sqlite3.Connection) -> Path | None:
+        """Snapshot this upgrade independently of an older profile migration.
+
+        A previously restored database may have accumulated new images since
+        its earlier upgrade attempt, so existing single-workbench snapshots
+        are preserved and a new numbered snapshot is created when necessary.
+        """
+        row = connection.execute("PRAGMA database_list").fetchone()
+        database_path = str(row[2]) if row is not None else ""
+        if not database_path:
+            return None
+        backup_path = Path(f"{database_path}.pre-single-workbench.bak")
+        number = 2
+        while backup_path.exists():
+            backup_path = Path(f"{database_path}.pre-single-workbench-{number}.bak")
+            number += 1
+        reserved = False
+        try:
+            # Exclusive reservation also prevents overwriting a snapshot made
+            # by another starting process between the existence check and open.
+            with backup_path.open("xb"):
+                reserved = True
+            backup = sqlite3.connect(backup_path)
+            try:
+                connection.backup(backup)
+            finally:
+                backup.close()
+        except (OSError, sqlite3.Error) as error:
+            if reserved:
+                try:
+                    backup_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise HistoryMigrationError(
+                f"单图工作台升级前无法创建数据库备份: {backup_path.name}"
+            ) from error
+        return backup_path
 
     @staticmethod
     def _initialize(connection: sqlite3.Connection) -> None:
@@ -164,6 +208,17 @@ class HistoryStore(StorageProtection):
             );
             CREATE INDEX IF NOT EXISTS idx_images_created ON images(id DESC);
             CREATE INDEX IF NOT EXISTS idx_images_batch ON images(batch_id, sequence);
+            CREATE TABLE IF NOT EXISTS prompt_jobs (
+                id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                input_fingerprint TEXT NOT NULL,
+                settings_json TEXT NOT NULL,
+                result_json TEXT NOT NULL DEFAULT 'null',
+                prompt_id TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         image_columns = {
@@ -181,11 +236,24 @@ class HistoryStore(StorageProtection):
             connection.execute(
                 "ALTER TABLE images ADD COLUMN bound_resources_json TEXT NOT NULL DEFAULT '{}'"
             )
+        if "single_runtime_json" not in image_columns:
+            connection.execute("ALTER TABLE images ADD COLUMN single_runtime_json TEXT NOT NULL DEFAULT '{}'")
         # Migrate before the normal restart-status update so the pre-migration
         # backup contains the exact legacy database state.
         HistoryStore._migrate_unprofiled_history(connection)
+        # Match the legacy-aware filter exactly so both counts and descending
+        # cursor pages avoid parsing every saved settings document. Build before
+        # restart-status writes: an index failure must leave existing data intact.
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_images_workbench_id ON images "
+            "(COALESCE(json_extract(settings_json, '$.workbench'), 'random'), id DESC)"
+        )
         connection.execute(
             "UPDATE batches SET status = 'interrupted', error = 'WebUI 重启，未完成批次未自动恢复', updated_at = ? WHERE status IN ('running', 'stopping')",
+            (_now(),),
+        )
+        connection.execute(
+            "UPDATE prompt_jobs SET status='interrupted',error='工作台重启，提示词任务未自动恢复',updated_at=? WHERE status IN ('queued','running','stopping')",
             (_now(),),
         )
         connection.commit()
@@ -430,6 +498,7 @@ class HistoryStore(StorageProtection):
         resolved_selection: dict[str, Any] | None = None,
         resolved_prompt: str = "",
         bound_resources: dict[str, Any] | None = None,
+        single_runtime: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.ensure_writable()
         cursor = self.connection.execute(
@@ -438,8 +507,8 @@ class HistoryStore(StorageProtection):
                 batch_id, sequence, prompt_id, filename, subfolder, file_type,
                 positive_prompt, negative_prompt, sample_seed, prompt_seed,
                 settings_json, created_at, resolved_selection_json, resolved_prompt,
-                bound_resources_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                bound_resources_json, single_runtime_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 batch_id,
@@ -457,6 +526,7 @@ class HistoryStore(StorageProtection):
                 json.dumps(resolved_selection or {}, ensure_ascii=False),
                 str(resolved_prompt or ""),
                 json.dumps(bound_resources or {}, ensure_ascii=False),
+                json.dumps(single_runtime or {}, ensure_ascii=False),
             ),
         )
         self.connection.commit()
@@ -490,29 +560,53 @@ class HistoryStore(StorageProtection):
         result["settings"] = json.loads(result.pop("settings_json"))
         result["resolved_selection"] = json.loads(result.pop("resolved_selection_json", "{}") or "{}")
         result["bound_resources"] = json.loads(result.pop("bound_resources_json", "{}") or "{}")
+        result["single_runtime"] = json.loads(result.pop("single_runtime_json", "{}") or "{}")
+        result["workbench"] = result["settings"].get("workbench", "random")
         return result
 
-    async def list_images(self, page: int = 1, limit: int = 24) -> dict[str, Any]:
-        return await self._call(self._list_images, page, limit)
+    async def list_images(
+        self, page: int = 1, limit: int = 24, workbench: str | None = None,
+        *, before_id: int | None = None,
+    ) -> dict[str, Any]:
+        return await self._call(self._list_images, page, limit, workbench, before_id=before_id)
 
-    def _list_images(self, page: int = 1, limit: int = 24) -> dict[str, Any]:
+    def _list_images(
+        self, page: int = 1, limit: int = 24, workbench: str | None = None,
+        *, before_id: int | None = None,
+    ) -> dict[str, Any]:
+        if before_id is not None and (
+            type(before_id) is not int or not 1 <= before_id <= 2**63 - 1
+        ):
+            raise ValueError("before_id 必须为正整数图片 ID")
         page = max(1, page)
         limit = min(60, max(1, limit))
-        total = int(self.connection.execute("SELECT COUNT(*) FROM images").fetchone()[0])
+        where = " WHERE COALESCE(json_extract(images.settings_json, '$.workbench'), 'random') = ?" if workbench else ""
+        params = (workbench,) if workbench else ()
+        total = int(self.connection.execute("SELECT COUNT(*) FROM images" + where, params).fetchone()[0])
+        if before_id is not None:
+            where += (" AND " if where else " WHERE ") + "images.id < ?"
+            params += (before_id,)
+        # Fetch one extra matching row, so an exact-size last page reports no
+        # further results. Cursor requests never use a shifting row offset.
+        pagination = " LIMIT ?" if before_id is not None else " LIMIT ? OFFSET ?"
+        pagination_params = (limit + 1,) if before_id is not None else (limit + 1, (page - 1) * limit)
         rows = self.connection.execute(
             """
             SELECT images.*, batches.total AS batch_total
             FROM images JOIN batches ON batches.id = images.batch_id
-            ORDER BY images.id DESC LIMIT ? OFFSET ?
-            """,
-            (limit, (page - 1) * limit),
+            """ + where + " ORDER BY images.id DESC" + pagination,
+            (*params, *pagination_params),
         ).fetchall()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
         return {
             "items": [self._image_row(row) for row in rows],
             "page": page,
             "limit": limit,
             "total": total,
             "pages": max(1, (total + limit - 1) // limit),
+            "next_before_id": int(rows[-1]["id"]) if rows else None,
+            "has_more": has_more,
         }
 
     async def delete_image(self, image_id: int) -> bool:

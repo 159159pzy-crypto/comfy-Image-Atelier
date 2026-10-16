@@ -6,6 +6,7 @@ import logging
 import random
 import secrets
 import uuid
+import hashlib
 from datetime import datetime
 from typing import Any
 
@@ -15,6 +16,10 @@ from .history import HistoryStore
 from .prompt_rules import PromptRuleStore
 from .prompt_pools import PromptPoolStore
 from .model_profiles import get_model_profile
+from .prompt_jobs import PromptJobStore
+from .single_workbench import active_lora_pipelines
+from .prompt_processing import (build_prompt_graph, compose_prompt, extract_prompt_result,
+                                final_prompts, prompt_fingerprint, validate_prompt_nodes)
 from .workflow import MAX_SAMPLE_SEED, WorkflowError, WorkflowTemplates, migrate_settings, validate_loras, validate_settings
 
 
@@ -59,6 +64,7 @@ class BatchManager:
         catalog: PromptCatalog | None = None,
         prompt_rules: PromptRuleStore | None = None,
         prompt_pools: PromptPoolStore | None = None,
+        input_images: Any | None = None,
     ):
         self.templates = templates
         self.history = history
@@ -70,11 +76,15 @@ class BatchManager:
         self.catalog = catalog
         self.prompt_rules = prompt_rules
         self.prompt_pools = prompt_pools
+        self.input_images = input_images
+        self.prompt_jobs = PromptJobStore(history)
         # 排队中的批次(仅内存;WebUI 重启后队列清空,历史记录只在真正开跑时创建)。
         self.queue: list[dict[str, Any]] = []
         self.shutting_down = False
         # 实时进度:由 _monitor_progress 通过 ComfyUI websocket 更新。
         self.preview: tuple[int, str, bytes] | None = None
+        self.preview_metadata: dict[str, str] | None = None
+        self._preview_context: tuple[str, str, str] | None = None
         self._monitor_task: asyncio.Task[None] | None = None
         self._preview_seq = 0
         # start 里的资源校验要 await 多次 ComfyUI 请求,期间若不上锁,
@@ -107,16 +117,17 @@ class BatchManager:
             return mapped.get(value.casefold(), value)
 
         v2 = self._uses_v2_workflow()
+        active = active_lora_pipelines(settings)
         lora_values = [
             resolve(item.get("filename"))
             for item in settings.get("loras") or []
-            if isinstance(item, dict) and item.get("enabled")
+            if "primary" in active and isinstance(item, dict) and item.get("enabled")
         ]
         return {
             "model_profile": profile["id"],
             "unet": resolve(settings.get("model_name") if v2 else settings.get("model_name")),
-            "clip": resolve(profile["clip_name"] if v2 else settings.get("clip_name")),
-            "vae": resolve(profile["vae_name"] if v2 else settings.get("vae_name")),
+            "clip": resolve(settings.get("clip_name") if settings.get("workbench") == "single" else profile["clip_name"] if v2 else settings.get("clip_name")),
+            "vae": resolve(settings.get("vae_name") if settings.get("workbench") == "single" else profile["vae_name"] if v2 else settings.get("vae_name")),
             "seedvr2_model": resolve(
                 (settings.get("upscalers") or {}).get("seedvr2", {}).get("model_name")
                 or profile["seedvr2_model"]
@@ -126,6 +137,7 @@ class BatchManager:
                 or profile["seedvr2_vae"]
             ),
             "loras": lora_values,
+            **({"loras_secondary": [resolve(item["filename"]) for item in settings["single"]["loras_secondary"] if "secondary" in active and item["enabled"]]} if settings.get("workbench") == "single" else {}),
         }
 
     @staticmethod
@@ -142,16 +154,19 @@ class BatchManager:
             "redraw_sections",
             "original_selection",
             "prompt_seed",
+            "single_runtime",
         }
         if unknown:
             raise WorkflowError(
                 f"regeneration 包含未知参数: {', '.join(sorted(unknown))}"
             )
         mode = value.get("mode")
-        if mode not in REGENERATION_MODES:
+        if not isinstance(mode, str) or mode not in REGENERATION_MODES:
             raise WorkflowError("regeneration.mode 无效")
         result = copy.deepcopy(value)
         result["mode"] = mode
+        if "single_runtime" in result and not isinstance(result["single_runtime"], dict):
+            raise WorkflowError("历史单图运行快照无效")
         if mode in {"replay", "prompt_variant"}:
             positive = str(value.get("frozen_positive_prompt") or "")
             if not positive.strip():
@@ -219,7 +234,19 @@ class BatchManager:
             str(value).replace("\\", "/").casefold(): str(value)
             for value in await lora_filenames()
         } if lora_filenames else {}
-        for item in settings["loras"]:
+        active = active_lora_pipelines(settings)
+        all_loras = list(settings["loras"]) if "primary" in active else []
+        if settings.get("workbench") == "single":
+            if "secondary" in active:
+                all_loras.extend(settings["single"]["loras_secondary"])
+            if settings.get("generation_mode") == "img2img":
+                try:
+                    if self.input_images is None:
+                        raise KeyError(settings["single"]["input_image_id"])
+                    self.input_images.get(settings["single"]["input_image_id"])
+                except KeyError:
+                    issues.append({"type": "input_image", "name": settings["single"]["input_image_id"], "label": "输入图片"})
+        for item in all_loras:
             if item["enabled"] and item["filename"].replace("\\", "/").casefold() not in available_loras:
                 issues.append({"type": "lora", "name": item["filename"], "label": "LoRA"})
         resource_inventory = getattr(self.comfy, "resource_inventory", None)
@@ -283,8 +310,9 @@ class BatchManager:
         issues: list[dict[str, str]] = []
         profile = get_model_profile(settings.get("model_profile", "anima"))
         check("model", "主模型", settings["model_name"], resources.get("models"))
-        check("clip", "CLIP", profile["clip_name"], resources.get("clips"))
-        check("vae", "VAE", profile["vae_name"], resources.get("vaes"))
+        single = settings.get("workbench") == "single"
+        check("clip", "CLIP", settings["clip_name"] if single else profile["clip_name"], resources.get("clips"))
+        check("vae", "VAE", settings["vae_name"] if single else profile["vae_name"], resources.get("vaes"))
         check("sampler", "Sampler", settings["sampler_name"], resources.get("samplers"))
         check("scheduler", "Scheduler", settings["scheduler"], resources.get("schedulers"))
 
@@ -387,7 +415,149 @@ class BatchManager:
             check("second_scheduler", "2ndSampler Scheduler", second["scheduler"], resources.get("schedulers"))
         if legacy_requested and "hires" in settings and (settings.get("hires") or {}).get("enabled"):
             check("upscale_model", "高清模型", settings["hires"]["model_name"], resources.get("upscale_models"))
+        if single:
+            from .single_workbench import single_resource_issues
+            issues.extend(single_resource_issues(settings, resources))
+        else:
+            from .sampling import random_sampling_resource_issues
+            issues.extend(random_sampling_resource_issues(settings, resources))
         return issues
+
+    async def start_prompt_preview(self, overrides: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
+        async with self._start_lock:
+            self.history.ensure_writable()
+            settings = validate_settings(overrides)
+            if settings.get("workbench") != "single":
+                raise WorkflowError("提示词预览仅适用于单图工作台")
+            await validate_prompt_nodes(self.comfy, settings)
+            if self.active() and len(self.queue) >= MAX_QUEUE:
+                raise BatchConflict(f"队列已满(最多 {MAX_QUEUE} 个)")
+            fingerprint = prompt_fingerprint(settings)
+            if force:
+                for config in settings["single"]["prompt_processing"].values():
+                    if config["enabled"]:
+                        config["seed"] = secrets.randbelow(2**31)
+            job = await self.prompt_jobs.create(settings, fingerprint)
+            if self.active():
+                self.queue.append({"queue_id": job["id"], "kind": "prompt_preview", "settings": settings, "job_id": job["id"]})
+            else:
+                await self._begin_prompt_preview(job)
+            return await self.prompt_jobs.get(job["id"])
+
+    async def _begin_prompt_preview(self, job: dict[str, Any]) -> None:
+        self.stop_requested = False
+        self._clear_preview()
+        self.state = {"id": job["id"], "kind": "prompt_preview", "stage": "prompt_processing",
+                      "status": "running", "total": 1, "current": 1, "completed": 0,
+                      "prompt_id": "", "error": "", "settings": job["settings"]}
+        self.task = asyncio.create_task(self._run_prompt_preview(job))
+        self._ensure_monitor()
+
+    async def _process_prompt(self, job: dict[str, Any]) -> dict[str, Any]:
+        job_id = job["id"]
+        settings = job["settings"]
+        await self.prompt_jobs.update(job_id, status="running")
+        if self.state is not None:
+            self.state.update(stage="prompt_processing", prompt_job_id=job_id, prompt_id="")
+            self._clear_preview()
+        try:
+            if self.stop_requested:
+                raise ComfyAborted("收到停止请求")
+            processing = settings["single"]["prompt_processing"]
+            if any(value["enabled"] for value in processing.values()):
+                rules = await validate_prompt_nodes(self.comfy, settings)
+                prompt_id = await self.comfy.submit(build_prompt_graph(settings, self.client_id, resolved_rules=rules))
+                self.state["prompt_id"] = prompt_id
+                await self.prompt_jobs.update(job_id, prompt_id=prompt_id)
+                entry = await self.comfy.wait_for_history(prompt_id, should_abort=lambda: self.stop_requested)
+                text = extract_prompt_result(entry)
+            else:
+                text = compose_prompt(settings)
+            if self.stop_requested:
+                raise ComfyAborted("收到停止请求")
+            if not text.strip():
+                raise WorkflowError("提示词处理结果为空")
+            result = final_prompts(settings, text)
+            if self.state and self.state.get("kind") == "prompt_preview":
+                # Match generation's terminal transition before its final DB
+                # await; a late Stop must not overwrite the completed job.
+                self.state.update(status="completed", completed=1)
+            await self.prompt_jobs.update(job_id, status="completed", result=result)
+            return result
+        except (ComfyAborted, asyncio.CancelledError):
+            await self._interrupt_current()
+            await self.prompt_jobs.update(job_id, status="cancelled", error="提示词处理已取消")
+            raise
+        except Exception as error:
+            await self.prompt_jobs.update(job_id, status="error", error=str(error))
+            raise
+
+    async def _run_prompt_preview(self, job: dict[str, Any]) -> None:
+        try:
+            await self._process_prompt(job)
+            self.state.update(status="completed", completed=1)
+        except (ComfyAborted, asyncio.CancelledError):
+            self.state["status"] = "stopped"
+        except Exception as error:
+            self.state.update(status="error", error=str(error))
+        finally:
+            await self._advance_queue()
+
+    async def cancel_prompt_preview(self, job_id: str) -> dict[str, Any]:
+        async with self._start_lock:
+            return await self._cancel_prompt_preview(job_id)
+
+    async def _cancel_prompt_preview(self, job_id: str) -> dict[str, Any]:
+        job = await self.prompt_jobs.get(job_id)
+        if job["status"] in {"completed", "error", "cancelled", "interrupted"}:
+            return job
+        queued = next((entry for entry in self.queue if entry.get("job_id") == job_id), None)
+        if queued:
+            self.queue.remove(queued)
+            return await self.prompt_jobs.update(job_id, status="cancelled", error="提示词预览已取消")
+        if self.state and (self.state.get("id") == job_id or self.state.get("prompt_job_id") == job_id):
+            await self._request_stop(self.state["id"], clear_queue=False)
+        return await self.prompt_jobs.get(job_id)
+
+    async def _prepare_single_runtime(self, settings: dict[str, Any], regeneration: dict[str, Any] | None) -> dict[str, Any]:
+        single = settings["single"]
+        frozen = (regeneration or {}).get("single_runtime")
+        if frozen:
+            runtime = copy.deepcopy(frozen)
+        else:
+            job_id = single.get("prompt_job_id")
+            if job_id:
+                job = await self.prompt_jobs.get(job_id)
+                if job["status"] != "completed" or not job["result"]:
+                    raise WorkflowError("所选提示词处理结果尚未成功完成")
+                if job["input_fingerprint"] != prompt_fingerprint(settings):
+                    raise WorkflowError("提示词或处理设置已变化，请重新预览后再生成")
+                text = job["result"]["text"]
+            elif any(value["enabled"] for value in single["prompt_processing"].values()):
+                job = await self.prompt_jobs.create(settings, prompt_fingerprint(settings))
+                job_id = job["id"]
+                text = (await self._process_prompt(job))["text"]
+            else:
+                text = compose_prompt(settings)
+            if single.get("processed_prompt_override") is not None:
+                text = single["processed_prompt_override"]
+            final = final_prompts(settings, text)
+            runtime = {"positive": text, "effective_positive": {key: final[key] for key in ("primary", "secondary")},
+                       "negative": final["negative"], "prompt_job_id": job_id or ""}
+        if self.stop_requested:
+            raise ComfyAborted("收到停止请求")
+        if settings.get("generation_mode") == "img2img":
+            if self.input_images is None:
+                raise WorkflowError("输入图片服务不可用")
+            asset_id = single["input_image_id"]
+            self.input_images.get(asset_id)
+            mode = single["resize_mode"]
+            body = await asyncio.to_thread(self.input_images.prepare, asset_id, settings["width"], settings["height"], mode)
+            runtime["input_image"] = await self.comfy.upload_image(body, hashlib.sha256(body).hexdigest() + ".png")
+            runtime["input_image_id"] = asset_id
+        self.state.update(stage="generating", prompt_id="")
+        self._clear_preview()
+        return runtime
 
     async def start(
         self,
@@ -401,7 +571,7 @@ class BatchManager:
                 ensure_writable()
             regeneration = self._validate_regeneration(regeneration)
             normalized_overrides = overrides
-            if self.prompt_rules is not None and not (
+            if self.prompt_rules is not None and overrides.get("workbench") != "single" and not (
                 regeneration and regeneration.get("frozen_positive_prompt")
             ):
                 normalized_overrides, _ = self.prompt_rules.normalize_settings(overrides)
@@ -412,20 +582,38 @@ class BatchManager:
                 # schema even when an embedded caller submits DEFAULT_SETTINGS
                 # with the four deprecated aliases attached.
                 settings = migrate_settings(settings)
-            if settings["model_profile"] == "krea2" and settings["krea_prompt_pool"]["enabled"]:
+            if settings.get("workbench") != "single" and settings["model_profile"] == "krea2" and settings["krea_prompt_pool"]["enabled"]:
                 if self.prompt_pools is None or not self.prompt_pools.resolve(
                     "krea2", settings["krea_prompt_pool"].get("ids")
                 ):
                     raise WorkflowError("Krea 2 自然语言提示词池为空，请先导入提示词")
             seeds = validate_seeds(seeds)
-            if self.catalog and not (
+            if settings.get("workbench") == "single":
+                if settings.get("generation_mode") == "img2img":
+                    if self.input_images is None:
+                        raise WorkflowError("输入图片服务不可用")
+                    self.input_images.get(settings["single"]["input_image_id"])
+                if not (regeneration and regeneration.get("single_runtime")):
+                    reference = settings["single"].get("prompt_job_id")
+                    if reference:
+                        job = await self.prompt_jobs.get(reference)
+                        if job["status"] != "completed" or job["input_fingerprint"] != prompt_fingerprint(settings):
+                            raise WorkflowError("提示词处理结果无效或已过期，请重新预览")
+                    else:
+                        await validate_prompt_nodes(self.comfy, settings)
+            if self.catalog and settings.get("workbench") != "single" and not (
                 regeneration and regeneration.get("frozen_positive_prompt")
             ):
                 self.catalog.validate_settings(settings)
             lora_filenames = getattr(self.comfy, "lora_filenames", None)
             if not lora_filenames:
                 raise ComfyError("ComfyUI 客户端无法读取 LoRA 列表")
-            settings["loras"] = validate_loras(settings, await lora_filenames())
+            available_loras = await lora_filenames()
+            active = active_lora_pipelines(settings)
+            if "primary" in active:
+                settings["loras"] = validate_loras(settings, available_loras)
+            if "secondary" in active:
+                settings["single"]["loras_secondary"] = validate_loras({"loras": settings["single"]["loras_secondary"]}, available_loras)
             resource_inventory = getattr(self.comfy, "resource_inventory", None)
             if resource_inventory:
                 resources = await resource_inventory()
@@ -461,6 +649,7 @@ class BatchManager:
                     "settings": settings,
                     "seeds": seeds,
                     "regeneration": regeneration,
+                    "kind": "generation",
                 }
                 self.queue.append(entry)
                 return {
@@ -480,9 +669,11 @@ class BatchManager:
     ) -> None:
         batch_id = uuid.uuid4().hex[:12]
         self.stop_requested = False
-        self.preview = None
+        self._clear_preview()
         self.state = {
             "id": batch_id,
+            "kind": "generation",
+            "stage": "generating",
             "status": "running",
             "total": settings["count"],
             "completed": 0,
@@ -502,12 +693,17 @@ class BatchManager:
                 "position": index + 1,
                 "count": entry["settings"]["count"],
                 "model_name": entry["settings"]["model_name"],
+                "kind": entry.get("kind", "generation"),
+                "workbench": entry["settings"].get("workbench", "random"),
             }
             for index, entry in enumerate(self.queue)
         ]
 
     def _resolve_prompt(self, settings: dict[str, Any], prompt_seed: int) -> dict[str, Any]:
         """Resolve Anima taxonomy pools or one seeded Krea natural prompt."""
+        if settings.get("workbench") == "single":
+            text = compose_prompt(settings)
+            return {"composer_prompt": text, "full_prompt": text, "selected": {}}
         if settings.get("model_profile") == "krea2":
             resolved: dict[str, Any] = {
                 "composer_prompt": "",
@@ -547,14 +743,26 @@ class BatchManager:
         return dict(self.state) if self.state else None
 
     async def request_stop(self, batch_id: str, clear_queue: bool = True) -> dict[str, Any]:
+        async with self._start_lock:
+            return await self._request_stop(batch_id, clear_queue)
+
+    async def _request_stop(self, batch_id: str, clear_queue: bool = True) -> dict[str, Any]:
         if not self.state or self.state["id"] != batch_id:
             raise KeyError(batch_id)
         if clear_queue:
+            for entry in self.queue:
+                if entry.get("kind") == "prompt_preview":
+                    await self.prompt_jobs.update(entry["job_id"], status="cancelled", error="队列已清空")
             self.queue.clear()
-        if self.active():
+        if self.active() and self.state.get("status") in {"running", "stopping"}:
             self.stop_requested = True
             self.state["status"] = "stopping"
-            await self.history.update_batch(batch_id, status="stopping")
+            if self.state.get("kind") == "prompt_preview":
+                await self.prompt_jobs.update(batch_id, status="stopping")
+            else:
+                await self.history.update_batch(batch_id, status="stopping")
+            if self.state.get("prompt_id"):
+                await self._interrupt_current()
         return self.snapshot()
 
     async def wait(self) -> dict[str, Any] | None:
@@ -572,6 +780,7 @@ class BatchManager:
         regeneration: dict[str, Any] | None = None,
     ) -> None:
         try:
+            single_runtime = await self._prepare_single_runtime(settings, regeneration) if settings.get("workbench") == "single" else None
             for sequence in range(1, settings["count"] + 1):
                 if self.stop_requested:
                     break
@@ -585,7 +794,7 @@ class BatchManager:
                     else secrets.randbelow(2**31)
                 )
                 date_folder = datetime.now().strftime("%Y-%m-%d")
-                prefix = f"AnimaRandom/{date_folder}/{batch_id}/image"
+                prefix = f"{'AnimaSingle' if settings.get('workbench') == 'single' else 'AnimaRandom'}/{date_folder}/{batch_id}/image"
                 resolved = self._resolve_regeneration(settings, prompt_seed, regeneration) if regeneration else self._resolve_prompt(settings, prompt_seed)
                 if regeneration and regeneration.get("mode") == "content_redraw":
                     for attempt in range(512):
@@ -598,7 +807,7 @@ class BatchManager:
                             break
                     else:
                         raise WorkflowError("所选维度无可用替代组合")
-                if self.prompt_rules is not None and not (
+                if self.prompt_rules is not None and settings.get("workbench") != "single" and not (
                     regeneration and regeneration.get("frozen_positive_prompt")
                 ):
                     protected = settings.get("lora_managed_triggers", [])
@@ -650,8 +859,12 @@ class BatchManager:
                     frozen_negative_prompt=(regeneration or {}).get(
                         "frozen_negative_prompt", ""
                     ),
+                    **({"single_runtime": single_runtime} if single_runtime is not None else {}),
                 )
                 self.state["current"] = sequence
+                self.state["prompt_id"] = ""
+                self._clear_preview()
+                self.state["preview_status"] = "waiting"
                 prompt_id = await self.comfy.submit(payload)
                 self.state["prompt_id"] = prompt_id
                 try:
@@ -666,7 +879,10 @@ class BatchManager:
                     raise ComfyError("任务完成但未返回保存图片")
                 frozen_positive = (regeneration or {}).get("frozen_positive_prompt", "")
                 frozen_negative = (regeneration or {}).get("frozen_negative_prompt", "")
-                positive = frozen_positive or extract_positive_prompt(entry)
+                active_pipeline = "primary"
+                if single_runtime:
+                    active_pipeline = settings["single"]["dual"]["second_pipeline"] if settings.get("base_mode") == "dual_sampler" else settings["single"]["normal_pipeline"]
+                positive = (single_runtime["effective_positive"][active_pipeline] if single_runtime else frozen_positive or extract_positive_prompt(entry))
                 bound_resources = self._bound_resources(settings)
                 for image in images:
                     await self.history.add_image(
@@ -682,6 +898,7 @@ class BatchManager:
                         resolved_selection=resolved["selected"],
                         resolved_prompt=positive or resolved["full_prompt"],
                         bound_resources=bound_resources,
+                        **({"single_runtime": single_runtime} if single_runtime is not None else {}),
                     )
                 self.state["completed"] = sequence
                 await self.history.update_batch(batch_id, completed=sequence)
@@ -691,6 +908,10 @@ class BatchManager:
             status = "stopped" if self.stop_requested else "completed"
             self.state["status"] = status
             await self.history.update_batch(batch_id, completed=self.state["completed"], status=status)
+        except (ComfyAborted, asyncio.CancelledError):
+            await self._interrupt_current()
+            self.state["status"] = "stopped"
+            await self.history.update_batch(batch_id, completed=self.state["completed"], status="stopped")
         except Exception as error:
             logger.warning("批次 %s 出错: %s", batch_id, error)
             self.state["status"] = "error"
@@ -710,17 +931,24 @@ class BatchManager:
         stop_requested 只作用于当前批次:clearQueue=true 的停止已经清空了队列,
         clearQueue=false(只停当前)则应继续接续,_begin_batch 会复位该标志。
         """
-        if self.shutting_down or not self.queue:
+        self._clear_preview()
+        async with self._start_lock:
+            while not self.shutting_down and self.queue:
+                entry = self.queue.pop(0)
+                try:
+                    if entry.get("kind") == "prompt_preview":
+                        job = await self.prompt_jobs.get(entry["job_id"])
+                        if job["status"] == "cancelled":
+                            continue
+                        await self._begin_prompt_preview(job)
+                    else:
+                        await self._begin_batch(entry["settings"], entry["seeds"], entry.get("regeneration"))
+                    return
+                except Exception as error:
+                    logger.warning("队列任务启动失败: %s", error)
+                    if entry.get("kind") == "prompt_preview":
+                        await self.prompt_jobs.update(entry["job_id"], status="error", error=str(error))
             self._stop_monitor()
-            return
-        entry = self.queue.pop(0)
-        try:
-            await self._begin_batch(
-                entry["settings"], entry["seeds"], entry.get("regeneration")
-            )
-        except Exception as error:  # 接续失败不应吞掉:记录并继续尝试下一个
-            logger.warning("队列批次启动失败: %s", error)
-            await self._advance_queue()
 
     def _ensure_monitor(self) -> None:
         if self._monitor_task and not self._monitor_task.done():
@@ -735,6 +963,90 @@ class BatchManager:
             self._monitor_task.cancel()
         self._monitor_task = None
 
+    def _clear_preview(self) -> None:
+        """Drop all ownership when a prompt, batch or processing stage changes."""
+        self.preview = None
+        self.preview_metadata = None
+        self._preview_context = None
+        if self.state is not None:
+            for key in ("preview_id", "preview_prompt_id", "preview_node", "preview_status", "progress", "progress_node"):
+                self.state.pop(key, None)
+
+    def _consume_progress(self, item: dict[str, Any]) -> None:
+        state = self.state
+        if not state or state.get("status") not in ("running", "stopping"):
+            return
+        # LLM prompt processing can have its own progress stream; it must never
+        # be mistaken for a frame from the subsequent image-generation prompt.
+        if state.get("kind") != "generation" or state.get("stage") != "generating":
+            return
+        batch_id, prompt_id = state["id"], state.get("prompt_id")
+        if not prompt_id:
+            return
+        context = self._preview_context
+        context_matches = bool(context and context[:2] == (batch_id, prompt_id))
+        if item.get("kind") == "event":
+            payload = item.get("payload")
+            if not isinstance(payload, dict) or payload.get("type") not in ("progress", "executing"):
+                return
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                return
+            event_prompt = data.get("prompt_id")
+            if event_prompt and event_prompt != prompt_id:
+                # Old binary packets carry no identity. A foreign execution
+                # event invalidates their inferred owner until ours is seen.
+                self._preview_context = None
+                return
+            if not event_prompt and not context_matches:
+                return
+            node = str(data.get("node") or "")
+            if payload["type"] == "executing":
+                if node != state.get("progress_node"):
+                    state.pop("progress", None)
+                state["progress_node"] = node
+                self._preview_context = (batch_id, prompt_id, node)
+            else:
+                try:
+                    value, maximum = int(data.get("value") or 0), int(data.get("max") or 0)
+                except (ValueError, TypeError, OverflowError):
+                    return
+                if value < 0 or maximum <= 0:
+                    return
+                node = node or (context[2] if context_matches else "")
+                if not node:
+                    return
+                self._preview_context = (batch_id, prompt_id, node)
+                state["progress_node"] = node
+                state["progress"] = {"value": min(value, maximum), "max": maximum}
+            if state.get("preview_status") == "disconnected":
+                state["preview_status"] = "live" if self.preview else "waiting"
+            return
+        if item.get("kind") != "preview":
+            return
+        frame_prompt, node = item.get("prompt_id"), item.get("node_id")
+        if frame_prompt:
+            if frame_prompt != prompt_id or not isinstance(node, str) or not node:
+                return
+            if context_matches:
+                node_ids = (node, item.get("display_node_id"), item.get("parent_node_id"))
+                if not context[2] or context[2] not in node_ids:
+                    return
+        else:
+            # Legacy frames are accepted only after an identified execution or
+            # progress event on this connection and for this exact prompt.
+            if not context_matches or not context[2]:
+                return
+            node = context[2]
+        body, image_format = item.get("bytes"), item.get("format")
+        if not isinstance(body, bytes) or not body or image_format not in ("jpeg", "png"):
+            return
+        self._preview_seq += 1
+        self.preview = (self._preview_seq, f"image/{image_format}", body)
+        self.preview_metadata = {"batch_id": batch_id, "prompt_id": prompt_id, "node_id": node}
+        state.update(preview_id=self._preview_seq, preview_prompt_id=prompt_id,
+                     preview_node=node, preview_status="live")
+
     async def _monitor_progress(self) -> None:
         """通过 ComfyUI websocket 更新采样进度与实时预览。
 
@@ -742,41 +1054,39 @@ class BatchManager:
         (批次完成仍由 wait_for_history 轮询判定)。
         """
         while self.active():
+            # Never infer legacy-frame ownership from events before reconnect.
+            self._preview_context = None
             try:
                 async for item in self.comfy.progress_stream(self.client_id):
-                    state = self.state
-                    if state is None or state.get("status") not in ("running", "stopping"):
-                        continue
-                    if item.get("kind") == "event":
-                        payload = item.get("payload") or {}
-                        data = payload.get("data") or {}
-                        if payload.get("type") == "progress":
-                            state["progress"] = {
-                                "value": int(data.get("value") or 0),
-                                "max": int(data.get("max") or 0),
-                            }
-                        elif payload.get("type") == "executing":
-                            state["progress_node"] = str(data.get("node") or "")
-                            if data.get("node") is None:
-                                state.pop("progress", None)
-                    elif item.get("kind") == "preview":
-                        self._preview_seq += 1
-                        self.preview = (
-                            self._preview_seq,
-                            f"image/{item.get('format') or 'jpeg'}",
-                            item.get("bytes") or b"",
-                        )
-                        state["preview_id"] = self._preview_seq
+                    self._consume_progress(item)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
                 logger.debug("进度 websocket 中断,稍后重连: %s", error)
+            self._preview_context = None
+            if self.state and self.state.get("status") in ("running", "stopping") and self.state.get("stage") == "generating":
+                self.state["preview_status"] = "disconnected"
             if not self.active():
                 break
             await asyncio.sleep(2.0)
 
     async def _interrupt_current(self) -> None:
         """停止时尽力中断 ComfyUI 正在渲染的任务;失败不影响批次收尾。"""
+        cancel = getattr(self.comfy, "cancel_prompt", None)
+        prompt_id = (self.state or {}).get("prompt_id")
+        if cancel is not None:
+            if prompt_id:
+                try:
+                    await cancel(prompt_id)
+                    queued = getattr(self.comfy, "prompt_queued", None)
+                    if queued:
+                        for _ in range(40):
+                            if not await queued(prompt_id):
+                                break
+                            await asyncio.sleep(0.1)
+                except ComfyError:
+                    pass
+            return
         interrupt = getattr(self.comfy, "interrupt", None)
         if interrupt is None:
             return

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "defaultProfile": "anima",
+  "profiles": [
+    {
+      "id": "anima",
+      "label": "Anima",
+      "modelName": "anima-base-v1.0.safetensors",
+      "clipName": "qwen_3_06b_base.safetensors",
+      "vaeName": "qwen_image_vae.safetensors",
+      "clipType": "stable_diffusion",
+      "seedvr2Model": "seedvr2_3b_int8_convrot.safetensors",
+      "seedvr2Vae": "ema_vae_fp16.safetensors"
+    },
+    {
+      "id": "krea2",
+      "label": "Krea 2",
+      "modelName": "krea2_turbo_int8_convrot.safetensors",
+      "clipName": "qwen3vl_4b_fp8_scaled.safetensors",
+      "vaeName": "qwen_image_vae.safetensors",
+      "clipType": "krea2",
+      "seedvr2Model": "seedvr2_3b_int8_convrot.safetensors",
+      "seedvr2Vae": "ema_vae_fp16.safetensors"
+    }
+  ]
+}

@@ -4,23 +4,30 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "anima-random-studio"
-version = "0.4.0"
+dynamic = ["version"]
 description = "基于 ComfyUI 与 Anima Tools 的本地随机生图工作台"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 dependencies = [
-    # aiohttp 4 将移除当前使用的字符串 app key 等 API,先锁定在 3.x
+    # Keep the tested aiohttp 3.x API contract.
     "aiohttp>=3.9,<4",
+    # GHSA-54p9-h82j-f925: items-view reference leak in 6.7.0 through 6.9.0.
+    "multidict>=6.9.1,<7",
+    "Pillow>=10,<13",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
+    "ruff>=0.15,<0.16",
 ]
 
 [tool.setuptools]
 packages = ["anima_webui"]
+
+[tool.setuptools.dynamic]
+version = { file = "launcher/version.txt" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

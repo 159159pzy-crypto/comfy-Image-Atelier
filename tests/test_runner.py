@@ -120,7 +120,7 @@ class ProgressComfy(FakeComfy):
         self.release_stream = asyncio.Event()
 
     async def progress_stream(self, client_id):
-        yield {"kind": "event", "payload": {"type": "progress", "data": {"value": 12, "max": 30}}}
+        yield {"kind": "event", "payload": {"type": "progress", "data": {"value": 12, "max": 30, "prompt_id": "prompt-1", "node": "sampler"}}}
         yield {"kind": "preview", "format": "jpeg", "bytes": b"jpeg-frame"}
         await self.release_stream.wait()
 

@@ -39,6 +39,9 @@ def _locked(method: Any) -> Any:
 
 
 PRESET_SETTING_KEYS = (
+    "workbench",
+    "generation_mode",
+    "single",
     "model_profile",
     "model_name",
     "clip_name",
@@ -61,6 +64,7 @@ PRESET_SETTING_KEYS = (
     "cfg_zero_star",
     "second_sampler",
     "base_mode",
+    "dual",
     "upscalers",
     "krea_prompt_pool",
 )
@@ -115,6 +119,13 @@ def preset_settings(
     if prompt_rules is not None:
         candidate, _ = prompt_rules.normalize_settings(candidate)
     normalized = validate_settings(candidate)
+    if isinstance(normalized.get("single"), dict):
+        # A reusable style must not pin a previous image or a completed AI job.
+        # Keep its editable prompt/settings, but resolve assets/results anew.
+        normalized["single"] = copy.deepcopy(normalized["single"])
+        normalized["single"]["input_image_id"] = ""
+        normalized["single"]["prompt_job_id"] = ""
+        normalized["single"]["processed_prompt_override"] = None
     return {
         key: copy.deepcopy(normalized[key])
         for key in V2_PRESET_SETTING_KEYS
@@ -278,6 +289,21 @@ class StylePresetStore(StorageProtection):
         if index is None:
             raise KeyError(preset_id)
         current = self.items[index]
+        incoming_settings = payload.get("settings")
+        previous_settings = current.get("settings", {})
+        if (
+            isinstance(incoming_settings, dict)
+            and incoming_settings.get("workbench", "random") == "random"
+            and previous_settings.get("workbench") == "single"
+        ):
+            # The random workbench cannot edit these fields. Updating shared
+            # sampling/style fields must not erase the advanced snapshot.
+            preserved = {
+                key: copy.deepcopy(previous_settings[key])
+                for key in ("workbench", "generation_mode", "single", "clip_name", "vae_name", "clip_type")
+                if key in previous_settings
+            }
+            payload = {**payload, "settings": {**incoming_settings, **preserved}}
         if "name" in payload:
             profile_id = payload.get("model_profile") or (
                 payload.get("settings") or current.get("settings") or {}
