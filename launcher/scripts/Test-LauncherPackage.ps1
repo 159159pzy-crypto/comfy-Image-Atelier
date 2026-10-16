@@ -6,7 +6,7 @@ $publish = Join-Path $work 'publish'
 $sourceInfo = Get-LauncherSourceInfo $publish
 if ($sourceInfo.sourceCommit -ne 'unknown' -or $sourceInfo.sourceKind -ne 'source-archive' -or $null -ne $sourceInfo.sourceDirty) { throw 'Source ZIP incorrectly claims a known Git commit or clean tree.' }
 Write-Output 'PASS: a source ZIP without .git has explicit unknown provenance'
-$fixtureNames = @('AnimaRandomStudio.exe', 'AnimaRandomStudio.dll', 'Anima.Launcher.Core.dll', 'AnimaRandomStudio.deps.json', 'AnimaRandomStudio.runtimeconfig.json', 'AnimaRandomStudio.pri', 'Microsoft.UI.Xaml.dll', 'coreclr.dll', 'README.md', 'LICENSE', 'THIRD-PARTY-NOTICES.txt', 'third-party-packages.json', '资源 with spaces/dependency.dll')
+$fixtureNames = @('AnimaRandomStudio.exe', 'AnimaRandomStudio.dll', 'Anima.Launcher.Core.dll', 'AnimaRandomStudio.deps.json', 'AnimaRandomStudio.runtimeconfig.json', 'AnimaRandomStudio.pri', 'Microsoft.ui.xaml.dll', 'coreclr.dll', 'README.md', 'LICENSE', 'THIRD-PARTY-NOTICES.txt', 'third-party-packages.json', '资源 with spaces/dependency.dll')
 foreach ($name in $fixtureNames) {
     [System.IO.File]::WriteAllText((Join-Path $publish $name), "fixture $name")
 }

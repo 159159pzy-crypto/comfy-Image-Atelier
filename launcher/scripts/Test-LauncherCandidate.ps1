@@ -21,7 +21,8 @@ if ($RequireClean -and ($info.sourceKind -ne 'git-checkout' -or $info.sourceDirt
 $zip = [System.IO.Compression.ZipFile]::OpenRead($archive)
 try {
     foreach ($required in @('AnimaRandomStudio.exe', 'AnimaRandomStudio.dll', 'Anima.Launcher.Core.dll', 'AnimaRandomStudio.deps.json', 'AnimaRandomStudio.runtimeconfig.json', 'AnimaRandomStudio.pri', 'Microsoft.UI.Xaml.dll', 'coreclr.dll', 'README.md', 'LICENSE', 'THIRD-PARTY-NOTICES.txt', 'third-party-packages.json')) {
-        if ($null -eq $zip.GetEntry("AnimaRandomStudio/$required")) { throw "Candidate ZIP is missing required runtime file: $required" }
+        # Windows package filenames are case-insensitive; the SDK publishes Microsoft.ui.xaml.dll.
+        if ($zip.Entries.FullName -notcontains "AnimaRandomStudio/$required") { throw "Candidate ZIP is missing required runtime file: $required" }
     }
     foreach ($file in $zip.Entries) {
         if ($file.FullName -match '/(data|output|\.git|\.codex-local|\.claude|__pycache__)/' -or ($file.FullName -like '*.md' -and $file.FullName -ne 'AnimaRandomStudio/README.md')) { throw "Unexpected local file or internal note in candidate: $($file.FullName)" }
