@@ -81,6 +81,19 @@ class PreviewProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(received), 1)
         self.assertEqual(received[0]["bytes"], b"image-data")
 
+    async def test_metadata_before_progress_matches_comfyui_emission_order(self):
+        manager = BatchManager(FakeTemplates(), None, FakeComfy())
+        manager.state = {"id": "batch-1", "prompt_id": "prompt-1", "kind": "generation", "stage": "generating", "status": "running"}
+        self.frames = [json.dumps(event("executing")["payload"]), metadata_frame(),
+                       json.dumps(event(value=1, max=30)["payload"])]
+        async for item in self.client.progress_stream("test-client"):
+            manager._consume_progress(item)
+            if item["kind"] == "preview":
+                self.assertIsNotNone(manager.preview)
+                self.assertNotIn("progress", manager.state)
+        self.assertEqual(manager.preview[2], b"image-data")
+        self.assertEqual(manager.state["progress"], {"value": 1, "max": 30})
+
 
 class PreviewOwnershipTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -103,18 +116,49 @@ class PreviewOwnershipTests(unittest.IsolatedAsyncioTestCase):
         manager._consume_progress(frame(prompt="foreign"))
         self.assertIsNone(manager.preview)
         manager._consume_progress(frame())
-        self.assertEqual(manager.preview_metadata, {"batch_id": "batch-1", "prompt_id": "prompt-1", "node_id": "sampler"})
+        self.assertEqual(manager.preview_metadata, {"batch_id": "batch-1", "prompt_id": "prompt-1", "node_id": "sampler", "epoch": 1})
         manager._consume_progress(event("progress", value=12, max=30))
         manager._consume_progress(event("executing", node="second"))
         self.assertNotIn("progress", manager.state)
         manager._consume_progress(frame(bytes=b"late-first-node"))
-        self.assertEqual(manager.preview[2], b"frame")
+        self.assertIsNone(manager.preview)
         manager._consume_progress(frame(node="second", bytes=b"second-frame"))
         self.assertEqual(manager.state["preview_node"], "second")
         self.assertEqual(manager.preview[2], b"second-frame")
         manager._consume_progress(event("executing", node=None))
         manager._consume_progress(frame(node="second", bytes=b"after-finish"))
-        self.assertEqual(manager.preview[2], b"second-frame")
+        self.assertIsNone(manager.preview)
+
+    async def test_late_progress_cannot_move_back_after_a_stage_transition(self):
+        manager = self.manager
+        for node in ("701:1245", "701:1246", "704:1248", "1253:191"):
+            previous = manager.state.get("progress_node")
+            manager._consume_progress(event("executing", node=node))
+            epoch = manager.state["preview_epoch"]
+            manager._consume_progress(frame(node=node, bytes=node.encode()))
+            if previous:
+                manager._consume_progress(event(node=previous, value=30, max=30))
+                manager._consume_progress(frame(node=previous, bytes=b"late-old-stage"))
+            self.assertEqual(manager.state["preview_epoch"], epoch)
+            self.assertEqual(manager.state["progress_node"], node)
+            self.assertEqual(manager.preview[2], node.encode())
+        manager._consume_progress(event("executing", node=None))
+        manager._consume_progress(event(node=node, value=30, max=30))
+        manager._consume_progress(frame(node=node))
+        self.assertIsNone(manager.preview)
+        self.assertNotIn("progress", manager.state)
+
+    async def test_same_node_reentry_advances_epoch_and_preserves_metadata_aliases(self):
+        manager = self.manager
+        manager._consume_progress(event("executing", node="parent"))
+        manager._consume_progress(frame(node="child", parent_node_id="parent"))
+        first_epoch = manager.preview_metadata["epoch"]
+        manager._consume_progress(event("executing", node="parent"))
+        self.assertIsNone(manager.preview)
+        self.assertGreater(manager.state["preview_epoch"], first_epoch)
+        manager._consume_progress(frame(node="child", display_node_id="parent", bytes=b"reentry"))
+        self.assertEqual(manager.preview[2], b"reentry")
+        self.assertEqual(manager.preview_metadata["epoch"], manager.state["preview_epoch"])
 
     async def test_legacy_frames_need_identified_current_execution(self):
         manager = self.manager
@@ -154,11 +198,22 @@ class PreviewOwnershipTests(unittest.IsolatedAsyncioTestCase):
     async def test_metadata_works_after_reconnect_before_next_text_progress(self):
         self.manager._consume_progress(frame())
         self.assertEqual(self.manager.preview[2], b"frame")
-        self.manager._preview_context = None
+        epoch = self.manager.state["preview_epoch"]
+        self.manager._reset_preview_connection()
+        self.assertGreater(self.manager.state["preview_epoch"], epoch)
+        self.manager._consume_progress(event("executing", prompt=None, node="second"))
         self.manager._consume_progress({"kind": "preview", "bytes": b"unowned", "format": "jpeg"})
-        self.assertEqual(self.manager.preview[2], b"frame")
-        self.manager._consume_progress(frame(bytes=b"reconnected"))
+        self.assertIsNone(self.manager.preview)
+        self.manager._consume_progress(frame(node="second", bytes=b"reconnected"))
         self.assertEqual(self.manager.preview[2], b"reconnected")
+        self.manager._consume_progress(event(node="sampler", value=30, max=30))
+        self.assertNotIn("progress", self.manager.state)
+        self.manager._consume_progress(event(node="second", value=1, max=30))
+        self.assertEqual(self.manager.state["progress_node"], "second")
+        self.manager._consume_progress(event("executing", node=None))
+        self.manager._reset_preview_connection()
+        self.manager._consume_progress(frame(node="second", bytes=b"after-finish"))
+        self.assertIsNone(self.manager.preview)
 
     async def test_websocket_failure_does_not_stop_history_completion(self):
         class DisconnectedComfy(FakeComfy):
@@ -256,7 +311,7 @@ class PreviewEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 204)
         self.assertEqual(response.headers["Cache-Control"], "no-store")
         self.manager._consume_progress(frame())
-        for identity in ("batch_id=batch-old", "prompt_id=prompt-old", "node_id=other", "batch_id="):
+        for identity in ("batch_id=batch-old", "prompt_id=prompt-old", "node_id=other", "batch_id=", "epoch=99", "epoch=invalid"):
             response = await self.client.get(f"/api/batches/current/preview?{identity}")
             self.assertEqual(response.status, 204)
         response = await self.client.get("/api/batches/current/preview?batch_id=batch-1&prompt_id=prompt-1&node_id=sampler&v=0")
@@ -265,6 +320,7 @@ class PreviewEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.headers["Content-Type"], "image/jpeg")
         self.assertEqual(response.headers["X-Preview-Prompt-Id"], "prompt-1")
         self.assertEqual(response.headers["X-Preview-Id"], "1")
+        self.assertEqual(response.headers["X-Preview-Epoch"], "0")
         self.manager.state["prompt_id"] = "prompt-2"
         self.assertEqual((await self.client.get("/api/batches/current/preview")).status, 204)
 
@@ -272,3 +328,20 @@ class PreviewEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.manager._consume_progress(frame())
         self.manager.state["status"] = "completed"
         self.assertEqual((await self.client.get("/api/batches/current/preview")).status, 204)
+
+    async def test_epoch_rejects_old_reads_when_the_same_node_executes_again(self):
+        manager = self.manager
+        manager._consume_progress(event("executing"))
+        manager._consume_progress(frame(bytes=b"first-execution"))
+        old_epoch = manager.state["preview_epoch"]
+        query = "/api/batches/current/preview?batch_id=batch-1&prompt_id=prompt-1&node_id=sampler"
+        self.assertEqual((await self.client.get(f"{query}&epoch={old_epoch}")).status, 200)
+        manager._consume_progress(event("executing"))
+        self.assertEqual((await self.client.get(query)).status, 204)
+        manager._consume_progress(frame(bytes=b"second-execution"))
+        stale = await self.client.get(f"{query}&epoch={old_epoch}")
+        self.assertEqual(stale.status, 204)
+        self.assertEqual(stale.headers["Cache-Control"], "no-store")
+        current = await self.client.get(f"{query}&epoch={manager.state['preview_epoch']}")
+        self.assertEqual(await current.read(), b"second-execution")
+        self.assertEqual(current.headers["X-Preview-Epoch"], str(manager.state["preview_epoch"]))

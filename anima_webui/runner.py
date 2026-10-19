@@ -83,10 +83,12 @@ class BatchManager:
         self.shutting_down = False
         # 实时进度:由 _monitor_progress 通过 ComfyUI websocket 更新。
         self.preview: tuple[int, str, bytes] | None = None
-        self.preview_metadata: dict[str, str] | None = None
+        self.preview_metadata: dict[str, Any] | None = None
         self._preview_context: tuple[str, str, str] | None = None
+        self._preview_execution: tuple[str, str, str] | None = None
         self._monitor_task: asyncio.Task[None] | None = None
         self._preview_seq = 0
+        self._preview_epoch = 0
         # start 里的资源校验要 await 多次 ComfyUI 请求,期间若不上锁,
         # 第二个并发 start 也能通过 active() 检查并启动重复批次。
         self._start_lock = asyncio.Lock()
@@ -965,12 +967,25 @@ class BatchManager:
 
     def _clear_preview(self) -> None:
         """Drop all ownership when a prompt, batch or processing stage changes."""
+        self._advance_preview_epoch()
+        self._preview_context = None
+        self._preview_execution = None
+
+    def _advance_preview_epoch(self) -> None:
+        """Invalidate in-flight image reads, even when the next node has the same id."""
+        self._preview_epoch += 1
         self.preview = None
         self.preview_metadata = None
-        self._preview_context = None
         if self.state is not None:
+            self.state["preview_epoch"] = self._preview_epoch
             for key in ("preview_id", "preview_prompt_id", "preview_node", "preview_status", "progress", "progress_node"):
                 self.state.pop(key, None)
+
+    def _reset_preview_connection(self) -> None:
+        execution = self._preview_execution
+        self._clear_preview()
+        if execution and not execution[2]:
+            self._preview_execution = execution
 
     def _consume_progress(self, item: dict[str, Any]) -> None:
         state = self.state
@@ -985,6 +1000,8 @@ class BatchManager:
             return
         context = self._preview_context
         context_matches = bool(context and context[:2] == (batch_id, prompt_id))
+        execution = self._preview_execution
+        execution_matches = bool(execution and execution[:2] == (batch_id, prompt_id))
         if item.get("kind") == "event":
             payload = item.get("payload")
             if not isinstance(payload, dict) or payload.get("type") not in ("progress", "executing"):
@@ -1002,9 +1019,10 @@ class BatchManager:
                 return
             node = str(data.get("node") or "")
             if payload["type"] == "executing":
-                if node != state.get("progress_node"):
-                    state.pop("progress", None)
+                self._advance_preview_epoch()
                 state["progress_node"] = node
+                state["preview_status"] = "waiting"
+                self._preview_execution = (batch_id, prompt_id, node)
                 self._preview_context = (batch_id, prompt_id, node)
             else:
                 try:
@@ -1016,7 +1034,14 @@ class BatchManager:
                 node = node or (context[2] if context_matches else "")
                 if not node:
                     return
+                # Progress cannot reopen a completed execution or move back to
+                # an earlier node after an executing event has advanced it.
+                if execution_matches and node != execution[2]:
+                    return
+                if not execution_matches:
+                    self._preview_execution = (batch_id, prompt_id, node)
                 self._preview_context = (batch_id, prompt_id, node)
+                state.setdefault("preview_epoch", self._preview_epoch)
                 state["progress_node"] = node
                 state["progress"] = {"value": min(value, maximum), "max": maximum}
             if state.get("preview_status") == "disconnected":
@@ -1028,9 +1053,9 @@ class BatchManager:
         if frame_prompt:
             if frame_prompt != prompt_id or not isinstance(node, str) or not node:
                 return
-            if context_matches:
+            if execution_matches:
                 node_ids = (node, item.get("display_node_id"), item.get("parent_node_id"))
-                if not context[2] or context[2] not in node_ids:
+                if not execution[2] or execution[2] not in node_ids:
                     return
         else:
             # Legacy frames are accepted only after an identified execution or
@@ -1041,11 +1066,16 @@ class BatchManager:
         body, image_format = item.get("bytes"), item.get("format")
         if not isinstance(body, bytes) or not body or image_format not in ("jpeg", "png"):
             return
+        # ComfyUI's metadata preview arrives before its progress event. It can
+        # establish initial ownership after reconnect without accepting an
+        # unidentified legacy frame from the previous connection.
+        if not execution_matches:
+            self._preview_execution = (batch_id, prompt_id, node)
         self._preview_seq += 1
         self.preview = (self._preview_seq, f"image/{image_format}", body)
-        self.preview_metadata = {"batch_id": batch_id, "prompt_id": prompt_id, "node_id": node}
+        self.preview_metadata = {"batch_id": batch_id, "prompt_id": prompt_id, "node_id": node, "epoch": self._preview_epoch}
         state.update(preview_id=self._preview_seq, preview_prompt_id=prompt_id,
-                     preview_node=node, preview_status="live")
+                     preview_node=node, preview_epoch=self._preview_epoch, preview_status="live")
 
     async def _monitor_progress(self) -> None:
         """通过 ComfyUI websocket 更新采样进度与实时预览。
@@ -1055,7 +1085,7 @@ class BatchManager:
         """
         while self.active():
             # Never infer legacy-frame ownership from events before reconnect.
-            self._preview_context = None
+            self._reset_preview_connection()
             try:
                 async for item in self.comfy.progress_stream(self.client_id):
                     self._consume_progress(item)
@@ -1064,6 +1094,7 @@ class BatchManager:
             except Exception as error:
                 logger.debug("进度 websocket 中断,稍后重连: %s", error)
             self._preview_context = None
+            self._advance_preview_epoch()
             if self.state and self.state.get("status") in ("running", "stopping") and self.state.get("stage") == "generating":
                 self.state["preview_status"] = "disconnected"
             if not self.active():

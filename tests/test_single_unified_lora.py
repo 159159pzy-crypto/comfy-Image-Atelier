@@ -91,7 +91,7 @@ def test_one_lora_list_drives_every_sampler_and_face_clip(templates, profile, ba
     assert_connected(api)
     assert "243" not in api
     assert api["72"]["inputs"]["loras"]["__value__"] == [
-        {"on": item["enabled"], "lora": item["filename"], "strength": item["strength"], "strengthTwo": None}
+        {"active": item["enabled"], "name": item["filename"], "strength": item["strength"], "clipStrength": item["strength"]}
         for item in LORAS
     ]
     # Triggers are frozen into the encoding once, never re-appended by the loader.

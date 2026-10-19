@@ -97,7 +97,7 @@ function initializeSingleLayout() {
   for (const [category, leftCards, rightCards, tailCards] of [
     ["prompt", [processingCard("expand")], [processingCard("oc")], [document.getElementById("singleProcessedSection")]],
     ["repair", [postCard("latent"), postCard("nvidia"), document.getElementById("singleDlssSection")], [postCard("seedvr2"), postCard("face")], []],
-    ["more", [], [document.getElementById("singleKreaSection")], [cardFor("savePreset"), document.getElementById("singleCompatibilitySection")]],
+    ["more", [], [], [cardFor("savePreset"), document.getElementById("singleCompatibilitySection")]],
   ]) {
     const container = document.createElement("div");
     container.className = "single-category-layout";

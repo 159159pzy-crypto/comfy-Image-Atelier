@@ -36,6 +36,7 @@ class ComfyClient:
         self.session: aiohttp.ClientSession | None = None
         self._object_info_cache: tuple[float, dict[str, Any] | None] = (0.0, None)
         self._object_info_generation = 0
+        self._object_info_pending: dict[int, asyncio.Task[dict[str, Any]]] = {}
         self._classification_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._classification_locks = {kind: asyncio.Lock() for kind in ("models", "loras")}
 
@@ -46,6 +47,11 @@ class ComfyClient:
         return self.session
 
     async def close(self) -> None:
+        pending = list(self._object_info_pending.values())
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         if self.session is not None and not self.session.closed:
             await self.session.close()
 
@@ -80,10 +86,23 @@ class ComfyClient:
         if cached is not None and loop.time() - timestamp < 5.0:
             return cached
         generation = self._object_info_generation
-        data = await self._json("GET", "/object_info")
-        if generation == self._object_info_generation:
-            self._object_info_cache = (loop.time(), data)
-        return data
+        task = self._object_info_pending.get(generation)
+        if task is None:
+            async def fetch() -> dict[str, Any]:
+                try:
+                    data = await self._json("GET", "/object_info")
+                    if generation == self._object_info_generation:
+                        self._object_info_cache = (loop.time(), data)
+                    return data
+                finally:
+                    self._object_info_pending.pop(generation, None)
+
+            task = asyncio.create_task(fetch())
+            self._object_info_pending[generation] = task
+            # A cancelled HTTP waiter must neither cancel the shared request
+            # nor leave an unobserved exception if every waiter disconnects.
+            task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        return await asyncio.shield(task)
 
     async def _manager_inventory(self, prefix: str) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []

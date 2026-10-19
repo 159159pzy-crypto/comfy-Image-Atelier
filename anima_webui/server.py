@@ -298,6 +298,7 @@ def create_app(
         return web.json_response(
             {
                 "defaults": startup_defaults,
+                "model_profiles": {profile_id: profile_public(profile_id) for profile_id in MODEL_PROFILE_IDS},
                 "single_defaults": SINGLE_DEFAULTS,
                 "comfy_url": getattr(client, "base_url", "local"),
                 "catalog": {
@@ -1056,13 +1057,16 @@ def create_app(
         for key in ("batch_id", "prompt_id", "node_id"):
             if key in request.query and (owner is None or request.query[key] != owner[key]):
                 return web.Response(status=204, headers=headers)
+        if "epoch" in request.query and (owner is None or request.query["epoch"] != str(owner.get("epoch"))):
+            return web.Response(status=204, headers=headers)
         if owner is not None:
             state = manager.state or {}
             if (owner["batch_id"] != state.get("id") or owner["prompt_id"] != state.get("prompt_id")
+                    or owner["epoch"] != state.get("preview_epoch")
                     or state.get("stage") != "generating" or state.get("status") not in ("running", "stopping")):
                 return web.Response(status=204, headers=headers)
             headers.update({"X-Preview-Batch-Id": owner["batch_id"], "X-Preview-Prompt-Id": owner["prompt_id"],
-                            "X-Preview-Node-Id": owner["node_id"]})
+                            "X-Preview-Node-Id": owner["node_id"], "X-Preview-Epoch": str(owner["epoch"])})
         seq, content_type, body = preview
         headers["X-Preview-Id"] = str(seq)
         return web.Response(body=body, content_type=content_type, headers=headers)

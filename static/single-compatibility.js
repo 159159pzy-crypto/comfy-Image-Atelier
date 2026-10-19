@@ -4,7 +4,6 @@ const SINGLE_VISIBLE_PATHS = new Set([
   "prompt_job_id", "processed_prompt_override", "dual.switch_step", "dual.scale",
   "dual.second_cfg", "dual.second_sampler_name", "dual.second_scheduler", "dual.upscale_method",
   "latent.upscale_method", "dlss.enabled", "dlss.style", "dlss.intensity", "dlss.output_mix",
-  "krea_variance.enabled", "krea_variance.randomize_percent", "krea_variance.strength",
   ...["expand", "oc"].flatMap(stage => ["enabled", "rule", "llm_service", "custom_rule", "custom_rule_content", "user_prompt", "character", "features"].map(key => `prompt_processing.${stage}.${key}`)),
 ]);
 const SINGLE_COMPATIBILITY_LABELS = {
@@ -39,6 +38,9 @@ function singleWorkbenchCompatibilityEntries(settings) {
     if (value !== undefined && normal !== undefined && JSON.stringify(value) !== JSON.stringify(normal)) entries.push({ path, label, value, normal });
   };
   for (const [path] of singleCompatibilityLeaves(baseline.single)) {
+    // The Krea controls were removed, not their saved execution settings.
+    // Exclude the entire group from both this display and its reset action.
+    if (path.startsWith("krea_variance.")) continue;
     if (!SINGLE_VISIBLE_PATHS.has(path)) add(`single.${path}`, path.split(".").map(part => SINGLE_COMPATIBILITY_LABELS[part] || part).join(" · "));
   }
   for (const [key, label] of [["clip_name", "CLIP"], ["vae_name", "VAE"], ["clip_type", "编码类型"]]) add(key, label);

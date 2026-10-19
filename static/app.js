@@ -850,14 +850,20 @@ function profileDefaults(profile) {
 }
 function profileSettingsDefaults(profile) {
   const id = normalizeProfileId(profile);
-  return defaults?.profile_settings?.[id] || defaults?.profiles?.[id]?.settings || (id === "krea2" ? { ...defaults, loras: [], pools: defaultPools() } : defaults || {});
+  const saved = defaults?.profile_settings?.[id] || defaults?.profiles?.[id]?.settings;
+  if (saved) return saved;
+  if (normalizeProfileId(defaults?.model_profile || "anima") === id) return defaults || {};
+  const bound = profileConfig(id);
+  return { ...defaults, ...bound.defaults, model_profile: id,
+    ...Object.fromEntries(["model_name", "clip_name", "vae_name", "clip_type"].map(key => [key, bound[key] || ""])),
+    loras: [], lora_managed_triggers: [], pools: defaultPools() };
 }
 function defaultLorasForProfile(profile) {
   return clone(profileSettingsDefaults(profile)?.loras || []);
 }
 function profileConfig(profile) {
   const id = normalizeProfileId(profile);
-  return resources.model_profiles?.[id] || resources.profiles?.[id] || profileResources?.[id] || { id };
+  return resources.model_profiles?.[id] || resources.profiles?.[id] || profileResources?.[id] || (typeof config !== "undefined" ? config?.model_profiles?.[id] : null) || { id };
 }
 function profileLabel(profile) {
   const value = profileConfig(profile);
@@ -1086,6 +1092,18 @@ function refreshProfileData() {
     loadStylePresets(),
     loadCustomGroups(section).then(() => loadPool()),
   ]);
+}
+function invalidateResourceInventories() {
+  for (const load of [loadResources, loadLoraInventory]) {
+    if (!load.cache) continue;
+    load.cache.generation++;
+    load.cache.values.clear();
+    load.cache.pending.clear();
+  }
+  ++resourceRequest;
+  ++loraInventoryRequest;
+  resourcesLoaded = false;
+  loraInventoryLoaded = false;
 }
 
 function applySettings(raw, { useProfileDraft = false } = {}) {
@@ -1508,20 +1526,32 @@ function moveLora(index, delta) {
   schedulePersist();
 }
 async function loadLoraInventory({ refresh = false } = {}) {
+  const cache = loadLoraInventory.cache ||= { generation: 0, values: new Map(), pending: new Map() };
   const requestedProfile = currentProfile();
+  if (refresh && !cache.pending.get(requestedProfile)?.refresh) { cache.generation++; cache.values.clear(); cache.pending.clear(); }
+  const generation = cache.generation;
   const requestId = ++loraInventoryRequest;
-  loraInventoryLoaded = false;
+  const cached = cache.values.get(requestedProfile);
+  if (!cached) loraInventoryLoaded = false;
   loraInventoryError = "";
   if (loraInventoryProfile !== requestedProfile) {
     loraInventoryProfile = requestedProfile;
     loraInventory = [];
     loraClassificationItems = [];
   }
-  renderLoras();
-  renderLoraCatalog();
+  if (!cached) { renderLoras(); renderLoraCatalog(); }
   try {
-    const data = await request(`/api/loras?model_profile=${encodeURIComponent(requestedProfile)}${refresh ? "&refresh=1" : ""}`);
-    if (requestId !== loraInventoryRequest || requestedProfile !== currentProfile()) return;
+    let pending = cache.pending.get(requestedProfile);
+    if (!cached && !pending) {
+      pending = request(`/api/loras?model_profile=${encodeURIComponent(requestedProfile)}${refresh ? "&refresh=1" : ""}`).then(data => {
+        if (generation === cache.generation) cache.values.set(requestedProfile, data);
+        return data;
+      }).finally(() => { if (cache.pending.get(requestedProfile) === pending) cache.pending.delete(requestedProfile); });
+      pending.refresh = refresh;
+      cache.pending.set(requestedProfile, pending);
+    }
+    const data = clone(cached || await pending);
+    if (generation !== cache.generation || requestId !== loraInventoryRequest || requestedProfile !== currentProfile()) return;
     loraInventory = data.items || [];
     loraClassificationItems = Array.isArray(data.classification_items) ? data.classification_items : loraInventory;
     loraInventoryLoaded = true;
@@ -1530,7 +1560,7 @@ async function loadLoraInventory({ refresh = false } = {}) {
     renderLoras();
     renderLoraCatalog();
   } catch (error) {
-    if (requestId !== loraInventoryRequest || requestedProfile !== currentProfile()) return;
+    if (generation !== cache.generation || requestId !== loraInventoryRequest || requestedProfile !== currentProfile()) return;
     loraInventory = [];
     loraClassificationItems = [];
     loraInventoryLoaded = false;
@@ -1600,10 +1630,26 @@ function parseLoraTriggerInput(value) {
 }
 function replaceLoraInventoryItem(value) {
   const identity = normalizedPath(value.filename);
+  // Trigger overrides are shared by both workbenches. Update every cached
+  // profile and reject inventories which began before this edit completed.
+  if (typeof loadLoraInventory === "function" && loadLoraInventory.cache) {
+    const cache = loadLoraInventory.cache;
+    cache.generation++;
+    cache.pending.clear();
+    ++loraInventoryRequest;
+    for (const [profile, saved] of cache.values) {
+      const items = (saved.items || []).filter(item => normalizedPath(item.filename) !== identity);
+      if (value.model_profile === profile && value.classification_status === "recognized") items.push(clone(value));
+      const classified = (saved.classification_items || saved.items || []).filter(item => normalizedPath(item.name || item.filename) !== identity);
+      classified.push(clone(value));
+      cache.values.set(profile, { ...saved, items, count: items.length, classification_items: classified });
+    }
+  }
   loraClassificationItems = loraClassificationItems.filter((item) => normalizedPath(item.name || item.filename) !== identity);
   loraClassificationItems.push(value);
   loraInventory = loraInventory.filter((item) => normalizedPath(item.filename) !== identity);
   if (value.model_profile === currentProfile() && value.classification_status === "recognized") loraInventory.push(value);
+  if (typeof loadLoraInventory === "function" && loadLoraInventory.cache && !loraInventoryLoaded) void loadLoraInventory();
 }
 function openLoraTriggerDialog(configuredItem) {
   const inventoryItem = loraItem(configuredItem.filename);
@@ -1618,48 +1664,140 @@ function openLoraTriggerDialog(configuredItem) {
   ui.resetLoraTriggers.disabled = !inventoryItem.trigger_override;
   ui.loraTriggerDialog.showModal();
 }
+function queueLoraTriggerWrite(profile, filename, send) {
+  const queues = queueLoraTriggerWrite.queues ||= new Map();
+  const key = JSON.stringify([profile, normalizedPath(filename)]);
+  const queue = queues.get(key) || { revision: 0, pending: null };
+  queues.set(key, queue);
+  const revision = ++queue.revision;
+  const execute = async () => {
+    const value = await send();
+    // Every committed write updates the cache, including an earlier write
+    // followed by a queued operation that may subsequently fail.
+    replaceLoraInventoryItem(value);
+    return value;
+  };
+  const pending = queue.pending ? queue.pending.catch(() => {}).then(execute) : execute();
+  queue.pending = pending;
+  const settled = () => { if (queue.pending === pending) queue.pending = null; };
+  pending.then(settled, settled);
+  return { promise: pending, isLatest: () => queue.revision === revision };
+}
 async function saveLoraTriggers(event) {
   event.preventDefault();
   if (!editingLoraTrigger) return;
+  const edited = editingLoraTrigger, profile = currentProfile(), filename = ui.loraTriggerFilename.value;
+  const body = JSON.stringify({ filename, model_profile: profile, triggerWords: parseLoraTriggerInput(ui.loraTriggerWords.value) });
+  const operation = queueLoraTriggerWrite(profile, filename, () => request("/api/loras/triggers", { method: "PUT", body }));
+  const currentEditor = () => operation.isLatest() && profile === currentProfile() && editingLoraTrigger === edited;
   try {
-    const value = await request("/api/loras/triggers", {
-      method: "PUT",
-      body: JSON.stringify({
-        filename: ui.loraTriggerFilename.value,
-        model_profile: currentProfile(),
-        triggerWords: parseLoraTriggerInput(ui.loraTriggerWords.value),
-      }),
-    });
-    replaceLoraInventoryItem(value);
-    reconcileLoraTriggers(editingLoraTrigger.enabled ? [editingLoraTrigger] : []);
+    const value = await operation.promise;
+    if (!currentEditor()) return;
+    reconcileLoraTriggers(edited.enabled ? [edited] : []);
     renderLoras();
     renderLoraCatalog();
     schedulePersist();
     ui.loraTriggerDialog.close();
     toast(value.trigger_words?.length ? "LoRA 触发词已保存" : "已禁用该 LoRA 的自动触发词");
   } catch (error) {
+    if (!currentEditor()) return;
+    reconcileLoraTriggers(edited.enabled ? [edited] : []);
+    renderLoras();
+    renderLoraCatalog();
+    schedulePersist();
     toast(error.message);
   }
 }
 async function resetLoraTriggers() {
   if (!editingLoraTrigger) return;
+  const edited = editingLoraTrigger, profile = currentProfile(), filename = ui.loraTriggerFilename.value;
+  const url = `/api/loras/triggers?filename=${encodeURIComponent(filename)}&model_profile=${encodeURIComponent(profile)}`;
+  const operation = queueLoraTriggerWrite(profile, filename, () => request(url, { method: "DELETE" }));
+  const currentEditor = () => operation.isLatest() && profile === currentProfile() && editingLoraTrigger === edited;
   try {
-    const filename = encodeURIComponent(ui.loraTriggerFilename.value);
-    const value = await request(`/api/loras/triggers?filename=${filename}&model_profile=${encodeURIComponent(currentProfile())}`, { method: "DELETE" });
-    replaceLoraInventoryItem(value);
-    reconcileLoraTriggers(editingLoraTrigger.enabled ? [editingLoraTrigger] : []);
+    await operation.promise;
+    if (!currentEditor()) return;
+    reconcileLoraTriggers(edited.enabled ? [edited] : []);
     renderLoras();
     renderLoraCatalog();
     schedulePersist();
     ui.loraTriggerDialog.close();
     toast("已恢复 LoRA Manager 原始触发词");
   } catch (error) {
+    if (!currentEditor()) return;
+    reconcileLoraTriggers(edited.enabled ? [edited] : []);
+    renderLoras();
+    renderLoraCatalog();
+    schedulePersist();
     toast(error.message);
   }
 }
 
 let currentQueue = [];
-let lastPreviewId = 0;
+const randomPreviewState = { identity: "", epoch: 0, request: 0, pending: false, requested: "", live: null };
+function invalidateRandomPreview(clearImage = false) {
+  const state = randomPreviewState;
+  ++state.request; state.pending = false; state.requested = "";
+  if (clearImage) {
+    if (state.live?.src) URL.revokeObjectURL(state.live.src);
+    state.live = null;
+    ui.livePreview.removeAttribute("src");
+    ui.livePreview.hidden = true;
+  }
+}
+function renderRandomPreview(batch) {
+  if (!ui.livePreview) return;
+  const state = randomPreviewState;
+  const active = batch && ["running", "stopping"].includes(batch.status) && batch.kind !== "prompt_preview";
+  const identity = active ? `${batch.id}:${batch.prompt_id || ""}` : "";
+  const epoch = Number(batch?.preview_epoch || 0);
+  if (identity !== state.identity || !active) {
+    invalidateRandomPreview(true); state.identity = identity;
+  } else if (epoch !== state.epoch) invalidateRandomPreview();
+  state.epoch = epoch;
+  if (active) void fetchRandomPreview(batch);
+}
+async function fetchRandomPreview(batch) {
+  const state = randomPreviewState, identity = `${batch.id}:${batch.prompt_id || ""}`, epoch = Number(batch.preview_epoch || 0);
+  const key = `${identity}:${epoch}:${batch.preview_id}`;
+  if (!batch.prompt_id || !batch.preview_id || state.pending || state.requested === key) return;
+  if (state.live?.epoch === epoch && Number(batch.preview_id) <= state.live.previewId) return;
+  state.pending = true; state.requested = key;
+  const requestId = ++state.request;
+  const valid = () => requestId === state.request && identity === state.identity && epoch === state.epoch;
+  let source = "", committed = false;
+  try {
+    const query = new URLSearchParams({ batch_id: batch.id, prompt_id: batch.prompt_id, v: String(batch.preview_id) });
+    if (batch.preview_node) query.set("node_id", batch.preview_node);
+    if (batch.preview_epoch != null) query.set("epoch", String(epoch));
+    const response = await fetch(`/api/batches/current/preview?${query}`, { cache: "no-store" });
+    if (!response.ok || response.status === 204 || !valid()) return;
+    for (const [header, expected] of [["X-Preview-Batch-Id", batch.id], ["X-Preview-Prompt-Id", batch.prompt_id], ["X-Preview-Node-Id", batch.preview_node]]) {
+      const returned = response.headers.get(header);
+      if (returned && expected != null && returned !== String(expected)) return;
+    }
+    if (batch.preview_epoch != null && response.headers.get("X-Preview-Epoch") !== String(epoch)) return;
+    const previewId = Number(response.headers.get("X-Preview-Id")) || batch.preview_id;
+    if (previewId < Number(batch.preview_id) || (state.live?.epoch === epoch && previewId <= state.live.previewId)) return;
+    const body = await response.blob();
+    if (!body.type.startsWith("image/") || !valid()) return;
+    source = URL.createObjectURL(body);
+    const image = new Image(); image.src = source;
+    await image.decode();
+    if (!valid()) return;
+    const previous = state.live?.src;
+    state.live = { src: source, epoch, previewId }; source = ""; committed = true;
+    state.requested = `${identity}:${epoch}:${previewId}`;
+    ui.livePreview.src = state.live.src; ui.livePreview.hidden = false;
+    if (previous) URL.revokeObjectURL(previous);
+  } catch {
+    // Keep the last decoded frame while an intermediate frame is unavailable.
+  } finally {
+    if (source) URL.revokeObjectURL(source);
+    if (!committed && valid()) state.requested = "";
+    if (requestId === state.request) state.pending = false;
+  }
+}
 let submitInFlight = false;
 function renderBatchPayload(payload) {
   renderBatch(payload.batch, payload.queue || []);
@@ -1744,17 +1882,7 @@ function renderBatch(batch, queue = currentQueue) {
       ui.sampleFill.style.width = "0%";
     }
   }
-  // 实时预览帧:preview_id 变化时刷新缩略图
-  if (ui.livePreview) {
-    if (active && batch.preview_id && batch.preview_id !== lastPreviewId) {
-      lastPreviewId = batch.preview_id;
-      ui.livePreview.src = `/api/batches/current/preview?v=${batch.preview_id}`;
-      ui.livePreview.hidden = false;
-    } else if (!active) {
-      ui.livePreview.hidden = true;
-      lastPreviewId = 0;
-    }
-  }
+  renderRandomPreview(batch);
   ui.stopButton.disabled = !active || batch.status === "stopping";
   // 运行中仍可加入队列，但分类有效性与连接状态共用同一守卫。
   updateGenerationAvailability();
@@ -1772,16 +1900,29 @@ function renderBatch(batch, queue = currentQueue) {
 }
 async function refreshConnection() {
   if (document.hidden) return;
-  try {
-    const status = await request("/api/status");
-    ui.connection.className = `status-badge ${status.online ? "online" : "offline"}`;
-    ui.connection.querySelector("span").textContent = status.online ? `ComfyUI ${status.version}` : "ComfyUI 离线";
+  if (refreshConnection.pending) return refreshConnection.pending;
+  refreshConnection.pending = (async () => {
+    const previous = refreshConnection.online;
+    let online = false;
+    try {
+      const status = await request("/api/status");
+      online = Boolean(status.online);
+      ui.connection.className = `status-badge ${status.online ? "online" : "offline"}`;
+      ui.connection.querySelector("span").textContent = status.online ? `ComfyUI ${status.version}` : "ComfyUI 离线";
+    } catch {
+      ui.connection.className = "status-badge offline";
+      ui.connection.querySelector("span").textContent = "ComfyUI 离线";
+    }
+    refreshConnection.online = online;
+    if (previous === true && !online) invalidateResourceInventories();
+    if (previous === false && online) {
+      invalidateResourceInventories();
+      await Promise.allSettled([loadResources({ refresh: true }), loadLoraInventory({ refresh: true })]);
+    }
     updateGenerationAvailability();
-  } catch {
-    ui.connection.className = "status-badge offline";
-    ui.connection.querySelector("span").textContent = "ComfyUI 离线";
-    updateGenerationAvailability();
-  }
+  })();
+  try { await refreshConnection.pending; }
+  finally { refreshConnection.pending = null; }
 }
 let pollErrorShown = false;
 let pollIdleTicks = 0;
@@ -4707,28 +4848,43 @@ function profileOptionsFromResources() {
   ];
 }
 async function loadResources({ refresh = false } = {}) {
-  const requestId = ++resourceRequest;
+  const cache = loadResources.cache ||= { generation: 0, values: new Map(), pending: new Map() };
   const selectedProfile = currentProfile();
+  if (refresh && !cache.pending.get(selectedProfile)?.refresh) { cache.generation++; cache.values.clear(); cache.pending.clear(); }
+  const generation = cache.generation;
+  const requestId = ++resourceRequest;
+  const cached = cache.values.get(selectedProfile);
   const selectedSeed = ui.seedvr2_model_name.value || profileConfig(selectedProfile).seedvr2_model || "";
   const selectedSeedVae = ui.seedvr2_vae_name.value || profileConfig(selectedProfile).seedvr2_vae || "";
   const selectedSampler = ui.sampler_name.value || profileDefaults(selectedProfile).sampler_name || defaults?.sampler_name || "";
   const selectedScheduler = ui.scheduler.value || profileDefaults(selectedProfile).scheduler || defaults?.scheduler || "";
-  resourcesLoaded = false;
+  if (!cached) resourcesLoaded = false;
   resourceInventoryProfile = selectedProfile;
   resourceError = "";
-  refreshCurrentModelSelection();
-  updateGenerationAvailability();
-  ui.model_profile.disabled = true;
-  ui.sampler_name.disabled = true;
-  ui.scheduler.disabled = true;
-  ui.seedvr2_model_name.disabled = true;
-  ui.seedvr2_vae_name.disabled = true;
-  for (const id of ["latent_second_sampler_name", "latent_second_scheduler", "seedvr2_sampler_name", "seedvr2_scheduler", "face_sampler", "face_scheduler"]) ui[id].disabled = true;
+  if (!cached) {
+    refreshCurrentModelSelection();
+    updateGenerationAvailability();
+    ui.model_profile.disabled = true;
+    ui.sampler_name.disabled = true;
+    ui.scheduler.disabled = true;
+    ui.seedvr2_model_name.disabled = true;
+    ui.seedvr2_vae_name.disabled = true;
+    for (const id of ["latent_second_sampler_name", "latent_second_scheduler", "seedvr2_sampler_name", "seedvr2_scheduler", "face_sampler", "face_scheduler"]) ui[id].disabled = true;
+  }
   // Retain selected values while disabled: autosave and overlapping reads must
   // not capture placeholder values and silently replace them with defaults.
   try {
-    const payload = await request(`/api/resources?model_profile=${encodeURIComponent(selectedProfile)}${refresh ? "&refresh=1" : ""}`);
-    if (requestId !== resourceRequest || selectedProfile !== currentProfile()) return;
+    let pending = cache.pending.get(selectedProfile);
+    if (!cached && !pending) {
+      pending = request(`/api/resources?model_profile=${encodeURIComponent(selectedProfile)}${refresh ? "&refresh=1" : ""}`).then(payload => {
+        if (generation === cache.generation) cache.values.set(selectedProfile, payload);
+        return payload;
+      }).finally(() => { if (cache.pending.get(selectedProfile) === pending) cache.pending.delete(selectedProfile); });
+      pending.refresh = refresh;
+      cache.pending.set(selectedProfile, pending);
+    }
+    const payload = clone(cached || await pending);
+    if (generation !== cache.generation || requestId !== resourceRequest || selectedProfile !== currentProfile()) return;
     const modelProfiles = payload.model_profiles || payload.profiles || {};
     resources = {
       models: Array.isArray(payload.models) ? payload.models : [],
@@ -4774,7 +4930,7 @@ async function loadResources({ refresh = false } = {}) {
     for (const id of ["latent_second_scheduler", "seedvr2_scheduler", "face_scheduler"]) ui[id].disabled = resources.schedulers.length === 0;
     applyNodeResourceControls();
   } catch (error) {
-    if (requestId !== resourceRequest || selectedProfile !== currentProfile()) return;
+    if (generation !== cache.generation || requestId !== resourceRequest || selectedProfile !== currentProfile()) return;
     resources = { models: [], model_items: [], profile_models: {}, model_assignments: {}, seedvr2_models: [], seedvr2_vaes: [], upscale_models: [], samplers: [], schedulers: [], model_profiles: {}, profiles: {}, nodes: {}, plugins: {} };
     profileResources = {};
     resourceError = `模型资源读取失败：${error.message}`;
@@ -4923,6 +5079,7 @@ async function loadResourceOwnership({ refresh = false } = {}) {
 }
 async function refreshResourceClassification() {
   ui.refreshResourceClassification.disabled = true;
+  invalidateResourceInventories();
   try {
     await Promise.allSettled([
       loadResourceOwnership({ refresh: true }),

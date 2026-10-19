@@ -299,7 +299,7 @@ function singleContext(extra = {}) {
     JSON, Number, Set, Date, clearTimeout, setTimeout, console,
     document: { getElementById: id => elements[id] ||= { value: '', hidden: false }, querySelectorAll: () => [] },
     SECTIONS: ['character', 'clothing', 'pose', 'background', 'expression'],
-    config: {}, profileConfig: () => ({ clip_name: 'clip.safetensors', vae_name: 'vae.safetensors', clip_type: 'stable_diffusion' }),
+    config: {}, currentProfile: () => 'anima', profileConfig: () => ({ clip_name: 'clip.safetensors', vae_name: 'vae.safetensors', clip_type: 'stable_diffusion' }),
     profileSettingsDefaults: profile => ({ model_profile: profile, count: 8, base_mode: 'dual_sampler', loras: [], negative_prompt: 'negative' }),
     ...extra,
   });
@@ -314,6 +314,45 @@ test('single defaults use one normal sample and match safe image resize and dual
   assert.equal(value.single.resize_mode, 'crop');
   assert.equal(value.single.dual.scale, 1);
   assert.equal(value.single.dual.second_pipeline, 'primary');
+});
+function profileResourceContext() {
+  const profiles = {
+    anima: { id: 'anima', model_name: 'anima-base-v1.0.safetensors', clip_name: 'qwen_3_06b_base.safetensors', vae_name: 'qwen_image_vae.safetensors', clip_type: 'stable_diffusion', defaults: { steps: 30, cfg: 4, base_mode: 'dual_sampler' } },
+    krea2: { id: 'krea2', model_name: 'krea2_turbo_int8_convrot.safetensors', clip_name: 'qwen3vl_4b_fp8_scaled.safetensors', vae_name: 'qwen_image_vae.safetensors', clip_type: 'krea2', defaults: { steps: 30, cfg: 4, base_mode: 'normal' } },
+  };
+  const result = singleContext({
+    config: { model_profiles: profiles }, resources: {}, profileResources: {},
+    defaults: { ...profiles.anima, ...profiles.anima.defaults, model_profile: 'anima', loras: [{ filename: 'anima-lora' }] },
+    normalizeProfileId: value => value === 'krea2' ? 'krea2' : 'anima', defaultPools: () => ({}),
+  });
+  for (const name of ['profileConfig', 'profileSettingsDefaults']) vm.runInContext(functionSource(name), result.ctx);
+  return { ...result, profiles };
+}
+test('Krea single defaults bind its encoder before the live resource inventory loads', () => {
+  const { ctx, profiles } = profileResourceContext();
+  const before = plain(ctx.defaults);
+  const value = plain(ctx.singleWorkbenchDefaultSettings('krea2'));
+  for (const key of ['model_name', 'clip_name', 'vae_name', 'clip_type']) assert.equal(value[key], profiles.krea2[key], key);
+  assert.deepEqual(value.loras, []);
+  assert.deepEqual(plain(ctx.defaults), before);
+});
+test('single restores stale profile resources and serializes the repaired values', () => {
+  const { ctx, run, profiles } = profileResourceContext();
+  for (const name of ['singleWorkbenchCancelInput', 'singleWorkbenchRenderCompatibility', 'singleWorkbenchRenderProcessed', 'singleWorkbenchRestoreInput', 'singleWorkbenchRenderMode']) ctx[name] = () => {};
+  ctx.currentProfile = () => 'krea2';
+  run('singleWorkbenchState.ready = true');
+  for (const clipName of [profiles.anima.clip_name, 'text_encoders\\nested\\' + profiles.anima.clip_name.toUpperCase()]) {
+    const raw = { workbench: 'single', model_profile: 'krea2', clip_name: clipName, clip_type: profiles.anima.clip_type, single: { unlock_resources: true } };
+    ctx.singleWorkbenchApply(raw);
+    const value = plain(ctx.singleWorkbenchRead({ model_profile: 'krea2' }));
+    assert.equal(value.clip_name, profiles.krea2.clip_name);
+    assert.equal(value.clip_type, 'krea2');
+    assert.equal(raw.clip_name, clipName);
+  }
+  ctx.singleWorkbenchApply({ workbench: 'single', model_profile: 'krea2', clip_name: 'custom/qwen3vl_4b_bf16.safetensors', clip_type: 'krea2', vae_name: 'custom/vae', single: { unlock_resources: true } });
+  const custom = plain(ctx.singleWorkbenchRead({ model_profile: 'krea2' }));
+  assert.equal(custom.clip_name, 'custom/qwen3vl_4b_bf16.safetensors');
+  assert.equal(custom.vae_name, 'custom/vae');
 });
 test('single serialization freezes manual composition and omits all random dimensions', () => {
   const { ctx, elements, run } = singleContext();

@@ -9,10 +9,10 @@ const appSource = fs.readFileSync(path.join(__dirname, '../static/app.js'), 'utf
 const flush = () => new Promise(resolve => setImmediate(resolve));
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 function record(id = 1, batchId = 'older') { return { id, batch_id: batchId, filename: `${id}.png`, sample_seed: 3, settings: { workbench: 'single' } }; }
-function batch(overrides = {}) { return { id: 'batch-1', prompt_id: 'prompt-1', status: 'running', completed: 0, preview_id: 1, preview_node: 'sampler', settings: { workbench: 'single' }, ...overrides }; }
+function batch(overrides = {}) { return { id: 'batch-1', prompt_id: 'prompt-1', status: 'running', completed: 0, preview_id: 1, preview_epoch: 1, preview_node: 'sampler', settings: { workbench: 'single' }, ...overrides }; }
 function history(items) { return { items, total: items.length, has_more: false, next_before_id: items.at(-1)?.id || null }; }
-function response({ status = 200, batchId = 'batch-1', promptId = 'prompt-1', nodeId = 'sampler', seq = 1, type = 'image/jpeg' } = {}) {
-  const headers = { 'X-Preview-Batch-Id': batchId, 'X-Preview-Prompt-Id': promptId, 'X-Preview-Node-Id': nodeId, 'X-Preview-Id': String(seq) };
+function response({ status = 200, batchId = 'batch-1', promptId = 'prompt-1', nodeId = 'sampler', seq = 1, epoch = 1, type = 'image/jpeg' } = {}) {
+  const headers = { 'X-Preview-Batch-Id': batchId, 'X-Preview-Prompt-Id': promptId, 'X-Preview-Node-Id': nodeId, 'X-Preview-Id': String(seq), 'X-Preview-Epoch': String(epoch) };
   return { status, ok: status >= 200 && status < 300, headers: { get: key => headers[key] ?? null }, blob: async () => ({ type }) };
 }
 function element() {
@@ -41,8 +41,8 @@ function setup(extra = {}) {
   Object.assign(state, { ready: true, active: true, loaded: true, items: [record()], total: 1, lastCompleted: record() });
   ctx.singleGalleryCanvas();
   const image = elements.get('singlePreviewImage');
-  function running(value = batch()) { state.generationKey = `${value.id}:${value.prompt_id}`; state.batchSnapshot = value; state.busy = true; state.waitingBatch = value.id; return value; }
-  function live(value = 'blob:previous') { state.live = { batchId: 'batch-1', promptId: 'prompt-1', previewId: 0, src: value }; ctx.singleGalleryCanvas(); }
+  function running(value = batch()) { state.generationKey = `${value.id}:${value.prompt_id}`; state.frameEpoch = Number(value.preview_epoch || 0); state.batchSnapshot = value; state.busy = true; state.waitingBatch = value.id; return value; }
+  function live(value = 'blob:previous') { state.live = { batchId: 'batch-1', promptId: 'prompt-1', epoch: 1, previewId: 0, src: value }; ctx.singleGalleryCanvas(); }
   return { ctx, state, elements, image, decodes, revoked, requests, running, live };
 }
 
@@ -75,7 +75,7 @@ test('late fetch/decode from the prior prompt cannot replace the newer task', as
 });
 
 test('204, mismatched ownership and invalid content allow retry of the same frame', async () => {
-  for (const failed of [response({ status: 204 }), response({ batchId: 'other' }), response({ nodeId: 'other' }), response({ type: 'text/html' })]) {
+  for (const failed of [response({ status: 204 }), response({ batchId: 'other' }), response({ nodeId: 'other' }), response({ epoch: 99 }), response({ type: 'text/html' })]) {
     let count = 0;
     const h = setup({ fetch: async () => ++count === 1 ? failed : response() });
     const value = h.running();
@@ -109,6 +109,37 @@ test('a newer returned frame prevents repeated fetches for stale snapshot sequen
   assert.equal(h.state.live.previewId, 3);
   for (const seq of [1, 2, 3]) await h.ctx.singleGalleryFetchFrame(batch({ preview_id: seq }));
   assert.equal(count, 1);
+});
+
+test('a same-node stage transition keeps the displayed frame and rejects the previous decode', async () => {
+  let count = 0;
+  const h = setup({ fetch: async () => response(++count === 1 ? {} : { epoch: 2, seq: 2 }) });
+  const value = h.running(); h.live();
+  const first = h.ctx.singleGalleryFetchFrame(value);
+  await flush();
+  h.ctx.singleGalleryBatch(batch({ preview_epoch: 2, preview_id: undefined }));
+  assert.equal(h.image.src, 'blob:previous');
+  h.ctx.singleGalleryBatch(batch({ preview_epoch: 2, preview_id: 2 }));
+  await flush();
+  h.decodes[0].resolve(); await first;
+  assert.equal(h.image.src, 'blob:previous');
+  assert.equal(h.state.framePending, true);
+  assert.ok(h.revoked.includes('blob:frame-1'));
+  h.decodes[1].resolve(); await flush();
+  assert.equal(h.image.src, 'blob:frame-2');
+  assert.equal(h.state.live.epoch, 2);
+});
+
+test('a delayed previous-stage HTTP response cannot create a new image after a stage change', async () => {
+  const pendingResponse = deferred(), urls = [];
+  const h = setup({ fetch: url => { urls.push(url); return pendingResponse.promise; } });
+  const value = h.running(); h.live();
+  const first = h.ctx.singleGalleryFetchFrame(value);
+  h.ctx.singleGalleryBatch(batch({ preview_epoch: 2, preview_id: undefined, progress_node: 'second' }));
+  pendingResponse.resolve(response()); await first;
+  assert.equal(h.decodes.length, 0);
+  assert.equal(h.image.src, 'blob:previous');
+  assert.equal(new URL(urls[0], 'http://localhost').searchParams.get('epoch'), '1');
 });
 
 test('stopping restores the previous finished image and discards a late frame', async () => {
@@ -241,6 +272,92 @@ test('a queued random task with no preceding single output restores the last com
   assert.equal(h.state.finishingBatch, null);
   assert.equal(h.state.live, null);
   assert.equal(h.image.src, '/api/images/1');
+});
+
+function randomSetup(extra = {}) {
+  const image = element(), decodes = [], revoked = [], urls = [];
+  let blobId = 0;
+  const ctx = vm.createContext({
+    console, URLSearchParams, ui: { livePreview: image },
+    URL: { createObjectURL: () => `blob:random-${++blobId}`, revokeObjectURL: value => revoked.push(value) },
+    Image: class { decode() { const pending = deferred(); decodes.push({ source: this.src, ...pending }); return pending.promise; } },
+    fetch: async url => { urls.push(url); return response(); }, ...extra,
+  });
+  vm.runInContext(appSource.slice(appSource.indexOf('const randomPreviewState ='), appSource.indexOf('let submitInFlight =')), ctx);
+  const state = vm.runInContext('randomPreviewState', ctx);
+  const render = overrides => ctx.renderRandomPreview(batch({ settings: { workbench: 'random' }, ...overrides }));
+  return { ctx, state, image, decodes, revoked, urls, render };
+}
+
+test('random previews use owned uncached requests and replace only decoded frames', async () => {
+  const h = randomSetup(); h.render();
+  await flush();
+  assert.equal(h.image.getAttribute('src'), null);
+  h.decodes[0].resolve(); await flush();
+  assert.equal(h.image.src, 'blob:random-1');
+  const query = new URL(h.urls[0], 'http://localhost').searchParams;
+  assert.equal(query.get('batch_id'), 'batch-1');
+  assert.equal(query.get('prompt_id'), 'prompt-1');
+  assert.equal(query.get('node_id'), 'sampler');
+  assert.equal(query.get('epoch'), '1');
+});
+
+test('random same-node reentry cancels stale decode without blanking the last displayed frame', async () => {
+  let count = 0;
+  const h = randomSetup({ fetch: async () => response({ epoch: count < 2 ? 1 : 2, seq: ++count }) });
+  h.render(); await flush(); h.decodes[0].resolve(); await flush();
+  h.render({ preview_id: 2 }); await flush();
+  h.render({ preview_epoch: 2, preview_id: undefined });
+  assert.equal(h.image.src, 'blob:random-1');
+  h.render({ preview_epoch: 2, preview_id: 3 }); await flush();
+  h.decodes[2].resolve(); await flush();
+  assert.equal(h.image.src, 'blob:random-3');
+  h.decodes[1].resolve(); await flush();
+  assert.equal(h.image.src, 'blob:random-3');
+  assert.equal(h.state.pending, false);
+  assert.ok(h.revoked.includes('blob:random-1'));
+  assert.ok(h.revoked.includes('blob:random-2'));
+});
+
+test('random next prompt and terminal states clear the old frame and reject pending responses', async () => {
+  for (const next of [{ prompt_id: 'prompt-2', preview_id: undefined }, { status: 'completed' }]) {
+    const h = randomSetup();
+    h.render(); await flush(); h.decodes[0].resolve(); await flush();
+    const pendingResponse = deferred(); h.ctx.fetch = () => pendingResponse.promise;
+    h.render({ preview_id: 2 });
+    h.render(next);
+    assert.equal(h.image.getAttribute('src'), null);
+    assert.equal(h.image.hidden, true);
+    pendingResponse.resolve(response({ seq: 2 })); await flush();
+    assert.equal(h.image.getAttribute('src'), null);
+    assert.equal(h.decodes.length, 1);
+    assert.ok(h.revoked.includes('blob:random-1'));
+  }
+});
+
+test('random failed fetch, ownership, and decode preserve the frame and allow retries', async () => {
+  for (const failed of [response({ status: 204 }), response({ promptId: 'old' }), response({ epoch: 0 }), response({ type: 'text/html' }), new Error('offline')]) {
+    const h = randomSetup(); h.render(); await flush(); h.decodes[0].resolve(); await flush();
+    h.ctx.fetch = async () => { if (failed instanceof Error) throw failed; return failed; };
+    h.render({ preview_id: 2 }); await flush();
+    assert.equal(h.image.src, 'blob:random-1');
+    assert.equal(h.state.pending, false);
+    assert.equal(h.state.requested, '');
+    h.ctx.fetch = async () => response({ seq: 2 });
+    h.render({ preview_id: 2 }); await flush();
+    h.decodes[1].reject(new Error('decode failed')); await flush();
+    assert.equal(h.image.src, 'blob:random-1');
+    h.render({ preview_id: 2 }); await flush(); h.decodes[2].resolve(); await flush();
+    assert.equal(h.image.src, 'blob:random-3');
+  }
+});
+
+test('random newer returned frames avoid repeated fetches from older poll snapshots', async () => {
+  let count = 0;
+  const h = randomSetup({ fetch: async () => { ++count; return response({ seq: 3 }); } });
+  h.render(); await flush(); h.decodes[0].resolve(); await flush();
+  for (const preview_id of [1, 2, 3]) { h.render({ preview_id }); await flush(); }
+  assert.equal(count, 1);
 });
 
 function pollingSetup() {

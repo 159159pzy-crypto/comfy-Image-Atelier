@@ -81,7 +81,7 @@ function singleWorkbenchBuild() {
     '<div class="single-reference-heading"><label class="button ghost compact single-upload-button">＋ 添加参考图<input id="singleInputUpload" class="sr-only" type="file" accept="image/png,image/jpeg,image/webp"></label><span id="singleInputStatus" class="field-hint" role="status">拖入或粘贴图片，自动切换图生图</span></div>' +
     '<img id="singleInputPreview" alt="图生图参考图片" hidden>' +
     '<div class="single-inline-actions"><button id="singleUseInputSize" type="button" class="button ghost compact" hidden>使用原图尺寸</button><button id="singleInputRemove" type="button" class="button ghost compact" hidden>移除参考图</button></div>' +
-    '<div id="singleInputFields" class="single-advanced-grid" hidden>' + number("denoise", "重绘强度", 0, 1, .01) + field("resize_mode", "尺寸适配", "text", [["crop", "填满并裁切"], ["pad", "适应并留边"], ["stretch", "拉伸"]]) + '</div></section>' +
+    '<div id="singleInputFields" class="single-advanced-grid" hidden>' + number("denoise", "重绘强度", 0, 1, .01) + field("resize_mode", "尺寸适配", "text", [["crop", "填满并裁切"], ["pad", "适应并留边"], ["stretch", "拉伸"]]) + '<p class="field-hint wide">强度越低越保留原图；较高强度和后续二次采样会进一步改变画面。强度为 0 时基础阶段仅重建原图，后处理仍按配置执行。</p></div></section>' +
     '<section class="control-section single-prompt-section"><div class="section-heading"><h2>提示词</h2><span>描述你的下一张作品</span></div>' +
     '<label class="field single-prompt-main"><span>画面描述</span><textarea id="single_positive_prompt" data-single-path="positive_prompt" data-single-prompt rows="5" placeholder="描述主体、场景、动作与画面细节…"></textarea></label>' +
     '<label class="field"><span>负面提示词</span><textarea id="singleNegative" data-single-prompt rows="3"></textarea></label>' +
@@ -99,11 +99,9 @@ function singleWorkbenchBuild() {
   html += singleWorkbenchSection("双采样细项", number("dual.switch_step", "第二段起始步", 0, 149, 1) + number("dual.scale", "中间放大倍率", 1, 8, .05) + number("dual.second_cfg", "第二段 CFG", 0, 30, .1) + field("dual.second_sampler_name", "第二段采样器") + field("dual.second_scheduler", "第二段调度器") + field("dual.upscale_method", "中间放大算法", "text", upscalers) + '<p class="field-hint wide">第一段完整采样，第二段从指定步继续至总步数。</p>', "common", "singleDualSection");
   html += '<div id="singleLatentMethodField">' + field("latent.upscale_method", "放大算法", "text", upscalers) + '</div>';
   html += singleWorkbenchToggleSection("DLSS 色彩处理", "dlss.enabled", field("dlss.style", "风格", "text", ["默认", "自然", "电影", "风格3"]) + number("dlss.intensity", "强度", 0, 1, .05) + number("dlss.output_mix", "输出混合", 0, 1, .01), "repair", "singleDlssSection");
-  html += singleWorkbenchToggleSection("Krea 变化控制", "krea_variance.enabled", number("krea_variance.randomize_percent", "随机比例", 1, 100, 1) + number("krea_variance.strength", "变化强度", -4294967295, 4294967295, 1), "more", "singleKreaSection");
   html += '<section id="singleCompatibilitySection" class="control-section" data-single-group="more"><div class="section-heading"><h2>兼容设置</h2><span id="singleCompatibilityCount"></span></div><p class="field-hint">旧配置中的特殊参数仍按原值生效。恢复默认仅重置已精简的参数，并让各阶段共用当前 LoRA 列表。</p><dl id="singleCompatibilityValues"></dl><button id="singleResetCompatibility" type="button" class="button ghost compact">恢复精简参数默认值</button><p id="singleCompatibilityStatus" class="field-hint" role="status"></p></section>';
   document.getElementById("singleWorkbenchControls").innerHTML = html;
   document.getElementById("singleDualSection").dataset.singleWhen = "dual";
-  document.getElementById("singleKreaSection").dataset.singleWhen = "krea2";
 }
 
 function singleWorkbenchRead(settings) {
@@ -111,10 +109,22 @@ function singleWorkbenchRead(settings) {
   const single = singleWorkbenchState.single;
   document.querySelectorAll("[data-single-path]").forEach(element => singleWorkbenchPath(single, element.dataset.singlePath, element.type === "checkbox" ? element.checked : element.type === "number" ? Number(element.value) : element.value));
   const result = { ...settings, workbench: "single", generation_mode: singleWorkbenchState.generationMode, count: 1, single: singleWorkbenchClone(single), negative_prompt: document.getElementById("singleNegative").value,
-    ...singleWorkbenchState.resourceValues,
+    ...singleWorkbenchResourceValues({ ...settings, single, ...singleWorkbenchState.resourceValues }),
     extra_prompt: "", quality_prompt: "", manual_artist: "", krea_prompt_pool: { enabled: false, ids: [] } };
   for (const section of SECTIONS) { result[`random_${section}`] = false; result[`fixed_${section}`] = ""; }
   return result;
+}
+function singleWorkbenchResourceValues(settings) {
+  const profile = settings.model_profile || currentProfile();
+  const bound = profileConfig(profile);
+  const others = ["anima", "krea2"].filter(id => id !== profile).map(profileConfig);
+  return Object.fromEntries(["clip_name", "vae_name", "clip_type"].map(key => {
+    let value = settings[key] || bound[key] || "";
+    const normalized = String(value).replaceAll("\\", "/").split("/").at(-1).toLowerCase();
+    const stale = others.some(other => other[key] !== bound[key] && other[key]?.toLowerCase() === normalized);
+    if (bound[key] && (stale || settings.single?.unlock_resources === false)) value = bound[key];
+    return [key, value];
+  }));
 }
 function singleWorkbenchApply(raw) {
   if (!singleWorkbenchState.ready) return;
@@ -126,7 +136,7 @@ function singleWorkbenchApply(raw) {
     singleWorkbenchState.generationMode = raw.generation_mode === "img2img" ? "img2img" : "txt2img";
     document.querySelectorAll("[data-single-path]").forEach(element => { const value = singleWorkbenchPath(singleWorkbenchState.single, element.dataset.singlePath); if (element.type === "checkbox") element.checked = Boolean(value); else if (element.tagName === "SELECT") ensureSelectValue(element, String(value ?? "")); else element.value = value ?? ""; });
     document.getElementById("singleNegative").value = raw.negative_prompt || "";
-    singleWorkbenchState.resourceValues = Object.fromEntries(["clip_name", "vae_name", "clip_type"].map(key => [key, raw[key] || full[key]]));
+    singleWorkbenchState.resourceValues = singleWorkbenchResourceValues({ ...full, ...raw });
     singleWorkbenchRenderCompatibility();
     singleWorkbenchRenderProcessed();
     void singleWorkbenchRestoreInput();

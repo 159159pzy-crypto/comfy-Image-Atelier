@@ -157,7 +157,7 @@ test('compatibility lists hidden differences but excludes editable prompt, sampl
   const paths = plain(ctx.singleWorkbenchCompatibilityEntries(customized)).map(entry => entry.path).sort();
   assert.deepEqual(paths, [
     'clip_name', 'single.dual.first_add_noise', 'single.latent.pipeline', 'single.dlss.gpu_gen',
-    'single.krea_variance.noise_distribution', 'single.prompt_processing.expand.seed',
+    'single.prompt_processing.expand.seed',
     'upscalers.seedvr2.weight_dtype', 'upscalers.seedvr2.encode.tile_size',
     'upscalers.nvidia.resize_type', 'upscalers.face_refine.detection_confidence',
   ].sort());
@@ -175,6 +175,7 @@ test('resetting compatibility resets hidden differences and keeps authored promp
       face_pipeline: 'secondary', latent: { pipeline: 'secondary', upscale_method: 'bilinear' }, vae_decode: { tile_size: 1536 },
       prompt_processing: { expand: { enabled: true, rule: 'chosen rule', seed: 91 } },
       dual: { second_cfg: 7, first_add_noise: false },
+      krea_variance: { enabled: true, randomize_percent: 72, strength: 33, noise_distribution: 'gaussian' },
     },
     upscalers: { face_refine: { sampler: 'dpmpp_2m', detection_confidence: .9 } },
   });
@@ -193,6 +194,7 @@ test('resetting compatibility resets hidden differences and keeps authored promp
   assert.equal(saved.width, 768);
   assert.equal(saved.steps, 42);
   assert.equal(saved.single.dual.second_cfg, 7);
+  assert.deepEqual(plain(saved.single.krea_variance), plain(original.single.krea_variance));
   assert.equal(saved.single.latent.upscale_method, 'bilinear');
   assert.equal(saved.single.prompt_processing.expand.rule, 'chosen rule');
   assert.equal(saved.single.prompt_processing.expand.enabled, true);
@@ -209,6 +211,7 @@ test('resetting compatibility resets hidden differences and keeps authored promp
   assert.equal(state.promptSeed, 0);
   assert.equal(invalidations(), 1);
   assert.equal(persisted().settings.single.input_image_id, 'owned-reference');
+  assert.deepEqual(persisted().settings.single.krea_variance, plain(original.single.krea_variance));
   assert.equal(persisted().promptSeed, 0);
   assert.deepEqual(plain(ctx.singleWorkbenchCompatibilityEntries(saved)), []);
 });

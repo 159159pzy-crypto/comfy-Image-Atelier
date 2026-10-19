@@ -832,13 +832,25 @@ def migrate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     if not isinstance(raw_single, dict):
         raise WorkflowError("single 必须是对象")
     unlocked = workbench == "single" and raw_single.get("unlock_resources", True) is True
-    # A profile switch is authoritative for CLIP/VAE and encoder type.
+    # Unlocked single settings may select custom resources, but a canonical
+    # resource from another profile is a stale default, not a custom override.
+    # Repair old browser drafts/history as well as newly switched settings.
     for resource_key in ("clip_name", "vae_name", "clip_type"):
-        result[resource_key] = source.get(resource_key, profile[resource_key]) if unlocked else profile[resource_key]
+        value = source.get(resource_key, profile[resource_key]) if unlocked else profile[resource_key]
+        if unlocked and isinstance(value, str):
+            normalized = value.replace("\\", "/").rsplit("/", 1)[-1].casefold()
+            foreign_defaults = {
+                other[resource_key].casefold()
+                for other_id, other in MODEL_PROFILES.items()
+                if other_id != profile_id and other[resource_key] != profile[resource_key]
+            }
+            if normalized in foreign_defaults:
+                value = profile[resource_key]
+        result[resource_key] = value
     # Switching profiles should reset a previous profile's canonical UNet,
     # while a custom explicitly assigned UNet remains selected. Ownership is
     # enforced at the request/resource boundary where the live inventory is
-    # available; CLIP/VAE and encoder type are always profile-bound.
+    # available; locked CLIP/VAE and encoder type stay profile-bound.
     raw_model_name = str(source.get("model_name") or "")
     other_profile_defaults = {
         str(value["model_name"]).casefold()
@@ -1613,6 +1625,16 @@ def _v2_set_ui_mode(ui: dict[str, Any], node_id: int, enabled: bool) -> None:
             continue
 
 
+def _lora_manager_values(loras: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # Lora Manager consumes active/name/clipStrength, unlike rgthree's
+    # on/lora/strengthTwo widgets used by the legacy workflow.
+    return [
+        {"active": bool(item["enabled"]), "name": item["filename"],
+         "strength": item["strength"], "clipStrength": item["strength"]}
+        for item in loras
+    ]
+
+
 def _v2_set_ui_loras(ui: dict[str, Any], node_id: str, loras: list[dict[str, Any]]) -> None:
     for node in ui.get("nodes") or []:
         if str(node.get("id")) != str(node_id):
@@ -1624,6 +1646,8 @@ def _v2_set_ui_loras(ui: dict[str, Any], node_id: str, loras: list[dict[str, Any
             values.append({} if len(values) == 0 else "" if len(values) == 1 else [])
         values[2] = copy.deepcopy(loras)
         node["widgets_values"] = values
+        if "widgets_values_named" in node:
+            node["widgets_values_named"]["loras"] = copy.deepcopy(loras)
         return
 
 
@@ -1764,15 +1788,7 @@ def _render_v2_workflows(
             if "delimiter" in inputs:
                 inputs["delimiter"] = ""
 
-    lora_values = [
-        {
-            "on": bool(item["enabled"]),
-            "lora": item["filename"],
-            "strength": item["strength"],
-            "strengthTwo": None,
-        }
-        for item in settings["loras"]
-    ]
+    lora_values = _lora_manager_values(settings["loras"])
     trigger_text = ", ".join(settings.get("lora_managed_triggers") or [])
     for node_id in V2_LORA_IDS:
         inputs = _v2_inputs(api, node_id)

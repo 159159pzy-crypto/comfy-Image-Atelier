@@ -139,12 +139,12 @@ test('submission remains locked until its final status read settles', async () =
 
 function resourceContext() {
   const field = (value = '') => ({ value, disabled: false, replaceChildren(...options) { this.value = options[0]?.value || ''; } });
-  const ui = Object.fromEntries(['model_profile', 'base_mode', 'sampler_name', 'scheduler', 'seedvr2_model_name', 'seedvr2_vae_name', 'model_name', 'latent_second_sampler_name', 'latent_second_scheduler', 'seedvr2_sampler_name', 'seedvr2_scheduler', 'face_sampler', 'face_scheduler'].map(key => [key, field()]));
+  const ui = Object.fromEntries(['model_profile', 'base_mode', 'sampler_name', 'scheduler', 'seedvr2_model_name', 'seedvr2_vae_name', 'model_name', 'latent_second_sampler_name', 'latent_second_scheduler', 'seedvr2_sampler_name', 'seedvr2_scheduler', 'face_sampler', 'face_scheduler', 'face_upscaler_model'].map(key => [key, field()]));
   const saved = { sampler_name: 'user_sampler', scheduler: 'user_scheduler', seedvr2_model_name: 'user_model', seedvr2_vae_name: 'user_vae' };
   for (const [key, value] of Object.entries(saved)) ui[key].value = value;
   const gates = [];
   const ctx = vm.createContext({
-    ui, resourceRequest: 0, currentProfile: () => 'anima', defaults: {},
+    ui, resourceRequest: 0, currentProfile: () => 'anima', defaults: {}, clone: value => JSON.parse(JSON.stringify(value)),
     profileConfig: () => ({ seedvr2_model: 'default_model', seedvr2_vae: 'default_vae' }),
     profileDefaults: () => ({ sampler_name: 'default_sampler', scheduler: 'default_scheduler' }),
     refreshCurrentModelSelection() {}, updateGenerationAvailability() {}, Option: function(_label, value) { this.value = value; },
@@ -160,6 +160,7 @@ function resourceContext() {
 test('overlapping resource refreshes preserve saved selections throughout loading', async () => {
   const { ctx, ui, gates, saved } = resourceContext();
   const first = ctx.loadResources(), second = ctx.loadResources();
+  assert.equal(gates.length, 1, 'overlapping inventory reads share a request');
   const duringLoad = Object.fromEntries(Object.keys(saved).map(key => [key, ui[key].value]));
   const payload = { models: ['model'], samplers: ['user_sampler'], schedulers: ['user_scheduler'], seedvr2_models: ['user_model'], seedvr2_vaes: ['user_vae'] };
   gates.forEach(gate => gate.resolve(payload)); await Promise.all([first, second]);

@@ -321,7 +321,10 @@ def render_single_workflows(api_template: dict[str, Any], ui_template: dict[str,
                             *, single_runtime: dict[str, Any] | None = None,
                             frozen_positive_prompt: str = "", frozen_negative_prompt: str = "",
                             resource_paths: dict[str, str] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
-    from .workflow import WorkflowError, _render_v2_workflows, _mapped_resource_name, normalize_lora_path, V2_OUTPUT_ID
+    from .workflow import (
+        WorkflowError, _render_v2_workflows, _mapped_resource_name, normalize_lora_path, V2_OUTPUT_ID,
+        _lora_manager_values, _v2_set_ui_loras,
+    )
     runtime = copy.deepcopy(single_runtime or {})
     if not isinstance(runtime, dict) or set(runtime) - {"input_image", "positive", "effective_positive", "negative", "prompt_job_id", "input_image_id"}:
         raise WorkflowError("single_runtime 无效")
@@ -356,11 +359,11 @@ def render_single_workflows(api_template: dict[str, Any], ui_template: dict[str,
     active = active_lora_pipelines(settings)
     for name, loader, loras, zero in (("primary", "72", settings["loras"], s["zero_negative"]),
                                      ("secondary", "243", s["loras_secondary"], s["secondary_zero_negative"])):
+        lora_values = _lora_manager_values(loras)
+        _v2_set_ui_loras(ui, loader, lora_values)
         if name not in active:
             continue
-        api[loader]["inputs"].update(text="", loras={"__value__": [
-            {"on": item["enabled"], "lora": item["filename"], "strength": item["strength"], "strengthTwo": None}
-            for item in loras]})
+        api[loader]["inputs"].update(text="", loras={"__value__": lora_values})
         pos = node(f"single:{name}:positive", "CLIPTextEncode", clip=[loader, 1], text=effective[name])
         neg = node(f"single:{name}:negative", "CLIPTextEncode", clip=[loader, 1], text=negative)
         if zero:

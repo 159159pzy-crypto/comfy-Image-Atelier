@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 
 from anima_webui.single_workbench import compose_single_prompt, effective_single_prompts, single_resource_issues
-from anima_webui.workflow import WorkflowError, WorkflowTemplates, validate_settings
+from anima_webui.model_profiles import get_model_profile
+from anima_webui.workflow import WorkflowError, WorkflowTemplates, migrate_settings, validate_settings
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,6 +60,36 @@ def test_resource_unlock_only_changes_single():
     assert validate_settings(custom)["clip_name"] == "qwen_3_06b_base.safetensors"
     assert validate_settings({**custom, "workbench": "single"})["clip_name"] == "custom-clip"
     assert validate_settings({**custom, "workbench": "single", "single": {"unlock_resources": False}})["clip_name"] == "qwen_3_06b_base.safetensors"
+
+
+@pytest.mark.parametrize("profile_id,previous_id", [("krea2", "anima"), ("anima", "krea2")])
+@pytest.mark.parametrize("clip_prefix", ["", "text_encoders/nested/", "text_encoders\\nested\\"])
+def test_single_migrates_stale_other_profile_resources(templates, profile_id, previous_id, clip_prefix):
+    profile, previous = get_model_profile(profile_id), get_model_profile(previous_id)
+    raw = {"workbench": "single", "model_profile": profile_id, "model_name": profile["model_name"],
+           "clip_name": clip_prefix + previous["clip_name"].upper(), "clip_type": previous["clip_type"],
+           "single": {"unlock_resources": True, "positive_prompt": "a cat"}}
+    before = copy.deepcopy(raw)
+    for settings in (migrate_settings(raw), validate_settings(raw)):
+        assert settings["clip_name"] == profile["clip_name"]
+        assert settings["clip_type"] == profile["clip_type"]
+    payload = submit(templates, raw)
+    clip = payload["prompt"]["167:57"]["inputs"]
+    assert clip["clip_name"] == profile["clip_name"]
+    assert clip["type"] == profile["clip_type"]
+    metadata = payload["extra_data"]["extra_pnginfo"]["anima_random_webui"]["settings"]
+    assert metadata["clip_name"] == clip["clip_name"]
+    assert metadata["clip_type"] == clip["type"]
+    assert raw == before
+
+
+def test_single_krea_preserves_custom_encoder_and_vae(templates):
+    raw = {"model_profile": "krea2", "clip_name": "custom/qwen3vl_4b_bf16.safetensors",
+           "clip_type": "krea2", "vae_name": "custom/vae.safetensors"}
+    clip = submit(templates, raw)["prompt"]["167:57"]["inputs"]
+    assert clip["clip_name"] == raw["clip_name"]
+    assert clip["type"] == "krea2"
+    assert validate_settings({**raw, "workbench": "single"})["vae_name"] == raw["vae_name"]
 
 
 def test_prompt_composition_never_duplicates_managed_words():

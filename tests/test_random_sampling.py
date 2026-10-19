@@ -23,13 +23,15 @@ def submit(templates, **overrides):
 
 
 @pytest.mark.parametrize("steps,expected", [
-    (8, "3744f584cfb02e0ddb65e585c52e6a1d52cfbe2df6c94791f1291026f6a68bae"),
-    (30, "721bc9ea166e085c0092275a8c7260165e61c3365695fd5e93a87a8919cb016e"),
-    (40, "29b75ab15fe15a14b5c21551e7b7f9e548318bcbe1277e0942e0cf0a6acc5f20"),
+    (8, "99391a7db390c36cc28a3fe23c8c4be6a7b5d00a765bc83e087ddfa044f229dc"),
+    (30, "971ea1f6d766c7860827f6b266436c5df1a006ae0e35b52fa96020b85fdd3a56"),
+    (40, "7364246e4d68f433d764dc61e11b70e7230a64ef4c88f6fb22fa78aad8ed47ae"),
 ])
 def test_legacy_random_graph_matches_pre_change_snapshot(templates, steps, expected):
     # Captured before adding public dual settings: guards every graph input,
     # including template end=30, start=15, prompt seeds and both LoRA routes.
+    # Updated only for the corrected native fields on Lora Manager nodes 72/243;
+    # all other inputs were compared against the original snapshots unchanged.
     values = {"steps": steps, "loras": [{"filename": "style.safetensors", "enabled": True, "strength": .7}],
               "upscalers": {"latent": {"enabled": True, "scale_by": 1.75, "upscale_method": "bicubic"}}}
     for version in ({}, {"dual": None}):

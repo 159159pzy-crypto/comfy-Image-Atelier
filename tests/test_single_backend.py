@@ -142,6 +142,14 @@ class SingleBackendTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.wait()
         return await self.manager.prompt_jobs.get(job["id"])
 
+    async def test_config_bootstraps_both_model_profiles_without_live_inventory(self):
+        payload = await (await self.client.get("/api/config")).json()
+        krea = payload["model_profiles"]["krea2"]
+        self.assertEqual(krea["clip_name"], "qwen3vl_4b_fp8_scaled.safetensors")
+        self.assertEqual(krea["clip_type"], "krea2")
+        self.assertIsNone(krea["available"]["clip"])
+        self.assertEqual(payload["model_profiles"]["anima"]["clip_type"], "stable_diffusion")
+
     async def test_preview_persists_without_artwork_and_can_be_edited_and_reused(self):
         settings = self.settings(True)
         job = await self.preview(settings, force=True)

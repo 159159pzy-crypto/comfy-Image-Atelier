@@ -7,7 +7,7 @@ const singleGalleryState = {
   lastCompleted: null, live: null, busy: false, waitingBatch: null, terminalKey: "",
   viewerRecord: null, viewerOpen: false, selectionRequest: 0, navigationIntent: 0,
   imageError: null, canvasError: "", canvasSource: "", failedImages: new Set(), retryDirection: null,
-  generationKey: "", frameRequest: 0, framePending: false, requestedFrame: "", batchSnapshot: null,
+  generationKey: "", frameEpoch: 0, frameRequest: 0, framePending: false, requestedFrame: "", batchSnapshot: null,
   finishingBatch: null, finishingOptional: false, finishRequest: 0, finishingPromise: null,
 };
 const singleGalleryElement = id => document.getElementById(id);
@@ -259,15 +259,16 @@ async function singleGalleryDecode(source) {
   return image;
 }
 async function singleGalleryFetchFrame(batch) {
-  const state = singleGalleryState, identity = `${batch.id}:${batch.prompt_id || ""}`, frameKey = `${identity}:${batch.preview_id}`;
+  const state = singleGalleryState, identity = `${batch.id}:${batch.prompt_id || ""}`, epoch = Number(batch.preview_epoch || 0), frameKey = `${identity}:${epoch}:${batch.preview_id}`;
   if (!state.active || state.framePending || frameKey === state.requestedFrame || !batch.preview_id || !batch.prompt_id) return;
-  if (state.live?.batchId === batch.id && state.live.promptId === batch.prompt_id && Number(batch.preview_id) <= state.live.previewId) return;
+  if (state.live?.batchId === batch.id && state.live.promptId === batch.prompt_id && state.live.epoch === epoch && Number(batch.preview_id) <= state.live.previewId) return;
   state.framePending = true; state.requestedFrame = frameKey;
   const requestId = ++state.frameRequest;
-  const valid = () => requestId === state.frameRequest && state.generationKey === identity && state.busy && state.active;
+  const valid = () => requestId === state.frameRequest && state.generationKey === identity && state.frameEpoch === epoch && state.busy && state.active;
   let source = "", committed = false;
   try {
     const query = new URLSearchParams({ batch_id: batch.id, prompt_id: batch.prompt_id, v: String(batch.preview_id) });
+    if (batch.preview_epoch != null) query.set("epoch", String(epoch));
     if (batch.preview_node) query.set("node_id", batch.preview_node);
     const response = await fetch(`/api/batches/current/preview?${query}`, { cache: "no-store" });
     if (!response.ok || response.status === 204 || !valid()) { if (valid()) state.requestedFrame = ""; return; }
@@ -275,16 +276,18 @@ async function singleGalleryFetchFrame(batch) {
     if (returnedPrompt && returnedPrompt !== String(batch.prompt_id) || returnedBatch && returnedBatch !== String(batch.id)) return;
     const returnedNode = response.headers.get("X-Preview-Node-Id");
     if (returnedNode && batch.preview_node && returnedNode !== String(batch.preview_node)) return;
+    const returnedEpoch = response.headers.get("X-Preview-Epoch");
+    if (batch.preview_epoch != null && returnedEpoch !== String(epoch)) return;
     const previewId = Number(response.headers.get("X-Preview-Id")) || batch.preview_id;
-    if (previewId < Number(batch.preview_id) || (state.live?.promptId === batch.prompt_id && previewId <= state.live.previewId)) return;
+    if (previewId < Number(batch.preview_id) || (state.live?.promptId === batch.prompt_id && state.live.epoch === epoch && previewId <= state.live.previewId)) return;
     const body = await response.blob();
     if (!body.type.startsWith("image/") || !valid()) return;
     source = URL.createObjectURL(body);
     await singleGalleryDecode(source);
     if (!valid()) return;
     const previous = state.live?.src;
-    state.live = { batchId: batch.id, promptId: batch.prompt_id, previewId, src: source };
-    state.requestedFrame = `${identity}:${previewId}`;
+    state.live = { batchId: batch.id, promptId: batch.prompt_id, epoch, previewId, src: source };
+    state.requestedFrame = `${identity}:${epoch}:${previewId}`;
     source = ""; committed = true;
     singleGalleryCanvas();
     if (previous?.startsWith("blob:")) URL.revokeObjectURL(previous);
@@ -344,6 +347,11 @@ function singleGalleryBatch(batch) {
     if (state.generationKey !== key) {
       singleGalleryClearLive(); ++state.finishRequest; state.finishingBatch = null; state.finishingOptional = false; state.finishingPromise = null;
       state.generationKey = key;
+    }
+    const epoch = Number(batch.preview_epoch || 0);
+    if (state.frameEpoch !== epoch) {
+      ++state.frameRequest; state.framePending = false; state.requestedFrame = "";
+      state.frameEpoch = epoch;
     }
     state.batchSnapshot = batch;
     state.busy = true; state.waitingBatch = batch.id;
