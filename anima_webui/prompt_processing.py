@@ -11,6 +11,33 @@ from .workflow import WorkflowError
 OUTPUT_NODE = "studio_prompt_result"
 
 
+def build_rewrite_graph(snapshot: dict[str, Any], client_id: str, seed: int) -> dict[str, Any]:
+    """Run one frozen user template; no hidden instructions or generation nodes."""
+    return {
+        "client_id": client_id,
+        "prompt": {
+            "studio_prompt_rewrite": {
+                "class_type": "PromptExpand",
+                "inputs": {
+                    "rule": snapshot["rule"],
+                    "custom_rule": True,
+                    "custom_rule_content": snapshot["template_content"],
+                    "source_text": snapshot["source_text"],
+                    "user_prompt": "",
+                    "llm_service": snapshot["llm_service"],
+                    "ollama_auto_unload": True,
+                    "seed": seed,
+                    "template_only": True,
+                },
+            },
+            OUTPUT_NODE: {
+                "class_type": "PreviewAny",
+                "inputs": {"source": ["studio_prompt_rewrite", 0]},
+            },
+        },
+    }
+
+
 def compose_prompt(settings: dict[str, Any]) -> str:
     from .single_workbench import compose_single_prompt
     return compose_single_prompt(settings)

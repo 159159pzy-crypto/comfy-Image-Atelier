@@ -82,7 +82,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         var marker = Path.Combine(target, ".anima-revision.json");
         if (File.Exists(marker))
         {
-            await ValidateClone(repo, target, ct);
+            await ValidateClone(repo, target, config, ct);
             return;
         }
         if (Directory.Exists(target) && Directory.EnumerateFileSystemEntries(target).Any()) throw new IOException($"目标已存在，不能覆盖：{target}");
@@ -104,10 +104,10 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             if (actual != repo.Commit) throw new InvalidDataException("Git 来源提交与锁定版本不同。");
             await Commands.Run(git!, ["submodule", "update", "--init", "--recursive"], staging, log, ct, Env(config));
             JsonFile.Write(Path.Combine(staging, ".anima-revision.json"), repo);
-            await ValidateClone(repo, staging, ct);
+            await ValidateClone(repo, staging, config, ct);
             File.Delete(stageMarker);
         }
-        else await ValidateClone(repo, staging, ct);
+        else await ValidateClone(repo, staging, config, ct);
         ct.ThrowIfCancellationRequested();
         if (Directory.Exists(target)) Directory.Delete(target); // Only an empty target reaches this point.
         Directory.Move(staging, target);
@@ -119,7 +119,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             throw new InvalidDataException($"安装目录的仓库身份或锁定提交与当前清单不同，已保留：{path}。请使用原清单恢复或另选空目录。");
     }
 
-    private async Task ValidateClone(Repository repo, string path, CancellationToken ct)
+    private async Task ValidateClone(Repository repo, string path, LauncherConfig config, CancellationToken ct)
     {
         ValidateRepositoryIdentity(JsonFile.Read<Repository>(Path.Combine(path, ".anima-revision.json")), repo, path);
         // rev-parse HEAD alone may accidentally inspect a containing repository.
@@ -129,7 +129,12 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         var head = (await Commands.Run(git!, ["rev-parse", "HEAD"], path, null, ct)).Trim();
         if (head != repo.Commit) throw new IOException($"受管理仓库的版本已被手动更改：{path}。请导入为现有环境或另选空目录。");
         var changes = await Commands.Run(git!, ["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=untracked"], path, null, ct);
-        if (!string.IsNullOrWhiteSpace(changes)) throw new IOException($"受管理仓库有源代码修改，已保留：{path}。请先备份处理后再继续安装。");
+        if (!string.IsNullOrWhiteSpace(changes))
+        {
+            if (repo.Id != PromptAssistantCompatibility.NodeId || !PromptAssistantCompatibility.IsOnlyCompatibilityChange(changes))
+                throw new IOException($"受管理仓库有源代码修改，已保留：{path}。请先备份处理后再继续安装。");
+            await PromptAssistantCompatibility.CheckOrApply(config, stateDir, path, false, ct);
+        }
         var submodules = await Commands.Run(git!, ["submodule", "status", "--recursive"], path, null, ct);
         if (submodules.Split('\n', StringSplitOptions.RemoveEmptyEntries).Any(line => line[0] != ' '))
             throw new InvalidDataException($"子模块尚未完成或与锁定提交不同，已保留：{path}。请先恢复子模块后继续安装。");
@@ -306,6 +311,9 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
                 File.WriteAllText(complete, manifest.Version);
             });
         }
+        var assistantDirectory = PromptAssistantCompatibility.ResolveDirectory(config.ComfyRoot);
+        if (assistantDirectory is not null)
+            await Stage(config, "验证提示词助手纯模板兼容", () => PromptAssistantCompatibility.CheckOrApply(config, stateDir, assistantDirectory, true, ct));
         await Stage(config, "验证运行依赖", async () =>
         {
             await Commands.Run(config.Python, ["-c", "import aiohttp,yaml,torch; print('PyTorch:',torch.__version__); print('GPU:',torch.cuda.is_available())" + (fresh ? "; assert torch.cuda.is_available()" : "")], config.ComfyRoot, log, ct);

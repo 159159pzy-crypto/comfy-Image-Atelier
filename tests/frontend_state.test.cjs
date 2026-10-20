@@ -457,7 +457,7 @@ test('single source text is not modified by the random LoRA trigger reconciler',
 });
 test('favorite reads cannot replace the active section with a stale response', async () => {
   const pending = [];
-  const ctx = vm.createContext({ favoritesRequest: 0, activeSection: 'pose', favoritesData: {}, favoritesAvailable: false,
+  const ctx = vm.createContext({ favoritesRequest: 0, activeSection: 'pose', favoritesData: {}, favoritesAvailable: false, currentProfile: () => 'anima',
     request: path => new Promise(resolve => pending.push({ path, resolve })), updateFavoriteSelectionButton() {}, toast() {}, currentView: () => ({ filters: {} }) });
   vm.runInContext(functionSource('loadFavorites'), ctx);
   const first = ctx.loadFavorites('pose'); ctx.activeSection = 'character'; const second = ctx.loadFavorites('character');

@@ -17,8 +17,9 @@ from .prompt_rules import PromptRuleStore
 from .prompt_pools import PromptPoolStore
 from .model_profiles import get_model_profile
 from .prompt_jobs import PromptJobStore
+from .prompt_assistant import PromptAssistant, generation_settings, rewrite_fingerprint
 from .single_workbench import active_lora_pipelines
-from .prompt_processing import (build_prompt_graph, compose_prompt, extract_prompt_result,
+from .prompt_processing import (build_prompt_graph, build_rewrite_graph, compose_prompt, extract_prompt_result,
                                 final_prompts, prompt_fingerprint, validate_prompt_nodes)
 from .workflow import MAX_SAMPLE_SEED, WorkflowError, WorkflowTemplates, migrate_settings, validate_loras, validate_settings
 
@@ -31,6 +32,7 @@ class BatchConflict(RuntimeError):
 
 
 MAX_QUEUE = 20
+PROMPT_JOB_TIMEOUT = 300
 REGENERATION_MODES = {"replay", "prompt_variant", "content_redraw", "settings_reroll"}
 PROMPT_SECTIONS = ("character", "clothing", "pose", "background", "expression")
 
@@ -78,6 +80,7 @@ class BatchManager:
         self.prompt_pools = prompt_pools
         self.input_images = input_images
         self.prompt_jobs = PromptJobStore(history)
+        self.prompt_assistant = PromptAssistant(comfy)
         # 排队中的批次(仅内存;WebUI 重启后队列清空,历史记录只在真正开跑时创建)。
         self.queue: list[dict[str, Any]] = []
         self.shutting_down = False
@@ -425,6 +428,19 @@ class BatchManager:
             issues.extend(random_sampling_resource_issues(settings, resources))
         return issues
 
+    async def start_rewrite(self, payload: dict[str, Any]) -> dict[str, Any]:
+        async with self._start_lock:
+            self.history.ensure_writable()
+            if self.active() and len(self.queue) >= MAX_QUEUE:
+                raise BatchConflict(f"队列已满(最多 {MAX_QUEUE} 个)")
+            settings = await self.prompt_assistant.prepare(payload)
+            job = await self.prompt_jobs.create(settings, rewrite_fingerprint(settings))
+            if self.active():
+                self.queue.append({"queue_id": job["id"], "kind": "prompt_preview", "settings": settings, "job_id": job["id"]})
+            else:
+                await self._begin_prompt_preview(job)
+            return await self.prompt_jobs.get(job["id"])
+
     async def start_prompt_preview(self, overrides: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
         async with self._start_lock:
             self.history.ensure_writable()
@@ -465,21 +481,34 @@ class BatchManager:
         try:
             if self.stop_requested:
                 raise ComfyAborted("收到停止请求")
-            processing = settings["single"]["prompt_processing"]
-            if any(value["enabled"] for value in processing.values()):
-                rules = await validate_prompt_nodes(self.comfy, settings)
-                prompt_id = await self.comfy.submit(build_prompt_graph(settings, self.client_id, resolved_rules=rules))
+            rewrite = settings.get("kind") == "rewrite"
+            if rewrite:
+                snapshot = await self.prompt_assistant.transport(settings)
+                graph = build_rewrite_graph(snapshot, self.client_id, secrets.randbelow(2**31))
+            else:
+                processing = settings["single"]["prompt_processing"]
+                graph = None
+                if any(value["enabled"] for value in processing.values()):
+                    rules = await validate_prompt_nodes(self.comfy, settings)
+                    graph = build_prompt_graph(settings, self.client_id, resolved_rules=rules)
+            if graph is not None:
+                if self.stop_requested:
+                    raise ComfyAborted("收到停止请求")
+                prompt_id = await self.comfy.submit(graph)
                 self.state["prompt_id"] = prompt_id
-                await self.prompt_jobs.update(job_id, prompt_id=prompt_id)
-                entry = await self.comfy.wait_for_history(prompt_id, should_abort=lambda: self.stop_requested)
-                text = extract_prompt_result(entry)
+                # Configuration lookup and local queue time do not consume
+                # the execution budget. Start it once ComfyUI accepts the job.
+                async with asyncio.timeout(PROMPT_JOB_TIMEOUT):
+                    await self.prompt_jobs.update(job_id, prompt_id=prompt_id)
+                    entry = await self.comfy.wait_for_history(prompt_id, should_abort=lambda: self.stop_requested)
+                    text = extract_prompt_result(entry)
             else:
                 text = compose_prompt(settings)
             if self.stop_requested:
                 raise ComfyAborted("收到停止请求")
             if not text.strip():
                 raise WorkflowError("提示词处理结果为空")
-            result = final_prompts(settings, text)
+            result = {"text": text} if rewrite else final_prompts(settings, text)
             if self.state and self.state.get("kind") == "prompt_preview":
                 # Match generation's terminal transition before its final DB
                 # await; a late Stop must not overwrite the completed job.
@@ -490,7 +519,16 @@ class BatchManager:
             await self._interrupt_current()
             await self.prompt_jobs.update(job_id, status="cancelled", error="提示词处理已取消")
             raise
+        except asyncio.TimeoutError:
+            await self._interrupt_current()
+            message = f"提示词处理超过 {PROMPT_JOB_TIMEOUT} 秒，已取消本次任务"
+            await self.prompt_jobs.update(job_id, status="error", error=message)
+            raise WorkflowError(message) from None
         except Exception as error:
+            if settings.get("kind") == "rewrite":
+                message = str(error) if isinstance(error, WorkflowError) else "提示词重写失败，请在启动器中检查服务配置"
+                await self.prompt_jobs.update(job_id, status="error", error=message)
+                raise WorkflowError(message) from None
             await self.prompt_jobs.update(job_id, status="error", error=str(error))
             raise
 
@@ -527,25 +565,12 @@ class BatchManager:
         if frozen:
             runtime = copy.deepcopy(frozen)
         else:
-            job_id = single.get("prompt_job_id")
-            if job_id:
-                job = await self.prompt_jobs.get(job_id)
-                if job["status"] != "completed" or not job["result"]:
-                    raise WorkflowError("所选提示词处理结果尚未成功完成")
-                if job["input_fingerprint"] != prompt_fingerprint(settings):
-                    raise WorkflowError("提示词或处理设置已变化，请重新预览后再生成")
-                text = job["result"]["text"]
-            elif any(value["enabled"] for value in single["prompt_processing"].values()):
-                job = await self.prompt_jobs.create(settings, prompt_fingerprint(settings))
-                job_id = job["id"]
-                text = (await self._process_prompt(job))["text"]
-            else:
-                text = compose_prompt(settings)
-            if single.get("processed_prompt_override") is not None:
-                text = single["processed_prompt_override"]
+            # The rewrite bench is an independent text tool. Old AI settings
+            # remain readable for migration but never run implicitly here.
+            text = compose_prompt(settings)
             final = final_prompts(settings, text)
             runtime = {"positive": text, "effective_positive": {key: final[key] for key in ("primary", "secondary")},
-                       "negative": final["negative"], "prompt_job_id": job_id or ""}
+                       "negative": final["negative"], "prompt_job_id": ""}
         if self.stop_requested:
             raise ComfyAborted("收到停止请求")
         if settings.get("generation_mode") == "img2img":
@@ -572,11 +597,29 @@ class BatchManager:
             if ensure_writable is not None:
                 ensure_writable()
             regeneration = self._validate_regeneration(regeneration)
+            overrides = generation_settings(overrides)
             normalized_overrides = overrides
             if self.prompt_rules is not None and overrides.get("workbench") != "single" and not (
                 regeneration and regeneration.get("frozen_positive_prompt")
             ):
-                normalized_overrides, _ = self.prompt_rules.normalize_settings(overrides)
+                try:
+                    profile = get_model_profile(overrides.get("model_profile", "anima"))["id"]
+                except ValueError as error:
+                    raise WorkflowError(str(error)) from error
+                normalized_overrides, _ = self.prompt_rules.normalize_settings(
+                    overrides, model_profile=profile, apply_custom=profile == "krea2",
+                )
+                if profile != "krea2":
+                    if "negative_prompt" in overrides:
+                        negative = self.prompt_rules.normalize_fields(
+                            {"negative_prompt": overrides["negative_prompt"]}, model_profile=profile
+                        )
+                        normalized_overrides.update(negative["fields"])
+                    managed, _ = self.prompt_rules.normalize_settings(
+                        {"lora_managed_triggers": overrides.get("lora_managed_triggers", [])},
+                        model_profile=profile,
+                    )
+                    normalized_overrides["lora_managed_triggers"] = managed["lora_managed_triggers"]
             settings = validate_settings(normalized_overrides)
             v2_workflow = self._uses_v2_workflow()
             if v2_workflow:
@@ -595,14 +638,6 @@ class BatchManager:
                     if self.input_images is None:
                         raise WorkflowError("输入图片服务不可用")
                     self.input_images.get(settings["single"]["input_image_id"])
-                if not (regeneration and regeneration.get("single_runtime")):
-                    reference = settings["single"].get("prompt_job_id")
-                    if reference:
-                        job = await self.prompt_jobs.get(reference)
-                        if job["status"] != "completed" or job["input_fingerprint"] != prompt_fingerprint(settings):
-                            raise WorkflowError("提示词处理结果无效或已过期，请重新预览")
-                    else:
-                        await validate_prompt_nodes(self.comfy, settings)
             if self.catalog and settings.get("workbench") != "single" and not (
                 regeneration and regeneration.get("frozen_positive_prompt")
             ):
@@ -693,8 +728,8 @@ class BatchManager:
             {
                 "queue_id": entry["queue_id"],
                 "position": index + 1,
-                "count": entry["settings"]["count"],
-                "model_name": entry["settings"]["model_name"],
+                "count": entry["settings"].get("count", 1),
+                "model_name": entry["settings"].get("model_name", ""),
                 "kind": entry.get("kind", "generation"),
                 "workbench": entry["settings"].get("workbench", "random"),
             }
@@ -720,8 +755,14 @@ class BatchManager:
                 if not candidates:
                     raise WorkflowError("Krea 2 自然语言提示词池为空，请先导入提示词")
                 chosen = random.Random(prompt_seed).choice(candidates)
-                resolved["composer_prompt"] = chosen
-                resolved["full_prompt"] = chosen
+                effective = chosen
+                if self.prompt_rules is not None:
+                    effective, _ = self.prompt_rules.normalize_text(
+                        chosen, "positive", model_profile="krea2",
+                        protected_lora_words=settings.get("lora_managed_triggers", []),
+                    )
+                resolved["composer_prompt"] = effective
+                resolved["full_prompt"] = effective
                 resolved["selected"] = {
                     "krea_prompt_pool": [
                         {"id": self.prompt_pools.item_id(chosen), "text": chosen}
@@ -817,11 +858,13 @@ class BatchManager:
                         resolved["composer_prompt"],
                         "positive",
                         protected_lora_words=protected,
+                        model_profile=settings["model_profile"], apply_custom=settings["model_profile"] != "krea2",
                     )
                     full_prompt, _ = self.prompt_rules.normalize_text(
                         resolved["full_prompt"],
                         "positive",
                         protected_lora_words=protected,
+                        model_profile=settings["model_profile"], apply_custom=settings["model_profile"] != "krea2",
                     )
                     selected = copy.deepcopy(resolved["selected"])
                     for entries in selected.values():
@@ -830,11 +873,13 @@ class BatchManager:
                                 continue
                             snapshot["prompt"], _ = self.prompt_rules.normalize_text(
                                 snapshot["prompt"], "positive", protected_lora_words=protected,
+                                model_profile=settings["model_profile"],
                             )
                             if snapshot.get("trigger"):
                                 trigger, _ = self.prompt_rules.normalize_text(
                                     ", ".join(split_prompt(snapshot["trigger"])),
                                     "positive", protected_lora_words=protected,
+                                    model_profile=settings["model_profile"],
                                 )
                                 snapshot["trigger"] = split_prompt(trigger)
                     resolved = {
@@ -1117,6 +1162,10 @@ class BatchManager:
                             await asyncio.sleep(0.1)
                 except ComfyError:
                     pass
+            return
+        if (self.state or {}).get("kind") == "prompt_preview":
+            # Text jobs must never fall back to a global interrupt, even with
+            # an older/custom client that cannot cancel a specific prompt.
             return
         interrupt = getattr(self.comfy, "interrupt", None)
         if interrupt is None:

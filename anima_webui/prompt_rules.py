@@ -10,7 +10,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .persistence import StorageProtection
+from .model_profiles import normalize_model_profile
+from .persistence import StorageProtection, backup_for_migration
 from .workflow import WorkflowError
 
 
@@ -50,6 +51,20 @@ BUILTIN_RULES = (
     ("deduplicate", "移除重复 Tag", "大小写不敏感并保留首次出现位置"),
 )
 BUILTIN_IDS = {item[0] for item in BUILTIN_RULES}
+KREA_BUILTIN_RULES = (
+    ("natural-whitespace", "整理自然语言空白", "仅清理首尾、行尾空白并统一换行，保留原文表达"),
+)
+
+
+def _profile(value: Any) -> str:
+    try:
+        return normalize_model_profile(value)
+    except ValueError as error:
+        raise WorkflowError(str(error)) from error
+
+
+def _natural_whitespace(value: str) -> str:
+    return "\n".join(line.rstrip() for line in value.replace("\r\n", "\n").replace("\r", "\n").split("\n")).strip()
 
 _SCORE_RE = re.compile(r"^score[ _-]?([1-9])(?:[ _-]+(up))?$", re.IGNORECASE)
 _NORMALIZED_SCORE_RE = re.compile(r"^score_[1-9](?:_up)?$", re.IGNORECASE)
@@ -120,117 +135,182 @@ class PromptRuleStore(StorageProtection):
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.disabled_builtins: set[str] = set()
-        self.custom_rules: list[dict[str, Any]] = []
+        self.profiles: dict[str, dict[str, Any]] = {}
         self.load_warnings: list[str] = []
         self._lock = asyncio.Lock()
         self.reload()
 
+    @property
+    def disabled_builtins(self) -> set[str]:
+        """Compatibility view for callers that predate model profiles."""
+        return self.profiles["anima"]["disabledBuiltins"]
+
+    @property
+    def custom_rules(self) -> list[dict[str, Any]]:
+        return self.profiles["anima"]["rules"]
+
+    def _reset(self) -> None:
+        self.profiles = {
+            profile: {"disabledBuiltins": set(), "rules": []}
+            for profile in ("anima", "krea2")
+        }
+
+    @staticmethod
+    def _builtins(model_profile: str) -> tuple:
+        return KREA_BUILTIN_RULES if model_profile == "krea2" else BUILTIN_RULES
+
     def reload(self) -> None:
         self.load_warnings = []
         self.read_only_reason = None
+        self._reset()
         if not self.path.is_file():
-            self.disabled_builtins = set()
-            self.custom_rules = []
             return
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict) or payload.get("version") != 1:
+            if not isinstance(payload, dict) or payload.get("version") not in (1, 2):
                 raise WorkflowError("提示词规则文件版本无效")
-            disabled = payload.get("disabledBuiltins", [])
-            rules = payload.get("rules", [])
-            if not isinstance(disabled, list) or not isinstance(rules, list):
+            legacy = payload["version"] == 1
+            profiles = {"anima": payload} if legacy else payload.get("profiles")
+            if not isinstance(profiles, dict) or set(profiles) - {"anima", "krea2"}:
                 raise WorkflowError("提示词规则文件内容无效")
-            self.disabled_builtins = {
-                str(value) for value in disabled if str(value) in BUILTIN_IDS
-            }
-            if len(rules) > MAX_CUSTOM_RULES:
-                raise WorkflowError(f"自定义提示词规则不能超过 {MAX_CUSTOM_RULES} 条")
-            self.custom_rules = [self._normalize_custom(item, existing=True) for item in rules]
+            for profile, data in profiles.items():
+                if not isinstance(data, dict):
+                    raise WorkflowError("提示词规则档案内容无效")
+                disabled, rules = data.get("disabledBuiltins", []), data.get("rules", [])
+                if not isinstance(disabled, list) or not isinstance(rules, list):
+                    raise WorkflowError("提示词规则文件内容无效")
+                if len(rules) > MAX_CUSTOM_RULES:
+                    raise WorkflowError(f"自定义提示词规则不能超过 {MAX_CUSTOM_RULES} 条")
+                ids = {item[0] for item in self._builtins(profile)}
+                self.profiles[profile] = {
+                    "disabledBuiltins": {str(value) for value in disabled if str(value) in ids},
+                    "rules": [self._normalize_custom(item, existing=True, model_profile=profile) for item in rules],
+                }
+            if legacy:
+                try:
+                    backup_for_migration(self.path, 1)
+                    self._write_text(self._serialized())
+                except OSError as error:
+                    self._protect_storage(f"规则迁移无法安全写入({error})，继续使用旧规则")
         except (OSError, UnicodeError, json.JSONDecodeError, WorkflowError) as error:
             self._recover_load_failure(error, fallback="默认规则")
-            self.disabled_builtins = set()
-            self.custom_rules = []
+            self._reset()
 
-    def list(self) -> dict[str, Any]:
+    def list(self, model_profile: str = "anima") -> dict[str, Any]:
+        model_profile = _profile(model_profile)
+        state = self.profiles[model_profile]
         builtins = [
             {
                 "id": rule_id,
                 "kind": "builtin",
                 "name": name,
                 "description": description,
-                "enabled": rule_id not in self.disabled_builtins,
+                "enabled": rule_id not in state["disabledBuiltins"],
+                "model_profile": model_profile,
             }
-            for rule_id, name, description in BUILTIN_RULES
+            for rule_id, name, description in self._builtins(model_profile)
         ]
         return {
-            "items": [*builtins, *copy.deepcopy(self.custom_rules)],
-            "count": len(builtins) + len(self.custom_rules),
+            "model_profile": model_profile,
+            "items": [*builtins, *copy.deepcopy(state["rules"])],
+            "count": len(builtins) + len(state["rules"]),
         }
 
-    async def create(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def create(self, payload: dict[str, Any], model_profile: str = "anima") -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise WorkflowError("自定义提示词规则必须是对象")
+        model_profile = _profile(payload.get("model_profile", model_profile))
         async with self._lock:
             self.ensure_writable()
-            if len(self.custom_rules) >= MAX_CUSTOM_RULES:
+            rules = self.profiles[model_profile]["rules"]
+            if len(rules) >= MAX_CUSTOM_RULES:
                 raise WorkflowError(f"自定义提示词规则不能超过 {MAX_CUSTOM_RULES} 条")
             item = self._normalize_custom(
-                {**payload, "id": f"prompt_rule_{uuid.uuid4().hex[:16]}"}
+                {**payload, "id": f"prompt_rule_{uuid.uuid4().hex[:16]}"}, model_profile=model_profile
             )
-            self._ensure_unique(item)
-            self.custom_rules.append(item)
-            await self._save()
+            self._ensure_unique(item, model_profile=model_profile)
+            rules.append(item)
+            try:
+                await self._save()
+            except Exception:
+                rules.pop()
+                raise
         return copy.deepcopy(item)
 
-    async def update(self, rule_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def update(self, rule_id: str, payload: dict[str, Any], model_profile: str = "anima") -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise WorkflowError("提示词规则必须是对象")
+        model_profile = _profile(payload.get("model_profile", model_profile))
         async with self._lock:
             self.ensure_writable()
-            if rule_id in BUILTIN_IDS:
-                unknown = set(payload) - {"enabled"}
+            state = self.profiles[model_profile]
+            rules, disabled = state["rules"], state["disabledBuiltins"]
+            previous = copy.deepcopy(state)
+            if rule_id in {item[0] for item in self._builtins(model_profile)}:
+                unknown = set(payload) - {"enabled", "model_profile"}
                 if unknown or not isinstance(payload.get("enabled"), bool):
                     raise WorkflowError("内置规则只能修改 enabled")
                 if payload["enabled"]:
-                    self.disabled_builtins.discard(rule_id)
+                    disabled.discard(rule_id)
                 else:
-                    self.disabled_builtins.add(rule_id)
-                await self._save()
-                return next(item for item in self.list()["items"] if item["id"] == rule_id)
+                    disabled.add(rule_id)
+                try:
+                    await self._save()
+                except Exception:
+                    self.profiles[model_profile] = previous
+                    raise
+                return next(item for item in self.list(model_profile)["items"] if item["id"] == rule_id)
             index = next(
-                (index for index, item in enumerate(self.custom_rules) if item["id"] == rule_id),
+                (index for index, item in enumerate(rules) if item["id"] == rule_id),
                 None,
             )
             if index is None:
                 raise KeyError(rule_id)
             item = self._normalize_custom(
-                {**self.custom_rules[index], **payload, "id": rule_id}, existing=True
+                {**rules[index], **payload, "id": rule_id}, existing=True, model_profile=model_profile
             )
-            self._ensure_unique(item, excluding_id=rule_id)
-            self.custom_rules[index] = item
-            await self._save()
+            self._ensure_unique(item, excluding_id=rule_id, model_profile=model_profile)
+            rules[index] = item
+            try:
+                await self._save()
+            except Exception:
+                self.profiles[model_profile] = previous
+                raise
         return copy.deepcopy(item)
 
-    async def delete(self, rule_id: str) -> bool:
-        if rule_id in BUILTIN_IDS:
+    async def delete(self, rule_id: str, model_profile: str = "anima") -> bool:
+        model_profile = _profile(model_profile)
+        if rule_id in {item[0] for item in self._builtins(model_profile)}:
             raise WorkflowError("内置规则不能删除,可以停用")
         async with self._lock:
             self.ensure_writable()
-            previous = len(self.custom_rules)
-            self.custom_rules = [item for item in self.custom_rules if item["id"] != rule_id]
-            if len(self.custom_rules) == previous:
+            state = self.profiles[model_profile]
+            previous = state["rules"]
+            state["rules"] = [item for item in previous if item["id"] != rule_id]
+            if len(state["rules"]) == len(previous):
                 return False
-            await self._save()
+            try:
+                await self._save()
+            except Exception:
+                state["rules"] = previous
+                raise
         return True
 
     def normalize_fields(
         self,
         fields: Any,
         managed_triggers: Any | None = None,
+        *,
+        model_profile: str = "anima",
+        apply_custom: bool = True,
     ) -> dict[str, Any]:
+        model_profile = _profile(model_profile)
         if not isinstance(fields, dict):
             raise WorkflowError("fields 必须是对象")
         if len(fields) > len(FIELD_SCOPES):
             raise WorkflowError("提示词字段过多")
         raw_managed = managed_triggers or []
-        normalized_managed = self._normalize_lora_list(raw_managed)
+        normalized_managed = self._normalize_lora_list(raw_managed, model_profile, apply_custom=apply_custom)
         protected = list(
             dict.fromkeys(
                 [
@@ -253,6 +333,8 @@ class PromptRuleStore(StorageProtection):
                 FIELD_SCOPES[field],
                 artist_field=field == "manual_artist",
                 protected_lora_words=protected if field == "extra_prompt" else [],
+                model_profile=model_profile,
+                apply_custom=apply_custom,
             )
             result[field] = normalized
             if normalized != raw:
@@ -266,17 +348,20 @@ class PromptRuleStore(StorageProtection):
                 )
         return {"fields": result, "changes": changes, "changed": bool(changes)}
 
-    def normalize_settings(self, settings: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    def normalize_settings(
+        self, settings: dict[str, Any], *, model_profile: str | None = None, apply_custom: bool = True,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        model_profile = _profile(model_profile if model_profile is not None else settings.get("model_profile", "anima"))
         normalized = copy.deepcopy(settings)
         original_managed = normalized.get("lora_managed_triggers", [])
-        managed = self._normalize_lora_list(original_managed)
+        managed = self._normalize_lora_list(original_managed, model_profile, apply_custom=apply_custom)
         normalized["lora_managed_triggers"] = managed
         fields = {
             field: normalized.get(field, "")
             for field in FIELD_SCOPES
             if field in normalized and field not in {"custom_prompt", "resolved_prompt", "lora_trigger"}
         }
-        result = self.normalize_fields(fields, original_managed)
+        result = self.normalize_fields(fields, original_managed, model_profile=model_profile, apply_custom=apply_custom)
         normalized.update(result["fields"])
         if managed != original_managed:
             result["changes"].append(
@@ -296,9 +381,15 @@ class PromptRuleStore(StorageProtection):
         *,
         artist_field: bool = False,
         protected_lora_words: list[str] | None = None,
+        model_profile: str = "anima",
+        apply_custom: bool = True,
     ) -> tuple[str, set[str]]:
+        model_profile = _profile(model_profile)
         if scope not in SCOPES:
             raise WorkflowError(f"无效提示词作用域: {scope}")
+        if model_profile == "krea2":
+            return self._normalize_natural(value, scope, apply_custom=apply_custom,
+                                           protected_lora_words=protected_lora_words)
         protected = {item.casefold() for item in protected_lora_words or []}
         parts = _split_top_level(value)
         rules_used: set[str] = set()
@@ -306,7 +397,8 @@ class PromptRuleStore(StorageProtection):
         seen: set[str] = set()
         for raw_part in parts:
             part_scope = "lora" if raw_part.casefold() in protected else scope
-            part, used = self._normalize_part(raw_part, part_scope, artist_field=artist_field)
+            part, used = self._normalize_part(raw_part, part_scope, artist_field=artist_field,
+                                             apply_custom=apply_custom)
             rules_used.update(used)
             if not part:
                 continue
@@ -323,8 +415,36 @@ class PromptRuleStore(StorageProtection):
             rules_used.add("format-separators")
         return normalized, rules_used
 
+    def _normalize_natural(
+        self, value: str, scope: str, *, apply_custom: bool,
+        protected_lora_words: list[str] | None = None,
+    ) -> tuple[str, set[str]]:
+        """Never tokenize prose; even commas and repeated words are authored text."""
+        state = self.profiles["krea2"]
+        used: set[str] = set()
+        cleanup = "natural-whitespace" not in state["disabledBuiltins"]
+        part = _natural_whitespace(value) if cleanup else value
+        if part != value:
+            used.add("natural-whitespace")
+        # Explicit LoRA substitutions apply to a whole trigger, never to
+        # an occurrence inside a sentence.
+        if part in (protected_lora_words or []):
+            scope = "lora"
+        if apply_custom:
+            custom = next((item for item in reversed(state["rules"])
+                           if item["enabled"] and scope in item["scopes"] and item["from"] == part), None)
+            if custom:
+                part = custom["to"]
+                used.add(custom["id"])
+        if cleanup:
+            cleaned = _natural_whitespace(part)
+            if cleaned != part:
+                used.add("natural-whitespace")
+            part = cleaned
+        return part, used
+
     def _normalize_part(
-        self, raw_part: str, scope: str, *, artist_field: bool = False
+        self, raw_part: str, scope: str, *, artist_field: bool = False, apply_custom: bool = True,
     ) -> tuple[str, set[str]]:
         part = raw_part.strip()
         used: set[str] = set()
@@ -332,7 +452,7 @@ class PromptRuleStore(StorageProtection):
             (
                 item
                 for item in reversed(self.custom_rules)
-                if item["enabled"]
+                if apply_custom and item["enabled"]
                 and scope in item["scopes"]
                 and item["from"].casefold() == part.casefold()
             ),
@@ -345,7 +465,8 @@ class PromptRuleStore(StorageProtection):
         weight = _WEIGHT_RE.fullmatch(part)
         if weight:
             inner, inner_used = self._normalize_part(
-                weight.group(1), scope, artist_field=artist_field
+                weight.group(1), scope, artist_field=artist_field,
+                apply_custom=apply_custom and custom is None,
             )
             used.update(inner_used)
             return f"({inner}:{weight.group(2)})", used
@@ -397,7 +518,7 @@ class PromptRuleStore(StorageProtection):
             part = re.sub(r"\s+", " ", part).strip()
         return part, used
 
-    def _normalize_lora_list(self, value: Any) -> list[str]:
+    def _normalize_lora_list(self, value: Any, model_profile: str = "anima", *, apply_custom: bool = True) -> list[str]:
         if not isinstance(value, list):
             raise WorkflowError("managedTriggers 必须是数组")
         if len(value) > 256:
@@ -407,16 +528,21 @@ class PromptRuleStore(StorageProtection):
         for index, raw in enumerate(value):
             if not isinstance(raw, str):
                 raise WorkflowError(f"managedTriggers[{index}] 必须是字符串")
-            part, _ = self._normalize_part(raw.strip(), "lora")
+            if model_profile == "krea2":
+                part, _ = self._normalize_natural(raw, "lora", apply_custom=apply_custom)
+            else:
+                part, _ = self._normalize_part(raw.strip(), "lora", apply_custom=apply_custom)
             if len(part) > MAX_RULE_TEXT:
                 raise WorkflowError(f"managedTriggers[{index}] 过长")
-            identity = part.casefold()
+            identity = part if model_profile == "krea2" else part.casefold()
             if part and identity not in seen:
                 result.append(part)
                 seen.add(identity)
         return result
 
-    def _normalize_custom(self, payload: Any, existing: bool = False) -> dict[str, Any]:
+    def _normalize_custom(
+        self, payload: Any, existing: bool = False, *, model_profile: str = "anima",
+    ) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise WorkflowError("自定义提示词规则必须是对象")
         rule_id = str(payload.get("id") or "").strip()
@@ -430,7 +556,9 @@ class PromptRuleStore(StorageProtection):
             raise WorkflowError("替换原词和规范词不能为空")
         if len(source) > MAX_RULE_TEXT or len(target) > MAX_RULE_TEXT:
             raise WorkflowError(f"替换词不能超过 {MAX_RULE_TEXT} 个字符")
-        if len(_split_top_level(source)) != 1 or len(_split_top_level(target)) != 1:
+        if model_profile == "krea2":
+            source, target = _natural_whitespace(source), _natural_whitespace(target)
+        elif len(_split_top_level(source)) != 1 or len(_split_top_level(target)) != 1:
             raise WorkflowError("自定义规则只能精确替换单个 Tag")
         if not isinstance(scopes, list) or not scopes:
             raise WorkflowError("自定义规则至少需要一个作用域")
@@ -446,30 +574,39 @@ class PromptRuleStore(StorageProtection):
             "to": target,
             "scopes": normalized_scopes,
             "enabled": enabled,
+            "model_profile": model_profile,
         }
 
-    def _ensure_unique(self, item: dict[str, Any], excluding_id: str | None = None) -> None:
-        source = item["from"].casefold()
+    def _ensure_unique(
+        self, item: dict[str, Any], excluding_id: str | None = None, *, model_profile: str = "anima",
+    ) -> None:
+        def identity(value: str) -> str:
+            return value if model_profile == "krea2" else value.casefold()
+        source = identity(item["from"])
         scopes = set(item["scopes"])
         if any(
             existing["id"] != excluding_id
-            and existing["from"].casefold() == source
+            and identity(existing["from"]) == source
             and scopes.intersection(existing["scopes"])
-            for existing in self.custom_rules
+            for existing in self.profiles[model_profile]["rules"]
         ):
             raise WorkflowError("相同作用域已经存在该原词的自定义规则")
 
-    async def _save(self) -> None:
-        payload = json.dumps(
+    def _serialized(self) -> str:
+        return json.dumps(
             {
-                "version": 1,
-                "disabledBuiltins": sorted(self.disabled_builtins),
-                "rules": self.custom_rules,
+                "version": 2,
+                "profiles": {
+                    profile: {"disabledBuiltins": sorted(state["disabledBuiltins"]), "rules": state["rules"]}
+                    for profile, state in self.profiles.items()
+                },
             },
             ensure_ascii=False,
             indent=2,
         ) + "\n"
-        await asyncio.to_thread(self._write_text, payload)
+
+    async def _save(self) -> None:
+        await asyncio.to_thread(self._write_text, self._serialized())
 
     def _write_text(self, text: str) -> None:
         self.ensure_writable()

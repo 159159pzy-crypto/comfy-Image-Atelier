@@ -14,8 +14,8 @@
       document.documentElement.dataset.theme = theme;
     })();
   </script>
-  <link rel="stylesheet" href="/static/styles.css?v=20261017-detail-fill">
-  <link rel="stylesheet" href="/static/single-layout.css?v=20261017-detail-fill">
+  <link rel="stylesheet" href="/static/styles.css?v=20261020-rewrite">
+  <link rel="stylesheet" href="/static/single-layout.css?v=20261020-rewrite">
   <link rel="stylesheet" href="/static/single-details.css?v=20261017-detail-fill">
 </head>
 <body>
@@ -78,6 +78,7 @@
 
         <section id="randomPromptControls" class="control-section" data-random-only>
           <div class="section-heading"><h2>提示词池</h2><span id="poolOverview">0 项已选</span></div>
+          <div id="randomSharedFavorites"></div>
           <div id="animaPromptPoolControls">
           <div id="dimensionList" class="dimension-list"></div>
           <label class="field"><span>角色标签</span><select id="character_detail"><option value="trigger_tags">触发词 + 特征</option><option value="trigger">仅触发词</option></select></label>
@@ -538,13 +539,14 @@
 
   <dialog id="promptRuleDialog" class="prompt-rule-dialog">
     <form id="promptRuleForm" method="dialog">
-      <div class="dialog-heading"><div><span class="kicker">ANIMA TAG RULES</span><h2>规范与替换规则</h2></div><button id="closePromptRules" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
+      <div class="dialog-heading"><div><span id="promptRuleKicker" class="kicker">ANIMA · TAG RULES</span><h2 id="promptRuleTitle">Anima 规范与替换</h2></div><button id="closePromptRules" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
+      <p id="promptRuleHint" class="field-hint"></p>
       <div id="promptRuleList" class="prompt-rule-list"></div>
       <div class="prompt-rule-editor">
         <input id="promptRuleId" type="hidden">
         <div class="prompt-rule-fields">
-          <label class="field"><span>原词</span><input id="promptRuleFrom" type="text" maxlength="500" placeholder="例如 bad_tag"></label>
-          <label class="field"><span>规范词</span><input id="promptRuleTo" type="text" maxlength="500" placeholder="例如 good tag"></label>
+          <label class="field"><span>原文本</span><textarea id="promptRuleFrom" rows="3" maxlength="500" placeholder="例如 bad_tag"></textarea></label>
+          <label class="field"><span>替换文本</span><textarea id="promptRuleTo" rows="3" maxlength="500" placeholder="例如 good tag"></textarea></label>
         </div>
         <fieldset class="prompt-rule-scopes"><legend>应用范围</legend><label><input id="promptRulePositive" type="checkbox" checked>正向</label><label><input id="promptRuleNegative" type="checkbox" checked>负向</label><label><input id="promptRuleLora" type="checkbox">LoRA</label></fieldset>
         <div id="promptRuleError" class="field-error" role="alert" hidden></div>
@@ -621,14 +623,39 @@
     </div>
   </dialog>
 
+  <dialog id="sharedFavoriteDialog" class="compact-dialog shared-favorite-dialog">
+    <form id="sharedFavoriteForm">
+      <div class="dialog-heading"><h2 id="sharedFavoriteHeading">收藏提示词</h2><button type="button" class="icon-button dark" data-close-shared-favorite="sharedFavoriteDialog" aria-label="关闭收藏提示词">×</button></div>
+      <label class="field"><span>收藏分类</span><select id="sharedFavoriteSection"></select></label>
+      <label class="field"><span>收藏名称</span><input id="sharedFavoriteName" type="text" maxlength="200" required></label>
+      <label class="field"><span>提示词正文</span><textarea id="sharedFavoriteText" rows="6" required></textarea></label>
+      <p id="sharedFavoriteTextHint" class="field-hint" hidden>此处保留收藏正文；需要另一个版本时，可插入编辑框修改后重新收藏。</p>
+      <fieldset class="field group-fieldset"><legend>收藏分组（可多选）</legend><div id="sharedFavoriteGroups" class="favorite-groups"></div></fieldset>
+      <div class="shared-favorite-create"><input id="sharedFavoriteNewGroup" type="text" maxlength="100" aria-label="新建收藏分组名称" placeholder="新分组名称"><button id="sharedFavoriteCreateGroup" type="button" class="button ghost compact">新建分组</button></div>
+      <p id="sharedFavoriteError" class="field-error" role="alert" hidden></p>
+      <div class="dialog-actions"><span></span><span></span><button type="button" class="button ghost" data-close-shared-favorite="sharedFavoriteDialog">取消</button><button id="sharedFavoriteSave" type="submit" class="button primary">保存收藏</button></div>
+    </form>
+  </dialog>
+  <dialog id="sharedFavoriteGroupDialog" class="compact-dialog shared-favorite-dialog">
+    <form id="sharedFavoriteGroupForm">
+      <div class="dialog-heading"><h2>管理收藏分组</h2><button type="button" class="icon-button dark" data-close-shared-favorite="sharedFavoriteGroupDialog" aria-label="关闭收藏分组">×</button></div>
+      <p class="field-hint">删除分组会保留收藏；失去最后一个分组的收藏移入“我的收藏”。</p>
+      <div id="sharedFavoriteGroupList" class="shared-favorite-group-list"></div>
+      <label class="field"><span>分组名称</span><input id="sharedFavoriteGroupName" maxlength="100" type="text" required></label>
+      <p id="sharedFavoriteGroupError" class="field-error" role="alert"></p>
+      <div class="single-inline-actions"><button id="sharedFavoriteGroupNew" type="button" class="button ghost">新建分组</button><button id="sharedFavoriteGroupSave" type="submit" class="button primary">保存名称</button><button type="button" class="button ghost" data-close-shared-favorite="sharedFavoriteGroupDialog">完成</button></div>
+    </form>
+  </dialog>
   <div id="toast" role="status" aria-live="polite"></div>
   <script src="/static/workbench-parameters.js?v=20261017-detail-fill" defer></script>
   <script src="/static/single-layout.js?v=20261017-detail-fill" defer></script>
-  <script src="/static/single-gallery.js?v=20261017-detail-fill" defer></script>
-  <script src="/static/single-workbench.js?v=20261017-detail-fill" defer></script>
+  <script src="/static/single-gallery.js?v=20261020-rewrite" defer></script>
+  <script src="/static/shared-favorites.js?v=20261020-favorites" defer></script>
+  <script src="/static/prompt-assistant.js?v=20261020-rewrite" defer></script>
+  <script src="/static/single-workbench.js?v=20261020-rewrite" defer></script>
   <script src="/static/single-input.js?v=20261017-detail-fill" defer></script>
   <script src="/static/single-compatibility.js?v=20261017-detail-fill" defer></script>
   <script src="/static/single-details.js?v=20261017-detail-fill" defer></script>
-  <script src="/static/app.js?v=20261017-detail-fill" defer></script>
+  <script src="/static/app.js?v=20261020-rewrite" defer></script>
 </body>
 </html>

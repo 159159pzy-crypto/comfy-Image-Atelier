@@ -76,6 +76,21 @@ test('single normalization writes its captured field and discards an obsolete wo
   await stale;
   assert.equal(target.value, 'normalized single negative');
 });
+test('unchanged single normalization preserves independent rewrite preview and creates no undo', async () => {
+  const { ctx, requests, changes } = normalizationContext();
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../static/single-workbench.js'), 'utf8'), ctx);
+  const state = vm.runInContext('singleWorkbenchState', ctx);
+  const target = { id: 'single_positive_prompt', value: 'Already clean.' };
+  state.ready = true; state.mode = 'single'; state.promptTarget = target;
+  let invalidations = 0;
+  ctx.singleWorkbenchInvalidatePrompt = () => invalidations++;
+  ctx.toast = () => {};
+  const pending = ctx.singleWorkbenchNormalizePrompt();
+  requests[0].resolve({ fields: { single_positive_prompt: target.value }, changes: [], changed: false });
+  await pending;
+  assert.equal(invalidations, 0);
+  assert.equal(changes.length, 0);
+});
 
 function submitContext() {
   const gates = [], posts = []; let submit;
@@ -100,7 +115,7 @@ async function drainSubmit(promise, gates) {
   while (!done) { while (gates.length) gates.shift().resolve({ fields: {} }); await new Promise(setImmediate); }
   await promise;
 }
-test('submit locks before normalization and holds one immutable settings snapshot', async () => {
+test('submit locks once and posts one immutable snapshot without frontend generation normalization', async () => {
   const { ctx, gates, posts, submit } = submitContext();
   const first = submit();
   assert.equal(ctx.submitInFlight, true, 'the first asynchronous stage must already own the submit lock');
@@ -109,6 +124,7 @@ test('submit locks before normalization and holds one immutable settings snapsho
   ctx.settings = { workbench: 'single', model_profile: 'krea2', extra_prompt: 'different workbench' };
   await drainSubmit(first, gates); await drainSubmit(second, gates);
   assert.equal(posts.length, 1);
+  assert.equal(gates.length, 0, 'backend performs generation normalization once');
   assert.deepEqual(posts[0], { workbench: 'random', model_profile: 'anima', extra_prompt: 'original', loras: [{ filename: 'old' }] });
   assert.equal(ctx.submitInFlight, false);
 });
@@ -118,7 +134,7 @@ test('fixed single seeds are captured with settings and a failed submit unlocks 
   await submit();
   assert.equal(posts[0].seeds.sample_seed, 777);
   ctx.settings = { workbench: 'random', model_profile: 'anima' };
-  ctx.normalizeSettingsPayload = async () => { throw new Error('offline'); };
+  ctx.request = async () => { throw new Error('offline'); };
   await drainSubmit(submit(), gates);
   assert.equal(ctx.submitInFlight, false);
 });

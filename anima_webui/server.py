@@ -18,12 +18,13 @@ from .comfy import ComfyClient, ComfyError
 from .catalog import CatalogError, PromptCatalog, SECTIONS, resolve_history_selection
 from .persistence import StorageReadOnlyError
 from .custom_prompts import CustomPromptStore
-from .favorites import FavoritesService, FavoritesExtensionStore, favorite_key
+from .favorites import FavoriteSavePendingError, FavoritesService, FavoritesExtensionStore, favorite_key
 from .input_images import InputImageStore, MAX_IMAGE_BYTES
 from .single_workbench import SINGLE_DEFAULTS, active_lora_pipelines
 from .history import HistoryStore
 from .lora_triggers import LoraTriggerOverrideStore
 from .prompt_rules import PromptRuleStore
+from .prompt_assistant import generation_settings
 from .prompt_pools import PromptPoolStore, parse_prompt_import, parse_prompt_import_details
 from .runner import BatchConflict, BatchManager
 from .style_presets import StylePresetStore
@@ -155,6 +156,12 @@ async def local_only_middleware(request: web.Request, handler: Any) -> web.Strea
 async def error_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
     try:
         response = await handler(request)
+    except FavoriteSavePendingError as error:
+        return web.json_response(
+            {"error": str(error), "code": "favorite_save_pending", "item_id": error.item_id,
+             "source_saved": True, "retryable": True},
+            status=502,
+        )
     except StorageReadOnlyError as error:
         return web.json_response({"error": str(error), "code": error.code, "store": error.store, "path": str(error.path)}, status=503)
     except WorkflowError as error:
@@ -222,6 +229,10 @@ def create_app(
     )
     favorite_extensions = FavoritesExtensionStore(storage / "favorite_extensions.json")
     favorites = FavoritesService(client, catalog, expression_store=favorite_extensions)
+    profile_favorites = {
+        "anima": favorites,
+        "krea2": FavoritesService(client, catalog, expression_store=favorite_extensions, model_profile="krea2"),
+    }
     input_images = InputImageStore(storage / "input-images")
     prompt_rules = PromptRuleStore(
         prompt_replacements_path or storage / "prompt_replacements.json"
@@ -380,37 +391,56 @@ def create_app(
         selection = body.get("selection") if isinstance(body.get("selection"), dict) else None
         return await _pool_response(request.match_info["section"], params, selection)
 
+    def request_favorites(request: web.Request) -> FavoritesService:
+        try:
+            profile = normalize_model_profile(request.query.get("model_profile", "anima"))
+        except ValueError as error:
+            raise WorkflowError(str(error)) from error
+        service = profile_favorites[profile]
+        service._section(request.match_info["section"])
+        return service
+
     async def get_favorites(request: web.Request) -> web.Response:
-        return web.json_response(await favorites.get(request.match_info["section"]))
+        return web.json_response(await request_favorites(request).get(request.match_info["section"]))
 
     async def update_favorite(request: web.Request) -> web.Response:
         return web.json_response(
-            await favorites.update_item(request.match_info["section"], await _json_body(request))
+            await request_favorites(request).update_item(request.match_info["section"], await _json_body(request))
+        )
+
+    async def save_favorite_text(request: web.Request) -> web.Response:
+        service = request_favorites(request)
+        return web.json_response(
+            await service.save_text(request.match_info["section"], await _json_body(request), custom_prompts)
         )
 
     async def update_favorite_selection(request: web.Request) -> web.Response:
+        service = request_favorites(request)
         body = await _json_body(request)
         return web.json_response(
-            await favorites.update_selection(
+            await service.update_selection(
                 request.match_info["section"], body.get("selection"), body.get("groupIds")
             )
         )
 
     async def create_favorite_group(request: web.Request) -> web.Response:
         return web.json_response(
-            await favorites.create_group(request.match_info["section"], await _json_body(request)),
+            await request_favorites(request).create_group(request.match_info["section"], await _json_body(request)),
             status=201,
         )
 
     async def update_favorite_group(request: web.Request) -> web.Response:
         return web.json_response(
-            await favorites.update_group(
+            await request_favorites(request).update_group(
                 request.match_info["section"], request.match_info["group_id"], await _json_body(request)
             )
         )
 
     async def import_favorite_child_group(request: web.Request) -> web.Response:
+        service = request_favorites(request)
         section = request.match_info["section"]
+        if section == "prompt":
+            raise WorkflowError("自然语言收藏不支持导入 Anima 自定义分组")
         body = await _json_body(request)
         custom_group_id = str(body.get("customGroupId") or "").strip()
         if not custom_group_id:
@@ -426,7 +456,7 @@ def create_app(
         if source_group is None:
             raise KeyError(custom_group_id)
         return web.json_response(
-            await favorites.import_custom_group(
+            await service.import_custom_group(
                 section,
                 request.match_info["parent_id"],
                 source_group,
@@ -437,7 +467,7 @@ def create_app(
 
     async def delete_favorite_group(request: web.Request) -> web.Response:
         return web.json_response(
-            await favorites.delete_group(
+            await request_favorites(request).delete_group(
                 request.match_info["section"],
                 request.match_info["group_id"],
                 _query_bool(request, "deleteItems"),
@@ -811,6 +841,16 @@ def create_app(
         item = await prompt_pools.create_item(body.get("model_profile", "krea2"), body["text"])
         return web.json_response(item, status=201)
 
+    async def ensure_prompt_pool_item(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        if set(body) - {"model_profile", "text"}:
+            raise WorkflowError("提示词池条目包含未知字段")
+        if "text" not in body:
+            raise WorkflowError("提示词池 text 不能为空")
+        return web.json_response(
+            await prompt_pools.ensure_item(body.get("model_profile", "krea2"), body["text"])
+        )
+
     async def update_prompt_pool_item(request: web.Request) -> web.Response:
         body = await _json_body(request)
         unknown = set(body) - {"model_profile", "id", "text"}
@@ -860,24 +900,28 @@ def create_app(
             raise KeyError(request.match_info["preset_id"])
         return web.json_response({"deleted": True})
 
-    async def list_prompt_rules(_: web.Request) -> web.Response:
-        return web.json_response(prompt_rules.list())
+    async def list_prompt_rules(request: web.Request) -> web.Response:
+        return web.json_response(prompt_rules.list(request.query.get("model_profile", "anima")))
 
     async def create_prompt_rule(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        profile = body.pop("model_profile", "anima")
         return web.json_response(
-            await prompt_rules.create(await _json_body(request)), status=201
+            await prompt_rules.create(body, model_profile=profile), status=201
         )
 
     async def update_prompt_rule(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        profile = body.pop("model_profile", "anima")
         return web.json_response(
             await prompt_rules.update(
-                request.match_info["rule_id"], await _json_body(request)
+                request.match_info["rule_id"], body, model_profile=profile
             )
         )
 
     async def delete_prompt_rule(request: web.Request) -> web.Response:
         rule_id = request.match_info["rule_id"]
-        if not await prompt_rules.delete(rule_id):
+        if not await prompt_rules.delete(rule_id, model_profile=request.query.get("model_profile", "anima")):
             raise KeyError(rule_id)
         return web.json_response({"deleted": True})
 
@@ -891,7 +935,7 @@ def create_app(
         except ValueError as error:
             raise WorkflowError(str(error)) from error
         result = prompt_rules.normalize_fields(
-            body.get("fields"), body.get("managedTriggers", [])
+            body.get("fields"), body.get("managedTriggers", []), model_profile=profile
         )
         result["model_profile"] = profile
         return web.json_response(result)
@@ -968,6 +1012,7 @@ def create_app(
         seeds = body.pop("seeds", None)  # 复现历史图片时携带固定种子,不属于 settings
         if resource_paths is not None:
             body = {**startup_defaults, **body}
+        body = generation_settings(body)
         # Validate the public shape before resource helpers traverse nested
         # fields. Keep the original payload so legacy migration semantics at
         # the runner boundary remain unchanged.
@@ -1014,8 +1059,13 @@ def create_app(
         path = await asyncio.to_thread(input_images.image_path, request.match_info["asset_id"])
         return web.FileResponse(path, headers={"Content-Type": "image/png", "X-Content-Type-Options": "nosniff"})
 
+    async def prompt_assistant_options(_: web.Request) -> web.Response:
+        return web.json_response(await manager.prompt_assistant.options())
+
     async def create_prompt_job(request: web.Request) -> web.Response:
         body = await _json_body(request)
+        if body.get("kind") == "rewrite":
+            return web.json_response(await manager.start_rewrite(body), status=201)
         if set(body) - {"settings", "force"} or not isinstance(body.get("settings"), dict) or not isinstance(body.get("force", False), bool):
             raise WorkflowError("提示词预览需要 settings 对象及可选 force 布尔值")
         validate_settings(body["settings"])
@@ -1119,7 +1169,8 @@ def create_app(
             for item in items:
                 saved_prompt = str(item.get("prompt") or "")
                 normalized, _ = prompt_rules.normalize_text(
-                    saved_prompt, "positive", protected_lora_words=settings.get("lora_managed_triggers", [])
+                    saved_prompt, "positive", protected_lora_words=settings.get("lora_managed_triggers", []),
+                    model_profile=settings.get("model_profile", "anima"),
                 )
                 if normalized != saved_prompt:
                     preserve_issues[section] = "当前提示词规则会改变历史快照，请同时重抽此维度，或使用同提示词变体"
@@ -1379,6 +1430,7 @@ def create_app(
     app.router.add_post("/api/prompt-pools/import/preview", preview_prompt_pool_import)
     app.router.add_post("/api/prompt-pools/import", import_prompt_pool)
     app.router.add_post("/api/prompt-pools/items", create_prompt_pool_item)
+    app.router.add_post("/api/prompt-pools/items/ensure", ensure_prompt_pool_item)
     app.router.add_put("/api/prompt-pools/items", update_prompt_pool_item)
     app.router.add_post("/api/prompt-pools/items/delete", delete_prompt_pool_items)
     app.router.add_delete("/api/prompt-pools/items", delete_prompt_pool_item)
@@ -1393,6 +1445,7 @@ def create_app(
     app.router.add_post("/api/prompts/normalize", normalize_prompts)
     app.router.add_get("/api/favorites/{section}", get_favorites)
     app.router.add_put("/api/favorites/{section}/item", update_favorite)
+    app.router.add_post("/api/favorites/{section}/text", save_favorite_text)
     app.router.add_post("/api/favorites/{section}/selection", update_favorite_selection)
     app.router.add_post("/api/favorites/{section}/groups", create_favorite_group)
     app.router.add_put("/api/favorites/{section}/groups/{group_id}", update_favorite_group)
@@ -1419,6 +1472,7 @@ def create_app(
     app.router.add_post("/api/input-images/from-history", input_image_from_history)
     app.router.add_get("/api/input-images/{asset_id}/image", input_image_content)
     app.router.add_get("/api/input-images/{asset_id}", input_image_metadata)
+    app.router.add_get("/api/prompt-assistant/options", prompt_assistant_options)
     app.router.add_post("/api/prompt-jobs", create_prompt_job)
     app.router.add_get("/api/prompt-jobs/{job_id}", get_prompt_job)
     app.router.add_post("/api/prompt-jobs/{job_id}/cancel", cancel_prompt_job)

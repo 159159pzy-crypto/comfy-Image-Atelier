@@ -36,9 +36,9 @@ $archive = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compressi
 try {
     $files = @('run.py', 'LICENSE', 'README.md', 'pyproject.toml', 'launcher/version.txt')
     if ($sourceKind -eq 'git-checkout') {
-        $files += @(& git -C $repo -c core.quotePath=false ls-files -- anima_webui static templates) |
+        $files += @(& git -C $repo -c core.quotePath=false ls-files --cached --others --exclude-standard -- anima_webui static templates) |
             Where-Object { $_ -match '\.(py|json|js|css|html)$' }
-        if ($LASTEXITCODE -ne 0) { throw 'Cannot enumerate tracked application files.' }
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot enumerate application files.' }
     } else {
         foreach ($folder in @('anima_webui', 'static', 'templates')) {
             $files += Get-ChildItem -LiteralPath (Join-Path $repo $folder) -File -Recurse |
@@ -46,7 +46,7 @@ try {
                 ForEach-Object { $_.FullName.Substring($repo.Length + 1) }
         }
     }
-    foreach ($file in $files | Sort-Object) {
+    foreach ($file in $files | Sort-Object -Unique) {
         $entry = $archive.CreateEntry($file.Replace('\', '/'), [System.IO.Compression.CompressionLevel]::Optimal)
         $target = $entry.Open()
         $source = [System.IO.File]::OpenRead((Join-Path $repo $file))

@@ -1088,7 +1088,10 @@ def validate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]
     if not isinstance(settings["character_detail"], str) or settings["character_detail"] not in {"trigger", "trigger_tags"}:
         raise WorkflowError("character_detail 必须是 trigger 或 trigger_tags")
 
-    settings["manual_artist"] = normalize_artist_tags(settings["manual_artist"])
+    settings["manual_artist"] = (
+        normalize_artist_tags(settings["manual_artist"]) if profile_id == "anima"
+        else _text("manual_artist", settings["manual_artist"])
+    )
     for name in (
         "fixed_character",
         "fixed_clothing",

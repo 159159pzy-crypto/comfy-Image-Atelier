@@ -36,6 +36,7 @@ class PromptJobStore:
         result = dict(row)
         result["settings"] = json.loads(result.pop("settings_json"))
         result["result"] = json.loads(result.pop("result_json"))
+        result["kind"] = result["settings"].get("kind", "legacy_preview")
         return result
 
     async def update(self, job_id: str, *, status: str | None = None, prompt_id: str | None = None,

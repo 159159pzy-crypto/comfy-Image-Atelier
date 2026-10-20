@@ -81,7 +81,8 @@ public static class Inventory
         var paths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var repo in manifest.Nodes)
         {
-            var found = repo.Id.Equals(AnimaToolsDiscovery.NodeId, StringComparison.OrdinalIgnoreCase) ? AnimaToolsDiscovery.Resolve(root) : null;
+            var found = repo.Id.Equals(AnimaToolsDiscovery.NodeId, StringComparison.OrdinalIgnoreCase) ? AnimaToolsDiscovery.Resolve(root)
+                : repo.Id.Equals(PromptAssistantCompatibility.NodeId, StringComparison.OrdinalIgnoreCase) ? PromptAssistantCompatibility.ResolveDirectory(root) : null;
             paths[repo.Id] = found ?? Path.Combine(Path.GetFullPath(root), "custom_nodes", repo.Id);
         }
         return paths;

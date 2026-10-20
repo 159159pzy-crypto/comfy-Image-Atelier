@@ -117,7 +117,7 @@ def preset_settings(
     if force_model_profile is None and "model_profile" in value:
         candidate["model_profile"] = value["model_profile"]
     if prompt_rules is not None:
-        candidate, _ = prompt_rules.normalize_settings(candidate)
+        candidate, _ = prompt_rules.normalize_settings(candidate, model_profile=candidate.get("model_profile", "anima"))
     normalized = validate_settings(candidate)
     if isinstance(normalized.get("single"), dict):
         # A reusable style must not pin a previous image or a completed AI job.

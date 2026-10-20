@@ -1,0 +1,2 @@
+# Preserve the hash-checked upstream source fixtures, including original trailing spaces.
+launcher/tests/fixtures/prompt-assistant/pinned/** text eol=lf whitespace=-blank-at-eol

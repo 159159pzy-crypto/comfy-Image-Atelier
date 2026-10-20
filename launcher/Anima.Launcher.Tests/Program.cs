@@ -12,6 +12,20 @@ if (args.FirstOrDefault() == "--http-fixture")
     await ReleaseRecoveryTests.ServeFixture(args);
     return;
 }
+if (args.FirstOrDefault() == "--assistant-probe")
+{
+    using var assistant = new PromptAssistantClient(args.ElementAtOrDefault(1) ?? "http://127.0.0.1:8188");
+    await assistant.Connect(CancellationToken.None);
+    var configuredServices = await assistant.Services(CancellationToken.None);
+    var configuredTemplates = await assistant.Templates(CancellationToken.None);
+    Console.WriteLine($"Prompt Assistant: {configuredServices.Count} services, {configuredServices.Sum(item => item.Models.Count)} LLM models, {configuredTemplates.Count} templates, template_only={assistant.SupportsTemplateOnly}");
+    return;
+}
+if (args.FirstOrDefault() == "--assistant-crud-probe")
+{
+    await PromptAssistantTests.LiveProbe(args.ElementAtOrDefault(1) ?? "http://127.0.0.1:8188");
+    return;
+}
 
 var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
 var manifestDir = Path.Combine(root, "launcher", "manifests");
@@ -42,6 +56,7 @@ async Task ThrowsType<T>(Func<Task> operation, string label) where T : Exception
     throw new Exception("Expected " + typeof(T).Name + ": " + label);
 }
 count += await ReleaseRecoveryTests.Run(work, manifest);
+count += await PromptAssistantTests.Run(work);
 if (args.Contains("--recovery-only"))
 {
     Console.WriteLine($"{count} recovery checks passed; artifacts: {work}");
@@ -309,6 +324,8 @@ foreach (var activeStatus in new[] { "running", "stopping" })
     Check(RuntimePolicies.WorkbenchActivity(JsonDocument.Parse("{\"batch\":{\"status\":\"" + activeStatus + "\"},\"queue\":[]}").RootElement) == WorkbenchActivity.Busy, activeStatus + " batch blocks version switching");
 Check(RuntimePolicies.WorkbenchActivity(JsonDocument.Parse("{\"batch\":null,\"queue\":[]}").RootElement) == WorkbenchActivity.Idle, "unused workbench is idle");
 Check(RuntimePolicies.WorkbenchActivity(JsonDocument.Parse("{\"batch\":null,\"queue\":[{}]}").RootElement) == WorkbenchActivity.Busy, "queued work blocks version switching even without active batch");
+Check(RuntimePolicies.WorkbenchActivity(JsonDocument.Parse("""{"batch":{"kind":"prompt_preview","stage":"prompt_processing","status":"running"},"queue":[]}""").RootElement) == WorkbenchActivity.Busy, "running standalone rewrite blocks version switching");
+Check(RuntimePolicies.WorkbenchActivity(JsonDocument.Parse("""{"batch":null,"queue":[{"kind":"prompt_preview","job_id":"rewrite"}]}""").RootElement) == WorkbenchActivity.Busy, "queued standalone rewrite blocks version switching");
 Check(RuntimePolicies.WorkbenchActivity(null) == WorkbenchActivity.Unknown && RuntimePolicies.WorkbenchActivity(JsonDocument.Parse("{}").RootElement) == WorkbenchActivity.Unknown && RuntimePolicies.WorkbenchActivity(JsonDocument.Parse("{\"batch\":{},\"queue\":[]}").RootElement) == WorkbenchActivity.Unknown, "missing or malformed activity never authorizes an automatic stop");
 var versionsRoot = Path.Combine(work, "versions");
 var oldVersion = Path.Combine(versionsRoot, "app-old");

@@ -59,7 +59,7 @@ def test_simultaneous_expression_updates_are_serialized(tmp_path):
         service = FavoritesService(WhitelistedComfy(), Catalog(), FavoritesExtensionStore(path))
         await asyncio.gather(*(service.update_item("expression", {"id": f"custom:{index}"}) for index in range(12)))
         assert len((await service.get("expression"))["items"]) == 12
-        assert len(json.loads(path.read_text(encoding="utf-8"))["expression"]["items"]) == 12
+        assert len(json.loads(path.read_text(encoding="utf-8"))["profiles"]["anima"]["expression"]["items"]) == 12
 
     asyncio.run(run())
 

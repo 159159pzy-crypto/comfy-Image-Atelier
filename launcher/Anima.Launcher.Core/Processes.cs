@@ -129,6 +129,9 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
             }
             else
             {
+                var assistant = PromptAssistantCompatibility.ResolveDirectory(config.ComfyRoot);
+                if (assistant is not null)
+                    await PromptAssistantCompatibility.CheckOrApply(config, stateDir, assistant, true, ct);
                 var args = new List<string> { Path.Combine(config.ComfyRoot, "main.py"), "--listen", "127.0.0.1", "--port", config.ComfyPort.ToString(), "--disable-auto-launch" };
                 if (config.Python.Contains("python_embed", StringComparison.OrdinalIgnoreCase)) args.Add("--windows-standalone-build");
                 args.AddRange(config.ComfyArguments);
@@ -145,6 +148,11 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
             string[] core = ["UNETLoader", "CLIPLoader", "VAELoader", "KSampler", "KSamplerAdvanced", "VAEDecodeTiled", "EmptyLatentImage"];
             var missing = manifest.Nodes.SelectMany(n => n.RequiredClasses).Concat(core).Where(n => !nodes.TryGetProperty(n, out _)).ToArray();
             if (missing.Length > 0) throw new InvalidOperationException("缺少节点或导入失败：" + string.Join("、", missing));
+            if (nodes.TryGetProperty("PromptExpand", out var expand) &&
+                (!expand.TryGetProperty("input", out var inputs) ||
+                 !inputs.TryGetProperty("optional", out var optional) ||
+                 !optional.TryGetProperty("template_only", out _)))
+                log("当前 ComfyUI 尚未加载纯模板兼容更新；重写功能需停止 ComfyUI 后从启动器重新启动，其他功能可继续使用。");
             var bindings = ResourceBindings(nodes);
             var resourceFile = Path.Combine(stateDir, "resource-paths.json");
             JsonFile.Write(resourceFile, bindings);

@@ -23,6 +23,8 @@
                 </launch:Card.ActionContent>
             </launch:Card>
 
+            <launch:PromptAssistantPanel />
+
             <Expander HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
                 <Expander.Header>
                     <TextBlock Text="服务端口" Style="{StaticResource BodyStrongTextBlockStyle}" TextWrapping="Wrap" />

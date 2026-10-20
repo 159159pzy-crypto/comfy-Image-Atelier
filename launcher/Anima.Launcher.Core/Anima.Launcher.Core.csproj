@@ -5,4 +5,7 @@
     <Nullable>enable</Nullable>
     <DebugType>embedded</DebugType>
   </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../scripts/patch_prompt_assistant.py" LogicalName="Anima.Launcher.Core.patch_prompt_assistant.py" />
+  </ItemGroup>
 </Project>

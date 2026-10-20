@@ -333,7 +333,7 @@ async function singleGalleryFinishBatch(batchId) {
 function singleGalleryBatch(batch) {
   const state = singleGalleryState;
   if (!state.ready) return;
-  if (batch?.settings?.workbench !== "single") {
+  if (batch?.kind === "prompt_preview" || batch?.settings?.workbench !== "single") {
     const wasBusy = state.busy;
     const previous = state.waitingBatch;
     state.busy = false; state.waitingBatch = null;

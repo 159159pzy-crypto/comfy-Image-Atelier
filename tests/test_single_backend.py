@@ -150,7 +150,7 @@ class SingleBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(krea["available"]["clip"])
         self.assertEqual(payload["model_profiles"]["anima"]["clip_type"], "stable_diffusion")
 
-    async def test_preview_persists_without_artwork_and_can_be_edited_and_reused(self):
+    async def test_legacy_preview_is_readable_but_generation_uses_authored_body(self):
         settings = self.settings(True)
         job = await self.preview(settings, force=True)
         self.assertEqual(job["status"], "completed")
@@ -167,15 +167,18 @@ class SingleBackendTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.wait()
         self.assertEqual(len(self.comfy.submissions), 2)
         saved = (await self.app[HISTORY_KEY].list_images())["items"][0]
-        self.assertEqual(saved["single_runtime"]["positive"], "edited final")
+        self.assertEqual(saved["single_runtime"]["positive"], "authored prompt")
         self.assertIn("my trigger", saved["single_runtime"]["effective_positive"]["primary"])
         self.assertEqual(saved["workbench"], "single")
-        settings["single"]["positive_prompt"] = "changed"
+        settings["single"]["positive_prompt"] = "edited final"
         response = await self.client.post("/api/batches", json=settings)
-        self.assertEqual(response.status, 400)
-        self.assertEqual(len(self.comfy.submissions), 2)
+        self.assertEqual(response.status, 201, await response.text())
+        await self.manager.wait()
+        self.assertEqual(len(self.comfy.submissions), 3)
+        saved = (await self.app[HISTORY_KEY].list_images())["items"][0]
+        self.assertEqual(saved["single_runtime"]["positive"], "edited final")
 
-    async def test_auto_processing_then_img2img_upload_and_frozen_replay(self):
+    async def test_legacy_ai_is_ignored_in_img2img_and_frozen_replay(self):
         form = FormData()
         form.add_field("image", png(), filename="test.png", content_type="image/png")
         response = await self.client.post("/api/input-images", data=form)
@@ -189,14 +192,14 @@ class SingleBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 201, await response.text())
         await self.manager.wait()
         self.assertEqual(self.manager.snapshot()["status"], "completed", self.manager.snapshot())
-        self.assertEqual(len(self.comfy.submissions), 2)
+        self.assertEqual(len(self.comfy.submissions), 1)
         self.assertEqual(len(self.comfy.uploads), 1)
-        self.assertEqual({n["class_type"] for n in self.comfy.submissions[0]["prompt"].values()}, {"PromptExpand", "PreviewAny"})
+        self.assertNotIn(OUTPUT_NODE, self.comfy.submissions[0]["prompt"])
         saved = (await self.app[HISTORY_KEY].list_images())["items"][0]
         response = await self.client.post(f"/api/history/{saved['id']}/regenerate", json={"mode": "replay"})
         self.assertEqual(response.status, 201, await response.text())
         await self.manager.wait()
-        self.assertEqual(len(self.comfy.submissions), 3)
+        self.assertEqual(len(self.comfy.submissions), 2)
         self.assertEqual(len(self.comfy.uploads), 2)
         last = (await self.app[HISTORY_KEY].list_images())["items"][0]
         self.assertEqual(last["sample_seed"], saved["sample_seed"])
@@ -204,7 +207,7 @@ class SingleBackendTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancel_processing_never_submits_image_and_other_queue_entry_survives(self):
         self.comfy.block = asyncio.Event()
-        response = await self.client.post("/api/batches", json=self.settings(True))
+        response = await self.client.post("/api/prompt-jobs", json={"settings": self.settings(True)})
         self.assertEqual(response.status, 201, await response.text())
         for _ in range(100):
             if self.comfy.submissions:
@@ -247,7 +250,7 @@ class SingleBackendTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_processing_failure_does_not_fall_back_or_generate(self):
         self.comfy.prompt_failure = True
-        response = await self.client.post("/api/batches", json=self.settings(True))
+        response = await self.client.post("/api/prompt-jobs", json={"settings": self.settings(True)})
         self.assertEqual(response.status, 201)
         await self.manager.wait()
         self.assertEqual(self.manager.snapshot()["status"], "error")

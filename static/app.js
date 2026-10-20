@@ -503,6 +503,9 @@ let loraInventoryError = "";
 let editingLoraTrigger = null;
 let promptRules = [];
 let editingPromptRule = null;
+let promptRulesProfile = "";
+let promptRulesRequest = 0;
+let promptRuleEditorRevision = 0;
 let normalizationUndo = null;
 let promptNormalizationEpoch = 0;
 const promptNormalizationRequests = new Map();
@@ -561,6 +564,12 @@ function defaultView() {
 let poolViews = Object.fromEntries(SECTIONS.map((section) => [section, defaultView()]));
 
 async function request(path, options = {}) {
+  const favoriteSection = path.match(/^\/api\/favorites\/([^/?]+)/)?.[1];
+  const favoriteEpoch = typeof sharedFavoritesState !== "undefined" ? sharedFavoritesState.epoch : 0;
+  if (favoriteSection && !/[?&]model_profile=/.test(path)) {
+    path += `${path.includes("?") ? "&" : "?"}model_profile=${encodeURIComponent(currentProfile())}`;
+  }
+  const favoriteProfile = favoriteSection ? new URLSearchParams(path.split("?")[1]).get("model_profile") : null;
   const response = await fetch(path, {
     headers: options.body ? { "Content-Type": "application/json" } : undefined,
     ...options,
@@ -583,15 +592,19 @@ async function request(path, options = {}) {
     throw error;
   }
   if (path.startsWith("/api/favorites/") && options.method && options.method !== "GET") {
-    if (typeof singleWorkbenchFavoritesChanged === "function") singleWorkbenchFavoritesChanged();
+    if (typeof singleWorkbenchFavoritesChanged === "function") singleWorkbenchFavoritesChanged({ model_profile: favoriteProfile, section: favoriteSection });
+    if (favoriteProfile !== currentProfile() || (typeof sharedFavoritesState !== "undefined" && favoriteEpoch !== sharedFavoritesState.epoch)) {
+      throw new Error("已切换模型，收藏操作已在原模型完成");
+    }
   }
   return payload;
 }
 
 async function requestFavorites(path, options = {}) {
   const section = path.match(/\/api\/favorites\/([^/?]+)/)?.[1];
+  const profile = currentProfile();
   const value = await request(path, options);
-  return section === activeSection ? value : favoritesData;
+  return section === activeSection && profile === currentProfile() ? value : favoritesData;
 }
 
 // Protection lasts until restart. Observe new controls and later enable attempts
@@ -599,10 +612,11 @@ async function requestFavorites(path, options = {}) {
 const STORAGE_CONTROLS = {
   history: "#startButton, #confirmReplay, #confirmVariant, #deleteRecord",
   style_presets: "#savePreset, .preset-actions button",
-  custom_prompts: '#customForm button[type="submit"], #deleteCustom, #customGroupForm button[type="submit"], #deleteCustomGroup, #commitImport, [data-storage-write="custom_prompts"]',
+  custom_prompts: '#customForm button[type="submit"], #deleteCustom, #customGroupForm button[type="submit"], #deleteCustomGroup, #commitImport, [data-storage-write="custom_prompts"], [data-favorite-custom-write]',
   lora_triggers: '#loraTriggerForm button[type="submit"], #resetLoraTriggers',
   prompt_rules: '#promptRuleForm button[type="submit"], #deletePromptRule, .prompt-rule-actions input',
   prompt_pools: '#kreaPromptItemForm button[type="submit"], #kreaPromptItemDelete, #kreaPoolDeleteSelection, #kreaPromptImportCommit, .krea-prompt-remove',
+  favorite_extensions: '[data-favorite-extension-write]',
 };
 function protectStorageControls() {
   for (const [store, selector] of Object.entries(STORAGE_CONTROLS)) {
@@ -706,17 +720,41 @@ function applyPromptField(field, value) {
   }
   if (ui[field]) ui[field].value = value;
 }
-function setNormalizationUndo(changes) {
+function setNormalizationUndo(changes, elements = {}) {
   if (!changes.length) return;
-  normalizationUndo = Object.fromEntries(changes.map((item) => [item.field, item.before]));
-  ui.undoPromptNormalization.hidden = false;
+  const mode = typeof singleWorkbenchState !== "undefined" && singleWorkbenchState.ready ? singleWorkbenchState.mode : "random";
+  normalizationUndo = { profile: currentProfile(), mode, changes: changes.map(item => ({ ...item, element: elements[item.field] || promptElementForField(item.field) })) };
+  ui.undoPromptNormalization.hidden = mode !== "random";
+  const singleUndo = document.getElementById("singleUndoNormalization");
+  if (singleUndo) singleUndo.hidden = mode !== "single";
   const labels = changes.map((item) => PROMPT_FIELD_LABELS[item.field] || item.field);
   ui.promptNormalizationStatus.textContent = `已规范 ${changes.length} 个字段：${labels.join("、")}`;
 }
-function clearNormalizationUndo(message = "编辑结束后自动按 Anima Tag 规范整理。") {
+function clearNormalizationUndo(message = "") {
   normalizationUndo = null;
   ui.undoPromptNormalization.hidden = true;
-  ui.promptNormalizationStatus.textContent = message;
+  const natural = currentProfile() === "krea2";
+  ui.promptNormalizationStatus.textContent = message || (natural ? "编辑结束后整理自然语言格式，保留原意、大小写与段落。" : "编辑结束后自动按 Anima Tag 规范整理。");
+  const singleUndo = document.getElementById("singleUndoNormalization"), singleStatus = document.getElementById("singleNormalizationStatus");
+  if (singleUndo) singleUndo.hidden = true;
+  if (singleStatus) singleStatus.textContent = message || (natural ? "手动整理当前提示词框的自然语言格式，可撤销。" : "手动按 Anima Tag 规则整理当前提示词框，可撤销。");
+}
+function undoPromptNormalization() {
+  if (!normalizationUndo) return;
+  const undo = normalizationUndo;
+  const mode = typeof singleWorkbenchState !== "undefined" && singleWorkbenchState.ready ? singleWorkbenchState.mode : "random";
+  if (undo.profile !== currentProfile() || undo.mode !== mode) { clearNormalizationUndo(); return; }
+  invalidatePromptNormalization();
+  let restored = 0;
+  for (const change of undo.changes) {
+    if (!change.element || change.element.value !== change.after) continue;
+    change.element.value = change.before;
+    if (mode === "random") applyPromptField(change.field, change.before);
+    restored++;
+  }
+  if (restored && mode === "single") singleWorkbenchInvalidatePrompt();
+  clearNormalizationUndo(restored ? "已撤销上次提示词规范。" : "提示词已继续编辑，已保留你的新内容。");
+  schedulePersist();
 }
 function promptNormalizationContext() {
   const mode = typeof singleWorkbenchState !== "undefined" && singleWorkbenchState.ready ? singleWorkbenchState.mode : "random";
@@ -947,6 +985,7 @@ function switchProfileDraft(nextProfile, { applyDefaults = true } = {}) {
   if (previous !== next) saveCurrentProfileDraft();
   activeProfileId = next;
   if (ui.model_profile) ui.model_profile.value = next;
+  if (typeof sharedFavoritesResetModel === "function") sharedFavoritesResetModel();
   const state = profileDrafts[next];
   if (state) {
     restoreProfileDraft(next, state);
@@ -1108,11 +1147,13 @@ function invalidateResourceInventories() {
 
 function applySettings(raw, { useProfileDraft = false } = {}) {
   invalidatePromptNormalization();
-  clearNormalizationUndo();
   const settings = normalizeSettings(raw || defaults || {});
   const previousProfile = currentProfile();
   activeProfileId = settings.model_profile;
   if (ui.model_profile) ui.model_profile.value = settings.model_profile;
+  clearNormalizationUndo();
+  if (ui.promptRuleDialog?.open) { clearPromptRuleEditor(); void loadPromptRules(); }
+  if (typeof sharedFavoritesResetModel === "function") sharedFavoritesResetModel();
   ui.krea_prompt_pool_enabled.checked = Boolean(settings.krea_prompt_pool?.enabled);
   kreaPromptPoolSelection = [...(settings.krea_prompt_pool?.ids || [])];
   ensureSelectValue(ui.model_name, settings.model_name);
@@ -1830,7 +1871,9 @@ function renderQueue(queue) {
       const row = document.createElement("div");
       row.className = "queue-row";
       const label = document.createElement("span");
-      label.textContent = `${entry.position}. ${entry.count} 张 · ${entry.model_name}`;
+      label.textContent = entry.kind === "prompt_preview"
+        ? `${entry.position}. 提示词处理 · ${entry.model_name}`
+        : `${entry.position}. ${entry.count} 张 · ${entry.model_name}`;
       const remove = document.createElement("button");
       remove.type = "button";
       remove.className = "icon-button dark";
@@ -1850,6 +1893,28 @@ function renderQueue(queue) {
     }),
   );
 }
+function batchProgressLabel(batch) {
+  if (batch.stage === "prompt_processing") return "正在处理提示词";
+  if (batch.preview_status === "disconnected") return "进度连接已断开，正在重连";
+  const node = String(batch.progress_node || "");
+  const sampler = { "5": "底图采样", "691:1240": "底图采样", "701:1245": "第一段采样", "701:1246": "第二段采样", "704:1248": "潜空间二次采样", "712:1208": "SeedVR2 采样" }[node];
+  const progress = batch.progress;
+  if (progress?.max > 0) return `${sampler || "处理进度"} ${progress.value}/${progress.max}`;
+  // Model loading and the first denoising step can take a while. Keep the
+  // observed stage visible without inventing a sampling percentage.
+  if (sampler) return `${sampler} · 等待首步`;
+  if (["691:239", "701:539", "704:359", "712:718"].includes(node)) return "正在解码图像";
+  if (node === "v2:output") return "正在保存图片";
+  if (node.startsWith("167:")) return "正在准备模型";
+  if (node.startsWith("1010:") || node.startsWith("1026:")) return "正在准备提示词";
+  if (node === "701:1450" || node.startsWith("704:")) return "正在处理潜空间放大";
+  if (node.startsWith("712:")) return "正在进行 SeedVR2 处理";
+  if (node.startsWith("1253:")) return "正在进行脸部细化";
+  if (node.startsWith("1432:")) return "正在进行 NVIDIA 处理";
+  if (node) return "正在处理生成任务";
+  if (batch.progress_node === "") return "正在收取生成结果";
+  return batch.prompt_id ? "等待生成进度" : "正在提交任务";
+}
 function renderBatch(batch, queue = currentQueue) {
   currentBatch = batch;
   if (typeof singleWorkbenchBatch === "function") singleWorkbenchBatch(batch);
@@ -1857,7 +1922,14 @@ function renderBatch(batch, queue = currentQueue) {
   const active = Boolean(batch && ["running", "stopping"].includes(batch.status));
   const completed = batch?.completed || 0;
   const total = batch?.total || 0;
-  const labels = {
+  const promptOnly = batch?.kind === "prompt_preview";
+  const labels = promptOnly ? {
+    running: "正在处理提示词",
+    stopping: "正在取消提示词处理",
+    completed: "提示词处理完成",
+    stopped: "提示词处理已取消",
+    error: "提示词处理失败",
+  } : {
     running: "正在生成",
     stopping: "完成当前张后停止",
     completed: "批次完成",
@@ -1871,13 +1943,12 @@ function renderBatch(batch, queue = currentQueue) {
   if (ui.sampleFill && ui.sampleProgress) {
     const progress = active ? batch.progress : null;
     const sampleTrack = ui.sampleFill.parentElement;
+    ui.sampleProgress.hidden = !active;
+    ui.sampleProgress.textContent = active ? batchProgressLabel(batch) : "";
     if (progress && progress.max > 0) {
-      ui.sampleProgress.hidden = false;
-      ui.sampleProgress.textContent = `采样 ${progress.value}/${progress.max}`;
       sampleTrack.hidden = false;
       ui.sampleFill.style.width = `${Math.min(100, (progress.value / progress.max) * 100)}%`;
     } else {
-      ui.sampleProgress.hidden = true;
       sampleTrack.hidden = true;
       ui.sampleFill.style.width = "0%";
     }
@@ -1889,7 +1960,7 @@ function renderBatch(batch, queue = currentQueue) {
   ui.startButton.textContent = active ? "加入队列" : "开始生成";
   ui.batchError.hidden = !batch?.error;
   ui.batchError.textContent = batch?.error || "";
-  if (batch && !active && lastTerminalBatch !== `${batch.id}:${batch.status}:${completed}`) {
+  if (batch && !promptOnly && !active && lastTerminalBatch !== `${batch.id}:${batch.status}:${completed}`) {
     lastTerminalBatch = `${batch.id}:${batch.status}:${completed}`;
     if (batch.settings?.workbench === "single") {
       historyCache.clear();
@@ -1936,8 +2007,12 @@ async function pollBatch() {
   if (pollIdleTicks && Date.now() - pollBatchLast < interval) return;
   pollIdleTicks++; pollBatchLast = Date.now(); pollBatchPending = true;
   const batchAtStart = currentBatch;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
   try {
-    const payload = await request("/api/batches/current");
+    const payload = await request("/api/batches/current", { signal: controller.signal, cache: "no-store" });
+    // request() tolerates unreadable JSON, including an aborted response body.
+    controller.signal.throwIfAborted();
     // A submit/stop response can replace the batch while this read is in
     // flight. Its newer state takes precedence over this older snapshot.
     if (currentBatch !== batchAtStart) return;
@@ -1946,10 +2021,11 @@ async function pollBatch() {
   } catch (error) {
     // 服务端不可达时只提示一次,恢复后自动复位,不再每 1.2 秒刷屏。
     if (!pollErrorShown) {
-      toast(error.message);
+      toast(error.name === "AbortError" ? "读取生成进度超时，正在重试" : error.message);
       pollErrorShown = true;
     }
   } finally {
+    clearTimeout(timeout);
     pollBatchPending = false;
   }
 }
@@ -2948,13 +3024,15 @@ function isFavorite(item) {
 let favoritesRequest = 0;
 async function loadFavorites(section = activeSection) {
   const requestId = ++favoritesRequest;
+  const profile = currentProfile();
+  if (profile !== "anima") { favoritesData = { groups: [], items: [], favorite_keys: [] }; favoritesAvailable = false; return; }
   try {
-    const payload = await request(`/api/favorites/${section}`);
-    if (requestId !== favoritesRequest || section !== activeSection) return;
+    const payload = await request(`/api/favorites/${section}?model_profile=${profile}`);
+    if (requestId !== favoritesRequest || section !== activeSection || profile !== currentProfile()) return;
     favoritesData = payload;
     favoritesAvailable = true;
   } catch (error) {
-    if (requestId !== favoritesRequest || section !== activeSection) return;
+    if (requestId !== favoritesRequest || section !== activeSection || profile !== currentProfile()) return;
     favoritesData = { groups: [], items: [], favorite_keys: [] };
     favoritesAvailable = false;
     if (currentView().filters.collection) currentView().filters.collection = "";
@@ -3125,7 +3203,11 @@ function renderKreaPromptPool() {
     remove.setAttribute("aria-label", "从词池删除");
     remove.textContent = "×";
     remove.addEventListener("click", () => deleteKreaPromptPoolItem(item));
-    tools.append(edit, remove);
+    const favorite = document.createElement("button");
+    favorite.type = "button"; favorite.className = "button ghost compact";
+    favorite.textContent = "♡ 收藏"; favorite.setAttribute("aria-label", "收藏自然语言提示词");
+    favorite.addEventListener("click", () => sharedFavoriteOpen("random", { section: "prompt", text: item.text || item.prompt || "" }));
+    tools.append(favorite, edit, remove);
     row.append(checkbox, text, tools);
     return row;
   }));
@@ -4163,6 +4245,7 @@ async function createFavoriteSelectionGroup() {
 }
 async function saveFavoriteSelection(event) {
   event.preventDefault();
+  const section = activeSection, profile = currentProfile();
   const groupIds = [...ui.favoriteSelectionGroups.querySelectorAll("input:checked")].map((input) => input.value);
   if (!groupIds.length) {
     ui.favoriteSelectionError.textContent = "至少选择一个收藏分组";
@@ -4172,10 +4255,11 @@ async function saveFavoriteSelection(event) {
   ui.confirmFavoriteSelection.disabled = true;
   ui.confirmFavoriteSelection.textContent = "收藏中…";
   try {
-    const payload = await request(`/api/favorites/${activeSection}/selection`, {
+    const payload = await request(`/api/favorites/${section}/selection?model_profile=${profile}`, {
       method: "POST",
-      body: JSON.stringify({ selection: draft.pools[activeSection], groupIds }),
+      body: JSON.stringify({ selection: draft.pools[section], groupIds }),
     });
+    if (section !== activeSection || profile !== currentProfile()) return;
     favoritesData = payload;
     ui.favoriteSelectionDialog.close();
     renderPoolItems();
@@ -5244,6 +5328,7 @@ function setPromptRuleError(message = "") {
   ui.promptRuleError.hidden = !message;
 }
 function clearPromptRuleEditor() {
+  promptRuleEditorRevision++;
   editingPromptRule = null;
   ui.promptRuleId.value = "";
   ui.promptRuleFrom.value = "";
@@ -5256,6 +5341,7 @@ function clearPromptRuleEditor() {
 }
 function editPromptRule(item) {
   if (item.kind !== "custom") return;
+  promptRuleEditorRevision++;
   editingPromptRule = item;
   ui.promptRuleId.value = item.id;
   ui.promptRuleFrom.value = item.from || "";
@@ -5268,6 +5354,8 @@ function editPromptRule(item) {
   ui.promptRuleFrom.focus();
 }
 function renderPromptRules() {
+  const profile = promptRulesProfile;
+  if (profile !== currentProfile()) return;
   ui.promptRuleList.replaceChildren(
     ...promptRules.map((item) => {
       const row = document.createElement("div");
@@ -5279,13 +5367,15 @@ function renderPromptRules() {
       const ruleName = item.kind === "builtin" ? item.name : item.from;
       row.innerHTML = `<div class="prompt-rule-copy"><strong>${escapeHtml(ruleName)}</strong><small title="${escapeHtml(description)}">${escapeHtml(description)}</small></div><div class="prompt-rule-actions"><label class="compact-check"><input type="checkbox" ${item.enabled ? "checked" : ""} aria-label="${escapeHtml(ruleName)}：${item.enabled ? "停用" : "启用"}规则"><span>${item.enabled ? "启用" : "停用"}</span></label>${item.kind === "custom" ? '<button class="button ghost compact" type="button">编辑</button>' : ""}</div>`;
       row.querySelector('input[type="checkbox"]').addEventListener("change", async (event) => {
+        if (profile !== currentProfile()) return;
         try {
           await request(`/api/prompt-rules/${encodeURIComponent(item.id)}`, {
             method: "PUT",
-            body: JSON.stringify({ enabled: event.target.checked }),
+            body: JSON.stringify({ enabled: event.target.checked, model_profile: profile }),
           });
-          await loadPromptRules();
+          if (profile === currentProfile()) await loadPromptRules();
         } catch (error) {
+          if (profile !== currentProfile()) return;
           toast(error.message);
           await loadPromptRules();
         }
@@ -5296,16 +5386,35 @@ function renderPromptRules() {
   );
 }
 async function loadPromptRules() {
-  const data = await request("/api/prompt-rules");
+  const profile = currentProfile(), requestId = ++promptRulesRequest;
+  const kicker = document.getElementById("promptRuleKicker"), title = document.getElementById("promptRuleTitle");
+  if (kicker) kicker.textContent = profile === "krea2" ? "KREA 2 · NATURAL LANGUAGE" : "ANIMA · TAG RULES";
+  if (title) title.textContent = `${profile === "krea2" ? "Krea 2" : "Anima"} 规范与替换`;
+  const hint = document.getElementById("promptRuleHint");
+  if (hint) hint.textContent = profile === "krea2" ? "Krea 2 仅整理空白格式；自定义替换按完整文本、区分大小写匹配，支持逗号和换行，不替换句子中的片段。" : "Anima 按 Tag 规范整理；自定义规则精确匹配单个 Tag，不区分大小写。";
+  ui.promptRuleFrom.placeholder = profile === "krea2" ? "需要完整匹配的文本（区分大小写）" : "例如 bad_tag";
+  ui.promptRuleTo.placeholder = profile === "krea2" ? "替换后的完整文本" : "例如 good tag";
+  if (promptRulesProfile !== profile) { promptRulesProfile = profile; promptRules = []; renderPromptRules(); }
+  let data;
+  try { data = await request(`/api/prompt-rules?model_profile=${encodeURIComponent(profile)}`); }
+  catch (error) {
+    if (requestId === promptRulesRequest && profile === currentProfile()) setPromptRuleError(error.message);
+    return;
+  }
+  if (requestId !== promptRulesRequest || profile !== currentProfile()) return;
+  promptRulesProfile = profile;
   promptRules = data.items || [];
   renderPromptRules();
 }
 async function openPromptRuleDialog() {
+  const profile = currentProfile();
   clearPromptRuleEditor();
+  promptRules = []; promptRulesProfile = currentProfile(); renderPromptRules();
   ui.promptRuleDialog.showModal();
   try {
     await loadPromptRules();
   } catch (error) {
+    if (profile !== currentProfile()) return;
     setPromptRuleError(error.message);
   }
 }
@@ -5318,6 +5427,8 @@ function promptRuleScopes() {
 }
 async function savePromptRule(event) {
   event.preventDefault();
+  const profile = currentProfile(), editing = editingPromptRule, revision = promptRuleEditorRevision;
+  if (promptRulesProfile !== profile) return;
   const scopes = promptRuleScopes();
   if (!scopes.length) {
     setPromptRuleError("至少选择一个应用范围");
@@ -5330,30 +5441,36 @@ async function savePromptRule(event) {
     enabled: true,
   };
   try {
-    const path = editingPromptRule
-      ? `/api/prompt-rules/${encodeURIComponent(editingPromptRule.id)}`
+    const path = editing
+      ? `/api/prompt-rules/${encodeURIComponent(editing.id)}`
       : "/api/prompt-rules";
     await request(path, {
-      method: editingPromptRule ? "PUT" : "POST",
-      body: JSON.stringify({ ...payload, model_profile: currentProfile() }),
+      method: editing ? "PUT" : "POST",
+      body: JSON.stringify({ ...payload, model_profile: profile }),
     });
+    if (profile !== currentProfile() || editing !== editingPromptRule || revision !== promptRuleEditorRevision) return;
     clearPromptRuleEditor();
     await loadPromptRules();
     toast("提示词替换规则已保存");
   } catch (error) {
+    if (profile !== currentProfile()) return;
     setPromptRuleError(error.message);
   }
 }
 async function deletePromptRule() {
   if (!editingPromptRule) return;
+  const profile = currentProfile(), editing = editingPromptRule, revision = promptRuleEditorRevision;
+  if (promptRulesProfile !== profile) return;
   try {
-    await request(`/api/prompt-rules/${encodeURIComponent(editingPromptRule.id)}`, {
+    await request(`/api/prompt-rules/${encodeURIComponent(editing.id)}?model_profile=${encodeURIComponent(profile)}`, {
       method: "DELETE",
     });
+    if (profile !== currentProfile() || editing !== editingPromptRule || revision !== promptRuleEditorRevision) return;
     clearPromptRuleEditor();
     await loadPromptRules();
     toast("提示词替换规则已删除");
   } catch (error) {
+    if (profile !== currentProfile()) return;
     setPromptRuleError(error.message);
   }
 }
@@ -5421,9 +5538,16 @@ function normalizeArtistField(finalize = false) {
   if (document.activeElement === input) input.setSelectionRange(nextCaret, nextCaret);
 }
 async function loadArtistFavorites() {
+  const profile = currentProfile();
+  const token = (loadArtistFavorites.sequence || 0) + 1;
+  loadArtistFavorites.sequence = token;
+  if (profile !== "anima") { artistFavoritesData = { groups: [], items: [] }; renderArtistFavorites(); return; }
   try {
-    artistFavoritesData = await request("/api/favorites/artist");
+    const payload = await request("/api/favorites/artist?model_profile=anima");
+    if (token !== loadArtistFavorites.sequence || profile !== currentProfile()) return;
+    artistFavoritesData = payload;
   } catch {
+    if (token !== loadArtistFavorites.sequence || profile !== currentProfile()) return;
     artistFavoritesData = { groups: [], items: [] };
   }
   renderArtistFavorites();
@@ -5462,7 +5586,11 @@ function renderArtistFavorites() {
   );
 }
 async function openArtistDialog() {
+  const profile = currentProfile();
+  const epoch = typeof sharedFavoritesState !== "undefined" ? sharedFavoritesState.epoch : 0;
+  if (profile !== "anima") return;
   await loadArtistFavorites();
+  if (profile !== currentProfile() || (typeof sharedFavoritesState !== "undefined" && epoch !== sharedFavoritesState.epoch)) return;
   ui.artistDialog.showModal();
 }
 async function saveCurrentArtistFavorites() {
@@ -5510,7 +5638,6 @@ async function submitBatch(settings, seeds = null) {
   submitInFlight = true;
   ui.startButton.disabled = true;
   try {
-    if (settings.workbench !== "single") settings = await normalizeSettingsPayload(settings);
     const body = seeds ? { ...settings, seeds } : settings;
     const state = await request("/api/batches", { method: "POST", body: JSON.stringify(body) });
     if (state.status === "queued") toast(`已加入队列,第 ${state.position} 位`);
@@ -5538,7 +5665,7 @@ ui.settingsForm.addEventListener("submit", async (event) => {
     const single = typeof singleWorkbenchActive === "function" && singleWorkbenchActive();
     if (single && singleWorkbenchInputBlocked()) throw new Error("参考图正在读取或不可用，请等待、重新添加或移除");
     // Capture the workbench, profile and seeds before the first await. The
-    // submit entry owns normalization and its lock for the entire request.
+    // The backend owns normalization; the submit lock covers the whole request.
     const settings = readSettings();
     const seeds = single ? singleWorkbenchSeeds() : null;
     persistNow();
@@ -5886,15 +6013,10 @@ ui.manual_artist.addEventListener("blur", () => {
 });
 for (const input of [ui.quality_prompt, ui.extra_prompt, ui.negative_prompt, ui.customPrompt])
   input.addEventListener("blur", () => normalizePromptElement(input));
-ui.undoPromptNormalization.addEventListener("click", () => {
-  if (!normalizationUndo) return;
-  invalidatePromptNormalization();
-  for (const [field, value] of Object.entries(normalizationUndo)) applyPromptField(field, value);
-  clearNormalizationUndo("已撤销上次提示词规范。");
-  schedulePersist();
-});
+ui.undoPromptNormalization.addEventListener("click", undoPromptNormalization);
 ui.managePromptRules.addEventListener("click", openPromptRuleDialog);
 ui.promptRuleForm.addEventListener("submit", savePromptRule);
+ui.promptRuleForm.addEventListener("input", () => { promptRuleEditorRevision++; });
 ui.clearPromptRule.addEventListener("click", clearPromptRuleEditor);
 ui.deletePromptRule.addEventListener("click", deletePromptRule);
 ui.closePromptRules.addEventListener("click", () => ui.promptRuleDialog.close());
@@ -6109,6 +6231,7 @@ ui.resetSettings.addEventListener("click", () => {
 ui.clearDraft.addEventListener("click", () => {
   if (!confirm("清除本地草稿并恢复默认设置？收藏不会被删除。")) return;
   localStorage.removeItem(DRAFT_KEY);
+  if (typeof promptAssistantClear === "function") promptAssistantClear();
   if (typeof singleWorkbenchState !== "undefined" && singleWorkbenchState.ready) { localStorage.removeItem(WORKBENCH_DRAFT_KEY); singleWorkbenchState.drafts = { random: {}, single: {} }; singleWorkbenchState.mode = "random"; }
   for (const key of LEGACY_DRAFT_KEYS) localStorage.removeItem(key);
   localStorage.removeItem(VIEW_KEY);
@@ -6156,6 +6279,16 @@ async function initialize() {
     toast(message);
     return;
   }
+  // Resource inventories can be slow; progress monitoring must already work.
+  setInterval(pollBatch, 400);
+  setInterval(refreshConnection, 5000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      pollIdleTicks = 0;
+      pollBatch();
+      refreshConnection();
+    }
+  });
   await Promise.allSettled([
     loadResources(),
     loadKreaPromptPool(),
@@ -6166,14 +6299,5 @@ async function initialize() {
     loadArtistFavorites(),
     loadStylePresets(),
   ]);
-  setInterval(pollBatch, 400);
-  setInterval(refreshConnection, 5000);
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) {
-      pollIdleTicks = 0;
-      pollBatch();
-      refreshConnection();
-    }
-  });
 }
 initialize();

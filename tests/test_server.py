@@ -221,7 +221,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("deleteMode=${deleteMode}", app_js)
         self.assertIn('id="favoriteSelection"', index_html)
         self.assertIn('id="favoriteSelectionDialog"', index_html)
-        self.assertIn("/api/favorites/${activeSection}/selection", app_js)
+        self.assertIn("/api/favorites/${section}/selection?model_profile=${profile}", app_js)
         self.assertEqual(
             static_response.headers["Cache-Control"],
             "no-cache, max-age=0, must-revalidate",
@@ -567,8 +567,8 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(normalized.status, 200)
         payload = await normalized.json()
-        self.assertEqual(payload["fields"]["quality_prompt"], "year 2025, score_9, blue hair")
-        self.assertEqual(payload["fields"]["extra_prompt"], "@Niji9il, blue hair")
+        self.assertEqual(payload["fields"]["quality_prompt"], "2025，SCORE 9, Blue_Hair")
+        self.assertEqual(payload["fields"]["extra_prompt"], "@Niji9il, Blue_Hair")
         self.assertEqual(payload["model_profile"], "krea2")
 
         created = await self.client.post(

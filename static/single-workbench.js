@@ -3,8 +3,7 @@
 const WORKBENCH_DRAFT_KEY = "anima-studio:workbenches:v1";
 const singleWorkbenchState = {
   ready: false, mode: "random", drafts: { random: {}, single: {} }, single: {},
-  generationMode: "txt2img", favoriteSection: "character", favoriteRequest: 0,
-  favoriteData: null, favoriteItems: [], favoriteGroup: "__all__", promptTarget: null,
+  generationMode: "txt2img", promptTarget: null,
   inputImage: null, previewRecord: null, promptJob: null, promptPoll: null, promptRevision: 0, inputRequest: 0,
   reading: false, restoring: false, resourceValues: {}, promptSeed: 0,
 };
@@ -42,6 +41,8 @@ function singleWorkbenchUnifiedDefaults(single) {
   single.normal_pipeline = single.dual.first_pipeline = single.dual.second_pipeline = "primary";
   single.latent.pipeline = single.face_pipeline = "primary";
   single.loras_secondary = []; single.secondary_managed_triggers = [];
+  for (const stage of Object.values(single.prompt_processing || {})) stage.enabled = false;
+  single.prompt_job_id = ""; single.processed_prompt_override = null;
   return single;
 }
 function singleWorkbenchPath(value, path, next) {
@@ -87,15 +88,12 @@ function singleWorkbenchBuild() {
     '<label class="field"><span>负面提示词</span><textarea id="singleNegative" data-single-prompt rows="3"></textarea></label>' +
     '<label class="field"><span>前缀</span><textarea id="single_prefix" data-single-path="prefix" data-single-prompt rows="2" placeholder="风格、画面基调…"></textarea></label>' +
     '<label class="field"><span>后缀</span><textarea id="single_suffix" data-single-path="suffix" data-single-prompt rows="2" placeholder="补充细节、质量词…"></textarea></label>' +
-    '<div class="single-prompt-tools"><button id="singleFavoriteOpen" type="button" class="button ghost compact">♡ 共享收藏</button><button id="singleNormalize" type="button" class="button ghost compact">规范提示词</button></div>' +
-    '<div id="singleFavoritePanel" hidden><div class="single-favorite-tabs">' +
-    [...SECTIONS, "artist"].map(section => '<button type="button" class="button ghost compact" data-single-favorite-section="' + section + '" aria-pressed="' + (section === "character") + '">' + (SECTION_META[section]?.label || "画师") + '</button>').join("") +
-    '</div><label class="field"><span>收藏分组</span><select id="singleFavoriteGroup"><option value="__all__">全部收藏</option></select></label><div class="single-inline-actions"><button id="singleFavoriteManage" type="button" class="button ghost compact">管理收藏</button><button id="singleFavoriteRefresh" type="button" class="button ghost compact">刷新</button></div><p class="field-hint">点击词条，插入最近编辑位置。</p><div id="singleFavoriteList" class="single-favorite-list"></div><p id="singleFavoriteStatus" class="field-hint" role="status"></p></div></section>' +
+    '<div class="single-prompt-tools"><button id="singleFavoriteOpen" type="button" class="button ghost compact">♡ 共享收藏</button><button id="singleFavoriteSave" type="button" class="button ghost compact">收藏提示词</button><button id="singleNormalize" type="button" class="button ghost compact">规范当前提示词框</button><button id="singleManagePromptRules" type="button" class="button ghost compact">管理规范与替换</button><button id="singleUndoNormalization" type="button" class="button ghost compact" hidden>撤销上次规范</button></div><p id="singleNormalizationStatus" class="field-hint" role="status"></p>' +
+    sharedFavoritesPanelMarkup("single") + '</section>' +
     '<div id="singleParameterTabs" role="tablist" aria-label="参数分类"><span id="singleTabIndicator" aria-hidden="true"></span>' +
     [["common","常用参数"],["prompt","提示词处理"],["repair","放大修复"],["more","更多设置"]].map(([id,label]) => '<button id="singleCategory_' + id + '" type="button" role="tab" data-single-category="' + id + '" aria-selected="' + (id === "common") + '" tabindex="' + (id === "common" ? 0 : -1) + '">' + label + '</button>').join("") + '</div>' +
     '<section id="singleSeedSection" class="control-section" data-single-group="common"><div id="singleSeedControls"><div class="section-heading"><h2>随机种子</h2><button id="singleRollSeed" type="button" class="button ghost compact">换一个</button></div><div class="single-advanced-grid"><label class="field"><span>种子方式</span><select id="singleSeedMode"><option value="random">每次随机</option><option value="fixed">固定种子</option></select></label><label class="field"><span>图像种子</span><input id="singleSampleSeed" type="number" min="0" max="1125899906842624" step="1" value="0"></label></div></div></section>';
-  html += processing("expand", "提示词扩写") + processing("oc", "OC 提示词处理");
-  html += '<section class="control-section" data-single-group="prompt" id="singleProcessedSection"><div class="single-inline-actions"><button id="singleProcessPrompt" type="button" class="button primary compact">处理并预览提示词</button><button id="singleCancelPrompt" type="button" class="button ghost compact" hidden>取消处理</button></div><p id="singlePromptJobStatus" class="single-job-status" role="status">可先预览、编辑处理结果，再生成。</p><label id="singleProcessedField" class="field" hidden><span>处理后的提示词 · 可编辑</span><textarea id="singleProcessedPrompt" rows="6"></textarea></label><button id="singleDiscardProcessed" type="button" class="button ghost compact" hidden>清除处理结果</button></section>';
+  html += promptAssistantMarkup();
   html += singleWorkbenchSection("双采样细项", number("dual.switch_step", "第二段起始步", 0, 149, 1) + number("dual.scale", "中间放大倍率", 1, 8, .05) + number("dual.second_cfg", "第二段 CFG", 0, 30, .1) + field("dual.second_sampler_name", "第二段采样器") + field("dual.second_scheduler", "第二段调度器") + field("dual.upscale_method", "中间放大算法", "text", upscalers) + '<p class="field-hint wide">第一段完整采样，第二段从指定步继续至总步数。</p>', "common", "singleDualSection");
   html += '<div id="singleLatentMethodField">' + field("latent.upscale_method", "放大算法", "text", upscalers) + '</div>';
   html += singleWorkbenchToggleSection("DLSS 色彩处理", "dlss.enabled", field("dlss.style", "风格", "text", ["默认", "自然", "电影", "风格3"]) + number("dlss.intensity", "强度", 0, 1, .05) + number("dlss.output_mix", "输出混合", 0, 1, .01), "repair", "singleDlssSection");
@@ -111,6 +109,8 @@ function singleWorkbenchRead(settings) {
   const result = { ...settings, workbench: "single", generation_mode: singleWorkbenchState.generationMode, count: 1, single: singleWorkbenchClone(single), negative_prompt: document.getElementById("singleNegative").value,
     ...singleWorkbenchResourceValues({ ...settings, single, ...singleWorkbenchState.resourceValues }),
     extra_prompt: "", quality_prompt: "", manual_artist: "", krea_prompt_pool: { enabled: false, ids: [] } };
+  for (const stage of Object.values(result.single.prompt_processing || {})) stage.enabled = false;
+  result.single.prompt_job_id = ""; result.single.processed_prompt_override = null;
   for (const section of SECTIONS) { result[`random_${section}`] = false; result[`fixed_${section}`] = ""; }
   return result;
 }
@@ -133,6 +133,9 @@ function singleWorkbenchApply(raw) {
     singleWorkbenchState.mode = "single";
     const full = singleWorkbenchDefaultSettings(raw.model_profile || currentProfile());
     singleWorkbenchState.single = singleWorkbenchMerge(full.single, raw.single || {});
+    if (typeof promptAssistantMigrateLegacy === "function") promptAssistantMigrateLegacy(singleWorkbenchState.single, raw.model_profile || currentProfile());
+    for (const stage of Object.values(singleWorkbenchState.single.prompt_processing || {})) stage.enabled = false;
+    singleWorkbenchState.single.prompt_job_id = ""; singleWorkbenchState.single.processed_prompt_override = null;
     singleWorkbenchState.generationMode = raw.generation_mode === "img2img" ? "img2img" : "txt2img";
     document.querySelectorAll("[data-single-path]").forEach(element => { const value = singleWorkbenchPath(singleWorkbenchState.single, element.dataset.singlePath); if (element.type === "checkbox") element.checked = Boolean(value); else if (element.tagName === "SELECT") ensureSelectValue(element, String(value ?? "")); else element.value = value ?? ""; });
     document.getElementById("singleNegative").value = raw.negative_prompt || "";
@@ -140,8 +143,8 @@ function singleWorkbenchApply(raw) {
     singleWorkbenchRenderCompatibility();
     singleWorkbenchRenderProcessed();
     void singleWorkbenchRestoreInput();
-    if (singleWorkbenchState.single.prompt_job_id) void singleWorkbenchPollPrompt(singleWorkbenchState.single.prompt_job_id);
   } else if (raw.workbench === "random") singleWorkbenchState.mode = "random";
+  if (typeof promptAssistantRender === "function") promptAssistantRender();
   singleWorkbenchRenderMode();
 }
 function singleWorkbenchCapture() {
@@ -182,8 +185,9 @@ function singleWorkbenchSwitch(mode, profile = currentProfile(), { save = true, 
   singleWorkbenchCancelInput({ render: false });
   clearTimeout(state.promptPoll);
   state.promptJob = null;
-  document.getElementById("singleProcessPrompt").disabled = false;
-  document.getElementById("singleCancelPrompt").hidden = true;
+  if (document.getElementById("singleProcessPrompt")) document.getElementById("singleProcessPrompt").disabled = false;
+  if (document.getElementById("singleCancelPrompt")) document.getElementById("singleCancelPrompt").hidden = true;
+  state.promptTarget = null;
   const target = state.drafts[mode]?.[profile];
   state.mode = mode;
   state.restoring = true;
@@ -218,6 +222,7 @@ function singleWorkbenchRenderMode() {
   if (typeof singleWorkbenchLayout === "function") singleWorkbenchLayout();
   if (typeof singleGalleryMode === "function") singleGalleryMode(active);
   if (typeof sharedParameterVisibility === "function") sharedParameterVisibility();
+  if (typeof promptAssistantRender === "function") promptAssistantRender();
 }
 function singleWorkbenchRefreshLimits() {
   if (!singleWorkbenchState.ready) return;
@@ -246,12 +251,13 @@ function singleWorkbenchInvalidatePrompt() {
   singleWorkbenchState.single.processed_prompt_override = null;
   singleWorkbenchState.promptJob = null;
   clearTimeout(singleWorkbenchState.promptPoll);
-  document.getElementById("singleProcessPrompt").disabled = false;
-  document.getElementById("singleCancelPrompt").hidden = true;
-  document.getElementById("singlePromptJobStatus").textContent = "输入已更改，请重新处理提示词。";
+  if (document.getElementById("singleProcessPrompt")) document.getElementById("singleProcessPrompt").disabled = false;
+  if (document.getElementById("singleCancelPrompt")) document.getElementById("singleCancelPrompt").hidden = true;
+  if (document.getElementById("singlePromptJobStatus")) document.getElementById("singlePromptJobStatus").textContent = "输入已更改，请重新处理提示词。";
   singleWorkbenchRenderProcessed();
 }
 function singleWorkbenchRenderProcessed() {
+  if (!document.getElementById("singleProcessedPrompt")) return;
   const value = singleWorkbenchState.single.processed_prompt_override;
   const text = value ?? singleWorkbenchState.promptJob?.result?.text;
   const visible = typeof text === "string";
@@ -306,65 +312,33 @@ async function singleWorkbenchNormalizePrompt() {
   const field = target.id === "singleNegative" ? "negative_prompt" : target.id;
   const context = promptNormalizationContext();
   try {
-    const result = await normalizePromptFields({ [field]: target.value }, { recordUndo: false, elements: { [field]: target } });
+    const before = target.value;
+    const result = await normalizePromptFields({ [field]: before }, { recordUndo: false, elements: { [field]: target } });
     if (!result.appliedFields.includes(field)) return;
-    if (target.id !== "singleNegative") singleWorkbenchInvalidatePrompt();
+    const changed = target.value !== before;
+    if (changed && typeof setNormalizationUndo === "function") setNormalizationUndo([{ field, before, after: target.value }], { [field]: target });
+    if (changed && target.id !== "singleNegative") singleWorkbenchInvalidatePrompt();
+    const status = document.getElementById("singleNormalizationStatus");
+    if (status) status.textContent = changed ? "已规范当前提示词框，可撤销。" : "当前提示词无需调整。";
     schedulePersist();
-  } catch (error) { if (context === promptNormalizationContext()) toast(error.message); }
+  } catch (error) {
+    if (context !== promptNormalizationContext()) return;
+    const status = document.getElementById("singleNormalizationStatus");
+    if (status) status.textContent = `规范失败：${error.message}`;
+    toast(error.message);
+  }
 }
 async function singleWorkbenchLoadFavorites() {
-  const state = singleWorkbenchState, section = state.favoriteSection, token = ++state.favoriteRequest;
-  document.getElementById("singleFavoriteStatus").textContent = "正在读取共享收藏…";
-  try {
-    const data = await request(`/api/favorites/${section}`);
-    if (token !== state.favoriteRequest || section !== state.favoriteSection) return;
-    state.favoriteData = data;
-    const select = document.getElementById("singleFavoriteGroup");
-    select.replaceChildren(new Option("全部收藏", "__all__"), ...(data.groups || []).map(group => new Option(`${group.name} · ${group.totalCount ?? group.directCount ?? ""}`, group.id)));
-    if (![...select.options].some(option => option.value === state.favoriteGroup)) state.favoriteGroup = "__all__";
-    select.value = state.favoriteGroup;
-    if (section === "artist") state.favoriteItems = (data.items || []).filter(item => item.groupIds?.length).map(item => ({ ...item, text: `@${item.name}`, title: `@${item.name}`, favorite_key: item.name }));
-    else {
-      const items = []; let page = 1, pages = 1;
-      do {
-        const result = await request(`/api/pools/${section}?collection=__all__&limit=200&page=${page}&model_profile=anima`);
-        if (token !== state.favoriteRequest || section !== state.favoriteSection) return;
-        items.push(...(result.items || [])); pages = Number(result.pages || 1); page++;
-      } while (page <= pages);
-      state.favoriteItems = items.map(item => ({ ...item, text: item.prompt || (item.trigger || []).join(", ") || item.name || item.title }));
-    }
-    singleWorkbenchRenderFavorites();
-  } catch (error) { if (token === state.favoriteRequest) document.getElementById("singleFavoriteStatus").textContent = `收藏暂不可用：${error.message}`; }
+  if (typeof sharedFavoritesLoad === "function") return sharedFavoritesLoad();
 }
 function singleWorkbenchRenderFavorites() {
-  const state = singleWorkbenchState, section = state.favoriteSection, groups = state.favoriteData?.groups || [];
-  const groupIds = new Set([state.favoriteGroup]);
-  for (let changed = true; changed;) { changed = false; for (const group of groups) if (groupIds.has(group.parentId) && !groupIds.has(group.id)) { groupIds.add(group.id); changed = true; } }
-  const allowed = new Set((state.favoriteData?.items || []).filter(item => state.favoriteGroup === "__all__" ? item.groupIds?.length : item.groupIds?.some(id => groupIds.has(id))).map(item => String(section === "character" || section === "artist" ? item.name || item.id : item.id || item.name)));
-  const items = state.favoriteItems.filter(item => allowed.has(String(item.favorite_key)));
-  document.getElementById("singleFavoriteList").replaceChildren(...items.map(item => {
-    const row = document.createElement("span"); row.className = "single-favorite-chip";
-    const insert = document.createElement("button"); insert.type = "button"; insert.textContent = item.title || item.name; insert.title = item.text; insert.addEventListener("click", () => singleWorkbenchInsert(item.text));
-    const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "♥"; remove.setAttribute("aria-label", `取消收藏 ${item.title || item.name}`);
-    remove.addEventListener("click", async () => { remove.disabled = true; try { await request(`/api/favorites/${section}/item`, { method: "PUT", body: JSON.stringify({ ...(section === "artist" ? { name: item.name } : { id: item.id }), favorite: false }) }); await singleWorkbenchLoadFavorites(); if (section === activeSection) await loadFavorites(section); if (section === "artist") await loadArtistFavorites(); } catch (error) { toast(error.message); remove.disabled = false; } });
-    row.append(insert, remove); return row;
-  }));
-  document.getElementById("singleFavoriteStatus").textContent = items.length ? `${items.length} 项收藏 · 与随机工作台同步` : "当前分组暂无收藏。";
+  if (typeof sharedFavoritesRender === "function") sharedFavoritesRender();
 }
 
 
 function singleWorkbenchResources() {
   if (typeof sharedParameterResources === "function") sharedParameterResources();
   if (!singleWorkbenchState.ready) return;
-  for (const stage of ["expand", "oc"]) {
-    for (const [field, values] of [["rule", resources.prompt_processing?.rules || []], ["llm_service", resources.prompt_processing?.services || []]]) {
-      const input = document.getElementById(`single_prompt_processing_${stage}_${field}`);
-      const id = `${input.id}_options`;
-      let list = document.getElementById(id);
-      if (!list) { list = document.createElement("datalist"); list.id = id; input.after(list); input.setAttribute("list", id); }
-      list.replaceChildren(...values.map(value => new Option(value, value)));
-    }
-  }
   for (const [id, values] of [["single_dual_second_sampler_name", resources.samplers], ["single_dual_second_scheduler", resources.schedulers]]) {
     const input = document.getElementById(id), listId = `${id}_options`;
     let list = document.getElementById(listId);
@@ -374,10 +348,8 @@ function singleWorkbenchResources() {
   singleWorkbenchRenderCompatibility();
   if (typeof singleWorkbenchLayout === "function") singleWorkbenchLayout();
 }
-function singleWorkbenchFavoritesChanged() {
-  if (!singleWorkbenchState.ready) return;
-  try { localStorage.setItem("anima-studio:favorites-updated", String(Date.now())); } catch { /* Same-page updates still work. */ }
-  if (singleWorkbenchActive() && !document.getElementById("singleFavoritePanel").hidden) void singleWorkbenchLoadFavorites();
+function singleWorkbenchFavoritesChanged(context) {
+  if (typeof sharedFavoritesChanged === "function") sharedFavoritesChanged(context);
 }
 function singleWorkbenchHistory(data) {
   if (typeof singleGalleryRefresh === "function") return singleGalleryRefresh();
@@ -473,6 +445,7 @@ function initializeSingleWorkbench() {
   singleWorkbenchBuild();
   const state = singleWorkbenchState;
   state.ready = true;
+  if (typeof initializePromptAssistant === "function") initializePromptAssistant();
   const legacy = singleWorkbenchCapture();
   state.drafts.random = singleWorkbenchLegacyDrafts(legacy.settings, legacy.profileDrafts);
   state.drafts.random[currentProfile()] = legacy;
@@ -483,29 +456,21 @@ function initializeSingleWorkbench() {
   document.querySelectorAll("[data-workbench]").forEach(button => { if (button.tagName === "BUTTON") button.addEventListener("click", () => singleWorkbenchSwitch(button.dataset.workbench)); });
   document.getElementById("workbenchSwitch").addEventListener("keydown", event => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault(); const mode = ["ArrowLeft", "Home"].includes(event.key) ? "single" : "random"; singleWorkbenchSwitch(mode); document.querySelector(`#workbenchSwitch [data-workbench="${mode}"]`).focus(); });
   document.querySelectorAll("[data-single-prompt]").forEach(element => { element.addEventListener("focus", () => state.promptTarget = element); if (element.id !== "singleNegative") element.addEventListener("input", singleWorkbenchInvalidatePrompt); });
-  document.querySelectorAll('[data-single-path^="prompt_processing."]').forEach(element => element.addEventListener("input", singleWorkbenchInvalidatePrompt));
   for (const id of ["single_dual_upscale_method", "single_latent_upscale_method"]) document.getElementById(id).addEventListener("change", singleWorkbenchRefreshLimits);
   ui.settingsForm.addEventListener("change", () => { singleWorkbenchLayout(); if (singleWorkbenchActive()) singleWorkbenchRenderCompatibility(); });
   document.getElementById("singleResetCompatibility").addEventListener("click", singleWorkbenchResetCompatibility);
   if (typeof initializeSharedParameters === "function") initializeSharedParameters();
-  document.getElementById("singleProcessedPrompt").addEventListener("input", event => { state.single.processed_prompt_override = event.target.value; schedulePersist(); });
-  document.getElementById("singleDiscardProcessed").addEventListener("click", () => { singleWorkbenchInvalidatePrompt(); schedulePersist(); });
-  document.getElementById("singleProcessPrompt").addEventListener("click", singleWorkbenchProcessPrompt);
-  document.getElementById("singleCancelPrompt").addEventListener("click", async () => { const id = state.single.prompt_job_id; if (!id) return; try { await request(`/api/prompt-jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" }); await singleWorkbenchPollPrompt(id); } catch (error) { toast(error.message); } });
   initializeSingleInput();
   ui.model_name.addEventListener("change", () => { if (singleWorkbenchActive() && state.inputBusy === "upload") singleWorkbenchCancelInput(); });
   document.getElementById("singleRollSeed").addEventListener("click", () => { document.getElementById("singleSampleSeed").value = crypto.getRandomValues(new Uint32Array(1))[0]; document.getElementById("singleSeedMode").value = "fixed"; singleWorkbenchLayout(); schedulePersist(); });
-  document.getElementById("singleFavoriteOpen").addEventListener("click", () => { const panel = document.getElementById("singleFavoritePanel"); panel.hidden = !panel.hidden; if (!panel.hidden) void singleWorkbenchLoadFavorites(); });
-  document.querySelectorAll("[data-single-favorite-section]").forEach(button => button.addEventListener("click", () => { state.favoriteSection = button.dataset.singleFavoriteSection; state.favoriteGroup = "__all__"; document.querySelectorAll("[data-single-favorite-section]").forEach(item => item.setAttribute("aria-pressed", String(item === button))); void singleWorkbenchLoadFavorites(); }));
-  document.getElementById("singleFavoriteRefresh").addEventListener("click", singleWorkbenchLoadFavorites);
-  document.getElementById("singleFavoriteGroup").addEventListener("change", event => { state.favoriteGroup = event.target.value; singleWorkbenchRenderFavorites(); });
-  document.getElementById("singleFavoriteManage").addEventListener("click", () => state.favoriteSection === "artist" ? ui.manageArtists.click() : openPool(state.favoriteSection));
+  initializeSharedFavorites();
   document.getElementById("singleNormalize").addEventListener("click", singleWorkbenchNormalizePrompt);
+  document.getElementById("singleManagePromptRules").addEventListener("click", openPromptRuleDialog);
+  document.getElementById("singleUndoNormalization").addEventListener("click", undoPromptNormalization);
+  if (typeof clearNormalizationUndo === "function") clearNormalizationUndo();
   document.getElementById("historyWorkbenchFilter").addEventListener("change", () => { historyCache.clear(); void loadHistory(1); });
   document.getElementById("sendToSingle").addEventListener("click", () => singleWorkbenchFromHistory(selectedRecord));
   document.getElementById("useAsInputImage").addEventListener("click", () => singleWorkbenchFromHistory(selectedRecord, true));
-  window.addEventListener("focus", () => { if (singleWorkbenchActive() && !document.getElementById("singleFavoritePanel").hidden) void singleWorkbenchLoadFavorites(); });
-  window.addEventListener("storage", event => { if (event.key === "anima-studio:favorites-updated" && singleWorkbenchActive()) void singleWorkbenchLoadFavorites(); });
   window.addEventListener("pagehide", singleWorkbenchPersist);
   singleWorkbenchResources();
   if (typeof initializeSingleGallery === "function") initializeSingleGallery();

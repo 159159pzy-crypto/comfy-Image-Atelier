@@ -11,12 +11,22 @@ from pathlib import Path
 from typing import Any
 
 from .catalog import SECTIONS, CatalogError, PromptCatalog, normalize_text
-from .persistence import StorageProtection
+from .comfy import ComfyError
+from .model_profiles import normalize_model_profile
+from .persistence import StorageProtection, StorageReadOnlyError, backup_for_migration
 
 
 MAX_GROUPS = 128
 MAX_ITEMS = 50000
-FAVORITE_SECTIONS = (*SECTIONS, "artist")
+FAVORITE_SECTIONS = (*SECTIONS, "artist", "prompt")
+
+
+class FavoriteSavePendingError(RuntimeError):
+    """The source word is durable, but its favorite write needs a retry."""
+
+    def __init__(self, item_id: str, error: Exception):
+        self.item_id = item_id
+        super().__init__(f"提示词已保存到自定义池，但收藏尚未确认，请重试：{error}")
 
 
 def _section(value: str) -> str:
@@ -176,29 +186,65 @@ class FavoritesExtensionStore(StorageProtection):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.load_warnings: list[str] = []
         self.read_only_reason = None
-        self.value = normalize_section({})
+        self._lock = asyncio.Lock()
+        self.profiles: dict[str, dict[str, Any]] = {}
         if self.path.is_file():
             try:
                 payload = json.loads(self.path.read_text(encoding="utf-8"))
-                if not isinstance(payload, dict) or payload.get("version") != 1:
+                if not isinstance(payload, dict) or payload.get("version") not in (1, 2):
                     raise ValueError("收藏补充文件版本无效")
-                expression = payload.get("expression")
-                if not isinstance(expression, dict) or not isinstance(expression.get("items"), list) or not isinstance(expression.get("groups"), list):
-                    raise ValueError("表情收藏格式无效")
-                self.value = normalize_section(expression)
+                legacy = payload["version"] == 1
+                profiles = {"anima": {"expression": payload.get("expression")}} if legacy else payload.get("profiles")
+                if not isinstance(profiles, dict):
+                    raise ValueError("收藏档案格式无效")
+                normalized: dict[str, dict[str, Any]] = {}
+                for profile, sections in profiles.items():
+                    profile = normalize_model_profile(profile)
+                    if not isinstance(sections, dict):
+                        raise ValueError("收藏分类格式无效")
+                    normalized[profile] = {}
+                    for section, value in sections.items():
+                        if section not in ({"expression"} if profile == "anima" else {"prompt"}):
+                            raise ValueError("收藏档案包含不支持的分类")
+                        if not isinstance(value, dict) or not isinstance(value.get("items"), list) or not isinstance(value.get("groups"), list):
+                            raise ValueError("收藏分类格式无效")
+                        normalized[profile][section] = normalize_section(value)
+                self.profiles = normalized
             except (OSError, UnicodeError, ValueError) as error:
                 self._recover_load_failure(error)
+                return
+            if legacy:
+                try:
+                    backup = backup_for_migration(self.path, 2)
+                    self._write_text(self._serialize(self.profiles))
+                    if backup:
+                        self.load_warnings.append(f"收藏补充文件已迁移，原文件备份为 {backup.name}")
+                except OSError as error:
+                    self._protect_storage(f"收藏已在内存迁移，但备份或写回失败({error})")
 
-    async def save(self, value: dict[str, Any]) -> None:
-        self.ensure_writable()
-        normalized = normalize_section(value)
-        text = json.dumps({"version": 1, "expression": normalized}, ensure_ascii=False, indent=2) + "\n"
-        try:
-            await asyncio.to_thread(self._write_text, text)
-        except OSError as error:
-            self._protect_storage(f"收藏写入失败({error})，已保留原内容")
+    @property
+    def value(self) -> dict[str, Any]:
+        """Compatibility view for callers of the former expression-only store."""
+        return self.get("anima", "expression")
+
+    def get(self, model_profile: str, section: str) -> dict[str, Any]:
+        return copy.deepcopy(self.profiles.get(model_profile, {}).get(section, normalize_section({})))
+
+    @staticmethod
+    def _serialize(profiles: dict[str, Any]) -> str:
+        return json.dumps({"version": 2, "profiles": profiles}, ensure_ascii=False, indent=2) + "\n"
+
+    async def save(self, value: dict[str, Any], model_profile: str = "anima", section: str = "expression") -> None:
+        async with self._lock:
             self.ensure_writable()
-        self.value = normalized
+            profiles = copy.deepcopy(self.profiles)
+            profiles.setdefault(model_profile, {})[section] = normalize_section(value)
+            try:
+                await asyncio.to_thread(self._write_text, self._serialize(profiles))
+            except OSError as error:
+                self._protect_storage(f"收藏写入失败({error})，已保留原内容")
+                self.ensure_writable()
+            self.profiles = profiles
 
     def _write_text(self, text: str) -> None:
         fd, name = tempfile.mkstemp(prefix="favorites-", suffix=".json", dir=self.path.parent)
@@ -214,31 +260,41 @@ class FavoritesExtensionStore(StorageProtection):
 
 
 class FavoritesService:
-    def __init__(self, comfy: Any, catalog: PromptCatalog, expression_store: FavoritesExtensionStore | None = None):
+    def __init__(self, comfy: Any, catalog: PromptCatalog, expression_store: FavoritesExtensionStore | None = None, model_profile: str = "anima"):
         self.comfy = comfy
         self.catalog = catalog
         self.expression_store = expression_store
+        self.model_profile = normalize_model_profile(model_profile)
         # 所有变更都是「读 ComfyUI 全量 → 内存改 → 整体写回」,
         # 两次操作并发时后写者会覆盖前写者;用锁把读-改-写串行化。
         self._lock = asyncio.Lock()
 
+    def _section(self, section: str) -> str:
+        section = _section(section)
+        if (self.model_profile == "krea2") != (section == "prompt"):
+            raise CatalogError(f"{self.model_profile} 不支持收藏分类 {section}")
+        return section
+
     async def _read_payload(self, section: str) -> dict[str, Any]:
-        if section == "expression" and self.expression_store is not None:
-            return {section: copy.deepcopy(self.expression_store.value)}
+        if section in {"expression", "prompt"} and self.expression_store is not None:
+            return {section: self.expression_store.get(self.model_profile, section)}
+        if section == "prompt":
+            raise CatalogError("自然语言收藏存储不可用")
         return await self.comfy.favorites()
 
     async def _save_section(self, section: str, value: dict[str, Any]) -> None:
-        if section == "expression" and self.expression_store is not None:
-            await self.expression_store.save(value)
+        if section in {"expression", "prompt"} and self.expression_store is not None:
+            await self.expression_store.save(value, self.model_profile, section)
         else:
             await self.comfy.save_favorites({section: value})
 
     async def get(self, section: str) -> dict[str, Any]:
-        section = _section(section)
+        section = self._section(section)
         payload = await self._read_payload(section)
         result = normalize_section(payload.get(section))
         return {
             **result,
+            "model_profile": self.model_profile,
             "groups": _group_stats(result),
             "favorite_keys": sorted(
                 favorite_key(section, item) for item in result["items"] if item.get("groupIds")
@@ -246,7 +302,7 @@ class FavoritesService:
         }
 
     async def collection_group_ids(self, section: str, group_id: str) -> set[str]:
-        section = _section(section)
+        section = self._section(section)
         payload = await self._read_payload(section)
         current = normalize_section(payload.get(section))
         if not any(group["id"] == group_id for group in current["groups"]):
@@ -255,9 +311,11 @@ class FavoritesService:
 
     @_locked
     async def update_item(self, section: str, payload: dict[str, Any]) -> dict[str, Any]:
-        section = _section(section)
+        section = self._section(section)
         if section == "artist":
             return await self._update_artist(payload)
+        if section == "prompt":
+            return await self._update_prompt_item(payload)
         item_id = str(payload.get("id") or "").strip()
         catalog_item = self.catalog.get(item_id)
         if catalog_item is None or catalog_item.get("section") != section:
@@ -297,10 +355,112 @@ class FavoritesService:
         return await self.get(section)
 
     @_locked
+    async def save_text(self, section: str, payload: dict[str, Any], custom_prompts: Any = None) -> dict[str, Any]:
+        """Save one text selection; repeat requests never create duplicate words."""
+        section = self._section(section)
+        if section == "artist":
+            raise CatalogError("请将文本收藏到角色、服装、姿势、背景或表情分类")
+        if set(payload) - {"title", "text", "groupIds"}:
+            raise CatalogError("文本收藏包含未知字段")
+        title = payload.get("title")
+        text = payload.get("text")
+        if not isinstance(title, str) or not title.strip() or len(title.strip()) > 200:
+            raise CatalogError("收藏名称需要 1-200 个字符")
+        if not isinstance(text, str) or not text.strip() or len(text.strip()) > 20000:
+            raise CatalogError("收藏提示词需要 1-20000 个字符")
+        title, text = title.strip(), text.strip()
+        data = await self._read_payload(section)
+        current = normalize_section(data.get(section))
+        raw_groups = payload.get("groupIds", ["default"])
+        if not isinstance(raw_groups, list) or any(not isinstance(value, str) for value in raw_groups):
+            raise CatalogError("groupIds 必须是字符串数组")
+        groups = list(dict.fromkeys(raw_groups)) or ["default"]
+        valid_groups = {group["id"] for group in current["groups"]}
+        if any(group not in valid_groups for group in groups):
+            raise CatalogError("收藏分组不存在，请刷新后重试")
+        if section in {"expression", "prompt"} and self.expression_store is not None:
+            self.expression_store.ensure_writable()
+
+        created = False
+        if section == "prompt":
+            existing = next(
+                (item for item in current["items"] if str(item.get("text", item.get("customContent", ""))).strip().casefold() == text.casefold()),
+                None,
+            )
+            if existing is None:
+                if len(current["items"]) >= MAX_ITEMS:
+                    raise CatalogError("收藏条目数量已达到上限")
+                item_id = f"favorite_{uuid.uuid4().hex}"
+                existing = {"id": item_id, "name": item_id, "isCustom": True, "groupIds": []}
+                existing.update(title=title, nickname=title, text=text, customContent=text)
+                current["items"].append(existing)
+                created = True
+            item_id = existing["id"]
+            existing["groupIds"] = list(dict.fromkeys([*existing["groupIds"], *groups]))
+            await self._save_section(section, current)
+        else:
+            if custom_prompts is None:
+                raise CatalogError("自定义提示词存储不可用")
+            if len(current["items"]) >= MAX_ITEMS:
+                source = next(
+                    (item for item in custom_prompts.list(section) if item["prompt"].strip().casefold() == text.casefold()),
+                    None,
+                )
+                if source is None or not any(favorite_key(section, entry) == source["id"] for entry in current["items"]):
+                    raise CatalogError("收藏条目数量已达到上限")
+            # The source item must be durable before its favorite references it.
+            item, created = await custom_prompts.create_or_reuse(
+                {"section": section, "title": title, "prompt": text}
+            )
+            item_id = item["id"]
+            existing = next((entry for entry in current["items"] if favorite_key(section, entry) == item_id), None)
+            merged_groups = list(dict.fromkeys([*(existing.get("groupIds", []) if existing else []), *groups]))
+            saved = self._favorite_record(section, item, merged_groups, title)
+            if existing is None:
+                current["items"].append(saved)
+            else:
+                existing["groupIds"] = merged_groups
+            try:
+                await self._save_section(section, current)
+                result = await self.get(section)
+            except (ComfyError, StorageReadOnlyError, OSError, TimeoutError) as error:
+                # Do not compensate by deleting the source: an upstream timeout
+                # may mean the favorite was committed but its reply was lost.
+                raise FavoriteSavePendingError(item_id, error) from error
+            return {**result, "item_id": item_id, "created": created}
+        return {**(await self.get(section)), "item_id": item_id, "created": created}
+
+    async def _update_prompt_item(self, payload: dict[str, Any]) -> dict[str, Any]:
+        data = await self._read_payload("prompt")
+        current = normalize_section(data.get("prompt"))
+        item_id = str(payload.get("id") or "").strip()
+        item = next((entry for entry in current["items"] if entry.get("id") == item_id), None)
+        if item is None:
+            raise KeyError(item_id)
+        enabled = payload.get("favorite", True)
+        if not isinstance(enabled, bool):
+            raise CatalogError("favorite 必须是布尔值")
+        old_groups = list(item.get("groupIds") or [])
+        if enabled:
+            item["groupIds"] = self._validated_group_ids(current, payload.get("groupIds", old_groups), True)
+            if "nickname" in payload or "title" in payload:
+                title = payload.get("title", payload.get("nickname"))
+                if not isinstance(title, str) or not title.strip() or len(title.strip()) > 200:
+                    raise CatalogError("收藏名称需要 1-200 个字符")
+                item["title"] = item["nickname"] = title.strip()
+        else:
+            current["items"].remove(item)
+        self._prune_empty_affected_children(current, old_groups)
+        await self._save_section("prompt", current)
+        return await self.get("prompt")
+
+    @_locked
     async def update_selection(
         self, section: str, selection: Any, group_ids: Any
     ) -> dict[str, Any]:
-        section = _section(section)
+        section = self._section(section)
+        if section == "prompt":
+            raise CatalogError("自然语言提示词请逐条收藏")
         if not isinstance(selection, dict):
             raise CatalogError("selection 必须是对象")
         mode = str(selection.get("mode") or "include")
@@ -378,7 +538,7 @@ class FavoritesService:
 
     @_locked
     async def create_group(self, section: str, payload: dict[str, Any]) -> dict[str, Any]:
-        section = _section(section)
+        section = self._section(section)
         name = self._group_name(payload)
         data = await self._read_payload(section)
         current = normalize_section(data.get(section))
@@ -404,7 +564,9 @@ class FavoritesService:
         source_group: dict[str, Any],
         source_items: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        section = _section(section)
+        section = self._section(section)
+        if section == "prompt":
+            raise CatalogError("自然语言收藏不支持导入 Anima 自定义分组")
         data = await self._read_payload(section)
         current = normalize_section(data.get(section))
         if not any(group["id"] == parent_id for group in current["groups"]):
@@ -445,7 +607,7 @@ class FavoritesService:
 
     @_locked
     async def update_group(self, section: str, group_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        section = _section(section)
+        section = self._section(section)
         if group_id == "default":
             raise CatalogError("默认收藏分组不能重命名")
         name = self._group_name(payload)
@@ -463,7 +625,7 @@ class FavoritesService:
     async def delete_group(
         self, section: str, group_id: str, delete_items: bool = False
     ) -> dict[str, Any]:
-        section = _section(section)
+        section = self._section(section)
         if group_id == "default":
             raise CatalogError("默认收藏分组不能删除")
         data = await self._read_payload(section)
@@ -514,7 +676,7 @@ class FavoritesService:
 
     @_locked
     async def sync_custom(self, section: str, item: dict[str, Any]) -> None:
-        section = _section(section)
+        section = self._section(section)
         data = await self._read_payload(section)
         current = normalize_section(data.get(section))
         key = str(item.get("id") or "")
@@ -569,7 +731,7 @@ class FavoritesService:
                     saved["nickname"] = str(existing.get("nickname") or "")
                 current["items"][position] = saved
         self._prune_empty_affected_children(current, old_group_ids)
-        await self.comfy.save_favorites({"artist": current})
+        await self._save_section("artist", current)
         return await self.get("artist")
 
     @staticmethod

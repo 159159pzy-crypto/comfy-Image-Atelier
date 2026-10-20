@@ -154,10 +154,32 @@ class CustomPromptStore(StorageProtection):
     async def create(self, payload: dict[str, Any]) -> dict[str, Any]:
         item = self._normalize({**payload, "id": f"custom:{uuid.uuid4().hex}"})
         self._validate_group_ids(item["section"], item["groupIds"])
-        self.items.append(item)
-        await self._save()
+        next_items = [*self.items, item]
+        await self._write(self.groups, next_items)
+        self.items = next_items
         self.catalog.set_custom_items(self.items)
         return copy.deepcopy(item)
+
+    @_locked
+    async def create_or_reuse(self, payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Idempotent source creation for the save-text-and-favorite workflow."""
+        item = self._normalize({**payload, "id": f"custom:{uuid.uuid4().hex}"})
+        self._validate_group_ids(item["section"], item["groupIds"])
+        existing = next(
+            (
+                value for value in self.items
+                if value["section"] == item["section"]
+                and value["prompt"].strip().casefold() == item["prompt"].casefold()
+            ),
+            None,
+        )
+        if existing is not None:
+            return copy.deepcopy(existing), False
+        next_items = [*self.items, item]
+        await self._write(self.groups, next_items)
+        self.items = next_items
+        self.catalog.set_custom_items(self.items)
+        return copy.deepcopy(item), True
 
     @_locked
     async def update(self, item_id: str, payload: dict[str, Any]) -> dict[str, Any]:

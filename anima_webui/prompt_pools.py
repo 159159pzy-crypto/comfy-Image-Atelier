@@ -255,6 +255,29 @@ class PromptPoolStore(StorageProtection):
             "count": len(profiles[profile]),
         }
 
+    async def ensure_item(self, model_profile: Any, text: Any) -> dict[str, Any]:
+        """Reuse the pool's text identity without a racy list-then-create call."""
+        profile = self._profile(model_profile)
+        value = self._normalize_single_text(text)
+        async with self._lock:
+            values = self.items.get(profile, [])
+            existing = next((item for item in values if item.casefold() == value.casefold()), None)
+            if existing is not None:
+                return {
+                    "model_profile": profile, "id": self.item_id(existing),
+                    "text": existing, "created": False, "count": len(values),
+                }
+            self.ensure_writable()
+            if len(values) >= MAX_PROMPTS:
+                raise WorkflowError(f"提示词池不能超过 {MAX_PROMPTS} 项")
+            profiles = {key: list(items) for key, items in self.items.items()}
+            profiles[profile] = [*values, value]
+            await self._save(profiles)
+        return {
+            "model_profile": profile, "id": self.item_id(value),
+            "text": value, "created": True, "count": len(profiles[profile]),
+        }
+
     async def update_item(
         self, model_profile: Any, item_id: Any, text: Any
     ) -> dict[str, Any]:

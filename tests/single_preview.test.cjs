@@ -46,6 +46,42 @@ function setup(extra = {}) {
   return { ctx, state, elements, image, decodes, revoked, requests, running, live };
 }
 
+test('independent rewrite tasks leave the image canvas and history unchanged throughout their lifecycle', async () => {
+  const h = setup();
+  const previous = h.state.lastCompleted;
+  for (const status of ['queued', 'running', 'stopping', 'completed', 'stopped', 'error']) {
+    h.ctx.singleGalleryBatch(batch({ id: 'rewrite-job', kind: 'prompt_preview', stage: 'prompt_processing',
+      status, completed: status === 'completed' ? 1 : 0, preview_id: undefined,
+      settings: { kind: 'rewrite', workbench: 'single', model_profile: 'krea2' } }));
+    await flush();
+    assert.equal(h.state.lastCompleted, previous);
+    assert.equal(h.image.src, '/api/images/1');
+    assert.equal(h.state.busy, false);
+    assert.equal(h.state.finishingBatch, null);
+    assert.equal(h.state.error, '');
+  }
+  assert.equal(h.requests.length, 0);
+  assert.equal(h.decodes.length, 0);
+});
+
+test('a rewrite following a generation resolves only the preceding image batch', async () => {
+  const h = setup({ request: async () => history([record(2, 'batch-1'), record()]) });
+  h.running(); h.live();
+  h.ctx.singleGalleryBatch(batch({ id: 'rewrite-job', kind: 'prompt_preview', stage: 'prompt_processing',
+    preview_id: undefined, settings: { kind: 'rewrite', workbench: 'single' } }));
+  await flush();
+  assert.equal(h.state.finishingBatch, 'batch-1');
+  assert.equal(h.decodes[0].source, '/api/images/2');
+  h.decodes[0].resolve(); await flush();
+  h.ctx.singleGalleryBatch(batch({ id: 'rewrite-job', kind: 'prompt_preview', status: 'completed',
+    completed: 1, preview_id: undefined, settings: { kind: 'rewrite', workbench: 'single' } }));
+  await flush();
+  assert.equal(h.image.src, '/api/images/2');
+  assert.equal(h.state.finishingBatch, null);
+  assert.equal(h.state.error, '');
+  assert.equal(h.decodes.length, 1);
+});
+
 test('a preview replaces the existing frame only after successful decode', async () => {
   const h = setup(); const value = h.running(); h.live();
   const pending = h.ctx.singleGalleryFetchFrame(value);
@@ -364,6 +400,7 @@ function pollingSetup() {
   let now = 1000, visibleSingle = true;
   const pending = [], renders = [];
   const ctx = vm.createContext({
+    AbortController, setTimeout, clearTimeout,
     document: { hidden: false }, currentBatch: batch(), Date: { now: () => now },
     singleWorkbenchActive: () => visibleSingle, toast() {},
     request() { const wait = deferred(); pending.push(wait); return wait.promise; },

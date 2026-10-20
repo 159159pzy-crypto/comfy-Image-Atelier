@@ -197,7 +197,7 @@ test('resetting compatibility resets hidden differences and keeps authored promp
   assert.deepEqual(plain(saved.single.krea_variance), plain(original.single.krea_variance));
   assert.equal(saved.single.latent.upscale_method, 'bilinear');
   assert.equal(saved.single.prompt_processing.expand.rule, 'chosen rule');
-  assert.equal(saved.single.prompt_processing.expand.enabled, true);
+  assert.equal(saved.single.prompt_processing.expand.enabled, false, 'legacy automatic processing remains inactive');
   assert.equal(saved.upscalers.face_refine.sampler, 'dpmpp_2m');
   assert.equal(saved.clip_name, defaults.clip_name);
   assert.equal(saved.single.face_pipeline, 'primary');
