@@ -2,9 +2,9 @@
 
 ## 安装与使用
 
-从 [1.0.1 Release](https://github.com/159159pzy-crypto/comfyui-random-image-generation/releases/tag/1.0.1) 下载 `AnimaRandomStudio-win-x64-unsigned.zip`，完整解压到新文件夹后，直接运行根目录的 `AnimaRandomStudio.exe`。源码 ZIP 不包含 EXE。
+从 [1.1.0 Release](https://github.com/159159pzy-crypto/comfyui-random-image-generation/releases/tag/1.1.0) 下载 `AnimaRandomStudio-win-x64-unsigned.zip`，完整解压到新文件夹后，直接运行根目录的 `AnimaRandomStudio.exe`。源码 ZIP 不包含 EXE。
 
-首次打开且尚未配置环境时，启动器直接进入五步安装向导。已有环境的用户进入「概览」，也可从「安装环境」重新打开向导。以下向导说明对应当前源码及本地候选包；上方 Release 下载链接保留原版本。
+首次打开且尚未配置环境时，启动器直接进入五步安装向导。已有环境的用户进入「概览」，也可从「安装环境」重新打开向导。以下说明对应 1.1.0。
 
 1. **选择方式**：启动器自动检测系统和显卡。选择「安装完整环境」准备独立 Python、Git、ComfyUI、必需节点和 Anima 基础模型，需要 Windows 10 1809 或更新版本的 x64 系统，以及支持 CUDA 12.8 的 NVIDIA 驱动（570.65 或更新版本）。已有可用环境时选择「我已有 ComfyUI」。
 2. **安装位置**：新建环境选择安装文件夹，页面会显示实际环境路径和所在盘可用空间；工具、环境和模型放在所选安装盘。首次默认官方下载来源，也可切换国内镜像；自定义镜像等选项在「高级下载设置」中。导入时选择含 `main.py` 的 ComfyUI 目录或便携版父目录，自动识别 `.venv`、`venv`、`python_embeded`，其他布局可展开「手动指定 Python」。
@@ -25,7 +25,7 @@ Anima Tools 按其 `js` 目录中的四个数据文件识别，支持 `-main`、
 
 新版 ZIP 解压到新目录，退出旧启动器后运行新 EXE，再在设置中选择「应用内置新版」。保留完整目录；仅替换 EXE 会缺少运行资源。需要时可在空闲时回退上一工作台版本。
 
-配置、日志和用户数据默认保存在 `%LOCALAPPDATA%/AnimaRandomStudio`。迁移前备份整个目录；旧源码版的数据在原项目的 `data` 中。启动器不会自动把旧源码版的数据迁入新位置。
+配置、日志和用户数据默认保存在 `%LOCALAPPDATA%/AnimaRandomStudio`。迁移前先等待任务空闲、停止工作台并退出启动器，再备份整个目录；旧源码版的数据在原项目的 `data` 中。启动器不会自动把旧源码版的数据迁入新位置。
 
 ## 提示词助手
 
@@ -55,7 +55,7 @@ python launcher/scripts/patch_prompt_assistant.py --root '<Prompt Assistant 插�
 
 `--check` 不修改文件：返回码 0 表示已安装，2 表示已识别但待安装，1 表示不支持或文件异常。补丁脚本内嵌在启动器 Core 程序集中，发布包不依赖源码目录。
 
-可将 `templates/workflow_ui_v2.json` 拖进 ComfyUI 检查缺失节点；应用实际提交使用 `templates/workflow_api_v2.json`。节点及版本见 [运行清单](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.0.1/launcher/manifests/launcher-manifest.json)。
+可将 `templates/workflow_ui_v2.json` 拖进 ComfyUI 检查缺失节点；应用实际提交使用 `templates/workflow_api_v2.json`。节点及版本见 [运行清单](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.1.0/launcher/manifests/launcher-manifest.json)。
 
 ## 开发与构建
 
@@ -74,4 +74,4 @@ pwsh ./Build-Launcher.ps1
 
 需要源码目录的双击入口时，可运行 `pwsh ./Build-Launcher.ps1 -InstallRootEntry`；生成的根目录 EXE 依赖同级 `.launcher`，两者均不进入 Git。普通用户使用上面的完整 ZIP 即可。
 
-包内附带第三方许可和依赖清单；ComfyUI、节点与模型单独下载。已知依赖限制见 [依赖说明](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.0.1/docs/dependencies.md)。
+包内附带第三方许可和依赖清单；ComfyUI、节点与模型单独下载。已知依赖限制见 [依赖说明](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.1.0/docs/dependencies.md)。

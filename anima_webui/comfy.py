@@ -378,12 +378,20 @@ class ComfyClient:
                     raise ComfyError(f"取消任务失败: HTTP {response.status}")
                 await response.read()
                 return
-        # Older servers support deleting pending ids and targeted interruption.
-        for path, payload in (("/queue", {"delete": [prompt_id]}), ("/interrupt", {"prompt_id": prompt_id})):
-            async with session.post(f"{self.base_url}{path}", json=payload) as response:
-                await response.read()
-                if response.status >= 400:
-                    raise ComfyError(f"取消任务失败: HTTP {response.status}")
+        # Legacy /interrupt implementations ignore the request body and stop
+        # whichever job is running, even when a prompt_id is supplied. Only
+        # deleting this id from the pending queue is safe without the job API.
+        async with session.post(
+            f"{self.base_url}/queue", json={"delete": [prompt_id]}
+        ) as response:
+            await response.read()
+            if response.status >= 400:
+                raise ComfyError(f"取消任务失败: HTTP {response.status}")
+        if await self.prompt_queued(prompt_id):
+            raise ComfyError(
+                "当前 ComfyUI 不支持安全的按任务取消；已移除等待项，"
+                "远端正在执行的任务可能继续，请在 ComfyUI 中手动停止"
+            )
 
     async def progress_stream(self, client_id: str) -> AsyncIterator[dict[str, Any]]:
         """连接 ComfyUI 的 websocket,产出进度事件与预览帧。

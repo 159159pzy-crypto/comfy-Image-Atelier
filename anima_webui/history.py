@@ -425,7 +425,24 @@ class HistoryStore(StorageProtection):
 
     async def _call(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor, functools.partial(func, *args, **kwargs))
+        return await loop.run_in_executor(
+            self._executor, functools.partial(self._execute, func, *args, **kwargs)
+        )
+
+    def _execute(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        try:
+            return func(*args, **kwargs)
+        except Exception:
+            # SQLite can leave a transaction open after execute/commit fails.
+            # Roll it back on the same worker before another request can read
+            # its uncommitted data or accidentally commit the failed write.
+            # This boundary also covers PromptJobStore, which shares _call.
+            try:
+                if self.connection.in_transaction:
+                    self.connection.rollback()
+            except sqlite3.Error as rollback_error:
+                self._protect_storage(f"历史数据库事务回滚失败({rollback_error})")
+            raise
 
     async def create_batch(self, batch_id: str, total: int, settings: dict[str, Any]) -> dict[str, Any]:
         self.ensure_writable()

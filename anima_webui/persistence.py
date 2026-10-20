@@ -74,23 +74,50 @@ def backup_corrupt_file(path: Path) -> Path:
 
     原文件内容不会丢失:用户可以手工检查/修复备份文件后再改回原名。
     """
-    backup = path.with_name(path.name + ".corrupt.bak")
-    counter = 1
-    while backup.exists():
-        backup = path.with_name(f"{path.name}.corrupt-{counter}.bak")
-        counter += 1
-    os.replace(path, backup)
+    backup = _reserve_backup(path, "corrupt")
+    try:
+        os.replace(path, backup)
+    except OSError:
+        _discard_incomplete_backup(backup)
+        raise
     return backup
+
+
+def _reserve_backup(path: Path, label: str) -> Path:
+    """Claim a backup name atomically; concurrent startup must not overwrite it."""
+    counter = 0
+    while True:
+        suffix = f"-{counter}" if counter else ""
+        backup = path.with_name(f"{path.name}.{label}{suffix}.bak")
+        try:
+            with backup.open("xb"):
+                pass
+        except FileExistsError:
+            counter += 1
+        else:
+            return backup
+
+
+def _discard_incomplete_backup(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        # Keep the original I/O failure as the actionable error. An incomplete
+        # reserved file can be inspected manually; the source is untouched.
+        logger.warning("无法删除未完成的备份 %s", path, exc_info=True)
 
 
 def backup_for_migration(path: Path, version: int) -> Path | None:
     """Keep the original persisted file before an in-place schema upgrade."""
     if not path.is_file():
         return None
-    backup = path.with_name(f"{path.name}.v{version}.bak")
-    counter = 1
-    while backup.exists():
-        backup = path.with_name(f"{path.name}.v{version}-{counter}.bak")
-        counter += 1
-    shutil.copy2(path, backup)
+    backup = _reserve_backup(path, f"v{version}")
+    try:
+        shutil.copy2(path, backup)
+        # Windows' _commit requires a writable file descriptor.
+        with backup.open("r+b") as stream:
+            os.fsync(stream.fileno())
+    except OSError:
+        _discard_incomplete_backup(backup)
+        raise
     return backup

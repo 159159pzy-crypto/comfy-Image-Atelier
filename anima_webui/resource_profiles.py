@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from .async_utils import serialized_mutation
 from .model_profiles import (
     DEFAULT_MODEL_PROFILE,
     ModelProfileError,
@@ -125,6 +126,7 @@ class ResourceProfileStore(StorageProtection):
                 return profile
         return None
 
+    @serialized_mutation
     async def sync_inventory(self, kind: Any, names: Any) -> dict[str, str | None]:
         """Initialize legacy ownership once and return ownership for names.
 
@@ -137,41 +139,50 @@ class ResourceProfileStore(StorageProtection):
             raise WorkflowError(f"{normalized_kind} inventory 必须是数组")
         normalized_names = list(dict.fromkeys(self.normalize_name(name) for name in names if str(name or "").strip()))
         changed = False
-        async with self._lock:
-            if self.read_only_reason:
-                # A GET inventory request must stay readable without claiming
-                # unknown resources or overwriting unprotected ownership data.
-                return {name: self._lookup(normalized_kind, name) for name in normalized_names}
-            mapping = self.assignments[normalized_kind]
-            if normalized_kind not in self.initialized:
-                for name in normalized_names:
-                    if self._lookup(normalized_kind, name) is None and not any(
-                        key.casefold() == name.casefold() for key in mapping
-                    ):
-                        mapping[name] = self._legacy_profile(normalized_kind, name)
-                self.initialized.add(normalized_kind)
-                changed = True
-            result = {name: self._lookup(normalized_kind, name) for name in normalized_names}
-            if changed:
+        if self.read_only_reason:
+            # A GET inventory request must stay readable without claiming
+            # unknown resources or overwriting unprotected ownership data.
+            return {name: self._lookup(normalized_kind, name) for name in normalized_names}
+        mapping = self.assignments[normalized_kind]
+        if normalized_kind not in self.initialized:
+            previous = copy.deepcopy((self.assignments, self.initialized))
+            for name in normalized_names:
+                if self._lookup(normalized_kind, name) is None and not any(
+                    key.casefold() == name.casefold() for key in mapping
+                ):
+                    mapping[name] = self._legacy_profile(normalized_kind, name)
+            self.initialized.add(normalized_kind)
+            changed = True
+        result = {name: self._lookup(normalized_kind, name) for name in normalized_names}
+        if changed:
+            try:
                 await self._save_locked()
+            except Exception:
+                self.assignments, self.initialized = previous
+                raise
         return result
 
+    @serialized_mutation
     async def assign(self, kind: Any, name: Any, model_profile: Any) -> dict[str, Any]:
         normalized_kind = self.normalize_kind(kind)
         normalized_name = self.normalize_name(name)
         profile = self._profile(model_profile)
-        async with self._lock:
-            self.ensure_writable()
-            mapping = self.assignments[normalized_kind]
-            existing = next(
-                (key for key in mapping if key.casefold() == normalized_name.casefold()),
-                None,
-            )
-            if existing is not None and existing != normalized_name:
-                del mapping[existing]
-            mapping[normalized_name] = profile
-            self.initialized.add(normalized_kind)
+        self.ensure_writable()
+        previous = copy.deepcopy((self.assignments, self.initialized))
+        mapping = self.assignments[normalized_kind]
+        existing = next(
+            (key for key in mapping if key.casefold() == normalized_name.casefold()),
+            None,
+        )
+        if existing is not None and existing != normalized_name:
+            del mapping[existing]
+        mapping[normalized_name] = profile
+        self.initialized.add(normalized_kind)
+        try:
             await self._save_locked()
+        except Exception:
+            self.assignments, self.initialized = previous
+            raise
         return {"kind": normalized_kind, "name": normalized_name, "model_profile": profile}
 
     def ownership(self, kind: Any, names: Any) -> list[dict[str, Any]]:

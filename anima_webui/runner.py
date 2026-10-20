@@ -33,6 +33,8 @@ class BatchConflict(RuntimeError):
 
 MAX_QUEUE = 20
 PROMPT_JOB_TIMEOUT = 300
+SHUTDOWN_GRACE = 2.0
+CANCEL_PROMPT_TIMEOUT = 5.0
 REGENERATION_MODES = {"replay", "prompt_variant", "content_redraw", "settings_reroll"}
 PROMPT_SECTIONS = ("character", "clothing", "pose", "background", "expression")
 
@@ -90,14 +92,64 @@ class BatchManager:
         self._preview_context: tuple[str, str, str] | None = None
         self._preview_execution: tuple[str, str, str] | None = None
         self._monitor_task: asyncio.Task[None] | None = None
+        self._monitor_tasks: set[asyncio.Task[None]] = set()
         self._preview_seq = 0
         self._preview_epoch = 0
         # start 里的资源校验要 await 多次 ComfyUI 请求,期间若不上锁,
         # 第二个并发 start 也能通过 active() 检查并启动重复批次。
         self._start_lock = asyncio.Lock()
+        self._shutdown_lock = asyncio.Lock()
 
     def active(self) -> bool:
         return bool(self.task and not self.task.done())
+
+    def _ensure_accepting(self) -> None:
+        if self.shutting_down:
+            raise BatchConflict("服务正在关闭，无法接受新任务")
+
+    async def begin_idle_shutdown(self) -> None:
+        """Reserve an idle manager for a launcher update without a start race."""
+        async with self._start_lock:
+            if self.shutting_down:
+                return
+            if self.active() or self.queue:
+                raise BatchConflict("还有任务正在运行或等待，请先完成或停止任务")
+            self.shutting_down = True
+
+    async def shutdown(self) -> None:
+        """Drain owned work before the HTTP client and database are closed."""
+        # Set this before waiting for preflight/dispatch, so a runner finishing
+        # concurrently cannot advance to another queued batch.
+        self.shutting_down = True
+        self.stop_requested = True
+        async with self._shutdown_lock:
+            async with self._start_lock:
+                self.stop_requested = True
+                queued, self.queue = self.queue, []
+            try:
+                task = self.task
+                if task is not None:
+                    if not task.done():
+                        # Give an in-flight submit a chance to return its id;
+                        # cancellation can then target the accepted Comfy job.
+                        _, pending = await asyncio.wait({task}, timeout=SHUTDOWN_GRACE)
+                        if pending:
+                            task.cancel()
+                    results = await asyncio.gather(task, return_exceptions=True)
+                    for result in results:
+                        if isinstance(result, Exception):
+                            logger.warning("关闭时任务收尾失败: %s", result)
+            finally:
+                self._stop_monitor()
+                if self._monitor_tasks:
+                    await asyncio.gather(*self._monitor_tasks, return_exceptions=True)
+            # These jobs never reach _process_prompt, so shutdown owns their
+            # durable terminal transition as well as their in-memory removal.
+            for entry in queued:
+                if entry.get("kind") == "prompt_preview":
+                    await self.prompt_jobs.update(
+                        entry["job_id"], status="cancelled", error="服务关闭，排队任务已取消"
+                    )
 
     def _uses_v2_workflow(self) -> bool:
         """Return whether submissions use the namespaced v2 API template.
@@ -430,10 +482,12 @@ class BatchManager:
 
     async def start_rewrite(self, payload: dict[str, Any]) -> dict[str, Any]:
         async with self._start_lock:
+            self._ensure_accepting()
             self.history.ensure_writable()
             if self.active() and len(self.queue) >= MAX_QUEUE:
                 raise BatchConflict(f"队列已满(最多 {MAX_QUEUE} 个)")
             settings = await self.prompt_assistant.prepare(payload)
+            self._ensure_accepting()
             job = await self.prompt_jobs.create(settings, rewrite_fingerprint(settings))
             if self.active():
                 self.queue.append({"queue_id": job["id"], "kind": "prompt_preview", "settings": settings, "job_id": job["id"]})
@@ -443,11 +497,13 @@ class BatchManager:
 
     async def start_prompt_preview(self, overrides: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
         async with self._start_lock:
+            self._ensure_accepting()
             self.history.ensure_writable()
             settings = validate_settings(overrides)
             if settings.get("workbench") != "single":
                 raise WorkflowError("提示词预览仅适用于单图工作台")
             await validate_prompt_nodes(self.comfy, settings)
+            self._ensure_accepting()
             if self.active() and len(self.queue) >= MAX_QUEUE:
                 raise BatchConflict(f"队列已满(最多 {MAX_QUEUE} 个)")
             fingerprint = prompt_fingerprint(settings)
@@ -474,11 +530,11 @@ class BatchManager:
     async def _process_prompt(self, job: dict[str, Any]) -> dict[str, Any]:
         job_id = job["id"]
         settings = job["settings"]
-        await self.prompt_jobs.update(job_id, status="running")
-        if self.state is not None:
-            self.state.update(stage="prompt_processing", prompt_job_id=job_id, prompt_id="")
-            self._clear_preview()
         try:
+            await self.prompt_jobs.update(job_id, status="running")
+            if self.state is not None:
+                self.state.update(stage="prompt_processing", prompt_job_id=job_id, prompt_id="")
+                self._clear_preview()
             if self.stop_requested:
                 raise ComfyAborted("收到停止请求")
             rewrite = settings.get("kind") == "rewrite"
@@ -593,6 +649,7 @@ class BatchManager:
         regeneration: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         async with self._start_lock:
+            self._ensure_accepting()
             ensure_writable = getattr(self.history, "ensure_writable", None)
             if ensure_writable is not None:
                 ensure_writable()
@@ -677,6 +734,7 @@ class BatchManager:
                     }
                     prefix = legacy_messages.get(first["type"], f"{first['label']}不可用")
                     raise WorkflowError(f"{prefix}: {first['name']}")
+            self._ensure_accepting()
             if self.active():
                 # 有批次在跑:进入队列,当前批次结束后自动接续。
                 if len(self.queue) >= MAX_QUEUE:
@@ -1004,6 +1062,13 @@ class BatchManager:
         if stream is None:
             return
         self._monitor_task = asyncio.create_task(self._monitor_progress())
+        self._monitor_tasks.add(self._monitor_task)
+        self._monitor_task.add_done_callback(self._monitor_finished)
+
+    def _monitor_finished(self, task: asyncio.Task[None]) -> None:
+        self._monitor_tasks.discard(task)
+        if not task.cancelled():
+            task.exception()
 
     def _stop_monitor(self) -> None:
         if self._monitor_task and not self._monitor_task.done():
@@ -1148,20 +1213,29 @@ class BatchManager:
 
     async def _interrupt_current(self) -> None:
         """停止时尽力中断 ComfyUI 正在渲染的任务;失败不影响批次收尾。"""
+        try:
+            async with asyncio.timeout(CANCEL_PROMPT_TIMEOUT):
+                await self._cancel_current_prompt()
+        except (ComfyError, asyncio.TimeoutError) as error:
+            warning = str(error) or "取消请求超时，远端任务可能继续执行"
+            if self.state is not None:
+                self.state["cancel_warning"] = warning
+            logger.warning("ComfyUI 任务取消未确认；本地任务将继续收尾: %s", warning)
+
+    async def _cancel_current_prompt(self) -> None:
         cancel = getattr(self.comfy, "cancel_prompt", None)
         prompt_id = (self.state or {}).get("prompt_id")
         if cancel is not None:
             if prompt_id:
-                try:
-                    await cancel(prompt_id)
-                    queued = getattr(self.comfy, "prompt_queued", None)
-                    if queued:
-                        for _ in range(40):
-                            if not await queued(prompt_id):
-                                break
-                            await asyncio.sleep(0.1)
-                except ComfyError:
-                    pass
+                await cancel(prompt_id)
+                queued = getattr(self.comfy, "prompt_queued", None)
+                if queued:
+                    for _ in range(40):
+                        if not await queued(prompt_id):
+                            break
+                        await asyncio.sleep(0.1)
+                    else:
+                        raise ComfyError("取消请求后任务仍在 ComfyUI 队列中，远端任务可能继续执行")
             return
         if (self.state or {}).get("kind") == "prompt_preview":
             # Text jobs must never fall back to a global interrupt, even with
@@ -1170,10 +1244,7 @@ class BatchManager:
         interrupt = getattr(self.comfy, "interrupt", None)
         if interrupt is None:
             return
-        try:
-            await interrupt()
-        except ComfyError:
-            pass
+        await interrupt()
 
     def _resolve_regeneration(
         self,

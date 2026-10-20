@@ -7,12 +7,16 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: launcher-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 jobs:
   quality:
     uses: ./.github/workflows/ci.yml
   windows:
     needs: quality
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -61,6 +65,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     needs: windows
     runs-on: windows-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:

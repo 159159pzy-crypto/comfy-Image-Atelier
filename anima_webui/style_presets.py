@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .async_utils import serialized_mutation
 from .persistence import StorageProtection, backup_for_migration
 from .prompt_rules import PromptRuleStore
 from .model_profiles import (
@@ -30,10 +31,15 @@ def _locked(method: Any) -> Any:
     """变更方法整体串行化:内存修改在事件循环线程完成,写盘经 to_thread 让出循环。"""
 
     @functools.wraps(method)
+    @serialized_mutation
     async def wrapper(self: "StylePresetStore", *args: Any, **kwargs: Any) -> Any:
-        async with self._lock:
-            self.ensure_writable()
+        self.ensure_writable()
+        previous_items = copy.deepcopy(self.items)
+        try:
             return await method(self, *args, **kwargs)
+        except Exception:
+            self.items = previous_items
+            raise
 
     return wrapper
 

@@ -12,6 +12,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from .async_utils import serialized_mutation
 from .model_profiles import DEFAULT_MODEL_PROFILE, ModelProfileError, normalize_model_profile
 from .persistence import StorageProtection, backup_for_migration
 from .workflow import WorkflowError
@@ -195,6 +196,7 @@ class PromptPoolStore(StorageProtection):
             },
         }
 
+    @serialized_mutation
     async def import_items(
         self,
         model_profile: Any,
@@ -205,26 +207,25 @@ class PromptPoolStore(StorageProtection):
         profile = self._profile(model_profile)
         incoming = normalize_prompt_items(values)
         mode = self._normalize_import_mode(mode)
-        async with self._lock:
-            self.ensure_writable()
-            if mode == "append":
-                existing = self.items.get(profile, [])
-                existing_identities = {text.casefold() for text in existing}
-                # Only report entries that actually extend the pool.  Existing
-                # case-insensitive duplicates are skipped by append and should
-                # not be newly selected by the caller.
-                imported_ids = []
-                for text in incoming:
-                    identity = text.casefold()
-                    if identity not in existing_identities:
-                        imported_ids.append(self.item_id(text))
-                        existing_identities.add(identity)
-                incoming = normalize_prompt_items([*existing, *incoming])
-            else:
-                imported_ids = [self.item_id(text) for text in incoming]
-            profiles = {key: list(values) for key, values in self.items.items()}
-            profiles[profile] = incoming
-            await self._save(profiles)
+        self.ensure_writable()
+        if mode == "append":
+            existing = self.items.get(profile, [])
+            existing_identities = {text.casefold() for text in existing}
+            # Only report entries that actually extend the pool.  Existing
+            # case-insensitive duplicates are skipped by append and should
+            # not be newly selected by the caller.
+            imported_ids = []
+            for text in incoming:
+                identity = text.casefold()
+                if identity not in existing_identities:
+                    imported_ids.append(self.item_id(text))
+                    existing_identities.add(identity)
+            incoming = normalize_prompt_items([*existing, *incoming])
+        else:
+            imported_ids = [self.item_id(text) for text in incoming]
+        profiles = {key: list(values) for key, values in self.items.items()}
+        profiles[profile] = incoming
+        await self._save(profiles)
         result = self.list(profile)
         result["imported_ids"] = imported_ids
         return result
@@ -235,19 +236,19 @@ class PromptPoolStore(StorageProtection):
             raise WorkflowError("提示词池导入 mode 必须是 replace 或 append")
         return mode
 
+    @serialized_mutation
     async def create_item(self, model_profile: Any, text: Any) -> dict[str, Any]:
         profile = self._profile(model_profile)
         value = self._normalize_single_text(text)
-        async with self._lock:
-            self.ensure_writable()
-            values = self.items.get(profile, [])
-            if len(values) >= MAX_PROMPTS:
-                raise WorkflowError(f"提示词池不能超过 {MAX_PROMPTS} 项")
-            if any(item.casefold() == value.casefold() for item in values):
-                raise WorkflowError("提示词池中已存在相同文本")
-            profiles = {key: list(items) for key, items in self.items.items()}
-            profiles[profile] = [*values, value]
-            await self._save(profiles)
+        self.ensure_writable()
+        values = self.items.get(profile, [])
+        if len(values) >= MAX_PROMPTS:
+            raise WorkflowError(f"提示词池不能超过 {MAX_PROMPTS} 项")
+        if any(item.casefold() == value.casefold() for item in values):
+            raise WorkflowError("提示词池中已存在相同文本")
+        profiles = {key: list(items) for key, items in self.items.items()}
+        profiles[profile] = [*values, value]
+        await self._save(profiles)
         return {
             "model_profile": profile,
             "id": self.item_id(value),
@@ -255,29 +256,30 @@ class PromptPoolStore(StorageProtection):
             "count": len(profiles[profile]),
         }
 
+    @serialized_mutation
     async def ensure_item(self, model_profile: Any, text: Any) -> dict[str, Any]:
         """Reuse the pool's text identity without a racy list-then-create call."""
         profile = self._profile(model_profile)
         value = self._normalize_single_text(text)
-        async with self._lock:
-            values = self.items.get(profile, [])
-            existing = next((item for item in values if item.casefold() == value.casefold()), None)
-            if existing is not None:
-                return {
-                    "model_profile": profile, "id": self.item_id(existing),
-                    "text": existing, "created": False, "count": len(values),
-                }
-            self.ensure_writable()
-            if len(values) >= MAX_PROMPTS:
-                raise WorkflowError(f"提示词池不能超过 {MAX_PROMPTS} 项")
-            profiles = {key: list(items) for key, items in self.items.items()}
-            profiles[profile] = [*values, value]
-            await self._save(profiles)
+        values = self.items.get(profile, [])
+        existing = next((item for item in values if item.casefold() == value.casefold()), None)
+        if existing is not None:
+            return {
+                "model_profile": profile, "id": self.item_id(existing),
+                "text": existing, "created": False, "count": len(values),
+            }
+        self.ensure_writable()
+        if len(values) >= MAX_PROMPTS:
+            raise WorkflowError(f"提示词池不能超过 {MAX_PROMPTS} 项")
+        profiles = {key: list(items) for key, items in self.items.items()}
+        profiles[profile] = [*values, value]
+        await self._save(profiles)
         return {
             "model_profile": profile, "id": self.item_id(value),
             "text": value, "created": True, "count": len(profiles[profile]),
         }
 
+    @serialized_mutation
     async def update_item(
         self, model_profile: Any, item_id: Any, text: Any
     ) -> dict[str, Any]:
@@ -286,25 +288,24 @@ class PromptPoolStore(StorageProtection):
         if not target:
             raise WorkflowError("提示词池 item_id 不能为空")
         value = self._normalize_single_text(text)
-        async with self._lock:
-            self.ensure_writable()
-            values = self.items.get(profile, [])
-            index = next(
-                (i for i, existing in enumerate(values) if self.item_id(existing) == target),
-                None,
-            )
-            if index is None:
-                raise KeyError(target)
-            if any(
-                i != index and existing.casefold() == value.casefold()
-                for i, existing in enumerate(values)
-            ):
-                raise WorkflowError("提示词池中已存在相同文本")
-            updated = list(values)
-            updated[index] = value
-            profiles = {key: list(items) for key, items in self.items.items()}
-            profiles[profile] = updated
-            await self._save(profiles)
+        self.ensure_writable()
+        values = self.items.get(profile, [])
+        index = next(
+            (i for i, existing in enumerate(values) if self.item_id(existing) == target),
+            None,
+        )
+        if index is None:
+            raise KeyError(target)
+        if any(
+            i != index and existing.casefold() == value.casefold()
+            for i, existing in enumerate(values)
+        ):
+            raise WorkflowError("提示词池中已存在相同文本")
+        updated = list(values)
+        updated[index] = value
+        profiles = {key: list(items) for key, items in self.items.items()}
+        profiles[profile] = updated
+        await self._save(profiles)
         return {
             "model_profile": profile,
             "id": self.item_id(value),
@@ -324,22 +325,23 @@ class PromptPoolStore(StorageProtection):
     async def clear(self, model_profile: Any = DEFAULT_MODEL_PROFILE) -> dict[str, Any]:
         return await self.import_items(model_profile, [], mode="replace")
 
+    @serialized_mutation
     async def delete_item(self, model_profile: Any, item_id: Any) -> dict[str, Any]:
         profile = self._profile(model_profile)
         target = str(item_id or "").strip()
         if not target:
             raise WorkflowError("提示词池 item_id 不能为空")
-        async with self._lock:
-            self.ensure_writable()
-            values = self.items.get(profile, [])
-            remaining = [text for text in values if self.item_id(text) != target]
-            if len(remaining) == len(values):
-                raise KeyError(target)
-            profiles = {key: list(items) for key, items in self.items.items()}
-            profiles[profile] = remaining
-            await self._save(profiles)
+        self.ensure_writable()
+        values = self.items.get(profile, [])
+        remaining = [text for text in values if self.item_id(text) != target]
+        if len(remaining) == len(values):
+            raise KeyError(target)
+        profiles = {key: list(items) for key, items in self.items.items()}
+        profiles[profile] = remaining
+        await self._save(profiles)
         return self.list(profile)
 
+    @serialized_mutation
     async def delete_items(self, model_profile: Any, item_ids: Any) -> dict[str, Any]:
         profile = self._profile(model_profile)
         if not isinstance(item_ids, list):
@@ -351,16 +353,15 @@ class PromptPoolStore(StorageProtection):
             if not isinstance(item_id, str) or not item_id.strip():
                 raise WorkflowError(f"提示词池 ids[{index}] 必须是非空字符串")
             targets.add(item_id.strip())
-        async with self._lock:
-            self.ensure_writable()
-            values = self.items.get(profile, [])
-            deleted = [self.item_id(text) for text in values if self.item_id(text) in targets]
-            if deleted:
-                remaining = [text for text in values if self.item_id(text) not in targets]
-                profiles = {key: list(items) for key, items in self.items.items()}
-                profiles[profile] = remaining
-                await self._save(profiles)
-            count = len(self.items.get(profile, []))
+        self.ensure_writable()
+        values = self.items.get(profile, [])
+        deleted = [self.item_id(text) for text in values if self.item_id(text) in targets]
+        if deleted:
+            remaining = [text for text in values if self.item_id(text) not in targets]
+            profiles = {key: list(items) for key, items in self.items.items()}
+            profiles[profile] = remaining
+            await self._save(profiles)
+        count = len(self.items.get(profile, []))
         return {"model_profile": profile, "deleted": deleted, "count": count}
 
     async def _save(self, profiles: dict[str, list[str]]) -> None:

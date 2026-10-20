@@ -1958,8 +1958,9 @@ function renderBatch(batch, queue = currentQueue) {
   // 运行中仍可加入队列，但分类有效性与连接状态共用同一守卫。
   updateGenerationAvailability();
   ui.startButton.textContent = active ? "加入队列" : "开始生成";
-  ui.batchError.hidden = !batch?.error;
-  ui.batchError.textContent = batch?.error || "";
+  const batchMessage = [batch?.error, batch?.cancel_warning].filter(Boolean).join("\n");
+  ui.batchError.hidden = !batchMessage;
+  ui.batchError.textContent = batchMessage;
   if (batch && !promptOnly && !active && lastTerminalBatch !== `${batch.id}:${batch.status}:${completed}`) {
     lastTerminalBatch = `${batch.id}:${batch.status}:${completed}`;
     if (batch.settings?.workbench === "single") {

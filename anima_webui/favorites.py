@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import functools
 import json
 import os
 import tempfile
@@ -10,6 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .async_utils import serialized_mutation
 from .catalog import SECTIONS, CatalogError, PromptCatalog, normalize_text
 from .comfy import ComfyError
 from .model_profiles import normalize_model_profile
@@ -161,15 +161,7 @@ def _group_stats(current: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any
     return result
 
 
-def _locked(method: Any) -> Any:
-    """把整个变更方法包进 self._lock,保证读-改-写不被并发交错。"""
-
-    @functools.wraps(method)
-    async def wrapper(self: "FavoritesService", *args: Any, **kwargs: Any) -> Any:
-        async with self._lock:
-            return await method(self, *args, **kwargs)
-
-    return wrapper
+_locked = serialized_mutation
 
 
 class FavoritesExtensionStore(StorageProtection):
@@ -234,17 +226,17 @@ class FavoritesExtensionStore(StorageProtection):
     def _serialize(profiles: dict[str, Any]) -> str:
         return json.dumps({"version": 2, "profiles": profiles}, ensure_ascii=False, indent=2) + "\n"
 
+    @serialized_mutation
     async def save(self, value: dict[str, Any], model_profile: str = "anima", section: str = "expression") -> None:
-        async with self._lock:
+        self.ensure_writable()
+        profiles = copy.deepcopy(self.profiles)
+        profiles.setdefault(model_profile, {})[section] = normalize_section(value)
+        try:
+            await asyncio.to_thread(self._write_text, self._serialize(profiles))
+        except OSError as error:
+            self._protect_storage(f"收藏写入失败({error})，已保留原内容")
             self.ensure_writable()
-            profiles = copy.deepcopy(self.profiles)
-            profiles.setdefault(model_profile, {})[section] = normalize_section(value)
-            try:
-                await asyncio.to_thread(self._write_text, self._serialize(profiles))
-            except OSError as error:
-                self._protect_storage(f"收藏写入失败({error})，已保留原内容")
-                self.ensure_writable()
-            self.profiles = profiles
+        self.profiles = profiles
 
     def _write_text(self, text: str) -> None:
         fd, name = tempfile.mkstemp(prefix="favorites-", suffix=".json", dir=self.path.parent)

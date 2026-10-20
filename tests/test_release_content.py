@@ -16,6 +16,8 @@ def test_local_files_are_rejected(name):
 
 @pytest.mark.parametrize("name", [
     "README.md", "launcher/README.md", "docs/dependencies.md",
+    "CONTRIBUTING.md", "SECURITY.md", ".github/pull_request_template.md",
+    "launcher/tests/fixtures/prompt-assistant/README.md",
     "launcher/manifests/launcher-manifest.json", "anima_webui/server.py",
     "docs/screenshots/anima-studio-single-workbench.png",
 ])

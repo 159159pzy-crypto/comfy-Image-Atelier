@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .async_utils import serialized_mutation
 from .model_profiles import normalize_model_profile
 from .persistence import StorageProtection, backup_for_migration
 from .workflow import WorkflowError
@@ -216,84 +217,84 @@ class PromptRuleStore(StorageProtection):
             "count": len(builtins) + len(state["rules"]),
         }
 
+    @serialized_mutation
     async def create(self, payload: dict[str, Any], model_profile: str = "anima") -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise WorkflowError("自定义提示词规则必须是对象")
         model_profile = _profile(payload.get("model_profile", model_profile))
-        async with self._lock:
-            self.ensure_writable()
-            rules = self.profiles[model_profile]["rules"]
-            if len(rules) >= MAX_CUSTOM_RULES:
-                raise WorkflowError(f"自定义提示词规则不能超过 {MAX_CUSTOM_RULES} 条")
-            item = self._normalize_custom(
-                {**payload, "id": f"prompt_rule_{uuid.uuid4().hex[:16]}"}, model_profile=model_profile
-            )
-            self._ensure_unique(item, model_profile=model_profile)
-            rules.append(item)
-            try:
-                await self._save()
-            except Exception:
-                rules.pop()
-                raise
+        self.ensure_writable()
+        rules = self.profiles[model_profile]["rules"]
+        if len(rules) >= MAX_CUSTOM_RULES:
+            raise WorkflowError(f"自定义提示词规则不能超过 {MAX_CUSTOM_RULES} 条")
+        item = self._normalize_custom(
+            {**payload, "id": f"prompt_rule_{uuid.uuid4().hex[:16]}"}, model_profile=model_profile
+        )
+        self._ensure_unique(item, model_profile=model_profile)
+        rules.append(item)
+        try:
+            await self._save()
+        except Exception:
+            rules.pop()
+            raise
         return copy.deepcopy(item)
 
+    @serialized_mutation
     async def update(self, rule_id: str, payload: dict[str, Any], model_profile: str = "anima") -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise WorkflowError("提示词规则必须是对象")
         model_profile = _profile(payload.get("model_profile", model_profile))
-        async with self._lock:
-            self.ensure_writable()
-            state = self.profiles[model_profile]
-            rules, disabled = state["rules"], state["disabledBuiltins"]
-            previous = copy.deepcopy(state)
-            if rule_id in {item[0] for item in self._builtins(model_profile)}:
-                unknown = set(payload) - {"enabled", "model_profile"}
-                if unknown or not isinstance(payload.get("enabled"), bool):
-                    raise WorkflowError("内置规则只能修改 enabled")
-                if payload["enabled"]:
-                    disabled.discard(rule_id)
-                else:
-                    disabled.add(rule_id)
-                try:
-                    await self._save()
-                except Exception:
-                    self.profiles[model_profile] = previous
-                    raise
-                return next(item for item in self.list(model_profile)["items"] if item["id"] == rule_id)
-            index = next(
-                (index for index, item in enumerate(rules) if item["id"] == rule_id),
-                None,
-            )
-            if index is None:
-                raise KeyError(rule_id)
-            item = self._normalize_custom(
-                {**rules[index], **payload, "id": rule_id}, existing=True, model_profile=model_profile
-            )
-            self._ensure_unique(item, excluding_id=rule_id, model_profile=model_profile)
-            rules[index] = item
+        self.ensure_writable()
+        state = self.profiles[model_profile]
+        rules, disabled = state["rules"], state["disabledBuiltins"]
+        previous = copy.deepcopy(state)
+        if rule_id in {item[0] for item in self._builtins(model_profile)}:
+            unknown = set(payload) - {"enabled", "model_profile"}
+            if unknown or not isinstance(payload.get("enabled"), bool):
+                raise WorkflowError("内置规则只能修改 enabled")
+            if payload["enabled"]:
+                disabled.discard(rule_id)
+            else:
+                disabled.add(rule_id)
             try:
                 await self._save()
             except Exception:
                 self.profiles[model_profile] = previous
                 raise
+            return next(item for item in self.list(model_profile)["items"] if item["id"] == rule_id)
+        index = next(
+            (index for index, item in enumerate(rules) if item["id"] == rule_id),
+            None,
+        )
+        if index is None:
+            raise KeyError(rule_id)
+        item = self._normalize_custom(
+            {**rules[index], **payload, "id": rule_id}, existing=True, model_profile=model_profile
+        )
+        self._ensure_unique(item, excluding_id=rule_id, model_profile=model_profile)
+        rules[index] = item
+        try:
+            await self._save()
+        except Exception:
+            self.profiles[model_profile] = previous
+            raise
         return copy.deepcopy(item)
 
+    @serialized_mutation
     async def delete(self, rule_id: str, model_profile: str = "anima") -> bool:
         model_profile = _profile(model_profile)
         if rule_id in {item[0] for item in self._builtins(model_profile)}:
             raise WorkflowError("内置规则不能删除,可以停用")
-        async with self._lock:
-            self.ensure_writable()
-            state = self.profiles[model_profile]
-            previous = state["rules"]
-            state["rules"] = [item for item in previous if item["id"] != rule_id]
-            if len(state["rules"]) == len(previous):
-                return False
-            try:
-                await self._save()
-            except Exception:
-                state["rules"] = previous
-                raise
+        self.ensure_writable()
+        state = self.profiles[model_profile]
+        previous = state["rules"]
+        state["rules"] = [item for item in previous if item["id"] != rule_id]
+        if len(state["rules"]) == len(previous):
+            return False
+        try:
+            await self._save()
+        except Exception:
+            state["rules"] = previous
+            raise
         return True
 
     def normalize_fields(

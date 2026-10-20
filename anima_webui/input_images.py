@@ -7,6 +7,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from .workflow import WorkflowError
 
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_IMAGE_PIXELS = 40_000_000
+MAX_METADATA_BYTES = 64 * 1024
 _ASSET_ID = re.compile(r"^[a-f0-9]{64}$")
 
 
@@ -23,6 +25,10 @@ class InputImageStore:
     def __init__(self, directory: str | Path):
         self.path = Path(directory)
         self.path.mkdir(parents=True, exist_ok=True)
+        # Hold this inside the worker thread: cancelling an asyncio.to_thread
+        # caller must not release the guard while Pillow is still decoding.
+        # Upload and prepare share a guard to bound large decoded buffers.
+        self._processing_lock = threading.Lock()
 
     def _path(self, asset_id: str, suffix: str) -> Path:
         if not isinstance(asset_id, str) or not _ASSET_ID.fullmatch(asset_id):
@@ -45,6 +51,10 @@ class InputImageStore:
     def add(self, body: bytes, *, filename: str = "image", source_image_id: int | None = None) -> dict[str, Any]:
         if not body or len(body) > MAX_IMAGE_BYTES:
             raise WorkflowError("输入图片必须非空且不超过 20 MiB")
+        with self._processing_lock:
+            return self._add(body, filename=filename, source_image_id=source_image_id)
+
+    def _add(self, body: bytes, *, filename: str, source_image_id: int | None) -> dict[str, Any]:
         try:
             with Image.open(io.BytesIO(body)) as original:
                 if original.format not in {"PNG", "JPEG", "WEBP"}:
@@ -54,12 +64,18 @@ class InputImageStore:
                 if getattr(original, "n_frames", 1) != 1:
                     raise WorkflowError("请输入单帧图片")
                 original.load()
-                oriented = ImageOps.exif_transpose(original)
-                rgba = oriented.convert("RGBA")
-                image = Image.new("RGB", rgba.size, "white")
-                image.paste(rgba, mask=rgba.getchannel("A"))
-                encoded = io.BytesIO()
-                image.save(encoded, format="PNG")
+                with ImageOps.exif_transpose(original) as oriented:
+                    if oriented.mode in {"RGBA", "LA", "PA"} or "transparency" in oriented.info:
+                        with oriented.convert("RGBA") as rgba:
+                            image = Image.new("RGB", rgba.size, "white")
+                            with rgba.getchannel("A") as alpha:
+                                image.paste(rgba, mask=alpha)
+                    else:
+                        image = oriented.convert("RGB")
+                    with image:
+                        width, height = image.size
+                        encoded = io.BytesIO()
+                        image.save(encoded, format="PNG")
         except WorkflowError:
             raise
         except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as error:
@@ -68,7 +84,7 @@ class InputImageStore:
         asset_id = hashlib.sha256(pixels).hexdigest()
         metadata = {
             "id": asset_id, "filename": Path(filename.replace("\\", "/")).name[:240],
-            "width": image.width, "height": image.height, "content_type": "image/png",
+            "width": width, "height": height, "content_type": "image/png",
             "size": len(pixels), "source_image_id": source_image_id,
             "image_url": f"/api/input-images/{asset_id}/image",
         }
@@ -78,9 +94,31 @@ class InputImageStore:
 
     def get(self, asset_id: str) -> dict[str, Any]:
         path = self._path(asset_id, ".json")
-        if not path.is_file() or not self._path(asset_id, ".png").is_file():
+        image_path = self._path(asset_id, ".png")
+        if not path.is_file() or not image_path.is_file():
             raise KeyError(asset_id)
-        return json.loads(path.read_text(encoding="utf-8"))
+        try:
+            with path.open("rb") as stream:
+                body = stream.read(MAX_METADATA_BYTES + 1)
+            if len(body) > MAX_METADATA_BYTES:
+                raise ValueError("metadata is too large")
+            metadata = json.loads(body.decode("utf-8"))
+            if not isinstance(metadata, dict) or metadata.get("id") != asset_id:
+                raise ValueError("invalid asset metadata")
+            width, height = metadata.get("width"), metadata.get("height")
+            if (
+                type(width) is not int or type(height) is not int
+                or width <= 0 or height <= 0 or width * height > MAX_IMAGE_PIXELS
+                or metadata.get("content_type") != "image/png"
+                or type(metadata.get("size")) is not int
+                or metadata["size"] != image_path.stat().st_size
+                or not isinstance(metadata.get("filename"), str)
+            ):
+                raise ValueError("invalid asset dimensions or content")
+            metadata["image_url"] = f"/api/input-images/{asset_id}/image"
+            return metadata
+        except (OSError, ValueError, UnicodeError) as error:
+            raise WorkflowError("输入图片记录已损坏或无法读取，请重新上传图片") from error
 
     def image_path(self, asset_id: str) -> Path:
         self.get(asset_id)
@@ -89,14 +127,23 @@ class InputImageStore:
     def prepare(self, asset_id: str, width: int, height: int, fit: str) -> bytes:
         if fit not in {"crop", "stretch", "pad"}:
             raise WorkflowError("输入图片适配方式必须为 crop、stretch 或 pad")
-        with Image.open(self.image_path(asset_id)) as original:
-            size = (width, height)
-            if fit == "crop":
-                result = ImageOps.fit(original, size, method=Image.Resampling.LANCZOS)
-            elif fit == "pad":
-                result = ImageOps.pad(original, size, method=Image.Resampling.LANCZOS, color="white")
-            else:
-                result = original.resize(size, Image.Resampling.LANCZOS)
-            stream = io.BytesIO()
-            result.save(stream, format="PNG")
-            return stream.getvalue()
+        if type(width) is not int or type(height) is not int or not (1 <= width <= 4096 and 1 <= height <= 4096):
+            raise WorkflowError("输入图片目标尺寸必须为 1-4096 范围内的整数")
+        with self._processing_lock:
+            try:
+                with Image.open(self.image_path(asset_id)) as original:
+                    if original.format != "PNG" or original.width * original.height > MAX_IMAGE_PIXELS:
+                        raise ValueError("invalid stored image")
+                    size = (width, height)
+                    if fit == "crop":
+                        result = ImageOps.fit(original, size, method=Image.Resampling.LANCZOS)
+                    elif fit == "pad":
+                        result = ImageOps.pad(original, size, method=Image.Resampling.LANCZOS, color="white")
+                    else:
+                        result = original.resize(size, Image.Resampling.LANCZOS)
+                    with result:
+                        stream = io.BytesIO()
+                        result.save(stream, format="PNG")
+                        return stream.getvalue()
+            except (OSError, ValueError, Image.DecompressionBombError) as error:
+                raise WorkflowError("输入图片已损坏或无法读取，请重新上传图片") from error

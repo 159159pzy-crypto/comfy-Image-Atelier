@@ -51,6 +51,7 @@ def main() -> None:
     if not args.skip_tests:
         run(sys.executable, "-m", "pytest", "-q")
         run("node", "--test", *map(str, sorted((ROOT / "tests").glob("*.test.cjs"))))
+        run(sys.executable, "launcher/scripts/test_prompt_assistant_patch.py")
 
 
 if __name__ == "__main__":

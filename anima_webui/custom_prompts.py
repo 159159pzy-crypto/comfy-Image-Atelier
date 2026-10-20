@@ -14,6 +14,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .async_utils import serialized_mutation
 from .catalog import SECTIONS, CatalogError, PromptCatalog, normalize_text
 from .persistence import StorageProtection
 
@@ -25,10 +26,16 @@ def _locked(method: Any) -> Any:
     """变更方法整体串行化:内存修改在事件循环线程完成,写盘经 to_thread 让出循环。"""
 
     @functools.wraps(method)
+    @serialized_mutation
     async def wrapper(self: "CustomPromptStore", *args: Any, **kwargs: Any) -> Any:
-        async with self._lock:
-            self.ensure_writable()
+        self.ensure_writable()
+        previous_items, previous_groups = copy.deepcopy((self.items, self.groups))
+        try:
             return await method(self, *args, **kwargs)
+        except Exception:
+            self.items, self.groups = previous_items, previous_groups
+            self.catalog.set_custom_items(self.items)
+            raise
 
     return wrapper
 

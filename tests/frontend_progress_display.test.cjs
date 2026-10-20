@@ -95,3 +95,16 @@ test('rewrite tasks retain queue activity but never refresh image history or cla
   assert.equal(historyReads.length, 0);
   assert.equal(forwarded.length, 2);
 });
+
+test('a local stop exposes unconfirmed remote cancellation and clears it for the next job', () => {
+  const { ctx, ui } = setup();
+  const warning = '旧版 ComfyUI 无法安全取消正在执行的任务，远端任务可能继续执行';
+  ctx.renderBatch(batch({ status: 'stopped', cancel_warning: warning }));
+  assert.equal(ui.batchState.textContent, '已停止');
+  assert.equal(ui.batchError.hidden, false);
+  assert.equal(ui.batchError.textContent, warning);
+  assert.equal(ui.stopButton.disabled, true);
+  ctx.renderBatch(batch({ id: 'next-batch' }));
+  assert.equal(ui.batchError.hidden, true);
+  assert.equal(ui.batchError.textContent, '');
+});

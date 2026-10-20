@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from .async_utils import serialized_mutation
 from .persistence import StorageProtection, backup_for_migration
 from .model_profiles import (
     DEFAULT_MODEL_PROFILE,
@@ -154,6 +155,7 @@ class LoraTriggerOverrideStore(StorageProtection):
         except WorkflowError:
             return [], False
 
+    @serialized_mutation
     async def set(
         self,
         filename: str,
@@ -163,34 +165,44 @@ class LoraTriggerOverrideStore(StorageProtection):
         normalized_filename = normalize_lora_path(filename)
         normalized_words = normalize_trigger_words(words)
         profile = self._profile(model_profile)
-        async with self._lock:
-            self.ensure_writable()
-            overrides = self._map(profile)
-            existing_key = next(
-                (key for key in overrides if key.casefold() == normalized_filename.casefold()),
-                None,
-            )
-            if existing_key is None and sum(len(value) for value in self.profile_overrides.values()) >= MAX_OVERRIDES:
-                raise WorkflowError(f"LoRA 触发词覆盖不能超过 {MAX_OVERRIDES} 项")
-            if existing_key is not None and existing_key != normalized_filename:
-                del overrides[existing_key]
-            overrides[normalized_filename] = normalized_words
-            self.overrides = self.profile_overrides.setdefault(DEFAULT_MODEL_PROFILE, {})
+        self.ensure_writable()
+        previous = copy.deepcopy((self.profile_overrides, self.overrides))
+        overrides = self.profile_overrides.get(profile, {})
+        existing_key = next(
+            (key for key in overrides if key.casefold() == normalized_filename.casefold()),
+            None,
+        )
+        if existing_key is None and sum(len(value) for value in self.profile_overrides.values()) >= MAX_OVERRIDES:
+            raise WorkflowError(f"LoRA 触发词覆盖不能超过 {MAX_OVERRIDES} 项")
+        self.profile_overrides[profile] = overrides
+        if existing_key is not None and existing_key != normalized_filename:
+            del overrides[existing_key]
+        overrides[normalized_filename] = normalized_words
+        self.overrides = self.profile_overrides.setdefault(DEFAULT_MODEL_PROFILE, {})
+        try:
             await self._save()
+        except Exception:
+            self.profile_overrides, self.overrides = previous
+            raise
         return copy.deepcopy(normalized_words)
 
+    @serialized_mutation
     async def delete(self, filename: str, model_profile: Any = DEFAULT_MODEL_PROFILE) -> bool:
         identity = normalize_lora_path(filename).casefold()
         profile = self._profile(model_profile)
-        async with self._lock:
-            self.ensure_writable()
-            overrides = self._map(profile)
-            key = next((item for item in overrides if item.casefold() == identity), None)
-            if key is None:
-                return False
-            del overrides[key]
-            self.overrides = self.profile_overrides.setdefault(DEFAULT_MODEL_PROFILE, {})
+        self.ensure_writable()
+        previous = copy.deepcopy((self.profile_overrides, self.overrides))
+        overrides = self.profile_overrides.get(profile, {})
+        key = next((item for item in overrides if item.casefold() == identity), None)
+        if key is None:
+            return False
+        del overrides[key]
+        self.overrides = self.profile_overrides.setdefault(DEFAULT_MODEL_PROFILE, {})
+        try:
             await self._save()
+        except Exception:
+            self.profile_overrides, self.overrides = previous
+            raise
         return True
 
     async def _save(self) -> None:

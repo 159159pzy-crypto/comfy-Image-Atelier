@@ -1,0 +1,39 @@
+name: 错误报告
+description: 提交可复现的功能错误
+body:
+  - type: markdown
+    attributes:
+      value: 请勿上传 API Key、私人提示词、未经检查的完整配置或用户数据库。安全漏洞请参阅 SECURITY.md。
+  - type: input
+    id: version
+    attributes:
+      label: 版本或提交
+      description: 填写 Release 版本、提交 SHA；说明启动器版或源码版。
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 运行环境
+      description: 操作系统、GPU、Python / ComfyUI 版本、相关节点版本、Anima 或 Krea 2。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从启动到出错的最短步骤；说明是否每次发生。
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 预期与实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 已去除敏感信息的错误日志
+      description: 保留错误前后必要上下文，不要粘贴整个用户数据目录。
+      render: text

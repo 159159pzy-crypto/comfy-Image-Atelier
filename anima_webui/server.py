@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
-from aiohttp import web
+from aiohttp import BodyPartReader, MultipartReader, web
+from aiohttp.http_exceptions import BadHttpMessage
+from aiohttp.web_protocol import RequestPayloadError
 
 from .comfy import ComfyClient, ComfyError
 from .catalog import CatalogError, PromptCatalog, SECTIONS, resolve_history_selection
@@ -22,6 +24,13 @@ from .favorites import FavoriteSavePendingError, FavoritesService, FavoritesExte
 from .input_images import InputImageStore, MAX_IMAGE_BYTES
 from .single_workbench import SINGLE_DEFAULTS, active_lora_pipelines
 from .history import HistoryStore
+from .http_security import (
+    SQLITE_MAX_INTEGER,
+    LimitedMultipartStream,
+    parse_authority,
+    parse_origin,
+    strict_json_loads,
+)
 from .lora_triggers import LoraTriggerOverrideStore
 from .prompt_rules import PromptRuleStore
 from .prompt_assistant import generation_settings
@@ -144,11 +153,26 @@ def _resolve_owned_model(
 async def local_only_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
     # 只信任本机来源:防御恶意网页发起的 CSRF 与 DNS 重绑定。
     allowed_hostnames = request.app[ALLOWED_HOSTNAMES_KEY]
-    if _hostname(request.host or "") not in allowed_hostnames:
+    hosts = request.headers.getall("Host", [])
+    authority = parse_authority(hosts[0]) if len(hosts) == 1 else None
+    if authority is None or authority[0] not in allowed_hostnames:
         return web.json_response({"error": "仅允许本机访问"}, status=403)
-    origin = request.headers.get("Origin")
-    if origin is not None and (origin == "null" or _hostname(origin) not in allowed_hostnames):
-        return web.json_response({"error": "仅允许本机来源"}, status=403)
+    hostname, host_port = authority
+    origins = request.headers.getall("Origin", [])
+    if origins:
+        origin = parse_origin(origins[0]) if len(origins) == 1 else None
+        if origin is None or origin[1] != hostname:
+            return web.json_response({"error": "仅允许同源访问"}, status=403)
+        scheme, _, origin_port = origin
+        # Explicit non-local trusted hosts may terminate TLS at a reverse
+        # proxy. Its public Host (including any non-default port) must be
+        # preserved. Never trust client-supplied X-Forwarded-* headers.
+        if hostname in LOCAL_HOSTNAMES and scheme != request.scheme:
+            return web.json_response({"error": "仅允许同源访问"}, status=403)
+        if origin_port != (host_port or (443 if scheme == "https" else 80)):
+            return web.json_response({"error": "仅允许同源访问"}, status=403)
+    if request.path.startswith("/api/") and request.headers.get("Sec-Fetch-Site") in {"cross-site", "same-site"}:
+        return web.json_response({"error": "仅允许同源访问"}, status=403)
     return await handler(request)
 
 
@@ -157,25 +181,51 @@ async def error_middleware(request: web.Request, handler: Any) -> web.StreamResp
     try:
         response = await handler(request)
     except FavoriteSavePendingError as error:
-        return web.json_response(
+        response = web.json_response(
             {"error": str(error), "code": "favorite_save_pending", "item_id": error.item_id,
              "source_saved": True, "retryable": True},
             status=502,
         )
     except StorageReadOnlyError as error:
-        return web.json_response({"error": str(error), "code": error.code, "store": error.store, "path": str(error.path)}, status=503)
+        response = web.json_response({"error": str(error), "code": error.code, "store": error.store, "path": str(error.path)}, status=503)
     except WorkflowError as error:
-        return web.json_response({"error": str(error)}, status=400)
+        response = web.json_response({"error": str(error)}, status=400)
     except CatalogError as error:
-        return web.json_response({"error": str(error)}, status=400)
+        response = web.json_response({"error": str(error)}, status=400)
     except BatchConflict as error:
-        return web.json_response({"error": str(error)}, status=409)
+        response = web.json_response({"error": str(error)}, status=409)
     except KeyError:
-        return web.json_response({"error": "记录不存在"}, status=404)
+        response = web.json_response({"error": "记录不存在"}, status=404)
     except ComfyError as error:
-        return web.json_response({"error": str(error)}, status=503)
+        response = web.json_response({"error": str(error)}, status=503)
     except json.JSONDecodeError:
-        return web.json_response({"error": "请求 JSON 无效"}, status=400)
+        response = web.json_response({"error": "请求 JSON 无效"}, status=400)
+    except RequestPayloadError:
+        response = web.json_response({"error": "请求体传输或压缩编码无效"}, status=400)
+        # The payload parser cannot recover this HTTP connection reliably.
+        response.force_close()
+    except web.HTTPException as error:
+        if error.status < 400 or not request.path.startswith("/api/"):
+            raise
+        response = web.json_response(
+            {"error": error.reason},
+            status=error.status,
+            headers={
+                name: value for name, value in error.headers.items()
+                if name.lower() not in {"content-type", "content-length"}
+            },
+        )
+    except Exception:
+        # Preserve cancellation (a BaseException) and never return internal
+        # paths, provider responses or tracebacks to API consumers.
+        logger.exception("Unhandled request failure: %s %s", request.method, request.path)
+        response = web.json_response({"error": "服务内部错误，请检查服务日志", "code": "internal_error"}, status=500)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    if request.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
     if request.path == "/" or request.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache, max-age=0, must-revalidate"
         response.headers["Pragma"] = "no-cache"
@@ -183,13 +233,25 @@ async def error_middleware(request: web.Request, handler: Any) -> web.StreamResp
 
 
 async def _json_body(request: web.Request) -> dict[str, Any]:
+    if request.content_type != "application/json" and not (
+        request.content_type.startswith("application/") and request.content_type.endswith("+json")
+    ):
+        raise web.HTTPUnsupportedMediaType(reason="请求 Content-Type 必须是 application/json")
     try:
-        value = await request.json()
-    except Exception as error:
+        value = await request.json(loads=strict_json_loads)
+    except (ValueError, UnicodeError, LookupError, RecursionError) as error:
         raise WorkflowError("请求 JSON 无效") from error
     if not isinstance(value, dict):
         raise WorkflowError("请求内容必须是对象")
     return value
+
+
+def _image_id(raw: Any) -> int:
+    if isinstance(raw, str) and raw.isascii() and raw.isdecimal() and len(raw) <= 19:
+        raw = int(raw)
+    if type(raw) is not int or not 1 <= raw <= SQLITE_MAX_INTEGER:
+        raise WorkflowError("image_id 必须为有效作品 ID")
+    return raw
 
 
 def _query_bool(request: web.Request, name: str, default: bool = False) -> bool:
@@ -281,6 +343,8 @@ def create_app(
     app[PROMPT_RULES_KEY] = prompt_rules
     app[PROMPT_POOLS_KEY] = prompt_pools
     app[INPUT_IMAGES_KEY] = input_images
+    cleanup_task: asyncio.Task[None] | None = None
+    shutdown_exit_handle: asyncio.TimerHandle | None = None
 
     async def favorite_keys(section: str, collection: str = "") -> set[str] | None:
         if not collection:
@@ -1024,19 +1088,31 @@ def create_app(
         return web.json_response(state, status=201)
 
     async def upload_input_image(request: web.Request) -> web.Response:
-        if not request.content_type.startswith("multipart/"):
+        if request.content_type != "multipart/form-data":
             raise WorkflowError("请以 multipart image 字段上传图片")
-        reader = await request.multipart()
+        if request.content_length is not None and request.content_length > request.client_max_size:
+            raise web.HTTPRequestEntityTooLarge(max_size=request.client_max_size, actual_size=request.content_length)
         found = None
-        async for part in reader:
-            if part.name != "image" or found is not None:
-                raise WorkflowError("上传请求只能包含一个 image 字段")
-            data = bytearray()
-            while chunk := await part.read_chunk():
-                data.extend(chunk)
-                if len(data) > MAX_IMAGE_BYTES:
-                    raise WorkflowError("输入图片不能超过 20 MiB")
-            found = (bytes(data), part.filename or "image")
+        try:
+            stream = LimitedMultipartStream(request.content, request.client_max_size)
+            reader = MultipartReader(request.headers, stream)
+            async for part in reader:
+                if not isinstance(part, BodyPartReader) or part.name != "image" or found is not None:
+                    raise WorkflowError("上传请求只能包含一个 image 字段")
+                data = bytearray()
+                while chunk := await part.read_chunk():
+                    if len(data) + len(chunk) > MAX_IMAGE_BYTES:
+                        raise web.HTTPRequestEntityTooLarge(max_size=MAX_IMAGE_BYTES, actual_size=len(data) + len(chunk))
+                    data.extend(chunk)
+                found = (bytes(data), part.filename or "image")
+            # MultipartReader may stop before the optional MIME epilogue.
+            # Account for that tail too, including bodies without a length.
+            while await stream.read(64 * 1024):
+                pass
+        except WorkflowError:
+            raise
+        except (ValueError, AssertionError, EOFError, RuntimeError, BadHttpMessage) as error:
+            raise WorkflowError("上传 multipart 数据无效") from error
         if found is None:
             raise WorkflowError("缺少 image 文件")
         result = await asyncio.to_thread(input_images.add, found[0], filename=found[1])
@@ -1045,8 +1121,9 @@ def create_app(
     async def input_image_from_history(request: web.Request) -> web.Response:
         body = await _json_body(request)
         image_id = body.get("image_id")
-        if set(body) != {"image_id"} or isinstance(image_id, bool) or not isinstance(image_id, int) or image_id <= 0:
+        if set(body) != {"image_id"} or type(image_id) is not int:
             raise WorkflowError("image_id 必须为有效作品 ID")
+        image_id = _image_id(image_id)
         record = await history.get_image(image_id)
         content, _ = await client.image_bytes(record)
         result = await asyncio.to_thread(input_images.add, content, filename=record["filename"], source_image_id=image_id)
@@ -1127,6 +1204,8 @@ def create_app(
             limit = int(request.query.get("limit", "24"))
         except ValueError as error:
             raise WorkflowError("分页参数无效") from error
+        if max(0, page - 1) * min(60, max(1, limit)) > SQLITE_MAX_INTEGER:
+            raise WorkflowError("分页参数超出有效范围")
         before_id = None
         if "before_id" in request.query:
             raw_before_id = request.query["before_id"]
@@ -1214,7 +1293,7 @@ def create_app(
 
     async def regeneration_options(request: web.Request) -> web.Response:
         _record, context = await _regeneration_context(
-            int(request.match_info["image_id"])
+            _image_id(request.match_info["image_id"])
         )
         resources_ok = not context["resourceIssues"] and not history.read_only_reason
         positive_ok = bool(context["positive"])
@@ -1269,9 +1348,10 @@ def create_app(
 
     async def regenerate_history(request: web.Request) -> web.Response:
         history.ensure_writable()
+        image_id = _image_id(request.match_info["image_id"])
         await client.status()
         record, context = await _regeneration_context(
-            int(request.match_info["image_id"])
+            image_id
         )
         body = await _json_body(request)
         unknown = set(body) - {"mode", "count", "sections"}
@@ -1376,13 +1456,13 @@ def create_app(
         return web.json_response(state, status=201)
 
     async def delete_history(request: web.Request) -> web.Response:
-        image_id = int(request.match_info["image_id"])
+        image_id = _image_id(request.match_info["image_id"])
         if not await history.delete_image(image_id):
             raise KeyError(image_id)
         return web.json_response({"deleted": True})
 
     async def image(request: web.Request) -> web.Response:
-        record = await history.get_image(int(request.match_info["image_id"]))
+        record = await history.get_image(_image_id(request.match_info["image_id"]))
         body, content_type = await client.image_bytes(record)
         return web.Response(body=body, content_type=content_type.split(";", 1)[0])
 
@@ -1401,18 +1481,30 @@ def create_app(
         })
 
     async def launcher_shutdown(request: web.Request) -> web.Response:
+        nonlocal shutdown_exit_handle
         # 未配置 token 时端点不存在,旧版本天然返回 404 —— 启动器据此探测能力。
         if shutdown_token is None:
             raise web.HTTPNotFound()
-        try:
-            body = await request.json()
-        except Exception:
-            body = None
-        candidate = body.get("token") if isinstance(body, dict) else None
-        if not isinstance(candidate, str) or not hmac.compare_digest(candidate, shutdown_token):
+        body = await _json_body(request)
+        candidate = body.get("token")
+        if not isinstance(candidate, str) or not hmac.compare_digest(
+            candidate.encode("utf-8", errors="surrogatepass"),
+            shutdown_token.encode("utf-8", errors="surrogatepass"),
+        ):
             raise web.HTTPForbidden()
-        # 先让响应发出,再整体退出;升级路径只在空闲时调用,可跳过 on_cleanup。
-        asyncio.get_running_loop().call_later(0.5, os._exit, 0)
+        # Check idleness under the same lock as start; a launcher-side probe
+        # alone races with requests that are still validating resources.
+        await manager.begin_idle_shutdown()
+        try:
+            await cleanup(app)
+        except Exception:
+            if shutdown_exit_handle is None:
+                shutdown_exit_handle = asyncio.get_running_loop().call_later(0.5, os._exit, 1)
+            raise
+        # Flush the response after all owned resources have been released.
+        # Repeated authenticated requests share cleanup and schedule one exit.
+        if shutdown_exit_handle is None:
+            shutdown_exit_handle = asyncio.get_running_loop().call_later(0.5, os._exit, 0)
         return web.json_response({"stopping": True})
 
     app.router.add_get("/api/launcher-health", launcher_health)
@@ -1494,22 +1586,25 @@ def create_app(
     app.router.add_get("/favicon.ico", favicon)
     app.router.add_static("/static/", root / "static", show_index=False)
 
-    async def cleanup(_: web.Application) -> None:
-        manager.shutting_down = True
-        manager.queue.clear()
-        manager._stop_monitor()
-        if manager.task and not manager.task.done():
-            manager.stop_requested = True
+    async def cleanup_resources() -> None:
+        try:
+            await manager.shutdown()
+        finally:
             try:
-                await asyncio.wait_for(manager.task, timeout=2)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                manager.task.cancel()
-        close = getattr(client, "close", None)
-        if close:
-            result = close()
-            if asyncio.iscoroutine(result):
-                await result
-        await history.close()
+                close = getattr(client, "close", None)
+                if close:
+                    result = close()
+                    if asyncio.iscoroutine(result):
+                        await result
+            finally:
+                await history.close()
+
+    async def cleanup(_: web.Application) -> None:
+        nonlocal cleanup_task
+        if cleanup_task is None:
+            cleanup_task = asyncio.create_task(cleanup_resources())
+        # A disconnected shutdown caller must not cancel resource cleanup.
+        await asyncio.shield(cleanup_task)
 
     app.on_cleanup.append(cleanup)
     return app

@@ -11,7 +11,7 @@ from aiohttp import FormData, web
 from aiohttp.test_utils import TestClient, TestServer
 from PIL import Image
 
-from anima_webui.comfy import ComfyAborted, ComfyClient
+from anima_webui.comfy import ComfyAborted, ComfyClient, ComfyError
 from anima_webui.history import HistoryStore
 from anima_webui.input_images import InputImageStore, MAX_IMAGE_BYTES
 from anima_webui.prompt_jobs import PromptJobStore
@@ -444,14 +444,27 @@ class SingleComfyClientTests(unittest.IsolatedAsyncioTestCase):
             await client.close()
             await server.close()
 
-    async def test_legacy_cancel_uses_delete_and_targeted_interrupt_only(self):
+    async def test_legacy_cancel_deletes_own_pending_job_without_interrupting_other_job(self):
         calls = []
         app = web.Application()
+        queue = {"queue_running": [[0, "other-job"]], "queue_pending": [[1, "owned-job"]]}
 
         async def record(request):
-            calls.append((request.path, await request.json()))
+            payload = await request.json()
+            calls.append((request.path, payload))
+            if request.path == "/queue":
+                queue["queue_pending"] = [
+                    entry for entry in queue["queue_pending"] if entry[1] not in payload["delete"]
+                ]
+            else:
+                # ComfyUI v0.3.0 ignores the body of /interrupt completely.
+                queue["queue_running"] = []
             return web.Response()
 
+        async def get_queue(request):
+            return web.json_response(queue)
+
+        app.router.add_get("/queue", get_queue)
         app.router.add_post("/queue", record)
         app.router.add_post("/interrupt", record)
         server = TestServer(app)
@@ -459,7 +472,15 @@ class SingleComfyClientTests(unittest.IsolatedAsyncioTestCase):
         client = ComfyClient(f"http://127.0.0.1:{server.port}")
         try:
             await client.cancel_prompt("owned-job")
-            self.assertEqual(calls, [("/queue", {"delete": ["owned-job"]}), ("/interrupt", {"prompt_id": "owned-job"})])
+            self.assertEqual(calls, [("/queue", {"delete": ["owned-job"]})])
+            self.assertEqual(queue["queue_running"], [[0, "other-job"]])
+            self.assertEqual(queue["queue_pending"], [])
+            # Even when our job was already running, do not risk a global
+            # interrupt after a race with completion or another client's job.
+            queue["queue_running"] = [[0, "owned-job"]]
+            with self.assertRaisesRegex(ComfyError, "远端正在执行的任务可能继续"):
+                await client.cancel_prompt("owned-job")
+            self.assertTrue(all(path == "/queue" for path, _ in calls))
         finally:
             await client.close()
             await server.close()

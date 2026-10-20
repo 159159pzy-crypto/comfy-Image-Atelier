@@ -9,6 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_MARKDOWN = {
     "README.md", "CHANGELOG.md", "RELEASE_NOTES.md",
     "launcher/README.md", "docs/dependencies.md",
+    "CONTRIBUTING.md", "SECURITY.md", ".github/pull_request_template.md",
+    "launcher/tests/fixtures/prompt-assistant/README.md",
 }
 LOCAL_PARTS = {
     ".git", ".codex-local", ".claude", ".launcher", ".venv", "venv",
@@ -30,8 +32,11 @@ def check_path(name: str) -> None:
 
 
 def check_release_content() -> None:
+    # Include new source files during local development too. A clean release
+    # checkout has no untracked files, but developers should be able to run
+    # the same gate before staging a new document or regression test.
     names = subprocess.check_output(
-        ["git", "ls-files", "-z"], cwd=ROOT,
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT,
     ).decode("utf-8").split("\0")
     names = [name for name in names if name]
     for name in names:
@@ -49,7 +54,7 @@ def check_release_content() -> None:
                     relative = linked.relative_to(ROOT).as_posix()
                     if relative not in names:
                         raise ValueError(f"Documentation link is absent from release: {name} -> {target}")
-    print(f"Release content: {len(names)} tracked files; public documentation and local-state exclusions verified.")
+    print(f"Release content: {len(names)} source files; public documentation and local-state exclusions verified.")
 
 
 if __name__ == "__main__":
