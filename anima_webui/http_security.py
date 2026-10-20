@@ -11,6 +11,9 @@ from aiohttp import web
 
 
 SQLITE_MAX_INTEGER = 2**63 - 1
+# Root objects/arrays count as one level. Application payloads are much
+# shallower; keep the limit independent of Python's JSON recursion behavior.
+MAX_JSON_DEPTH = 64
 
 
 class LimitedMultipartStream:
@@ -81,8 +84,33 @@ def parse_origin(value: str) -> tuple[str, str, int] | None:
     return parsed.scheme, hostname, port or (443 if parsed.scheme == "https" else 80)
 
 
+def _check_json_depth(value: str) -> None:
+    """Bound containers before decoding; leave JSON syntax to json.loads."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in value:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if depth > MAX_JSON_DEPTH:
+                raise ValueError(f"JSON nesting exceeds {MAX_JSON_DEPTH} container levels")
+        elif char in "]}":
+            depth -= 1
+
+
 def strict_json_loads(value: str) -> Any:
-    """Reject non-JSON constants and floats that overflow to infinity."""
+    """Reject excessive nesting, non-JSON constants and overflowing floats."""
+    _check_json_depth(value)
+
     def invalid_constant(raw: str) -> Any:
         raise ValueError(f"Invalid JSON numeric constant: {raw}")
 

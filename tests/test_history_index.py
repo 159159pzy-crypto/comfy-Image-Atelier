@@ -45,7 +45,9 @@ class HistoryWorkbenchIndexTests(unittest.IsolatedAsyncioTestCase):
                         return [tuple(row) for row in store.connection.execute("SELECT * FROM images ORDER BY id")], " ".join(row[3] for row in plan)
                     rows, plan = await store._call(inspect)
                     self.assertEqual(rows, original)
-                    self.assertIn("USING INDEX idx_images_workbench_id", plan)
+                    # Newer SQLite recognizes that this projection is covered
+                    # by the same index; both plans must still perform a search.
+                    self.assertRegex(plan, r"\bSEARCH images USING (?:COVERING )?INDEX idx_images_workbench_id\b")
                     self.assertNotIn("TEMP B-TREE", plan)
                 finally:
                     await store.close()

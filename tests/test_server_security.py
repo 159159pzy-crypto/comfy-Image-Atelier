@@ -9,8 +9,55 @@ from unittest import mock
 
 from aiohttp.test_utils import TestClient, TestServer
 
+from anima_webui.http_security import MAX_JSON_DEPTH, strict_json_loads
 from anima_webui.server import COMFY_KEY, HISTORY_KEY, MANAGER_KEY, create_app
 from test_server import APP_DIR, FakeComfy, _write_fake_tools
+
+
+class StrictJsonDepthTests(unittest.TestCase):
+    def test_container_depth_boundary(self):
+        for kind in ("array", "object", "mixed"):
+            for depth in (MAX_JSON_DEPTH - 1, MAX_JSON_DEPTH, MAX_JSON_DEPTH + 1):
+                payload = "0"
+                for level in range(depth):
+                    if kind == "array" or (kind == "mixed" and level % 2 == 0):
+                        payload = "[" + payload + "]"
+                    else:
+                        payload = '{"value":' + payload + "}"
+                with self.subTest(kind=kind, depth=depth):
+                    if depth <= MAX_JSON_DEPTH:
+                        self.assertEqual(strict_json_loads(payload), json.loads(payload))
+                    else:
+                        with self.assertRaisesRegex(ValueError, "nesting"):
+                            strict_json_loads(payload)
+
+    def test_strings_and_escaped_quotes_do_not_count_as_containers(self):
+        texts = (
+            "[" * 1000 + "}" * 1000,
+            'quoted " [{ brackets }] and backslash \\',
+            '\\\\"[{' * 100,
+            '\\"}]"' * 100,
+        )
+        for text in texts:
+            payload = {text: text, "sibling": [{"text": text}]}
+            with self.subTest(text=text[:30]):
+                self.assertEqual(strict_json_loads(json.dumps(payload)), payload)
+        self.assertEqual(strict_json_loads(r'{"text": "\u005b\u007b\u005d\u007d"}'),
+                         {"text": "[{]}"})
+
+    def test_escaped_string_cannot_hide_following_nested_containers(self):
+        for text in ('\\"[{', "\\", '\\\\"}]'):
+            payload = (
+                '{"text":' + json.dumps(text) + ',"selection":'
+                + "[" * MAX_JSON_DEPTH + "0" + "]" * MAX_JSON_DEPTH + "}"
+            )
+            with self.subTest(text=text):
+                with self.assertRaisesRegex(ValueError, "nesting"):
+                    strict_json_loads(payload)
+
+    def test_many_sibling_containers_are_not_a_depth_overflow(self):
+        payload = {"items": [{} for _ in range(MAX_JSON_DEPTH * 4)]}
+        self.assertEqual(strict_json_loads(json.dumps(payload)), payload)
 
 
 class ServerSecurityTests(unittest.IsolatedAsyncioTestCase):
@@ -123,6 +170,24 @@ class ServerSecurityTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(response.status, 400)
                 self.assertIn("error", await response.json())
+
+    async def test_json_depth_boundary_returns_consistent_http_status(self):
+        for depth, expected_status in (
+            (MAX_JSON_DEPTH - 1, 200),
+            (MAX_JSON_DEPTH, 200),
+            (MAX_JSON_DEPTH + 1, 400),
+        ):
+            # The outer request object also consumes one container level.
+            payload = '{"selection":' + "[" * (depth - 1) + "0" + "]" * (depth - 1) + "}"
+            with self.subTest(depth=depth):
+                response = await self.client.post(
+                    "/api/pools/pose/query",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                )
+                self.assertEqual(response.status, expected_status)
+                if expected_status == 400:
+                    self.assertIn("error", await response.json())
 
     async def test_body_limit_preserves_413_json_contract(self):
         # Exercise aiohttp's real payload limit without allocating 21 MiB.

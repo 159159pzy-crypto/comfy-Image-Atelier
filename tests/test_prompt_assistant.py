@@ -3,13 +3,16 @@ import copy
 import json
 import tempfile
 import unittest
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp.test_utils import TestClient, TestServer
 
 from anima_webui.comfy import ComfyError
 from anima_webui.prompt_processing import OUTPUT_NODE
+from anima_webui.runner import PROMPT_JOB_TIMEOUT
 from anima_webui.server import HISTORY_KEY, MANAGER_KEY, create_app
 from anima_webui.workflow import validate_settings
 from test_server import APP_DIR, _write_fake_tools
@@ -199,21 +202,64 @@ class PromptAssistantTests(unittest.IsolatedAsyncioTestCase):
     async def test_execution_timeout_starts_after_configuration_lookup_and_submission(self):
         original_transport = self.manager.prompt_assistant.transport
         original_submit = self.comfy.submit
+        original_wait = self.comfy.wait_for_history
+        original_timeout = asyncio.timeout
+        phases = []
+        timeout_active = False
 
-        async def delayed_transport(snapshot):
-            await asyncio.sleep(0.15)
-            return await original_transport(snapshot)
+        async def observed_transport(snapshot):
+            self.assertFalse(timeout_active)
+            phases.append("configuration:start")
+            snapshot = await original_transport(snapshot)
+            self.assertFalse(timeout_active)
+            phases.append("configuration:done")
+            return snapshot
 
-        async def delayed_submit(graph):
-            await asyncio.sleep(0.15)
-            return await original_submit(graph)
+        async def observed_submit(graph):
+            self.assertFalse(timeout_active)
+            phases.append("submission:start")
+            prompt_id = await original_submit(graph)
+            self.assertFalse(timeout_active)
+            phases.append("submission:done")
+            return prompt_id
 
-        with patch("anima_webui.runner.PROMPT_JOB_TIMEOUT", 0.1), \
-                patch.object(self.manager.prompt_assistant, "transport", side_effect=delayed_transport), \
-                patch.object(self.comfy, "submit", side_effect=delayed_submit):
+        @asynccontextmanager
+        async def observed_timeout(delay):
+            nonlocal timeout_active
+            self.assertEqual(delay, PROMPT_JOB_TIMEOUT)
+            phases.append("execution:start")
+            async with original_timeout(delay):
+                timeout_active = True
+                try:
+                    yield
+                finally:
+                    timeout_active = False
+                    phases.append("execution:done")
+
+        async def observed_wait(*args, **kwargs):
+            self.assertTrue(timeout_active)
+            phases.append("history:wait")
+            return await original_wait(*args, **kwargs)
+
+        # Observe the actual budget boundary without making a disk write and
+        # event-loop scheduling race against a 100 ms artificial deadline.
+        # Keep aiohttp's own connection timeouts outside this observation.
+        observed_asyncio = SimpleNamespace(**vars(asyncio))
+        observed_asyncio.timeout = observed_timeout
+        with patch("anima_webui.runner.asyncio", observed_asyncio), \
+                patch.object(self.manager.prompt_assistant, "transport", side_effect=observed_transport), \
+                patch.object(self.comfy, "submit", side_effect=observed_submit), \
+                patch.object(self.comfy, "wait_for_history", side_effect=observed_wait):
             job = await self.create()
             await self.manager.wait()
-        self.assertEqual((await self.manager.prompt_jobs.get(job["id"]))["status"], "completed")
+        self.assertEqual(phases, [
+            "configuration:start", "configuration:done",
+            "submission:start", "submission:done",
+            "execution:start", "history:wait", "execution:done",
+        ])
+        saved = await self.manager.prompt_jobs.get(job["id"])
+        self.assertEqual(saved["status"], "completed", saved["error"])
+        self.assertEqual(saved["result"], {"text": "expanded final prompt"})
         self.assertEqual(self.comfy.cancelled, [])
 
     async def test_prompt_cancel_without_targeted_support_never_globally_interrupts(self):
