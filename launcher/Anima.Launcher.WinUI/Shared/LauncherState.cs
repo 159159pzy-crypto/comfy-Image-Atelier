@@ -11,7 +11,7 @@ namespace Anima.Launcher;
 /// install, start/stop and test generation. UI pages bind to this and raise commands;
 /// dialogs use the live <see cref="Microsoft.UI.Xaml.XamlRoot"/>.
 /// </summary>
-internal sealed class LauncherState : IDisposable
+internal sealed partial class LauncherState : IDisposable
 {
     private readonly string configFile = Path.Combine(Program.StateDir, "launcher.json");
     private readonly Func<XamlRoot?> root;
@@ -30,13 +30,14 @@ internal sealed class LauncherState : IDisposable
     private string? configWriteError;
     private Func<CancellationToken, Task>? retryAction;
     private bool retryable;
+    private bool retryIsSetup;
     private LauncherConfig? retryConfig;
     private bool retryFresh;
     private string? startingRole;
     private long progressBytes;
     private string progressName = "";
     private DateTime progressAt = DateTime.UtcNow;
-    public bool CanRetry => !Busy && retryable && retryAction is not null && retryAction.Method.Name != nameof(PreviewInstallAsync);
+    public bool CanRetry => !Busy && !retryIsSetup && retryable && retryAction is not null && retryAction.Method.Name != nameof(PreviewInstallAsync);
     public string ProgressText { get; private set; } = "";
     public event Action? TaskStateChanged;
     public event Action<string>? TaskProgressChanged;
@@ -70,6 +71,7 @@ internal sealed class LauncherState : IDisposable
         Program.Log("配置已读取");
         Services = new ServiceManager(Program.StateDir, AppendLog);
         Services.RecoverOwned();
+        InitializeSetup();
     }
 
     private LauncherConfig LoadConfig()
@@ -95,7 +97,12 @@ internal sealed class LauncherState : IDisposable
     /// <summary>In-memory copy of the session log for the log page.</summary>
     public List<string> LogLines { get; } = [];
 
-    public void SetStatus(string text) => StatusChanged?.Invoke(text);
+    public void SetStatus(string text)
+    {
+        SetupStatusText = text;
+        StatusChanged?.Invoke(text);
+        if (SetupActive) NotifySetup();
+    }
     public void AppendLog(string text)
     {
         Program.Log(text);
@@ -188,8 +195,14 @@ internal sealed class LauncherState : IDisposable
 
     // --- Task gating ---
 
-    public async Task Run(Func<CancellationToken, Task> action, bool applyDrafts = true, LauncherConfig? resumeConfig = null, bool resumeFresh = false)
+    public async Task Run(Func<CancellationToken, Task> action, bool applyDrafts = true, LauncherConfig? resumeConfig = null, bool resumeFresh = false, bool setupOperation = false)
     {
+        if (SetupActive && !setupOperation)
+        {
+            showWindow();
+            SetStatus("请先完成安装向导，或从向导返回概览后执行此操作。");
+            return;
+        }
         if (task is not null)
         {
             showWindow();
@@ -197,6 +210,7 @@ internal sealed class LauncherState : IDisposable
             return;
         }
         task = new CancellationTokenSource();
+        retryIsSetup = setupOperation;
         retryAction = action;
         retryConfig = null;
         retryable = false;
@@ -222,11 +236,18 @@ internal sealed class LauncherState : IDisposable
         {
             retryable = true;
             var message = cancelDownloads ? "下载已取消，所选临时文件已清理。" : "任务已暂停，点击继续可从已完成步骤恢复。";
+            SetSetupInterruption(message, true);
             SetStatus(message);
             AppendLog(message);
         }
-        catch (OperationCanceledException ex) { retryable = true; TaskFailed?.Invoke(new TimeoutException("网络或服务响应超时，请检查连接后重试。", ex)); }
-        catch (Exception ex) { retryable = true; TaskFailed?.Invoke(ex); }
+        catch (OperationCanceledException ex)
+        {
+            retryable = true;
+            var error = new TimeoutException("网络或服务响应超时，请检查连接后重试。", ex);
+            SetSetupInterruption(error.Message, false);
+            TaskFailed?.Invoke(error);
+        }
+        catch (Exception ex) { retryable = true; SetSetupInterruption(ex.Message, false); TaskFailed?.Invoke(ex); }
         finally
         {
             task.Dispose();
@@ -234,6 +255,7 @@ internal sealed class LauncherState : IDisposable
             BusyChanged?.Invoke(false);
             TaskStateChanged?.Invoke();
             Reloaded();
+            NotifySetup();
         }
     }
 
@@ -247,6 +269,7 @@ internal sealed class LauncherState : IDisposable
 
     private void ResetTransferProgress()
     {
+        SetupDownloadPercent = -1;
         ProgressText = "";
         progressName = "";
         progressBytes = 0;
@@ -264,6 +287,7 @@ internal sealed class LauncherState : IDisposable
     public IProgress<DownloadProgress> DownloadProgress() => new Progress<DownloadProgress>(p =>
     {
         var percent = (int)Math.Clamp(p.Received * 100d / Math.Max(1, p.Total), 0, 100);
+        SetupDownloadPercent = percent;
         ProgressChanged?.Invoke(percent);
         var now = DateTime.UtcNow;
         var seconds = (now - progressAt).TotalSeconds;
@@ -291,6 +315,7 @@ internal sealed class LauncherState : IDisposable
         var text = $"Windows {Environment.OSVersion.Version} · {(Environment.Is64BitOperatingSystem ? "x64" : "x86")}\n{gpu}\nGit：{(Commands.Find("git.exe") is null ? "新建时自动准备" : "已检测到")} · .NET：已内置\n";
         foreach (var drive in DriveInfo.GetDrives().Where(d => d.IsReady && d.DriveType == DriveType.Fixed))
             text += $"{drive.Name} 可用 {drive.AvailableFreeSpace / 1073741824d:N1} GiB  ";
+        UpdateSetupSystem(gpu);
         return text;
     }
 
@@ -356,13 +381,14 @@ internal sealed class LauncherState : IDisposable
         // restart resumes CUDA/dependency stages, not an incomplete import.
         Save();
         SetStatus("正在安装环境；已完成的下载和步骤会自动复用…");
-        var installer = new Installer(Program.StateDir, Program.Runtime, Downloads, AppendLog, DownloadProgress(), InstallStageChanged);
+        var installer = new Installer(Program.StateDir, Program.Runtime, Downloads, AppendLog, DownloadProgress(), InstallStageChanged, UpdateSetupProgress);
         Config = await installer.Install(plan, ct);
         Config.InstallPending = fresh;
         Save();
         Reloaded();
         if (fresh)
         {
+            UpdateSetupProgress(new("models", "准备 Anima 基础模型", SetupStageStatus.Running));
             SetStatus("环境已安装，正在准备 Anima 基础模型…");
             var probe = await Inventory.Probe(Config.ComfyRoot, Config.Python, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
             var selected = Program.ModelProfiles.RequiredModels(Program.Models, Config.SelectedProfile).Select(m => m.Id).ToHashSet();
@@ -374,13 +400,16 @@ internal sealed class LauncherState : IDisposable
             foreach (var item in inventory.Where(m => selected.Contains(m.Model.Id) && m.Model.Category == "diffusion_models"))
                 await ModelMetadata.EnsureDefaultAsync(Config, Program.Runtime, Program.Models, Program.ModelProfiles,
                     item.FoundPath ?? item.Destination, ct, AppendLog);
+            UpdateSetupProgress(new("models", "基础模型已准备", SetupStageStatus.Complete));
         }
+        UpdateSetupProgress(new("verify", "检查模型与节点", SetupStageStatus.Running));
         await Scan(ct);
+        UpdateSetupProgress(new("verify", "最终检查完成", SetupStageStatus.Complete));
         FreshInstallRequested = false;
         Config.InstallPending = false;
         Save();
         Reloaded();
-        GoTo(0);
+        if (!SetupActive) GoTo(0);
         SetStatus("安装完成。点击“启动工作台”开始创作；可选资源可在模型页添加。");
     }
 
@@ -406,6 +435,7 @@ internal sealed class LauncherState : IDisposable
         SetStatus("正在读取 ComfyUI 有效模型路径…");
         var probe = await Inventory.Probe(Config.ComfyRoot, Config.Python, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
         var scan = await Task.Run(() => Inventory.Scan(probe, Program.Models, hashes, ct), ct);
+        UpdateSetupMissingModels(scan);
         var nodes = await Inventory.Nodes(Config.ComfyRoot, Program.Runtime, Commands.Find("git.exe"), ct);
         var loras = await Task.Run(() => Inventory.Loras(probe), ct);
         AppendLog($"本地 LoRA：{loras.Length} 个，仅检测；请在工作台选择使用。");
@@ -741,7 +771,7 @@ internal sealed class LauncherState : IDisposable
             catch (PortConflictException ex) when (attempt < 2)
             {
                 showWindow();
-                GoTo(4); // 设置
+                if (!SetupActive) GoTo(4); // 向导内保留完成页，冲突对话框仍可分配端口。
                 var x = root();
                 if (x is null || !await Dialogs.ConfirmCancel(x, "端口冲突", $"{ex.Message}\n是否自动寻找并保存空闲端口，然后重新启动？", "自动分配")) throw;
                 var port = ex.Port + 1;

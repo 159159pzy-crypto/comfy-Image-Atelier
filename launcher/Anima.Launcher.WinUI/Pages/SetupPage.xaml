@@ -1,0 +1,212 @@
+<?xml version="1.0" encoding="utf-8"?>
+<local:LauncherPage x:Class="Anima.Launcher.Pages.SetupPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Anima.Launcher.Pages"
+    AutomationProperties.AutomationId="SetupPage">
+    <Grid Margin="4,4,4,0" RowSpacing="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Border Background="{ThemeResource StudioMutedBrush}" CornerRadius="16" Padding="16,12">
+            <Grid ColumnSpacing="12" AutomationProperties.AutomationId="SetupSteps">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name="StepWelcome" Text="1  选择方式" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource StudioTextBrush}" />
+                <TextBlock x:Name="StepLocation" Grid.Column="1" Text="2  安装位置" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource StudioTextBrush}" />
+                <TextBlock x:Name="StepReview" Grid.Column="2" Text="3  检查确认" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource StudioTextBrush}" />
+                <TextBlock x:Name="StepInstalling" Grid.Column="3" Text="4  安装环境" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource StudioTextBrush}" />
+                <TextBlock x:Name="StepComplete" Grid.Column="4" Text="5  开始创作" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource StudioTextBrush}" />
+            </Grid>
+        </Border>
+
+        <ScrollViewer x:Name="BodyScroll" Grid.Row="1" HorizontalContentAlignment="Stretch"
+            HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+            <StackPanel Spacing="16" Margin="8,0,8,12" HorizontalAlignment="Stretch">
+                <InfoBar x:Name="ErrorBar" IsOpen="False" IsClosable="False" Severity="Error"
+                    Title="需要处理" AutomationProperties.AutomationId="SetupError" />
+                <InfoBar x:Name="NoticeBar" IsOpen="False" IsClosable="False" Severity="Informational"
+                    AutomationProperties.AutomationId="SetupNotice" />
+
+                <StackPanel x:Name="WelcomePanel" Spacing="22">
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="准备好你的创作环境。" Style="{StaticResource StudioHeadingStyle}" />
+                        <TextBlock Text="选好位置，剩下的交给启动器。安装完成后，就能打开 Anima 工作台开始创作。" Style="{StaticResource StudioBodyStyle}" MaxWidth="620" HorizontalAlignment="Left" />
+                    </StackPanel>
+                    <Border Style="{StaticResource StudioPanelStyle}">
+                        <StackPanel Spacing="16">
+                            <TextBlock Text="一次准备完整环境" FontSize="20" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
+                            <TextBlock Text="ComfyUI 与独立 Python 环境、运行所需的工具和节点，以及 Anima 基础模型。" Style="{StaticResource StudioBodyStyle}" />
+                            <Border BorderBrush="{ThemeResource StudioSeparatorBrush}" BorderThickness="0,1,0,0" Padding="0,16,0,0">
+                                <StackPanel Spacing="7">
+                                    <TextBlock Text="这台电脑" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
+                                    <TextBlock x:Name="SystemSummary" Text="正在检测系统和显卡…" Style="{StaticResource StudioBodyStyle}" AutomationProperties.AutomationId="SetupSystemSummary" />
+                                    <TextBlock x:Name="SystemAdvice" Style="{StaticResource StudioBodyStyle}" />
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </Border>
+                    <TextBlock Text="已经装过 ComfyUI？选择「我已有 ComfyUI」，复用现有环境、模型与节点。" Style="{StaticResource StudioBodyStyle}" />
+                </StackPanel>
+
+                <StackPanel x:Name="LocationPanel" Visibility="Collapsed" Spacing="20">
+                    <StackPanel Spacing="7">
+                        <TextBlock x:Name="LocationTitle" Text="给创作环境选一个位置。" Style="{StaticResource StudioHeadingStyle}" />
+                        <TextBlock x:Name="LocationDescription" Style="{StaticResource StudioBodyStyle}" />
+                    </StackPanel>
+                    <ContentControl x:Name="LocationFields" HorizontalContentAlignment="Stretch" IsTabStop="False">
+                    <StackPanel Spacing="18">
+                        <StackPanel Spacing="8">
+                            <TextBlock x:Name="RootLabel" Text="安装文件夹" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                <TextBox x:Name="RootBox" TextChanged="Root_Changed" PlaceholderText="例如 D:\AnimaStudio"
+                                    AutomationProperties.AutomationId="SetupRoot" AutomationProperties.Name="安装或导入目录" />
+                                <Button x:Name="PickRootButton" Grid.Column="1" Content="浏览…" Click="PickRoot_Click"
+                                    AutomationProperties.AutomationId="SetupPickRoot" AutomationProperties.Name="选择安装或导入文件夹" />
+                            </Grid>
+                            <TextBlock x:Name="ResolvedRoot" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="SetupResolvedRoot" />
+                            <TextBlock x:Name="DiskSummary" Style="{StaticResource StudioBodyStyle}" AutomationProperties.AutomationId="SetupDiskSummary" />
+                        </StackPanel>
+                        <StackPanel x:Name="ImportPythonPanel" Spacing="8" Visibility="Collapsed">
+                            <TextBlock x:Name="DetectedPython" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="SetupDetectedPython" />
+                            <Expander Header="手动指定 Python" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                                <StackPanel Spacing="8">
+                                    <TextBlock Text="自动识别 .venv、venv 和便携版 Python。留空使用自动识别。" Style="{StaticResource StudioBodyStyle}" />
+                                    <Grid ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                        <TextBox x:Name="PythonBox" PlaceholderText="python.exe" TextChanged="Python_Changed"
+                                            AutomationProperties.AutomationId="SetupPython" AutomationProperties.Name="Python 可执行文件" />
+                                        <Button Grid.Column="1" Content="浏览…" Click="PickPython_Click"
+                                            AutomationProperties.AutomationId="SetupPickPython" AutomationProperties.Name="选择 Python 文件" />
+                                    </Grid>
+                                </StackPanel>
+                            </Expander>
+                        </StackPanel>
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="下载来源" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
+                            <ComboBox x:Name="SourceBox" HorizontalAlignment="Stretch" SelectionChanged="Source_Changed"
+                                AutomationProperties.AutomationId="SetupSource" AutomationProperties.Name="下载来源" />
+                            <TextBlock Text="下载慢或连接失败时，可以暂停后切换来源。已完成的下载会继续复用。" Style="{StaticResource StudioBodyStyle}" />
+                        </StackPanel>
+                        <Border Background="{ThemeResource StudioAccentSoftBrush}" CornerRadius="14" Padding="16,13">
+                            <TextBlock x:Name="ModelSummary" Text="将准备 Anima 基础模型：底模、文本编码器和 VAE。" Style="{StaticResource StudioBodyStyle}" />
+                        </Border>
+                        <Expander x:Name="AdvancedSettings" Header="高级下载设置" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                            <StackPanel Spacing="12">
+                                <TextBox x:Name="GitMirrorBox" Header="Git HTTPS 镜像模板" PlaceholderText="HTTPS 前缀或包含 {url} 的模板"
+                                    TextChanged="Input_Changed" AutomationProperties.AutomationId="SetupGitMirror" />
+                                <TextBox x:Name="ModelMirrorBox" Header="Hugging Face 镜像" TextChanged="Input_Changed" AutomationProperties.AutomationId="SetupModelMirror" />
+                                <TextBox x:Name="PipBox" Header="Python 包索引" TextChanged="Input_Changed" AutomationProperties.AutomationId="SetupPipIndex" />
+                                <TextBox x:Name="RepositoryBox" Header="自定义 ComfyUI 仓库（须包含锁定提交）"
+                                    TextChanged="Input_Changed" AutomationProperties.AutomationId="SetupRepository" />
+                                <TextBlock Text="这些设置仅用于本项目。修改后会重新检查安装内容。" Style="{StaticResource StudioBodyStyle}" />
+                            </StackPanel>
+                        </Expander>
+                    </StackPanel>
+                    </ContentControl>
+                </StackPanel>
+
+                <StackPanel x:Name="ReviewPanel" Visibility="Collapsed" Spacing="18">
+                    <StackPanel Spacing="7">
+                        <TextBlock Text="确认后，就可以开始安装。" Style="{StaticResource StudioHeadingStyle}" />
+                        <TextBlock x:Name="ReviewSummary" Style="{StaticResource StudioBodyStyle}" AutomationProperties.AutomationId="SetupReviewSummary" />
+                    </StackPanel>
+                    <ProgressBar x:Name="CheckProgress" IsIndeterminate="True" Visibility="Collapsed" AutomationProperties.AutomationId="SetupCheckProgress" />
+                    <Border Style="{StaticResource StudioPanelStyle}">
+                        <StackPanel Spacing="16">
+                            <TextBlock Text="即将准备" FontSize="18" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
+                            <TextBlock x:Name="PlanContents" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" />
+                            <Border BorderBrush="{ThemeResource StudioSeparatorBrush}" BorderThickness="0,1,0,0" Padding="0,14,0,0">
+                                <StackPanel Spacing="7">
+                                    <TextBlock x:Name="DownloadEstimate" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap" Foreground="{ThemeResource StudioTextBrush}" AutomationProperties.AutomationId="SetupDownloadEstimate" />
+                                    <TextBlock Text="这是可确定文件的剩余下载量；Python 依赖包会按需下载。" Style="{StaticResource StudioBodyStyle}" />
+                                    <TextBlock x:Name="ReuseSummary" Style="{StaticResource StudioBodyStyle}" />
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </Border>
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="磁盘空间" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
+                        <TextBlock x:Name="VolumeSummary" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="SetupVolumeSummary" />
+                    </StackPanel>
+                    <StackPanel x:Name="IssuesPanel" Spacing="8" Visibility="Collapsed">
+                        <TextBlock Text="检查结果" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
+                        <TextBlock x:Name="IssuesSummary" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="SetupPreflightIssues" />
+                        <Button Content="更换目录或来源" Click="EditLocation_Click" HorizontalAlignment="Left" AutomationProperties.AutomationId="SetupFixLocation" />
+                    </StackPanel>
+                </StackPanel>
+
+                <StackPanel x:Name="InstallingPanel" Visibility="Collapsed" Spacing="18">
+                    <StackPanel Spacing="7">
+                        <TextBlock x:Name="InstallingTitle" Text="正在准备创作环境。" Style="{StaticResource StudioHeadingStyle}" />
+                        <TextBlock x:Name="InstallationHelp" Style="{StaticResource StudioBodyStyle}" />
+                    </StackPanel>
+                    <Border Style="{StaticResource StudioPanelStyle}">
+                        <StackPanel Spacing="13">
+                            <TextBlock x:Name="CurrentOperation" FontSize="17" FontWeight="SemiBold" TextWrapping="Wrap" Foreground="{ThemeResource StudioTextBrush}" AutomationProperties.AutomationId="SetupCurrentOperation" />
+                            <ProgressBar x:Name="FileProgress" Minimum="0" Maximum="100" IsIndeterminate="True" AutomationProperties.AutomationId="SetupFileProgress" />
+                            <TextBlock x:Name="TransferDetails" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="SetupTransferDetails" />
+                            <TextBlock Text="进度条显示当前下载文件；安装依赖等步骤不计算整体百分比。" Style="{StaticResource StudioBodyStyle}" FontSize="12" />
+                        </StackPanel>
+                    </Border>
+                    <ItemsControl x:Name="StageList" AutomationProperties.AutomationId="SetupStageList">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid ColumnSpacing="12" Padding="4,10" BorderBrush="{ThemeResource StudioSeparatorBrush}" BorderThickness="0,0,0,1">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                    <TextBlock Text="{Binding Marker}" FontSize="17" Foreground="{ThemeResource StudioAccentBrush}" VerticalAlignment="Top" />
+                                    <StackPanel Grid.Column="1" Spacing="4">
+                                        <TextBlock Text="{Binding Title}" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" TextWrapping="Wrap" />
+                                        <TextBlock Text="{Binding Detail}" Style="{StaticResource StudioBodyStyle}" FontSize="12" />
+                                    </StackPanel>
+                                    <TextBlock Grid.Column="2" Text="{Binding State}" FontSize="12" Foreground="{ThemeResource StudioSecondaryBrush}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+
+                <StackPanel x:Name="CompletePanel" Visibility="Collapsed" Spacing="22">
+                    <StackPanel Spacing="8">
+                        <FontIcon Glyph="&#xE73E;" FontSize="32" Foreground="{ThemeResource StudioSuccessBrush}" HorizontalAlignment="Left" />
+                        <TextBlock Text="环境已准备好。" Style="{StaticResource StudioHeadingStyle}" />
+                        <TextBlock x:Name="CompletionSummary" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="SetupCompletionSummary" />
+                    </StackPanel>
+                    <Border Background="{ThemeResource StudioAccentSoftBrush}" CornerRadius="18" Padding="20,17">
+                        <TextBlock Text="点击「开始创作」，启动器会启动服务，确认连接正常后打开工作台。" Style="{StaticResource StudioBodyStyle}" />
+                    </Border>
+                    <StackPanel x:Name="MissingModelsPanel" Spacing="10" Visibility="Collapsed">
+                        <TextBlock Text="还有模型需要准备" FontSize="18" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
+                        <TextBlock x:Name="MissingModelsText" Style="{StaticResource StudioBodyStyle}" AutomationProperties.AutomationId="SetupMissingModels" />
+                        <Button x:Name="OpenModelsButton" Content="前往模型资源" Click="OpenModels_Click" HorizontalAlignment="Left" AutomationProperties.AutomationId="SetupOpenModels" />
+                    </StackPanel>
+                </StackPanel>
+            </StackPanel>
+        </ScrollViewer>
+
+        <Border Grid.Row="2" BorderBrush="{ThemeResource StudioSeparatorBrush}" BorderThickness="0,1,0,0" Padding="8,12,8,12">
+            <Grid RowSpacing="10">
+                <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                    <TextBlock x:Name="FooterHint" Style="{StaticResource StudioBodyStyle}" FontSize="12" VerticalAlignment="Center" AutomationProperties.AutomationId="SetupFooterHint" />
+                    <HyperlinkButton Grid.Column="1" Content="查看日志" Click="Logs_Click" Padding="4,3" AutomationProperties.AutomationId="SetupLogs" />
+                </Grid>
+                <Grid Grid.Row="1" ColumnSpacing="10">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                    <Button x:Name="BackButton" Content="上一步" Click="Back_Click" VerticalAlignment="Center" AutomationProperties.AutomationId="SetupBack" />
+                    <Button x:Name="SecondaryButton" Grid.Column="1" Content="我已有 ComfyUI" HorizontalAlignment="Right" VerticalAlignment="Center"
+                        Click="Secondary_Click" AutomationProperties.AutomationId="SetupSecondary" />
+                    <Button x:Name="PrimaryButton" Grid.Column="2" Content="安装完整环境" Click="Primary_Click"
+                        Style="{StaticResource StudioPrimaryButtonStyle}" AutomationProperties.AutomationId="SetupPrimary" />
+                </Grid>
+            </Grid>
+        </Border>
+    </Grid>
+</local:LauncherPage>

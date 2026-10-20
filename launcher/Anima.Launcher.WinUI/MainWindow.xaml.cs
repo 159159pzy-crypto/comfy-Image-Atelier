@@ -57,7 +57,7 @@ public sealed partial class MainWindow : Window
         app.State = State; // Pages resolve state via App.Shared during navigation.
         WireState();
 
-        GoToPage(0);
+        GoToPage(State.SetupActive ? 5 : 0);
         RootGrid.ActualThemeChanged += (_, _) => UpdateNavigation();
         RootGrid.SizeChanged += (_, e) => BrandCopy.Visibility = e.NewSize.Width < 720 ? Visibility.Collapsed : Visibility.Visible;
 
@@ -102,9 +102,10 @@ public sealed partial class MainWindow : Window
             StatusText.Foreground = ThemeBrush("StudioDangerBrush");
             StatusText.Text = ex.Message;
             ShowWindow();
-            if (Content?.XamlRoot is { } root) await Dialogs.Error(root, ex.Message);
+            if (!State.SetupActive && Content?.XamlRoot is { } root) await Dialogs.Error(root, ex.Message);
         });
         State.FieldsReloaded += () => DispatcherQueue.TryEnqueue(() => ApplyTheme());
+        State.SetupChanged += () => DispatcherQueue.TryEnqueue(UpdateSetupChrome);
     }
 
     // --- Navigation ---
@@ -123,17 +124,50 @@ public sealed partial class MainWindow : Window
 
     internal void GoToPage(int index)
     {
-        selectedPage = Math.Clamp(index, 0, 4);
+        if (index == 1)
+        {
+            if (State.Busy && !State.SetupActive)
+            {
+                State.SetStatus("请等待当前任务完成，再打开安装向导。");
+                return;
+            }
+            try { State.BeginSetup(); }
+            catch (Exception ex) { State.AppendLog(ex.Message); State.SetStatus(ex.Message); return; }
+            if (!State.SetupActive) return;
+            index = 5;
+        }
+        // Tray and background service actions cannot abandon a running wizard.
+        if (State.SetupActive && index != 3) index = 5;
+        selectedPage = Math.Clamp(index, 0, 5);
         var page = selectedPage switch
         {
             1 => typeof(Pages.EnvironmentPage),
             2 => typeof(Pages.ModelsPage),
             3 => typeof(Pages.LogsPage),
             4 => typeof(Pages.SettingsPage),
+            5 => typeof(Pages.SetupPage),
             _ => typeof(Pages.ServicesPage),
         };
         if (ContentFrame.CurrentSourcePageType != page) ContentFrame.Navigate(page);
         UpdateNavigation();
+        UpdateSetupChrome();
+    }
+
+    private void UpdateSetupChrome()
+    {
+        NormalNavigation.Visibility = State.SetupActive ? Visibility.Collapsed : Visibility.Visible;
+        SetupReturnButton.Visibility = State.SetupActive && selectedPage != 5 ? Visibility.Visible : Visibility.Collapsed;
+        TaskFooter.Visibility = State.SetupActive ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    internal void ShowSetupLogs() => GoToPage(3);
+    private void SetupReturn_Click(object sender, RoutedEventArgs e) => GoToPage(5);
+
+    internal void CancelSetup()
+    {
+        if (State.Busy) return;
+        State.SuspendSetup();
+        GoToPage(0);
     }
 
     internal Brush ThemeBrush(string key)
@@ -167,10 +201,11 @@ public sealed partial class MainWindow : Window
             var info = await State.DetectSystem();
             State.SystemInfoText = info;
             State.Reloaded();
-            State.OfferUpgradeIfNeeded();
+            await State.RefreshSetupCompletionAsync();
+            if (!State.SetupActive) State.OfferUpgradeIfNeeded();
             // Opening the launcher is read-only by default. Starting services is an
             // explicit primary action unless the user opted in to auto-start.
-            if (State.Config.SetupComplete && State.Config.StartOnLaunch && !State.Config.InstallPending && !State.FreshInstallRequested && !forceShow)
+            if (!State.SetupActive && State.Config.SetupComplete && State.Config.StartOnLaunch && !State.Config.InstallPending && !State.FreshInstallRequested && !forceShow)
                 await State.Run(async ct =>
                 {
                     await State.StartServicesAsync(ct);

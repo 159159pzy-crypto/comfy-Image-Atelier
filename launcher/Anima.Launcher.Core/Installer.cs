@@ -10,7 +10,7 @@ namespace Anima.Launcher.Core;
 public sealed record InstallJournal(string Root, string Stage, string Status, DateTime UpdatedUtc, string? Error = null);
 public sealed record NodeInstallPlan(Repository Repository, string Directory, bool PreserveExisting);
 
-public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloads downloads, Action<string> log, IProgress<DownloadProgress>? progress, Action<string>? stageChanged = null)
+public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloads downloads, Action<string> log, IProgress<DownloadProgress>? progress, Action<string>? stageChanged = null, Action<SetupProgress>? setupProgress = null)
 {
     public static IReadOnlyList<NodeInstallPlan> PlanNodes(string root, RuntimeManifest runtime)
     {
@@ -62,18 +62,26 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         await downloads.Fetch(name, Safety.MapSource(tool.Url, config), zip, tool.Size, tool.Sha256, progress, ct);
         return await ToolInstallation.InstallVerifiedArchive(runtime, tool, zip, ct);
     }
-    private async Task Stage(LauncherConfig config, string name, Func<Task> action)
+    private async Task Stage(LauncherConfig config, string stageId, string name, Func<Task> action)
     {
         stageChanged?.Invoke(name);
+        setupProgress?.Invoke(new(stageId, name, SetupStageStatus.Running));
         var file = Path.Combine(stateDir, "install-state.json");
-        JsonFile.Write(file, new InstallJournal(config.ComfyRoot, name, "running", DateTime.UtcNow)); log(name);
         try
         {
+            JsonFile.Write(file, new InstallJournal(config.ComfyRoot, name, "running", DateTime.UtcNow)); log(name);
             await action();
             InstallationPlanner.MarkStageComplete(config, manifest, stateDir, name);
             JsonFile.Write(file, new InstallJournal(config.ComfyRoot, name, "complete", DateTime.UtcNow));
+            setupProgress?.Invoke(new(stageId, name, SetupStageStatus.Complete));
         }
-        catch (Exception ex) { JsonFile.Write(file, new InstallJournal(config.ComfyRoot, name, "interrupted", DateTime.UtcNow, ex.Message)); throw; }
+        catch (Exception ex)
+        {
+            setupProgress?.Invoke(new(stageId, name + "：" + ex.Message,
+                ex is OperationCanceledException ? SetupStageStatus.Paused : SetupStageStatus.Failed));
+            JsonFile.Write(file, new InstallJournal(config.ComfyRoot, name, "interrupted", DateTime.UtcNow, ex.Message));
+            throw;
+        }
     }
     private async Task Clone(Repository repo, string target, LauncherConfig config, CancellationToken ct)
     {
@@ -253,12 +261,12 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             // Fail fast on a bad interpreter instead of at the first pip call.
             await Commands.Run(config.Python, ["--version"], config.ComfyRoot, log, ct, timeout: TimeSpan.FromSeconds(30));
         }
-        await Stage(config, "准备隔离安装工具", async () => { git = await ResolveGit(config, ct); if (fresh) uv = await Tool("uv", config, ct); });
+        await Stage(config, "tools", "准备隔离安装工具", async () => { git = await ResolveGit(config, ct); if (fresh) uv = await Tool("uv", config, ct); });
         var importedPins = "";
         if (fresh)
         {
-            await Stage(config, "拉取锁定版本的 ComfyUI", () => Clone(manifest.Comfy with { Url = config.CustomRepository.Length > 0 ? config.CustomRepository : manifest.Comfy.Url }, config.ComfyRoot, config, ct));
-            await Stage(config, "安装 Python 并创建独立虚拟环境", async () =>
+            await Stage(config, "comfy", "拉取锁定版本的 ComfyUI", () => Clone(manifest.Comfy with { Url = config.CustomRepository.Length > 0 ? config.CustomRepository : manifest.Comfy.Url }, config.ComfyRoot, config, ct));
+            await Stage(config, "python", "安装 Python 并创建独立虚拟环境", async () =>
             {
                 var env = Env(config);
                 await Commands.Run(uv!, ["python", "install", manifest.PythonVersion], stateDir, log, ct, env);
@@ -268,7 +276,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             });
             config.ManagedComfy = true;
             EnsureConstraints(config, importedPins); // PIP_CONSTRAINT is injected into every pip call; the file must exist first.
-            await Stage(config, "安装锁定 CUDA / PyTorch", async () =>
+            await Stage(config, "torch", "安装锁定 CUDA / PyTorch", async () =>
             {
                 await Pip(config, ["setuptools", "wheel"], ct);
                 var wheels = new List<string>();
@@ -280,7 +288,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
                 }
                 await Pip(config, wheels, ct);
             });
-            await Stage(config, "安装 ComfyUI 依赖", () => Pip(config, ["-r", Path.Combine(config.ComfyRoot, "requirements.txt")], ct));
+            await Stage(config, "dependencies", "安装 ComfyUI 依赖", () => Pip(config, ["-r", Path.Combine(config.ComfyRoot, "requirements.txt")], ct));
         }
         else
         {
@@ -299,7 +307,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             var repo = node.Repository;
             var target = node.Directory;
             if (node.PreserveExisting) { log($"保留已有节点 {repo.Id}：{target}；不升级、不改依赖。"); continue; }
-            await Stage(config, "安装节点 " + repo.Id, async () =>
+            await Stage(config, "nodes", "安装节点 " + repo.Id, async () =>
             {
                 await Clone(repo, target, config, ct);
                 var complete = Path.Combine(target, ".anima-dependencies-complete");
@@ -313,8 +321,9 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         }
         var assistantDirectory = PromptAssistantCompatibility.ResolveDirectory(config.ComfyRoot);
         if (assistantDirectory is not null)
-            await Stage(config, "验证提示词助手纯模板兼容", () => PromptAssistantCompatibility.CheckOrApply(config, stateDir, assistantDirectory, true, ct));
-        await Stage(config, "验证运行依赖", async () =>
+            await Stage(config, "nodes", "验证提示词助手纯模板兼容", () => PromptAssistantCompatibility.CheckOrApply(config, stateDir, assistantDirectory, true, ct));
+        setupProgress?.Invoke(new("nodes", "必要节点已准备就绪", SetupStageStatus.Complete));
+        await Stage(config, "validation", "验证运行依赖", async () =>
         {
             await Commands.Run(config.Python, ["-c", "import aiohttp,yaml,torch; print('PyTorch:',torch.__version__); print('GPU:',torch.cuda.is_available())" + (fresh ? "; assert torch.cuda.is_available()" : "")], config.ComfyRoot, log, ct);
             if (fresh) await Commands.Run(config.Python, ["-m", "pip", "check"], config.ComfyRoot, log, ct);

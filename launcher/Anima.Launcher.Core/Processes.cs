@@ -137,7 +137,7 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
                 args.AddRange(config.ComfyArguments);
                 var env = PrepareRuntimeEnvironment(config);
                 var process = await StartProcess(config.Python, args, config.ComfyRoot, "ComfyUI", ct, env);
-                await Ready(config.ComfyUrl + "/system_stats", process, ct);
+                await Ready(config.ComfyUrl + "/system_stats", process, ct, "ComfyUI", Path.Combine(stateDir, "logs", "ComfyUI.log"));
             }
             var nodes = await Json(config.ComfyUrl + "/object_info", ct) ?? throw new IOException("ComfyUI 节点清单不可读取。");
             // The v2 graph keeps SeedVR2, RTX and face refinement in optional
@@ -190,7 +190,7 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
                 var argv = WebUiArguments(config, resourceFile, nodeDirectories);
                 if (shutdownToken is not null) { argv.Add("--shutdown-token"); argv.Add(shutdownToken); }
                 var process = await StartProcess(config.Python, argv, config.AppRoot, "WebUI", ct, PrepareRuntimeEnvironment(config), shutdownToken);
-                await Ready(config.WebUrl + "/api/launcher-health", process, ct);
+                await Ready(config.WebUrl + "/api/launcher-health", process, ct, "WebUI", Path.Combine(stateDir, "logs", "WebUI.log"));
             }
             var status = await Json(config.WebUrl + "/api/status", ct);
             if (status is null || !status.Value.TryGetProperty("online", out var online) || !online.GetBoolean()) throw new IOException("工作台已启动，但尚未连接 ComfyUI，请查看日志。");
@@ -306,29 +306,44 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
         // Otherwise closing the tray would break Python stdout/stderr on the next write.
         const string script = "import subprocess,sys,json,os; f=open(sys.argv[1],'ab',buffering=0); p=subprocess.Popen(json.loads(sys.argv[2]),cwd=sys.argv[3],stdin=subprocess.DEVNULL,stdout=f,stderr=f,creationflags=0x08000000); print(p.pid)";
         var pid = await Commands.Run(exe, ["-c", script, logPath, JsonSerializer.Serialize(new[] { exe }.Concat(args)), cwd], cwd, null, ct, env);
-        Process process;
+        Process? process = null;
+        long started;
         try
         {
             if (!int.TryParse(pid.Trim(), out var id)) throw new InvalidDataException("服务引导未返回进程号。");
             process = Process.GetProcessById(id);
-            var _ = process.StartTime; // Throws if the child already exited; keep inside the guard.
+            started = process.StartTime.ToUniversalTime().Ticks;
+            if (process.HasExited) throw StartupFailure(process, role, logPath);
         }
-        catch
+        catch (Exception ex)
         {
+            var failure = StartupFailure(process, role, logPath, ex);
             TryKill(pid.Trim());
-            throw;
+            process?.Dispose();
+            throw failure;
         }
         string module;
         try { module = process.MainModule?.FileName ?? exe; } catch { module = exe; }
         log($"{role} 已启动；日志：{logPath}");
-        owned.Add(process); records.Add(new(process.Id, process.StartTime.ToUniversalTime().Ticks, module, role, shutdownToken)); Save();
+        // The child may exit while its module is inspected; never re-read StartTime
+        // outside the startup guard and replace the useful service failure with a runtime error.
+        owned.Add(process); records.Add(new(process.Id, started, module, role, shutdownToken)); Save();
         return process;
     }
     private static void TryKill(string pidText)
     {
         try { if (int.TryParse(pidText, out var id) && Process.GetProcessById(id) is { HasExited: false } p) p.Kill(true); } catch { }
     }
-    private static async Task Ready(string url, Process process, CancellationToken ct)
+    private static IOException StartupFailure(Process? process, string role, string logPath, Exception? cause = null)
+    {
+        var exit = "";
+        // GetProcessById attaches to the bootstrap child. Once it exits, Windows/.NET
+        // may know it exited without retaining an exit code for this Process object.
+        try { if (process is not null) exit = $"，退出码 {process.ExitCode}"; }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+        return new IOException($"{role} 服务启动失败{exit}；请查看日志：{logPath}。", cause);
+    }
+    private static async Task Ready(string url, Process process, CancellationToken ct, string role, string logPath)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromMinutes(6));
@@ -337,7 +352,7 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
             while (true)
             {
                 timeout.Token.ThrowIfCancellationRequested();
-                if (process.HasExited) throw new IOException($"服务启动失败，退出码 {process.ExitCode}；请查看日志。");
+                if (process.HasExited) throw StartupFailure(process, role, logPath);
                 // A slow first request may happen while custom nodes load. The overall
                 // startup deadline, rather than a single HTTP request, controls readiness.
                 try { if (await Json(url, timeout.Token) is not null) return; }

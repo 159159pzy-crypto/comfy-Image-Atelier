@@ -7,6 +7,14 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using Anima.Launcher.Core;
 
+if (args.FirstOrDefault() == "--exit-fixture")
+{
+    Console.WriteLine("ready");
+    Console.Out.Flush();
+    Console.ReadLine();
+    Environment.Exit(23);
+    return;
+}
 if (args.FirstOrDefault() == "--http-fixture")
 {
     await ReleaseRecoveryTests.ServeFixture(args);
@@ -55,6 +63,19 @@ async Task ThrowsType<T>(Func<Task> operation, string label) where T : Exception
     catch (T) { Check(true, label); return; }
     throw new Exception("Expected " + typeof(T).Name + ": " + label);
 }
+if (args.Contains("--startup-only"))
+{
+    count += await ServiceStartupTests.Run(work);
+    Console.WriteLine($"{count} service startup checks passed; artifacts: {work}");
+    return;
+}
+count += await OnboardingTests.Run(work, manifest);
+if (args.Contains("--onboarding-only"))
+{
+    Console.WriteLine($"{count} onboarding checks passed; artifacts: {work}");
+    return;
+}
+count += await ServiceStartupTests.Run(work);
 count += await ReleaseRecoveryTests.Run(work, manifest);
 count += await PromptAssistantTests.Run(work);
 if (args.Contains("--recovery-only"))

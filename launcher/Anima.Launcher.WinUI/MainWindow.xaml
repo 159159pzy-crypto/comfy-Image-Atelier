@@ -42,7 +42,7 @@
                         <TextBlock Text="创作，从这里开始" FontSize="10" Foreground="{ThemeResource StudioSecondaryBrush}" />
                     </StackPanel>
                 </StackPanel>
-                <Border Grid.Column="1" Background="{ThemeResource StudioMutedBrush}" BorderBrush="{ThemeResource StudioSeparatorBrush}" BorderThickness="1" CornerRadius="25" Padding="3">
+                <Border x:Name="NormalNavigation" Grid.Column="1" Background="{ThemeResource StudioMutedBrush}" BorderBrush="{ThemeResource StudioSeparatorBrush}" BorderThickness="1" CornerRadius="25" Padding="3">
                     <StackPanel Orientation="Horizontal" Spacing="2">
                         <Button x:Name="HomeNav" Content="概览" Tag="0" Style="{StaticResource StudioNavButtonStyle}" Click="Nav_Click" />
                         <Button x:Name="EnvironmentNav" Content="安装环境" Tag="1" Style="{StaticResource StudioNavButtonStyle}" Click="Nav_Click" />
@@ -53,10 +53,11 @@
                         </Button>
                     </StackPanel>
                 </Border>
+                <Button x:Name="SetupReturnButton" Grid.Column="1" Content="返回安装向导" Click="SetupReturn_Click" Visibility="Collapsed" />
             </Grid>
         </Border>
         <Frame x:Name="ContentFrame" Grid.Row="2" Margin="16,0,16,12" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
-        <Border Grid.Row="3" Background="{ThemeResource StudioChromeBrush}" BorderBrush="{ThemeResource StudioSeparatorBrush}" BorderThickness="1" CornerRadius="22" Margin="16,0,16,16" Padding="18,12">
+        <Border x:Name="TaskFooter" Grid.Row="3" Background="{ThemeResource StudioChromeBrush}" BorderBrush="{ThemeResource StudioSeparatorBrush}" BorderThickness="1" CornerRadius="22" Margin="16,0,16,16" Padding="18,12">
             <Grid RowSpacing="8" ColumnSpacing="12">
                 <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                 <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>

@@ -142,12 +142,8 @@ public sealed partial class ServicesPage : LauncherPage
     }
     private void Configure_Click(object sender, RoutedEventArgs e)
     {
-        if (string.IsNullOrWhiteSpace(State.Config.ComfyRoot) && State.PendingEnvironmentFields is null)
-        {
-            var c = State.Config;
-            State.PendingEnvironmentFields = new("", "", c.SourceId, c.GitMirror, c.ModelMirror, c.PipIndex, c.CustomRepository, false);
-        }
         Shell.GoToPage(1);
+        if (string.IsNullOrWhiteSpace(State.Config.ComfyRoot)) State.SetSetupMode(false);
     }
 
     private async void Folder_Click(object sender, RoutedEventArgs e)
