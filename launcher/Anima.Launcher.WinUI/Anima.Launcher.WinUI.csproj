@@ -27,6 +27,7 @@
   <ItemGroup>
     <ProjectReference Include="../Anima.Launcher.Core/Anima.Launcher.Core.csproj" />
     <EmbeddedResource Include="../manifests/*.json" Exclude="../manifests/model-profiles.json" />
+    <EmbeddedResource Include="../../anima_webui/tagger-models.json" LogicalName="Anima.Launcher.tagger-models.json" />
     <EmbeddedResource Include="../manifests/model-profiles.json" Condition="'$(ModelProfilesPath)' == ''" />
     <EmbeddedResource Include="$(ModelProfilesPath)" Condition="'$(ModelProfilesPath)' != ''" LogicalName="Anima.Launcher.model-profiles.json" />
     <EmbeddedResource Include="../scripts/probe_comfy.py" />

@@ -8,6 +8,7 @@ namespace Anima.Launcher;
 /// <summary>Edits the existing plugin through its local API; stores no separate config.</summary>
 public sealed class PromptAssistantPanel : UserControl
 {
+    private readonly ComboBox modePicker = new() { Header = "配置用途", ItemsSource = new[] { "文本重写", "图像反推" }, SelectedIndex = 0, HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly ComboBox services = new() { HorizontalAlignment = HorizontalAlignment.Stretch, DisplayMemberPath = "Name", PlaceholderText = "先加载服务与模板" };
     private readonly ComboBox models = new() { HorizontalAlignment = HorizontalAlignment.Stretch, DisplayMemberPath = "Name", PlaceholderText = "此服务已添加的 LLM 模型" };
     private readonly ComboBox templates = new() { HorizontalAlignment = HorizontalAlignment.Stretch, DisplayMemberPath = "Name", PlaceholderText = "选择系统提示词" };
@@ -23,12 +24,13 @@ public sealed class PromptAssistantPanel : UserControl
     {
         body.Children.Add(new TextBlock
         {
-            Text = "连接当前 ComfyUI 的 Prompt Assistant。服务与系统提示词由插件保存，Anima / Krea 2 共用；API Key 沿用插件的存储方式。",
+            Text = "连接当前 ComfyUI 的 Prompt Assistant。文本重写与图像反推共用服务，分别管理模型与系统提示词。配置由插件保存，Anima / Krea 2 共用。",
             TextWrapping = TextWrapping.Wrap,
         });
         body.Children.Add(Row(Button("加载 / 刷新", async () => await Run(async (client, ct) => await Reload(client, ct))),
-            Button("检查 / 修复纯模板支持", Repair)));
-        body.Children.Add(new TextBlock { Text = "LLM 服务", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+            Button("检查 / 修复重写纯模板支持", Repair)));
+        body.Children.Add(modePicker);
+        body.Children.Add(new TextBlock { Text = "共用服务", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
         body.Children.Add(services);
         body.Children.Add(serviceDetail);
         body.Children.Add(Row(Action("新增服务", () => ServiceEditor(null)), Action("编辑服务", () => ServiceEditor(SelectedService())),
@@ -54,6 +56,17 @@ public sealed class PromptAssistantPanel : UserControl
             serviceDetail.Text = service is null ? "" : $"{service.Type} · {service.BaseUrl}\nAPI Key：{(service.HasApiKey ? "已配置" : "未配置")}；模型参数：{(service.AdvancedParameters ? "启用" : "使用服务默认值")}";
         };
         templates.SelectionChanged += (_, _) => templateDetail.Text = (templates.SelectedItem as AssistantTemplate)?.Content ?? "";
+        modePicker.SelectionChanged += async (_, _) =>
+        {
+            models.PlaceholderText = Mode == AssistantMode.Reverse ? "此服务已添加的 VLM 视觉模型" : "此服务已添加的 LLM 模型";
+            models.ItemsSource = null;
+            templates.ItemsSource = null;
+            templateDetail.Text = "";
+            if (!loaded) return;
+            loaded = false;
+            UpdateActions();
+            await Run(async (client, ct) => await Reload(client, ct));
+        };
         UpdateActions();
     }
 
@@ -76,6 +89,7 @@ public sealed class PromptAssistantPanel : UserControl
         return panel;
     }
     private void UpdateActions() { foreach (var action in loadedActions) action.IsEnabled = loaded; }
+    private AssistantMode Mode => modePicker.SelectedIndex == 1 ? AssistantMode.Reverse : AssistantMode.Rewrite;
     private AssistantService? SelectedService() => services.SelectedItem as AssistantService;
     private AssistantTemplate? SelectedTemplate() => templates.SelectedItem as AssistantTemplate;
 
@@ -92,7 +106,7 @@ public sealed class PromptAssistantPanel : UserControl
             if (stats is null || !ServiceManager.SameRoot(stats.Value, config.ComfyRoot))
                 throw new InvalidOperationException("此端口的 ComfyUI 与启动器所选目录不一致，请先检查环境并启动对应服务。");
             using var client = new PromptAssistantClient(config.ComfyUrl);
-            await client.Connect(CancellationToken.None);
+            await client.Connect(CancellationToken.None, Mode);
             if (loaded && loadedEnvironment != environment)
             {
                 await Reload(client, CancellationToken.None);
@@ -112,17 +126,21 @@ public sealed class PromptAssistantPanel : UserControl
         serviceId ??= SelectedService()?.Id;
         templateId ??= SelectedTemplate()?.Id;
         var selectedModel = (models.SelectedItem as AssistantModel)?.Name;
-        var serviceList = await client.Services(ct);
-        var templateList = await client.Templates(ct);
+        var serviceList = await client.Services(ct, Mode);
+        var templateList = await client.Templates(ct, Mode);
         services.ItemsSource = serviceList;
         services.SelectedItem = serviceList.FirstOrDefault(item => item.Id == serviceId) ?? serviceList.FirstOrDefault();
         models.SelectedItem = SelectedService()?.Models.FirstOrDefault(item => item.Name == selectedModel) ?? SelectedService()?.Models.FirstOrDefault();
         templates.ItemsSource = templateList;
         templates.SelectedItem = templateList.FirstOrDefault(item => item.Id == templateId) ?? templateList.FirstOrDefault();
         loaded = true;
-        status.Text = client.SupportsTemplateOnly
-            ? "已加载。保存后，在工作台重写区刷新服务与模板即可选用。"
-            : "已加载配置，但运行中的插件尚不支持纯模板重写。请停止 ComfyUI 后点击“检查 / 修复纯模板支持”，再重新启动。";
+        status.Text = Mode == AssistantMode.Reverse
+            ? client.SupportsVision
+                ? "已加载图像反推配置。请添加支持图像输入的 VLM 模型，保存后在反推台刷新服务与模板。"
+                : "已加载配置，但运行中的插件缺少兼容的图像反推节点。请更新 Prompt Assistant 并重新启动 ComfyUI。"
+            : client.SupportsTemplateOnly
+                ? "已加载。保存后，在工作台重写区刷新服务与模板即可选用。"
+                : "已加载配置，但运行中的插件尚不支持纯模板重写。请停止 ComfyUI 后点击“检查 / 修复重写纯模板支持”，再重新启动。";
     }
 
     private async Task Repair()
@@ -186,7 +204,7 @@ public sealed class PromptAssistantPanel : UserControl
         clear.Unchecked += (_, _) => key.IsEnabled = true;
         var fields = new StackPanel { Spacing = 10 };
         foreach (var control in new UIElement[] { name, type, url, key, clear, advanced }) fields.Children.Add(control);
-        await ShowEditor(selected is null ? "新增 LLM 服务" : "编辑 LLM 服务", fields, async () =>
+        await ShowEditor(selected is null ? "新增共用服务" : "编辑共用服务", fields, async () =>
         {
             var id = await client.SaveService(selected?.Id, type.SelectedItem as string ?? "openai_compatible", name.Text, url.Text, key.Password, clear.IsChecked == true, advanced.IsChecked == true, ct);
             key.Password = "";
@@ -220,7 +238,11 @@ public sealed class PromptAssistantPanel : UserControl
             var fetchStatus = new TextBlock { TextWrapping = TextWrapping.Wrap };
             var fetch = Button("从供应商获取模型列表", async () =>
             {
-                try { available.ItemsSource = await client.RemoteModels(service.Id, ct); fetchStatus.Text = "已获取可用模型。"; }
+                try
+                {
+                    available.ItemsSource = await client.RemoteModels(service.Id, ct, Mode);
+                    fetchStatus.Text = Mode == AssistantMode.Reverse ? "已获取模型列表，请选择支持图像输入的视觉模型。" : "已获取可用模型。";
+                }
                 catch (Exception error) { fetchStatus.Text = error.Message; }
             });
             available.SelectionChanged += (_, _) => { if (available.SelectedItem is string modelName) name.Text = modelName; };
@@ -228,9 +250,9 @@ public sealed class PromptAssistantPanel : UserControl
         }
         fields.Children.Add(temperature); fields.Children.Add(topP); fields.Children.Add(tokens);
         if (!service.AdvancedParameters) fields.Children.Add(new TextBlock { Text = "该服务尚未启用模型参数；可在编辑服务中开启。", TextWrapping = TextWrapping.Wrap });
-        await ShowEditor(existing ? "编辑模型参数" : "添加 LLM 模型", fields, async () =>
+        await ShowEditor(existing ? "编辑模型参数" : Mode == AssistantMode.Reverse ? "添加 VLM 视觉模型" : "添加 LLM 模型", fields, async () =>
         {
-            await client.SaveModel(service.Id, name.Text, temperature.Value, topP.Value, double.IsFinite(tokens.Value) ? (int)tokens.Value : 0, existing, ct);
+            await client.SaveModel(service.Id, name.Text, temperature.Value, topP.Value, double.IsFinite(tokens.Value) ? (int)tokens.Value : 0, existing, ct, Mode);
             await Reload(client, ct, serviceId: service.Id);
         });
     });
@@ -239,7 +261,7 @@ public sealed class PromptAssistantPanel : UserControl
     {
         if (SelectedService() is not { } service || models.SelectedItem is not AssistantModel model) { status.Text = "请先选择模型。"; return; }
         if (!await Dialogs.ConfirmCancel(XamlRoot, "删除模型", $"从“{service.Name}”删除模型“{model.Name}”？", "删除")) return;
-        await client.DeleteModel(service.Id, model.Name, ct);
+        await client.DeleteModel(service.Id, model.Name, ct, Mode);
         await Reload(client, ct, serviceId: service.Id);
     });
 
@@ -250,10 +272,12 @@ public sealed class PromptAssistantPanel : UserControl
         var content = new TextBox { Header = "系统提示词", Text = selected?.Content ?? "", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 230 };
         var fields = new StackPanel { Spacing = 10 };
         fields.Children.Add(name); fields.Children.Add(category); fields.Children.Add(content);
-        fields.Children.Add(new TextBlock { Text = "按原文发送所选系统提示词；语言与重写要求由此模板决定。", TextWrapping = TextWrapping.Wrap });
+        fields.Children.Add(new TextBlock { Text = Mode == AssistantMode.Reverse
+            ? "此模板决定 AI 如何描述图片，包括输出语言、画面细节和提示词格式。"
+            : "按原文发送所选系统提示词；语言与重写要求由此模板决定。", TextWrapping = TextWrapping.Wrap });
         await ShowEditor(selected is null ? "新增系统提示词" : "编辑系统提示词", fields, async () =>
         {
-            var id = await client.SaveTemplate(selected?.Id, name.Text, content.Text, category.Text, ct, selected);
+            var id = await client.SaveTemplate(selected?.Id, name.Text, content.Text, category.Text, ct, selected, Mode);
             await Reload(client, ct, templateId: id);
         });
     });
@@ -261,7 +285,7 @@ public sealed class PromptAssistantPanel : UserControl
     private Task CopyTemplate() => Run(async (client, ct) =>
     {
         if (SelectedTemplate() is not { } template) { status.Text = "请先选择模板。"; return; }
-        var id = await client.CopyTemplate(template.Id, ct);
+        var id = await client.CopyTemplate(template.Id, ct, Mode);
         await Reload(client, ct, templateId: id);
     });
 
@@ -269,7 +293,7 @@ public sealed class PromptAssistantPanel : UserControl
     {
         if (SelectedTemplate() is not { } template) { status.Text = "请先选择模板。"; return; }
         if (!await Dialogs.ConfirmCancel(XamlRoot, "删除系统提示词", $"删除模板“{template.Name}”？使用此模板的工作台需要重新选择。", "删除")) return;
-        await client.DeleteTemplate(template.Id, ct);
+        await client.DeleteTemplate(template.Id, ct, Mode);
         await Reload(client, ct);
     });
 }

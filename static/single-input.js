@@ -11,8 +11,7 @@ function singleWorkbenchInputBlocked() {
 
 function singleWorkbenchHideDrop() {
   singleWorkbenchState.inputDragDepth = 0;
-  const overlay = document.getElementById("singleDropOverlay");
-  if (overlay) overlay.hidden = true;
+  document.getElementById("singleInputDropZone")?.classList.toggle("is-dragging", false);
 }
 
 function singleWorkbenchCanReceiveInput() {
@@ -56,7 +55,7 @@ function singleWorkbenchRenderInput() {
     : state.inputBusy === "restore" ? "正在读取参考图…"
       : state.inputError || (value ? `${value.filename || "参考图"} · ${value.width} × ${value.height}`
         : id ? "参考图不可用，请重新添加或移除后生成。"
-          : "拖入或粘贴图片，自动切换为图生图。PNG / JPEG / WebP，最大 20 MiB。");
+          : "拖入此框，或点击此框后粘贴，自动切换图生图。PNG / JPEG / WebP，最大 20 MiB。");
   if (!singleWorkbenchCanReceiveInput()) singleWorkbenchHideDrop();
   if (typeof updateGenerationAvailability === "function") updateGenerationAvailability();
 }
@@ -184,17 +183,57 @@ function singleWorkbenchDragHasFiles(event) {
     || Array.from(data.items || []).some(item => item.kind === "file")));
 }
 
+/* Each image destination owns its events. Page-level guards never upload files. */
+function bindImageInputZone(zone, { canReceive, accept, onHide = () => {} }) {
+  if (!zone) return;
+  let depth = 0;
+  const hide = () => { depth = 0; zone.classList.toggle("is-dragging", false); onHide(); };
+  zone.addEventListener("click", event => {
+    if (!event.target.closest?.("button, input, select, textarea, a, label")) zone.focus();
+  });
+  zone.addEventListener("paste", event => {
+    if (!canReceive()) return;
+    const files = Array.from(event.clipboardData?.items || [])
+      .filter(item => item.kind === "file" && item.type.startsWith("image/"))
+      .map(item => item.getAsFile()).filter(Boolean);
+    if (!files.length) return;
+    event.preventDefault(); event.stopPropagation();
+    void accept(files);
+  });
+  zone.addEventListener("dragenter", event => {
+    if (!canReceive() || !singleWorkbenchDragHasFiles(event)) return;
+    event.preventDefault(); event.stopPropagation(); depth++;
+    zone.classList.toggle("is-dragging", true);
+  });
+  zone.addEventListener("dragover", event => {
+    if (!canReceive()) { hide(); return; }
+    if (!singleWorkbenchDragHasFiles(event)) return;
+    event.preventDefault(); event.stopPropagation();
+    event.dataTransfer.dropEffect = "copy";
+    depth = Math.max(1, depth); zone.classList.toggle("is-dragging", true);
+  });
+  zone.addEventListener("dragleave", () => { if (--depth <= 0) hide(); });
+  zone.addEventListener("drop", event => {
+    hide();
+    if (!canReceive() || !singleWorkbenchDragHasFiles(event)) return;
+    event.preventDefault(); event.stopPropagation();
+    void accept(event.dataTransfer.files);
+  });
+  document.addEventListener("dragend", hide);
+  document.addEventListener("keydown", event => { if (event.key === "Escape") hide(); });
+  document.addEventListener("visibilitychange", () => { if (document.hidden) hide(); });
+  window.addEventListener("blur", hide);
+  return hide;
+}
+
 function initializeSingleInput() {
   const state = singleWorkbenchState;
   if (state.inputInitialized) return;
   state.inputInitialized = true;
-  const overlay = document.createElement("div");
-  overlay.id = "singleDropOverlay";
-  overlay.className = "single-drop-overlay";
-  overlay.hidden = true;
-  overlay.setAttribute("aria-hidden", "true");
-  overlay.innerHTML = `<div class="single-drop-content"><div class="single-drop-icon"><svg viewBox="0 0 128 108" aria-hidden="true"><rect x="14" y="15" width="47" height="57" rx="12" fill="#9de3e9" transform="rotate(-19 38 44)"/><path d="m31 29 9 26m-17-9 26-9" stroke="white" stroke-width="4"/><rect x="66" y="21" width="47" height="57" rx="10" fill="#689bff" transform="rotate(16 89 50)"/><path d="m79 36 24 7m-26 1 20 6m-22 2 13 4" stroke="white" stroke-width="3"/><rect x="43" y="52" width="51" height="47" rx="13" fill="#3860ff"/><circle cx="76" cy="66" r="5" fill="white"/><path d="m51 87 9-13 9 10 5-6 10 9" fill="none" stroke="white" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round"/></svg></div><strong class="single-drop-title">松开以添加参考图</strong><span class="single-drop-hint">一次一张，PNG / JPEG / WebP，最大 20 MiB</span></div>`;
-  document.body.append(overlay);
+  bindImageInputZone(document.getElementById("singleInputDropZone"), {
+    canReceive: singleWorkbenchCanReceiveInput, accept: singleWorkbenchAcceptInput,
+    onHide: () => { state.inputDragDepth = 0; },
+  });
   document.getElementById("singleInputUpload").addEventListener("change", event => {
     const files = Array.from(event.target.files || []);
     event.target.value = "";
@@ -209,41 +248,14 @@ function initializeSingleInput() {
     schedulePersist();
     toast("已按原图尺寸设置，取 8 的倍数");
   });
-  document.addEventListener("paste", event => {
-    if (!singleWorkbenchCanReceiveInput()) return;
-    const files = Array.from(event.clipboardData?.items || [])
-      .filter(item => item.kind === "file" && item.type.startsWith("image/"))
-      .map(item => item.getAsFile()).filter(Boolean);
-    if (!files.length) return;
-    event.preventDefault();
-    void singleWorkbenchAcceptInput(files);
-  });
-  document.addEventListener("dragenter", event => {
-    if (!singleWorkbenchCanReceiveInput() || !singleWorkbenchDragHasFiles(event)) return;
-    event.preventDefault();
-    state.inputDragDepth = (state.inputDragDepth || 0) + 1;
-    overlay.hidden = false;
-  });
   document.addEventListener("dragover", event => {
-    if (!singleWorkbenchCanReceiveInput()) { singleWorkbenchHideDrop(); return; }
     if (!singleWorkbenchDragHasFiles(event)) return;
     event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
-    state.inputDragDepth = Math.max(1, state.inputDragDepth || 0);
-    overlay.hidden = false;
-  });
-  document.addEventListener("dragleave", event => {
-    if (!state.inputDragDepth) return;
-    state.inputDragDepth = Math.max(0, state.inputDragDepth - 1);
-    if (!state.inputDragDepth || (event.relatedTarget === null
-      && (event.target === document.documentElement || event.target === document))) singleWorkbenchHideDrop();
+    event.dataTransfer.dropEffect = "none";
   });
   document.addEventListener("drop", event => {
-    const accept = singleWorkbenchCanReceiveInput() && singleWorkbenchDragHasFiles(event);
     singleWorkbenchHideDrop();
-    if (!accept) return;
-    event.preventDefault();
-    void singleWorkbenchAcceptInput(event.dataTransfer.files);
+    if (singleWorkbenchDragHasFiles(event)) event.preventDefault();
   });
   document.addEventListener("dragend", singleWorkbenchHideDrop);
   document.addEventListener("keydown", event => { if (event.key === "Escape") singleWorkbenchHideDrop(); });

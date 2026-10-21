@@ -79,8 +79,8 @@ function singleWorkbenchBuild() {
     field("prompt_processing." + stage + ".user_prompt", "附加指令", "textarea") +
     (stage === "oc" ? field("prompt_processing.oc.character", "角色") + field("prompt_processing.oc.features", "角色特征", "textarea") : ""), "prompt", stage === "oc" ? "singleOcSection" : "singleExpandSection");
   let html = '<section id="singleInputSection" class="control-section single-reference">' +
-    '<div class="single-reference-heading"><label class="button ghost compact single-upload-button">＋ 添加参考图<input id="singleInputUpload" class="sr-only" type="file" accept="image/png,image/jpeg,image/webp"></label><span id="singleInputStatus" class="field-hint" role="status">拖入或粘贴图片，自动切换图生图</span></div>' +
-    '<img id="singleInputPreview" alt="图生图参考图片" hidden>' +
+    '<div id="singleInputDropZone" class="image-input-zone" tabindex="0" role="group" aria-label="图生图参考图识别框" aria-describedby="singleInputStatus"><div class="single-reference-heading"><label class="button ghost compact single-upload-button">＋ 添加参考图<input id="singleInputUpload" class="sr-only" type="file" accept="image/png,image/jpeg,image/webp"></label><span id="singleInputStatus" class="field-hint" role="status">将图片拖入此框，或点击此框后粘贴，自动切换图生图</span></div>' +
+    '<img id="singleInputPreview" alt="图生图参考图片" hidden></div>' +
     '<div class="single-inline-actions"><button id="singleUseInputSize" type="button" class="button ghost compact" hidden>使用原图尺寸</button><button id="singleInputRemove" type="button" class="button ghost compact" hidden>移除参考图</button></div>' +
     '<div id="singleInputFields" class="single-advanced-grid" hidden>' + number("denoise", "重绘强度", 0, 1, .01) + field("resize_mode", "尺寸适配", "text", [["crop", "填满并裁切"], ["pad", "适应并留边"], ["stretch", "拉伸"]]) + '<p class="field-hint wide">强度越低越保留原图；较高强度和后续二次采样会进一步改变画面。强度为 0 时基础阶段仅重建原图，后处理仍按配置执行。</p></div></section>' +
     '<section class="control-section single-prompt-section"><div class="section-heading"><h2>提示词</h2><span>描述你的下一张作品</span></div>' +

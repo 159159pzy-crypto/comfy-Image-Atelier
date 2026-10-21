@@ -1,0 +1,349 @@
+{
+  "schemaVersion": 1,
+  "models": [
+    {
+      "id": "tagger-wd-eva02-large-tagger-v3",
+      "name": "wd-eva02-large-tagger-v3",
+      "group": "本地反推模型（可选）",
+      "category": "wd_taggers",
+      "relativePath": "wd-eva02-large-tagger-v3",
+      "aliases": [],
+      "size": 1261105106,
+      "sha256": "",
+      "urls": [],
+      "license": "apache-2.0",
+      "licenseUrl": "https://huggingface.co/SmilingWolf/wd-eva02-large-tagger-v3/blob/b25b82a03f7282e41aa2f257a52c7583b710bd1c/README.md",
+      "sourceUrl": "https://huggingface.co/SmilingWolf/wd-eva02-large-tagger-v3",
+      "revision": "b25b82a03f7282e41aa2f257a52c7583b710bd1c",
+      "recommended": false,
+      "files": [
+        {
+          "path": "config.json",
+          "size": 634,
+          "sha256": "1db05aefb1a245533818e33bea22852300ac647a64636854095d1a313cd2e9dc",
+          "urls": [
+            "https://huggingface.co/SmilingWolf/wd-eva02-large-tagger-v3/resolve/b25b82a03f7282e41aa2f257a52c7583b710bd1c/config.json"
+          ]
+        },
+        {
+          "path": "model.safetensors",
+          "size": 1260796004,
+          "sha256": "74f05b0aad869d9f91fbc597bc8d157d98abdead573d5c23509a195dbb8a7ef5",
+          "urls": [
+            "https://huggingface.co/SmilingWolf/wd-eva02-large-tagger-v3/resolve/b25b82a03f7282e41aa2f257a52c7583b710bd1c/model.safetensors"
+          ]
+        },
+        {
+          "path": "selected_tags.csv",
+          "size": 308468,
+          "sha256": "298633d94d0031d2081c0893f29c82eab7f0df00b08483ba8f29d1e979441217",
+          "urls": [
+            "https://huggingface.co/SmilingWolf/wd-eva02-large-tagger-v3/resolve/b25b82a03f7282e41aa2f257a52c7583b710bd1c/selected_tags.csv"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tagger-wd-vit-large-tagger-v3",
+      "name": "wd-vit-large-tagger-v3",
+      "group": "本地反推模型（可选）",
+      "category": "wd_taggers",
+      "relativePath": "wd-vit-large-tagger-v3",
+      "aliases": [],
+      "size": 1260719892,
+      "sha256": "",
+      "urls": [],
+      "license": "apache-2.0",
+      "licenseUrl": "https://huggingface.co/SmilingWolf/wd-vit-large-tagger-v3/blob/ae469aa2e4706a3af08d3673cf73a11d1add314c/README.md",
+      "sourceUrl": "https://huggingface.co/SmilingWolf/wd-vit-large-tagger-v3",
+      "revision": "ae469aa2e4706a3af08d3673cf73a11d1add314c",
+      "recommended": false,
+      "files": [
+        {
+          "path": "config.json",
+          "size": 708,
+          "sha256": "11715cd7c3f451eff94c26b4e6dd7cc8dc60392605f2ebdb28ec49a85f6fddd6",
+          "urls": [
+            "https://huggingface.co/SmilingWolf/wd-vit-large-tagger-v3/resolve/ae469aa2e4706a3af08d3673cf73a11d1add314c/config.json"
+          ]
+        },
+        {
+          "path": "model.safetensors",
+          "size": 1260410716,
+          "sha256": "fbfaf059bc61a0af74cea0e590c5533d01956f50adf293436783a241d7964bbb",
+          "urls": [
+            "https://huggingface.co/SmilingWolf/wd-vit-large-tagger-v3/resolve/ae469aa2e4706a3af08d3673cf73a11d1add314c/model.safetensors"
+          ]
+        },
+        {
+          "path": "selected_tags.csv",
+          "size": 308468,
+          "sha256": "298633d94d0031d2081c0893f29c82eab7f0df00b08483ba8f29d1e979441217",
+          "urls": [
+            "https://huggingface.co/SmilingWolf/wd-vit-large-tagger-v3/resolve/ae469aa2e4706a3af08d3673cf73a11d1add314c/selected_tags.csv"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tagger-wd-vit-tagger-v3",
+      "name": "wd-vit-tagger-v3",
+      "group": "本地反推模型（可选）",
+      "category": "wd_taggers",
+      "relativePath": "wd-vit-tagger-v3",
+      "aliases": [],
+      "size": 378726412,
+      "sha256": "",
+      "urls": [],
+      "license": "apache-2.0",
+      "licenseUrl": "https://huggingface.co/SmilingWolf/wd-vit-tagger-v3/blob/7f6b584d0bd3f55c4531f14ba3d4761b2bccdc0f/README.md",
+      "sourceUrl": "https://huggingface.co/SmilingWolf/wd-vit-tagger-v3",
+      "revision": "7f6b584d0bd3f55c4531f14ba3d4761b2bccdc0f",
+      "recommended": false,
+      "files": [
+        {
+          "path": "config.json",
+          "size": 684,
+          "sha256": "038b25b517e0511475195bd1a45a19710929a3f2afa8f96d002ee28e1115dc1f",
+          "urls": [
+            "https://huggingface.co/SmilingWolf/wd-vit-tagger-v3/resolve/7f6b584d0bd3f55c4531f14ba3d4761b2bccdc0f/config.json"
+          ]
+        },
+        {
+          "path": "model.safetensors",
+          "size": 378417260,
+          "sha256": "ee78db0cd9f1c7e01578cc89661a10c73675d60c30e235e505c391f57ea4d4e5",
+          "urls": [
+            "https://huggingface.co/SmilingWolf/wd-vit-tagger-v3/resolve/7f6b584d0bd3f55c4531f14ba3d4761b2bccdc0f/model.safetensors"
+          ]
+        },
+        {
+          "path": "selected_tags.csv",
+          "size": 308468,
+          "sha256": "298633d94d0031d2081c0893f29c82eab7f0df00b08483ba8f29d1e979441217",
+          "urls": [
+            "https://huggingface.co/SmilingWolf/wd-vit-tagger-v3/resolve/7f6b584d0bd3f55c4531f14ba3d4761b2bccdc0f/selected_tags.csv"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tagger-wd-swinv2-tagger-v3",
+      "name": "wd-swinv2-tagger-v3",
+      "group": "本地反推模型（可选）",
+      "category": "wd_taggers",
+      "relativePath": "wd-swinv2-tagger-v3",
+      "aliases": [],
+      "size": 392458325,
+      "sha256": "",
+      "urls": [],
+      "license": "apache-2.0",
+      "licenseUrl": "https://huggingface.co/SmilingWolf/wd-swinv2-tagger-v3/blob/627aef95638667ddcaa3ac8ae625e88ea5b02f51/README.md",
+      "sourceUrl": "https://huggingface.co/SmilingWolf/wd-swinv2-tagger-v3",
+      "revision": "627aef95638667ddcaa3ac8ae625e88ea5b02f51",
+      "recommended": false,
+      "files": [
+        {
+          "path": "config.json",
+          "size": 637,
+          "sha256": "ddcdd28facc40ee8d0ef4b16ee3e7c70e4d7b156aff7b0f2ccc180e617eda795",
+          "urls": [
+            "https://huggingface.co/SmilingWolf/wd-swinv2-tagger-v3/resolve/627aef95638667ddcaa3ac8ae625e88ea5b02f51/config.json"
+          ]
+        },
+        {
+          "path": "model.safetensors",
+          "size": 392149220,
+          "sha256": "39fe04000d5907a0a7616df54af744d43fbd70b5fba7abc3135d3675734c03ef",
+          "urls": [
+            "https://huggingface.co/SmilingWolf/wd-swinv2-tagger-v3/resolve/627aef95638667ddcaa3ac8ae625e88ea5b02f51/model.safetensors"
+          ]
+        },
+        {
+          "path": "selected_tags.csv",
+          "size": 308468,
+          "sha256": "298633d94d0031d2081c0893f29c82eab7f0df00b08483ba8f29d1e979441217",
+          "urls": [
+            "https://huggingface.co/SmilingWolf/wd-swinv2-tagger-v3/resolve/627aef95638667ddcaa3ac8ae625e88ea5b02f51/selected_tags.csv"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tagger-wd-convnext-tagger-v3",
+      "name": "wd-convnext-tagger-v3",
+      "group": "本地反推模型（可选）",
+      "category": "wd_taggers",
+      "relativePath": "wd-convnext-tagger-v3",
+      "aliases": [],
+      "size": 395139631,
+      "sha256": "",
+      "urls": [],
+      "license": "apache-2.0",
+      "licenseUrl": "https://huggingface.co/SmilingWolf/wd-convnext-tagger-v3/blob/d39e46de298d27340111b64965e20b8185c407e6/README.md",
+      "sourceUrl": "https://huggingface.co/SmilingWolf/wd-convnext-tagger-v3",
+      "revision": "d39e46de298d27340111b64965e20b8185c407e6",
+      "recommended": false,
+      "files": [
+        {
+          "path": "config.json",
+          "size": 559,
+          "sha256": "ae1cac0a8b7fc24b4f356631a2a5cab4d2cbb3c84d3e3c194349f4c570690501",
+          "urls": [
+            "https://huggingface.co/SmilingWolf/wd-convnext-tagger-v3/resolve/d39e46de298d27340111b64965e20b8185c407e6/config.json"
+          ]
+        },
+        {
+          "path": "model.safetensors",
+          "size": 394830604,
+          "sha256": "77ad172eb1f7a697dc629bef7da7d50402e93ef0b1c86d7f69a865d31be64022",
+          "urls": [
+            "https://huggingface.co/SmilingWolf/wd-convnext-tagger-v3/resolve/d39e46de298d27340111b64965e20b8185c407e6/model.safetensors"
+          ]
+        },
+        {
+          "path": "selected_tags.csv",
+          "size": 308468,
+          "sha256": "298633d94d0031d2081c0893f29c82eab7f0df00b08483ba8f29d1e979441217",
+          "urls": [
+            "https://huggingface.co/SmilingWolf/wd-convnext-tagger-v3/resolve/d39e46de298d27340111b64965e20b8185c407e6/selected_tags.csv"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tagger-pixai-tagger-v1.0-timm",
+      "name": "pixai-tagger-v1.0-timm",
+      "group": "本地反推模型（可选）",
+      "category": "wd_taggers",
+      "relativePath": "pixai-tagger-v1.0-timm",
+      "aliases": [],
+      "size": 1965108263,
+      "sha256": "",
+      "urls": [],
+      "license": "apache-2.0",
+      "licenseUrl": "https://huggingface.co/Bedovyy/pixai-tagger-v1.0-timm/blob/0d72995a99faa55fa6a3bf873d99133f75bff3f6/README.md",
+      "sourceUrl": "https://huggingface.co/Bedovyy/pixai-tagger-v1.0-timm",
+      "revision": "0d72995a99faa55fa6a3bf873d99133f75bff3f6",
+      "recommended": false,
+      "files": [
+        {
+          "path": "config.json",
+          "size": 805,
+          "sha256": "567d5e1ac9c47d430cdb75f133803561dbc8a9748ea4df7a5211150ad3b8bf03",
+          "urls": [
+            "https://huggingface.co/Bedovyy/pixai-tagger-v1.0-timm/resolve/0d72995a99faa55fa6a3bf873d99133f75bff3f6/config.json"
+          ]
+        },
+        {
+          "path": "model.safetensors",
+          "size": 1964296044,
+          "sha256": "8fc574a4949b9a28fd384453430a34cfc98a0b95f8d7d3474d80b96c076dab63",
+          "urls": [
+            "https://huggingface.co/Bedovyy/pixai-tagger-v1.0-timm/resolve/0d72995a99faa55fa6a3bf873d99133f75bff3f6/model.safetensors"
+          ]
+        },
+        {
+          "path": "selected_tags.csv",
+          "size": 804675,
+          "sha256": "839d0e7614a8b2b557aa6c9abe9dc430c177f3b91567243ac8a3cffa8f8714c6",
+          "urls": [
+            "https://huggingface.co/Bedovyy/pixai-tagger-v1.0-timm/resolve/0d72995a99faa55fa6a3bf873d99133f75bff3f6/selected_tags.csv"
+          ]
+        },
+        {
+          "path": "timm_arch.py",
+          "size": 6739,
+          "sha256": "c87eea48942607ea780c08ff082de8f92330e49aaa0bccaa13da49f831ca9b89",
+          "urls": [
+            "https://huggingface.co/Bedovyy/pixai-tagger-v1.0-timm/resolve/0d72995a99faa55fa6a3bf873d99133f75bff3f6/timm_arch.py"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tagger-pixai-tagger-v0.9-timm",
+      "name": "pixai-tagger-v0.9-timm",
+      "group": "本地反推模型（可选）",
+      "category": "wd_taggers",
+      "relativePath": "pixai-tagger-v0.9-timm",
+      "aliases": [],
+      "size": 1271829428,
+      "sha256": "",
+      "urls": [],
+      "license": "apache-2.0",
+      "licenseUrl": "https://huggingface.co/Bedovyy/pixai-tagger-v0.9-timm/blob/56bcb07f4065ddd43d4d400620770f06975a6962/README.md",
+      "sourceUrl": "https://huggingface.co/Bedovyy/pixai-tagger-v0.9-timm",
+      "revision": "56bcb07f4065ddd43d4d400620770f06975a6962",
+      "recommended": true,
+      "files": [
+        {
+          "path": "config.json",
+          "size": 675,
+          "sha256": "08f6a99af63bbc8c9af540f9e0f980007c8cfbc74e519de880dd4be76116c595",
+          "urls": [
+            "https://huggingface.co/Bedovyy/pixai-tagger-v0.9-timm/resolve/56bcb07f4065ddd43d4d400620770f06975a6962/config.json"
+          ]
+        },
+        {
+          "path": "model.safetensors",
+          "size": 1271456004,
+          "sha256": "eac8b7cc079977049d981b4df9a88ddb312e751ebcebed41dbf3f5023900668f",
+          "urls": [
+            "https://huggingface.co/Bedovyy/pixai-tagger-v0.9-timm/resolve/56bcb07f4065ddd43d4d400620770f06975a6962/model.safetensors"
+          ]
+        },
+        {
+          "path": "selected_tags.csv",
+          "size": 372749,
+          "sha256": "3687e2ec9585e042d926bdbd01dac36fc1e07e6014dae92440f61214e644db02",
+          "urls": [
+            "https://huggingface.co/Bedovyy/pixai-tagger-v0.9-timm/resolve/56bcb07f4065ddd43d4d400620770f06975a6962/selected_tags.csv"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tagger-OppaiOracle-V1.1-timm",
+      "name": "OppaiOracle-V1.1-timm",
+      "group": "本地反推模型（可选）",
+      "category": "wd_taggers",
+      "relativePath": "OppaiOracle-V1.1-timm",
+      "aliases": [],
+      "size": 496680442,
+      "sha256": "",
+      "urls": [],
+      "license": "apache-2.0",
+      "licenseUrl": "https://huggingface.co/Bedovyy/OppaiOracle-V1.1-timm/blob/6647ea98598e9ca9ac57b862c1b1d0eb84a99301/README.md",
+      "sourceUrl": "https://huggingface.co/Bedovyy/OppaiOracle-V1.1-timm",
+      "revision": "6647ea98598e9ca9ac57b862c1b1d0eb84a99301",
+      "recommended": false,
+      "files": [
+        {
+          "path": "config.json",
+          "size": 817,
+          "sha256": "2a60c046f1150529ab98c0c1034c61b8691d28a26b255e4bc1f44f4d4b23fe1b",
+          "urls": [
+            "https://huggingface.co/Bedovyy/OppaiOracle-V1.1-timm/resolve/6647ea98598e9ca9ac57b862c1b1d0eb84a99301/config.json"
+          ]
+        },
+        {
+          "path": "model.safetensors",
+          "size": 496226828,
+          "sha256": "2bebbb3a2408ffb8617f3fb70ed1bce2b9234c503605a384ad9a3995087c535e",
+          "urls": [
+            "https://huggingface.co/Bedovyy/OppaiOracle-V1.1-timm/resolve/6647ea98598e9ca9ac57b862c1b1d0eb84a99301/model.safetensors"
+          ]
+        },
+        {
+          "path": "selected_tags.csv",
+          "size": 452797,
+          "sha256": "7a404ffa2611637b8e28c578f7616ca0aa3f552e6076d2a19acfa802b85384cc",
+          "urls": [
+            "https://huggingface.co/Bedovyy/OppaiOracle-V1.1-timm/resolve/6647ea98598e9ca9ac57b862c1b1d0eb84a99301/selected_tags.csv"
+          ]
+        }
+      ]
+    }
+  ]
+}

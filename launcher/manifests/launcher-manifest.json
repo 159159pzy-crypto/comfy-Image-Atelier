@@ -31,6 +31,12 @@
   ],
   "nodes": [
     {
+      "id": "ComfyUI-WD-Timm-Tagger",
+      "url": "https://github.com/bedovyy/ComfyUI-WD-Timm-Tagger.git",
+      "commit": "0729015dbd873abbded3796c5345f6328d3aa27d",
+      "requiredClasses": []
+    },
+    {
       "id": "Comfyui-Anima-Tools",
       "url": "https://github.com/nregret/Comfyui-Anima-Tools.git",
       "commit": "d71fce225b1cb7486461759b41ed6c254b92e5a8",

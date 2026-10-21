@@ -7,12 +7,14 @@ from pathlib import Path
 import sys
 
 
-def probe(root):
+def probe(root, arguments=()):
     root = Path(root).resolve()
     os.chdir(root)
     sys.path.insert(0, str(root))
-    sys.argv = [str(root / "main.py")]
+    sys.argv = [str(root / "main.py"), *arguments]
     with contextlib.redirect_stdout(io.StringIO()):
+        import comfy.options
+        comfy.options.enable_args_parsing()
         import folder_paths
         from utils.extra_config import load_extra_path_config
 
@@ -21,9 +23,9 @@ def probe(root):
         # choice, which ComfyUI itself places first.
         for key, legacy, canonical in [("diffusion_models", "unet", "diffusion_models"), ("text_encoders", "clip", "text_encoders")]:
             configured = folder_paths.folder_names_and_paths.get(key)
-            defaults = {str(root / "models" / legacy), str(root / "models" / canonical)}
+            defaults = {str(Path(folder_paths.models_dir) / legacy), str(Path(folder_paths.models_dir) / canonical)}
             if configured and configured[0] and configured[0][0] in defaults:
-                preferred = str(root / "models" / canonical)
+                preferred = str(Path(folder_paths.models_dir) / canonical)
                 folder_paths.folder_names_and_paths[key] = (
                     [preferred] + [p for p in configured[0] if p != preferred], configured[1]
                 )
@@ -31,8 +33,10 @@ def probe(root):
         if extra.is_file():
             load_extra_path_config(str(extra))
         paths = {key: list(value[0]) for key, value in folder_paths.folder_names_and_paths.items()}
-    paths.setdefault("sams", [str(root / "models" / "sams")])
-    paths.setdefault("ultralytics", [str(root / "models" / "ultralytics")])
+    models = Path(folder_paths.models_dir)
+    paths["wd_taggers"] = [str(models / "wd_taggers")]
+    paths.setdefault("sams", [str(models / "sams")])
+    paths.setdefault("ultralytics", [str(models / "ultralytics")])
     # Impact Subpack also recognizes these extra_model_paths keys.
     for key, suffix in [("ultralytics_bbox", "bbox"), ("ultralytics_segm", "segm")]:
         paths.setdefault(key, [str(Path(p) / suffix) for p in paths["ultralytics"]])
@@ -40,5 +44,5 @@ def probe(root):
 
 
 if __name__ == "__main__":
-    result = probe(sys.argv[1])
+    result = probe(sys.argv[1], sys.argv[2:])
     print(json.dumps(result, ensure_ascii=True))

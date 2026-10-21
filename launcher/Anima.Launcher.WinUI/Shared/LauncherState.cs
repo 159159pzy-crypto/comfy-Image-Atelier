@@ -235,7 +235,7 @@ internal sealed partial class LauncherState : IDisposable
         catch (OperationCanceledException) when (task.IsCancellationRequested)
         {
             retryable = true;
-            var message = cancelDownloads ? "下载已取消，所选临时文件已清理。" : "任务已暂停，点击继续可从已完成步骤恢复。";
+            var message = cancelDownloads ? "下载已取消；模型包进度已保留，单文件临时下载已清理。" : "任务已暂停，点击继续可从已完成步骤恢复。";
             SetSetupInterruption(message, true);
             SetStatus(message);
             AppendLog(message);
@@ -390,7 +390,7 @@ internal sealed partial class LauncherState : IDisposable
         {
             UpdateSetupProgress(new("models", "准备 Anima 基础模型", SetupStageStatus.Running));
             SetStatus("环境已安装，正在准备 Anima 基础模型…");
-            var probe = await Inventory.Probe(Config.ComfyRoot, Config.Python, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
+            var probe = await TaggerRuntime.Probe(Config, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
             var selected = Program.ModelProfiles.RequiredModels(Program.Models, Config.SelectedProfile).Select(m => m.Id).ToHashSet();
             var inventory = await Inventory.Scan(probe, Program.Models, false, ct);
             var pending = inventory.Where(m => selected.Contains(m.Model.Id) && m.Missing).ToList();
@@ -433,7 +433,7 @@ internal sealed partial class LauncherState : IDisposable
         Config.ComfyRoot = Inventory.NormalizeRoot(Config.ComfyRoot);
         Config.Python = Inventory.FindPython(Config.ComfyRoot, Config.Python);
         SetStatus("正在读取 ComfyUI 有效模型路径…");
-        var probe = await Inventory.Probe(Config.ComfyRoot, Config.Python, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
+        var probe = await TaggerRuntime.Probe(Config, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
         var scan = await Task.Run(() => Inventory.Scan(probe, Program.Models, hashes, ct), ct);
         UpdateSetupMissingModels(scan);
         var nodes = await Inventory.Nodes(Config.ComfyRoot, Program.Runtime, Commands.Find("git.exe"), ct);
@@ -480,7 +480,7 @@ internal sealed partial class LauncherState : IDisposable
         ResolvePaths();
         var models = modelIds.Select(id => Program.Models.Models.SingleOrDefault(model => model.Id == id)
             ?? throw new InvalidDataException("模型清单中已不存在此资源，请重新扫描：" + id)).ToArray();
-        var probe = await Inventory.Probe(Config.ComfyRoot, Config.Python, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
+        var probe = await TaggerRuntime.Probe(Config, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
         return await Task.Run(() => Inventory.Scan(probe, new ModelManifest(Program.Models.SchemaVersion, models), hashes, ct), ct);
     }
 
@@ -509,7 +509,7 @@ internal sealed partial class LauncherState : IDisposable
     public async Task OpenModelLocationAsync(string modelId, CancellationToken ct)
     {
         var model = (await ResolveModelIdsAsync([modelId], false, ct)).Single();
-        var dir = Path.GetDirectoryName(model.FoundPath ?? model.Destination);
+        var dir = model.Model.IsPackage && model.FoundPath is not null ? model.FoundPath : Path.GetDirectoryName(model.FoundPath ?? model.Destination);
         if (string.IsNullOrWhiteSpace(dir)) throw new IOException("该模型没有可打开的目录。");
         ct.ThrowIfCancellationRequested();
         Directory.CreateDirectory(dir);
@@ -521,11 +521,12 @@ internal sealed partial class LauncherState : IDisposable
     {
         foreach (var item in selected)
         {
+            if (string.IsNullOrWhiteSpace(item.Destination)) throw new IOException($"{item.Model.Name} 的实际模型目录待确认，请检查 ComfyUI 目录配置后重新扫描。");
             if (!item.Model.CanDownload) throw new InvalidOperationException($"{item.Model.Name} 暂无可验证下载，请从资源页的来源手动安装。");
-            if (item.FoundPath is not null) throw new IOException($"已有文件校验异常，已保留原文件：{item.FoundPath}。请备份处理后重试。");
+            if (item.FoundPath is not null && !item.Model.IsPackage) throw new IOException($"已有文件校验异常，已保留原文件：{item.FoundPath}。请备份处理后重试。");
         }
         foreach (var volume in selected.GroupBy(s => Path.GetPathRoot(s.Destination)))
-            Safety.FreeSpace(volume.Key!, volume.Sum(s => Downloads.RemainingBytes(s.Destination, s.Model.Size, s.Model.Sha256)));
+            Safety.FreeSpace(volume.Key!, volume.Sum(s => s.Model.IsPackage ? ModelPackages.RemainingBytes(s.Model, s.Destination) : Downloads.RemainingBytes(s.Destination, s.Model.Size, s.Model.Sha256)));
         downloadQueue = selected;
         cancelDownloads = false;
         DownloadCancelable?.Invoke(true);
@@ -534,6 +535,11 @@ internal sealed partial class LauncherState : IDisposable
             foreach (var item in selected)
             {
                 ct.ThrowIfCancellationRequested();
+                if (item.Model.IsPackage)
+                {
+                    await ModelPackages.Fetch(Downloads, item.Model, item.Destination, Config, DownloadProgress(), ct);
+                    continue;
+                }
                 Exception? failure = null;
                 var done = false;
                 foreach (var source in item.Model.Urls)
@@ -558,7 +564,7 @@ internal sealed partial class LauncherState : IDisposable
         }
         finally
         {
-            if (cancelDownloads) foreach (var item in downloadQueue) Downloads.CancelPartial(item.Destination);
+            if (cancelDownloads) foreach (var item in downloadQueue.Where(item => !item.Model.IsPackage)) Downloads.CancelPartial(item.Destination);
             DownloadCancelable?.Invoke(false);
         }
     }
@@ -571,7 +577,7 @@ internal sealed partial class LauncherState : IDisposable
         {
             if (string.IsNullOrWhiteSpace(Config.ComfyRoot)) { GoTo(1); SetStatus("先选择并检查 ComfyUI 目录，即可打开模型文件夹。"); return; }
             ResolvePaths();
-            var probe = await Inventory.Probe(Config.ComfyRoot, Config.Python, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
+            var probe = await TaggerRuntime.Probe(Config, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
             var paths = (probe.Paths.GetValueOrDefault(category) ?? []).Where(p => !string.IsNullOrWhiteSpace(p))
                 .Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             if (paths.Length == 0) throw new IOException("此环境没有配置该类型的模型目录，请先检查 ComfyUI 路径配置。");

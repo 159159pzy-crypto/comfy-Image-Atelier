@@ -1872,7 +1872,7 @@ function renderQueue(queue) {
       row.className = "queue-row";
       const label = document.createElement("span");
       label.textContent = entry.kind === "prompt_preview"
-        ? `${entry.position}. 提示词处理 · ${entry.model_name}`
+        ? `${entry.position}. ${entry.prompt_kind === "reverse" || entry.settings?.kind === "reverse" ? "图像反推" : "提示词重写"} · ${entry.model_name}`
         : `${entry.position}. ${entry.count} 张 · ${entry.model_name}`;
       const remove = document.createElement("button");
       remove.type = "button";
@@ -1894,7 +1894,7 @@ function renderQueue(queue) {
   );
 }
 function batchProgressLabel(batch) {
-  if (batch.stage === "prompt_processing") return "正在处理提示词";
+  if (batch.stage === "prompt_processing") return batch.settings?.kind === "reverse" ? "正在反推图像提示词" : "正在处理提示词";
   if (batch.preview_status === "disconnected") return "进度连接已断开，正在重连";
   const node = String(batch.progress_node || "");
   const sampler = { "5": "底图采样", "691:1240": "底图采样", "701:1245": "第一段采样", "701:1246": "第二段采样", "704:1248": "潜空间二次采样", "712:1208": "SeedVR2 采样" }[node];
@@ -1923,12 +1923,13 @@ function renderBatch(batch, queue = currentQueue) {
   const completed = batch?.completed || 0;
   const total = batch?.total || 0;
   const promptOnly = batch?.kind === "prompt_preview";
+  const promptAction = batch?.settings?.kind === "reverse" ? "图像反推" : "提示词重写";
   const labels = promptOnly ? {
-    running: "正在处理提示词",
-    stopping: "正在取消提示词处理",
-    completed: "提示词处理完成",
-    stopped: "提示词处理已取消",
-    error: "提示词处理失败",
+    running: batch?.settings?.kind === "reverse" ? "正在反推图像提示词" : "正在重写提示词",
+    stopping: `正在取消${promptAction}`,
+    completed: `${promptAction}完成`,
+    stopped: `${promptAction}已取消`,
+    error: `${promptAction}失败`,
   } : {
     running: "正在生成",
     stopping: "完成当前张后停止",

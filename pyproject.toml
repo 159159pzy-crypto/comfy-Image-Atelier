@@ -23,8 +23,12 @@ dev = [
     "ruff>=0.15,<0.16",
 ]
 
-[tool.setuptools]
-packages = ["anima_webui"]
+[tool.setuptools.packages.find]
+include = ["anima_webui*"]
+
+[tool.setuptools.package-data]
+"anima_webui" = ["tagger-models.json"]
+"anima_webui._vendor.sd_prompt_reader" = ["LICENSE", "UPSTREAM.txt"]
 
 [tool.setuptools.dynamic]
 version = { file = "launcher/version.txt" }

@@ -105,6 +105,35 @@ internal static class PromptAssistantTests
         await client.DeleteModel("svc", "namespace/model", default);
         Check(!(await client.Services(default)).Single(item => item.Id == "svc").Models.Any(), "model deletion handles slash names and checks readback");
 
+        await client.Connect(default, AssistantMode.Reverse);
+        Check(client.SupportsVision && !client.SupportsTemplateOnly, "vision capability does not depend on the rewrite compatibility patch");
+        var readsBeforeVisionConnect = handler.Paths.Count(path => path == "/object_info/PromptExpand");
+        await client.Connect(default, AssistantMode.Reverse);
+        Check(handler.Paths.Count(path => path == "/object_info/PromptExpand") == readsBeforeVisionConnect,
+            "vision connection resolves its own node without requiring the rewrite node");
+        Check((await client.RemoteModels("svc", default, AssistantMode.Reverse)).SequenceEqual(new[] { "remote/vision" }),
+            "vision discovery projects the provider VLM list");
+        await client.SaveModel("svc", "shared/model", .2, .8, 100, false, default);
+        await client.SaveModel("svc", "shared/model", .4, .9, 200, false, default, AssistantMode.Reverse);
+        await client.SaveModel("svc", "shared/model", .5, .7, 300, true, default, AssistantMode.Reverse);
+        Check((await client.Services(default)).Single(item => item.Id == "svc").Models.Single().MaxTokens == 100 &&
+              (await client.Services(default, AssistantMode.Reverse)).Single(item => item.Id == "svc").Models.Single().MaxTokens == 300,
+              "same-name text and vision models have independent parameters");
+        Check(!JsonSerializer.Serialize(await client.Services(default, AssistantMode.Reverse)).Contains("secret-key"),
+            "vision model projection excludes credentials");
+        await client.DeleteModel("svc", "shared/model", default, AssistantMode.Reverse);
+        Check(!(await client.Services(default, AssistantMode.Reverse)).Single(item => item.Id == "svc").Models.Any() &&
+              (await client.Services(default)).Single(item => item.Id == "svc").Models.Count == 1,
+              "deleting a vision model preserves the same-name text model");
+        await client.DeleteModel("svc", "shared/model", default);
+        await Reject(() => client.SaveModel("svc", "invalid", .5, .8, 100, false, default, (AssistantMode)99),
+            "unsupported model types are rejected before mutation");
+        handler.MissingVision = true;
+        await client.Connect(default, AssistantMode.Reverse);
+        Check(!client.SupportsVision && (await client.Services(default, AssistantMode.Reverse)).Count > 0,
+            "old plugins can still configure vision while reporting the missing node");
+        handler.MissingVision = false;
+
         var original = (JsonObject)handler.Document.DeepClone();
         var selected = (await client.Templates(default)).Single(item => item.Id == "one");
         // An unrelated edit made after the UI loaded must survive its later save.
@@ -121,6 +150,29 @@ internal static class PromptAssistantTests
         Check(copyId != "one" && handler.Document["expand_prompts"]?[copyId]?["future"]?["setting"]?.GetValue<int>() == 4, "copy gets a new stable ID and retains template metadata");
         await client.DeleteTemplate(copyId, default);
         await Reject(() => client.DeleteTemplate("two", default), "active plugin template cannot be deleted without changing default");
+
+        var beforeVision = (JsonObject)handler.Document.DeepClone();
+        var visionId = await client.SaveTemplate(null, "Vision new", "Describe composition.\n保留细节", "image", default, mode: AssistantMode.Reverse);
+        var visionSelected = (await client.Templates(default, AssistantMode.Reverse)).Single(item => item.Id == visionId);
+        handler.Document["vision_prompts"]![visionId]!["future"] = new JsonObject { ["keep"] = true };
+        await client.SaveTemplate(visionId, "Vision renamed", visionSelected.Content, "photo", default, visionSelected, AssistantMode.Reverse);
+        Check(JsonNode.DeepEquals(beforeVision["expand_prompts"], handler.Document["expand_prompts"]) &&
+              JsonNode.DeepEquals(beforeVision["active_prompts"], handler.Document["active_prompts"]) &&
+              JsonNode.DeepEquals(beforeVision["future_root"], handler.Document["future_root"]) &&
+              JsonNode.DeepEquals(beforeVision["vision_prompts"]?["vision"], handler.Document["vision_prompts"]?["vision"]) &&
+              handler.Document["vision_prompts"]?[visionId]?["future"]?["keep"]?.GetValue<bool>() == true,
+              "vision template editing preserves text templates, active choices, unrelated entries and unknown fields");
+        await Reject(() => client.SaveTemplate(visionId, "Stale vision", "old", "", default, visionSelected, AssistantMode.Reverse),
+            "vision templates retain stale-edit protection");
+        var visionCopy = await client.CopyTemplate(visionId, default, AssistantMode.Reverse);
+        Check((await client.Templates(default, AssistantMode.Reverse)).Single(item => item.Id == visionCopy).Content == visionSelected.Content &&
+              handler.Document["vision_prompts"]?[visionCopy]?["future"]?["keep"]?.GetValue<bool>() == true,
+              "vision template copying retains exact content and unknown metadata");
+        await client.DeleteTemplate(visionCopy, default, AssistantMode.Reverse);
+        await client.DeleteTemplate(visionId, default, AssistantMode.Reverse);
+        await Reject(() => client.DeleteTemplate("vision", default, AssistantMode.Reverse),
+            "the active vision template cannot be deleted");
+        Check(JsonNode.DeepEquals(beforeVision, handler.Document), "vision CRUD leaves all preexisting template data intact");
         await client.DeleteService(created, default);
         Check(!(await client.Services(default)).Any(item => item.Id == created), "service deletion is verified");
         handler.Fail = true;
@@ -164,12 +216,13 @@ internal static class PromptAssistantTests
         public JsonObject? LastServiceBody;
         public int ParameterWrites;
         public bool Fail;
+        public bool MissingVision;
         public JsonObject Document = JsonNode.Parse("""
             {"expand_prompts":{"one":{"name":"One","content":"old","category":"A","role":"system","showIn":["frontend","node"],"tags":["keep"],"future":{"setting":4}},"two":{"name":"Two","content":"unrelated","role":"system"}},
              "vision_prompts":{"vision":{"name":"Vision","content":"vision"}},"active_prompts":{"expand":"two","vision":"vision"},"future_root":{"keep":true}}
             """)!.AsObject();
         private readonly JsonArray services = JsonNode.Parse("""
-            [{"id":"svc","name":"Existing","type":"openai_compatible","base_url":"https://provider.invalid/v1","api_key":"secret-key","api_key_encrypted":"encrypted-secret-key","has_api_key":true,"llm_models":[]}]
+            [{"id":"svc","name":"Existing","type":"openai_compatible","base_url":"https://provider.invalid/v1","api_key":"secret-key","api_key_encrypted":"encrypted-secret-key","has_api_key":true,"llm_models":[],"vlm_models":[]}]
             """)!.AsArray();
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -177,6 +230,7 @@ internal static class PromptAssistantTests
             Paths.Add(path);
             if (Fail) return Response(new JsonObject { ["success"] = false, ["error"] = "secret-key" }, HttpStatusCode.BadRequest);
             if (path == "/object_info/PromptExpand") return Response(JsonNode.Parse("""{"PromptExpand":{"python_module":"custom_nodes.Prompt-Assistant-main"}}""")!);
+            if (path == "/object_info/ImageCaptionNode") return Response(MissingVision ? new JsonObject() : JsonNode.Parse("""{"ImageCaptionNode":{"python_module":"custom_nodes.Prompt-Assistant-main.node.image_caption_node","input":{"required":{"image":["IMAGE"],"vlm_service":[["Example/vision"]],"custom_rule":["BOOLEAN"],"custom_rule_content":["STRING"]}}}}""")!);
             if (!path.StartsWith("/Prompt-Assistant-main/api/")) throw new Exception("wrong discovered prefix");
             path = path["/Prompt-Assistant-main/api".Length..];
             var body = request.Content is null ? null : (await request.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken))!;
@@ -186,6 +240,7 @@ internal static class PromptAssistantTests
                 var service = (JsonObject)body!.DeepClone();
                 service["id"] = "new";
                 service["llm_models"] = new JsonArray();
+                service["vlm_models"] = new JsonArray();
                 services.Add(service);
                 return Response(new JsonObject { ["success"] = true, ["service_id"] = "new" });
             }
@@ -207,23 +262,24 @@ internal static class PromptAssistantTests
                 }
             }
             else if (request.Method == HttpMethod.Get)
-                return Response(JsonNode.Parse("""{"success":true,"models":{"llm":["remote/model"],"vlm":[]}}""")!);
+                return Response(JsonNode.Parse("""{"success":true,"models":{"llm":["remote/model"],"vlm":["remote/vision"]}}""")!);
             else if (request.Method == HttpMethod.Post)
             {
                 var model = (JsonObject)body!.DeepClone();
                 model["name"] = model["model_name"]!.DeepClone();
-                entry["llm_models"]!.AsArray().Add(model);
+                entry[body["model_type"]!.GetValue<string>() + "_models"]!.AsArray().Add(model);
             }
             else if (request.Method == HttpMethod.Delete)
             {
                 var name = Uri.UnescapeDataString(string.Join("/", parts.Skip(5)));
-                var model = entry["llm_models"]!.AsArray().OfType<JsonObject>().Single(item => item["name"]!.GetValue<string>() == name);
-                entry["llm_models"]!.AsArray().Remove(model);
+                var modelList = entry[parts[4] + "_models"]!.AsArray();
+                var model = modelList.OfType<JsonObject>().Single(item => item["name"]!.GetValue<string>() == name);
+                modelList.Remove(model);
             }
             else
             {
                 ParameterWrites++;
-                var model = entry["llm_models"]!.AsArray().OfType<JsonObject>().Single(item => item["name"]!.GetValue<string>() == body!["model_name"]!.GetValue<string>());
+                var model = entry[body!["model_type"]!.GetValue<string>() + "_models"]!.AsArray().OfType<JsonObject>().Single(item => item["name"]!.GetValue<string>() == body["model_name"]!.GetValue<string>());
                 model[body!["parameter_name"]!.GetValue<string>()] = body["parameter_value"]!.DeepClone();
             }
             return Response(new JsonObject { ["success"] = true });

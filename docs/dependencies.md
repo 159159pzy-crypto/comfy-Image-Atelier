@@ -1,5 +1,9 @@
 # 依赖说明
 
+图像反推的本地读取适配自 MIT 许可的 [Stable Diffusion Prompt Reader v1.3.5](https://github.com/receyuki/stable-diffusion-prompt-reader/commit/1a499becb0a88fd28ac3e4e09bd8917ce95c9629)，仅包含元数据读取部分，使用现有 Pillow，不安装上游 GUI、Tk 或旧版 Pillow。随源码和应用负载保留来源、许可及本地适配说明。
+
+本地标签识别使用可选的 [ComfyUI-WD-Timm-Tagger](https://github.com/bedovyy/ComfyUI-WD-Timm-Tagger)，在 ComfyUI 环境中运行。节点版本由启动器清单固定；八个预设模型包的来源版本、文件校验和及各自许可保存在 `anima_webui/tagger-models.json`，由网页检测和启动器下载共用。模型按需单独下载，不包含在启动器安装包中。该节点所需 `timm`、`huggingface_hub` 使用现有 ComfyUI 依赖管理，不加入轻量网页服务依赖。模型包中的额外架构文件同样锁定版本并校验，完整性检测本身不导入或执行它们。
+
 1.1.0 新建环境使用清单锁定的 Python 3.11.9、PyTorch 2.11.0 / CUDA 12.8；导入已有环境保留原 GPU 运行时。ComfyUI 和节点固定到提交，自动下载的模型与工具校验大小及 SHA-256。自定义下载源需要用户自行信任。
 
 `python scripts/audit_dependencies.py --output output/dependency-audit.json` 审计托管运行时的锁定依赖。脚本只对 torch 2.11.0 的 `GHSA-rrmf-rvhw-rf47` / `PYSEC-2025-194` 保留一项明确例外：该问题由 `torch.jit.script` 编译带异常裸 `list` / `tuple` 类型注解的 Python 源码触发，工作台输入和固定工作流接口不提供这种编译入口。其他公告或跳过扫描均视为失败。更换节点或运行时时需重新评估此范围；这不表示第三方依赖没有漏洞。

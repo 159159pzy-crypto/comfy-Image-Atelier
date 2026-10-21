@@ -16,7 +16,7 @@ function target() {
     classList: { toggle(name, on) { if (on) classes.add(name); else classes.delete(name); }, contains: name => classes.has(name) },
     addEventListener(name, handler) { if (!handlers.has(name)) handlers.set(name, []); handlers.get(name).push(handler); },
     emit(name, data = {}) {
-      const event = { target: this, relatedTarget: {}, prevented: false, preventDefault() { this.prevented = true; }, ...data };
+      const event = { target: this, relatedTarget: {}, prevented: false, preventDefault() { this.prevented = true; }, stopPropagation() { this.stopped = true; }, ...data };
       for (const handler of handlers.get(name) || []) handler(event);
       return event;
     },
@@ -26,7 +26,7 @@ function target() {
   };
 }
 function setup(extra = {}) {
-  const elements = Object.fromEntries(['singleInputSection', 'singleInputPreview', 'singleInputStatus', 'singleInputRemove', 'singleUseInputSize', 'singleInputFields', 'singleInputUpload'].map(id => [id, target()]));
+  const elements = Object.fromEntries(['singleInputSection', 'singleInputDropZone', 'singleInputPreview', 'singleInputStatus', 'singleInputRemove', 'singleUseInputSize', 'singleInputFields', 'singleInputUpload'].map(id => [id, target()]));
   let modal = false, profile = 'anima';
   const document = Object.assign(target(), {
     hidden: false, documentElement: target(),
@@ -172,42 +172,45 @@ test('single-file validation rejects multiple, unsupported, empty and oversized 
   assert.equal(uploads, 1);
 });
 
-test('nested file drags show a stable overlay and leaving, blurring or hiding clears it', () => {
+test('nested drags highlight only the reference box and leaving, blurring or hiding clears it', () => {
   const { document, elements, window, state } = setup();
+  const zone = elements.singleInputDropZone;
   const dataTransfer = fileTransfer([file()]);
-  document.emit('dragenter', { dataTransfer });
-  document.emit('dragenter', { dataTransfer });
-  assert.equal(elements.singleDropOverlay.hidden, false);
-  document.emit('dragleave');
-  assert.equal(elements.singleDropOverlay.hidden, false);
-  document.emit('dragleave');
-  assert.equal(elements.singleDropOverlay.hidden, true);
-  document.emit('dragover', { dataTransfer });
+  zone.emit('dragenter', { dataTransfer });
+  zone.emit('dragenter', { dataTransfer });
+  assert.equal(zone.classList.contains('is-dragging'), true);
+  zone.emit('dragleave');
+  assert.equal(zone.classList.contains('is-dragging'), true);
+  zone.emit('dragleave');
+  assert.equal(zone.classList.contains('is-dragging'), false);
+  zone.emit('dragover', { dataTransfer });
   assert.equal(dataTransfer.dropEffect, 'copy');
   window.emit('blur');
-  assert.equal(elements.singleDropOverlay.hidden, true);
-  document.emit('dragenter', { dataTransfer });
+  assert.equal(zone.classList.contains('is-dragging'), false);
+  zone.emit('dragenter', { dataTransfer });
   document.hidden = true;
   document.emit('visibilitychange');
-  assert.equal(elements.singleDropOverlay.hidden, true);
+  assert.equal(zone.classList.contains('is-dragging'), false);
   assert.equal(state.inputDragDepth, 0);
+  assert.equal(elements.singleDropOverlay, undefined);
 });
 
 test('text drags, random mode and open dialogs/viewers never accept workbench file input', () => {
   const { ctx, state, document, elements, setModal } = setup();
-  const text = document.emit('dragenter', { dataTransfer: { types: ['text/plain'], items: [{ kind: 'string' }] } });
+  const zone = elements.singleInputDropZone;
+  const text = zone.emit('dragenter', { dataTransfer: { types: ['text/plain'], items: [{ kind: 'string' }] } });
   assert.equal(text.prevented, false);
-  assert.equal(elements.singleDropOverlay.hidden, true);
+  assert.equal(zone.classList.contains('is-dragging'), false);
   const dataTransfer = fileTransfer([file()]);
   setModal(true);
-  assert.equal(document.emit('dragover', { dataTransfer }).prevented, false);
+  assert.equal(zone.emit('dragover', { dataTransfer }).prevented, false);
   setModal(false);
   ctx.imagePreview.phase = 'open';
-  assert.equal(document.emit('drop', { dataTransfer }).prevented, false);
+  assert.equal(zone.emit('drop', { dataTransfer }).prevented, false);
   ctx.imagePreview.phase = 'closed';
   state.mode = 'random';
-  assert.equal(document.emit('dragenter', { dataTransfer }).prevented, false);
-  assert.equal(elements.singleDropOverlay.hidden, true);
+  assert.equal(zone.emit('dragenter', { dataTransfer }).prevented, false);
+  assert.equal(zone.classList.contains('is-dragging'), false);
 });
 
 test('drop, file picker and paste each route one image through the same upload entry', async () => {
@@ -215,14 +218,41 @@ test('drop, file picker and paste each route one image through the same upload e
   const uploads = [];
   ctx.singleWorkbenchUpload = async image => { uploads.push(image); return true; };
   const dropped = file({ name: 'drop.png' }), selected = file({ name: 'select.png' }), pasted = file({ name: 'paste.png' });
-  assert.equal(document.emit('drop', { dataTransfer: fileTransfer([dropped]) }).prevented, true);
+  assert.equal(elements.singleInputDropZone.emit('drop', { dataTransfer: fileTransfer([dropped]) }).prevented, true);
   elements.singleInputUpload.value = 'C:\\fakepath\\select.png';
   elements.singleInputUpload.files = [selected];
   elements.singleInputUpload.emit('change');
   assert.equal(elements.singleInputUpload.value, '');
-  assert.equal(document.emit('paste', { clipboardData: { items: [{ kind: 'file', type: 'image/png', getAsFile: () => pasted }] } }).prevented, true);
+  assert.equal(elements.singleInputDropZone.emit('paste', { clipboardData: { items: [{ kind: 'file', type: 'image/png', getAsFile: () => pasted }] } }).prevented, true);
   assert.deepEqual(uploads, [dropped, selected, pasted]);
-  assert.equal(elements.singleDropOverlay.hidden, true);
+  assert.equal(elements.singleInputDropZone.classList.contains('is-dragging'), false);
+});
+
+test('page-wide file drops only prevent browser navigation and never upload or intercept paste', () => {
+  const { ctx, document, state } = setup();
+  const uploads = []; ctx.singleWorkbenchUpload = async image => { uploads.push(image); };
+  const dataTransfer = fileTransfer([file()]);
+  assert.equal(document.emit('dragover', { dataTransfer }).prevented, true);
+  assert.equal(dataTransfer.dropEffect, 'none');
+  assert.equal(document.emit('drop', { dataTransfer }).prevented, true);
+  assert.equal(document.emit('paste', { clipboardData: { items: [{ kind: 'file', type: 'image/png', getAsFile: () => file() }] } }).prevented, false);
+  assert.deepEqual(uploads, []); assert.equal(state.generationMode, 'txt2img');
+  state.mode = 'random';
+  assert.equal(document.emit('dragover', { dataTransfer }).prevented, true);
+  assert.equal(dataTransfer.dropEffect, 'none');
+  assert.equal(document.emit('drop', { dataTransfer }).prevented, true);
+  assert.deepEqual(uploads, []);
+});
+
+test('two image zones route exclusively to their own handler', () => {
+  const { ctx, elements } = setup(), reverse = target(), uploads = [], analysis = [];
+  ctx.singleWorkbenchUpload = async image => { uploads.push(image); };
+  ctx.bindImageInputZone(reverse, { canReceive: () => true, accept: files => analysis.push(...files) });
+  const image = file();
+  const drop = reverse.emit('drop', { dataTransfer: fileTransfer([image]) });
+  assert.equal(drop.stopped, true); assert.deepEqual(analysis, [image]); assert.deepEqual(uploads, []);
+  elements.singleInputDropZone.emit('drop', { dataTransfer: fileTransfer([image]) });
+  assert.deepEqual(uploads, [image]); assert.deepEqual(analysis, [image]);
 });
 
 test('using the reference size is explicit, clamps dimensions and rounds to multiples of eight', () => {

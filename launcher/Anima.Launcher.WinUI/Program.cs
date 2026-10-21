@@ -171,6 +171,7 @@ internal static class Program
                 : resource.EndsWith("probe_comfy.py") ? "probe_comfy.py"
                 : resource.EndsWith("launcher-manifest.json") ? "launcher-manifest.json"
                 : resource.EndsWith("model-manifest.json") ? "model-manifest.json"
+                : resource.EndsWith("tagger-models.json") ? "tagger-models.json"
                 : resource.EndsWith("source-profiles.json") ? "source-profiles.json"
                 : resource.EndsWith("model-profiles.json") ? "model-profiles.json"
                 : null;
@@ -183,6 +184,7 @@ internal static class Program
         }
         Runtime = JsonFile.Read<RuntimeManifest>(Path.Combine(Assets, "launcher-manifest.json"));
         Models = JsonFile.Read<ModelManifest>(Path.Combine(Assets, "model-manifest.json"));
+        Models = Models with { Models = Models.Models.Concat(JsonFile.Read<ModelManifest>(Path.Combine(Assets, "tagger-models.json")).Models).ToArray() };
         Sources = JsonFile.Read<SourceManifest>(Path.Combine(Assets, "source-profiles.json"));
         ModelProfiles = JsonFile.Read<ModelProfilesManifest>(Path.Combine(Assets, "model-profiles.json"));
         Safety.Validate(Runtime, Models);
@@ -224,15 +226,19 @@ internal static class Program
         }
         var root = Inventory.NormalizeRoot(target);
         var python = Inventory.FindPython(root, Arg("--python"));
-        var probe = await Inventory.Probe(root, python, Path.Combine(Assets, "probe_comfy.py"), CancellationToken.None);
-        var models = await Inventory.Scan(probe, Models, args.Contains("--hashes"), CancellationToken.None);
-        var nodes = await Inventory.Nodes(root, Runtime, Commands.Find("git.exe"), CancellationToken.None);
         var warnings = new List<string>();
         var configuration = new LauncherConfig();
         try { if (File.Exists(Path.Combine(StateDir, "launcher.json"))) configuration = JsonFile.Read<LauncherConfig>(Path.Combine(StateDir, "launcher.json")); }
         catch (Exception ex) { warnings.Add("启动器配置无法读取：" + ex.Message); }
         var portText = Arg("--comfy-port", configuration.ComfyPort.ToString());
         if (!int.TryParse(portText, out var port) || port is < 1024 or > 65535) throw new ArgumentException("无效的 ComfyUI 端口。");
+        // Diagnose the explicitly selected environment without saving over the user's configuration.
+        configuration.ComfyRoot = root;
+        configuration.Python = python;
+        configuration.ComfyPort = port;
+        var probe = await TaggerRuntime.Probe(configuration, Path.Combine(Assets, "probe_comfy.py"), CancellationToken.None);
+        var models = await Inventory.Scan(probe, Models, args.Contains("--hashes"), CancellationToken.None);
+        var nodes = await Inventory.Nodes(root, Runtime, Commands.Find("git.exe"), CancellationToken.None);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         JsonElement? comfy = null;
         try { comfy = await ServiceManager.Json($"http://127.0.0.1:{port}/system_stats", timeout.Token); }

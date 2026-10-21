@@ -10,7 +10,9 @@ function promptAssistantDraft(profile = currentProfile()) {
 }
 function promptAssistantMarkup() {
   return `<section id="singleProcessedSection" class="control-section prompt-assistant" data-single-group="prompt">
-    <div class="section-heading"><h2>提示词重写台</h2><button id="rewriteRefresh" class="button ghost compact" type="button">刷新选项</button></div>
+    <div class="section-heading prompt-desk-heading"><h2>提示词工作台</h2><div id="promptDeskTabs" class="prompt-desk-switch" role="tablist" aria-label="提示词工作台"><span class="prompt-desk-thumb" aria-hidden="true"></span><button id="promptDeskRewrite" type="button" role="tab" aria-controls="promptRewritePanel" aria-selected="true">重写台</button><button id="promptDeskReverse" type="button" role="tab" aria-controls="promptReversePanel" aria-selected="false" tabindex="-1">反推台</button></div></div>
+    <div id="promptRewritePanel" class="prompt-desk-panel" role="tabpanel" aria-labelledby="promptDeskRewrite">
+    <div class="single-inline-actions"><button id="rewriteRefresh" class="button ghost compact" type="button">刷新选项</button></div>
     <p class="field-hint">输入与生图正文独立保存。重写完成后，可编辑预览，再手动追加或替换正文。系统提示词和第三方服务在启动器中管理。</p>
     <div class="prompt-assistant-selectors">
       <label class="field"><span>服务</span><select id="rewriteService" aria-describedby="rewriteStatus"></select></label>
@@ -22,6 +24,7 @@ function promptAssistantMarkup() {
     <p id="rewriteStatus" class="field-hint" role="status" aria-live="polite"></p>
     <label class="field"><span>结果预览 · 可编辑</span><textarea id="rewriteResult" rows="6" maxlength="20000" placeholder="重写结果会显示在这里；生图只使用上方画面描述中的文本。"></textarea></label>
     <div class="single-inline-actions"><button id="rewriteAppend" class="button ghost compact" type="button">追加到正文</button><button id="rewriteReplace" class="button primary compact" type="button">替换正文</button><button id="rewriteUndo" class="button ghost compact" type="button" hidden>撤销导入</button></div>
+    </div>${typeof promptReverseMarkup === "function" ? promptReverseMarkup() : ""}
   </section>`;
 }
 function promptAssistantFingerprint(draft) {
@@ -54,6 +57,7 @@ function promptAssistantIssue(draft) {
   return "";
 }
 function promptAssistantRender() {
+  if (typeof promptReverseRender === "function") promptReverseRender();
   if (!promptAssistantState.ready || !document.getElementById("rewriteSource")) return;
   const draft = promptAssistantDraft(), options = promptAssistantState.options || {};
   promptAssistantSelect("rewriteService", options.services || [], draft.service, "选择服务");
@@ -236,6 +240,7 @@ function promptAssistantMigrateLegacy(single, profile = currentProfile()) {
   promptAssistantPersist();
 }
 function promptAssistantClear() {
+  if (typeof promptReverseClear === "function") promptReverseClear();
   promptAssistantState.epoch++;
   Object.values(promptAssistantState.timers).forEach(clearTimeout);
   promptAssistantState.drafts = {}; promptAssistantState.timers = {};
@@ -262,6 +267,7 @@ function initializePromptAssistant() {
     }
   } catch { /* Keep the original local data until the next explicit edit. */ }
   promptAssistantState.ready = true;
+  if (typeof initializePromptReverse === "function") initializePromptReverse();
   for (const [id, key] of [["rewriteSource", "source"], ["rewriteResult", "result"], ["rewriteService", "service"], ["rewriteModel", "model"], ["rewriteTemplate", "template"]]) {
     document.getElementById(id).addEventListener(id === "rewriteSource" || id === "rewriteResult" ? "input" : "change", event => promptAssistantEdit(key, event.target.value));
   }

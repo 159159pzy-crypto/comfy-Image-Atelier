@@ -265,28 +265,38 @@ body[data-workbench="single"] .command-deck #batchError { position: static; whit
 .single-viewer-feedback { position: absolute; z-index: 4; bottom: max(16px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px 12px; max-width: calc(100% - 40px); padding: 10px 14px; border: 1px solid var(--separator); border-radius: 15px; background: var(--chrome-heavy); box-shadow: var(--shadow-sm); pointer-events: auto; }
 #singleViewerStatus { margin: 0; color: var(--text-secondary); font-size: 11px; line-height: 1.6; text-align: center; overflow-wrap: anywhere; }
 
-/* External image drag: one viewport overlay, while the document handles the drop. */
-.single-drop-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 10000;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: rgb(18 20 29 / 82%);
-  backdrop-filter: blur(9px);
-  -webkit-backdrop-filter: blur(9px);
-  color: #f4f5fb;
-  pointer-events: none;
-  animation: single-drop-enter 150ms ease-out;
-}
-.single-drop-overlay[hidden] { display: none; }
-.single-drop-content { max-width: 440px; text-align: center; transform: translateY(-15px); }
-.single-drop-icon { width: 112px; height: 94px; margin: 0 auto 22px; }
-.single-drop-icon svg { display: block; width: 100%; height: 100%; overflow: visible; filter: drop-shadow(0 10px 20px rgb(0 0 0 / 12%)); }
-.single-drop-title { display: block; margin: 0; font-size: clamp(19px, 2vw, 23px); font-weight: 500; line-height: 1.5; letter-spacing: .01em; }
-.single-drop-hint { display: block; margin: 14px 0 0; color: #b5b8c3; font-size: 12px; line-height: 1.7; }
-@keyframes single-drop-enter { from { opacity: 0; } to { opacity: 1; } }
+/* Image destinations stay visible and separate; only the hovered box is highlighted. */
+.image-input-zone { min-width: 0; padding: 14px; border: 1px dashed var(--separator-strong); border-radius: 12px; background: var(--surface-muted); transition: border-color 160ms ease, background-color 160ms ease; }
+.image-input-zone:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.image-input-zone.is-dragging { border-color: var(--accent); background: var(--accent-soft); }
+.image-input-zone img { display: block; width: auto; max-width: 100%; max-height: 220px; object-fit: contain; margin: 12px auto 0; border-radius: 8px; }
+.prompt-desk-heading { flex-wrap: wrap; gap: 10px; }
+.prompt-desk-switch { position: relative; isolation: isolate; display: grid; grid-template-columns: 1fr 1fr; padding: 3px; border: 1px solid var(--separator); border-radius: 999px; background: var(--surface-muted); }
+.prompt-desk-switch button { position: relative; min-width: 78px; min-height: 32px; padding: 5px 13px; border: 0; border-radius: 999px; background: transparent; color: var(--text-secondary); font: inherit; font-size: 12px; }
+.prompt-desk-switch button[aria-selected="true"] { color: var(--text); font-weight: 600; }
+.prompt-desk-switch button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.prompt-desk-thumb { position: absolute; z-index: -1; inset: 3px auto 3px 3px; width: calc(50% - 3px); border-radius: 999px; background: var(--surface); box-shadow: var(--shadow-sm); transition: transform 220ms var(--spring); }
+.prompt-desk-switch.is-reverse .prompt-desk-thumb { transform: translateX(100%); }
+.prompt-desk-panel { display: grid; min-width: 0; gap: 12px; }
+.prompt-desk-panel .field { margin: 0; }
+.reverse-source { color: var(--accent); font-size: 11px; }
+.reverse-method-switch { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-bottom: 1px solid var(--separator); }
+.reverse-method-switch button { min-width: 0; min-height: 40px; padding: 8px 5px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--text-secondary); font: inherit; font-size: 12px; }
+.reverse-method-switch button[aria-selected="true"] { border-bottom-color: var(--accent); color: var(--accent); font-weight: 600; }
+.reverse-method-switch button:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.reverse-method-panel, .reverse-method-options { display: grid; min-width: 0; gap: 10px; }
+.reverse-seed-fields, .reverse-threshold-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.reverse-tagger-settings .reverse-threshold-fields { margin: 12px 0; }
+.reverse-method-panel .field-hint { margin: 0; }
+.reverse-details { min-width: 0; color: var(--text-secondary); font-size: 12px; }
+.reverse-details summary { cursor: pointer; }
+.reverse-parameter-table { width: 100%; margin: 12px 0; border-collapse: collapse; table-layout: fixed; }
+.reverse-parameter-table th, .reverse-parameter-table td { padding: 8px 10px; border-bottom: 1px solid var(--separator); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.reverse-parameter-table th { width: 32%; font-weight: 500; color: var(--text-secondary); }
+.reverse-parameter-table td { color: var(--text); }
+.reverse-parameter-table details { min-width: 0; }
+.reverse-details pre { margin: 12px 0; max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.7; }
+.reverse-details .field-hint { white-space: pre-wrap; }
 
 @media (max-width: 1100px) {
   body[data-workbench="single"] .mobile-tabs { position: sticky; z-index: 25; top: var(--header-height); height: 48px; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 0 10px; padding: 5px; border: 1px solid var(--separator); border-radius: 999px; background: var(--chrome); backdrop-filter: blur(var(--blur)); }
@@ -332,12 +342,10 @@ body[data-workbench="single"] .command-deck #batchError { position: static; whit
   }
   body[data-workbench="single"] #singleParameterTabs::-webkit-scrollbar { display: none; }
   #singleParameterTabs [data-single-category] { min-height: 40px; padding-inline: 4px; font-size: 11px; }
-  .single-drop-overlay { padding: 20px; }
-  .single-drop-icon { width: 100px; height: 84px; }
 }
 @media (prefers-reduced-motion: reduce) {
   body[data-workbench="single"] .mobile-tabs button,
   #singleParameterTabs [data-single-category],
   #singleTabIndicator { transition: none; }
-  .single-drop-overlay { animation: none; }
+  .prompt-desk-thumb, .image-input-zone { transition: none; }
 }

@@ -149,6 +149,13 @@ def main():
         check("Real copied folder_paths.py is loaded", Path(raw["module_path"]).resolve() == case_dir / "folder_paths.py")
         check("No torch import", not raw["loaded_torch"])
         check("Probe interpreter is the requested ComfyUI Python", Path(actual["python"]).resolve() == python)
+        check("Tagger root follows actual folder_paths.models_dir", actual["paths"]["wd_taggers"] == [str(case_dir / "models/wd_taggers")])
+        override = case_dir / "独立 模型目录"
+        override.mkdir()
+        overridden = run_json([str(python), "-B", str(probe), str(case_dir), "--models-directory", str(override)], case_dir)
+        check("Explicit models-directory reaches the probe", overridden["paths"]["wd_taggers"] == [str(override / "wd_taggers")])
+        based = run_json([str(python), "-B", str(probe), str(case_dir), "--base-directory", str(override)], case_dir)
+        check("Explicit base-directory reaches the probe", based["paths"]["wd_taggers"] == [str(override / "models/wd_taggers")])
         check("LoRA paths and ordering exactly match real ComfyUI", actual["paths"]["loras"] == raw["paths"]["loras"])
         check("All diffusion roots remain searchable", set(actual["paths"]["diffusion_models"]) == set(raw["paths"]["diffusion_models"]))
         check("All encoder roots remain searchable", set(actual["paths"]["text_encoders"]) == set(raw["paths"]["text_encoders"]))

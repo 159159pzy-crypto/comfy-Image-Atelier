@@ -22,6 +22,7 @@ from .persistence import StorageReadOnlyError
 from .custom_prompts import CustomPromptStore
 from .favorites import FavoriteSavePendingError, FavoritesService, FavoritesExtensionStore, favorite_key
 from .input_images import InputImageStore, MAX_IMAGE_BYTES
+from .prompt_images import PromptImageStore
 from .single_workbench import SINGLE_DEFAULTS, active_lora_pipelines
 from .history import HistoryStore
 from .http_security import (
@@ -63,6 +64,7 @@ LORA_TRIGGER_OVERRIDES_KEY: web.AppKey[Any] = web.AppKey("lora_trigger_overrides
 PROMPT_RULES_KEY: web.AppKey[Any] = web.AppKey("prompt_rules", object)
 PROMPT_POOLS_KEY: web.AppKey[Any] = web.AppKey("prompt_pools", object)
 INPUT_IMAGES_KEY: web.AppKey[Any] = web.AppKey("input_images", object)
+PROMPT_IMAGES_KEY: web.AppKey[Any] = web.AppKey("prompt_images", object)
 ALLOWED_HOSTNAMES_KEY: web.AppKey[frozenset[str]] = web.AppKey(
     "allowed_hostnames", frozenset
 )
@@ -296,6 +298,7 @@ def create_app(
         "krea2": FavoritesService(client, catalog, expression_store=favorite_extensions, model_profile="krea2"),
     }
     input_images = InputImageStore(storage / "input-images")
+    prompt_images = PromptImageStore(storage / "prompt-images")
     prompt_rules = PromptRuleStore(
         prompt_replacements_path or storage / "prompt_replacements.json"
     )
@@ -311,7 +314,7 @@ def create_app(
     templates = WorkflowTemplates.load(root / "templates")
     startup_defaults = configure_resources(templates, resource_paths)
     manager = BatchManager(
-        templates, history, client, catalog, prompt_rules, prompt_pools, input_images
+        templates, history, client, catalog, prompt_rules, prompt_pools, input_images, prompt_images
     )
 
     startup_warnings = [
@@ -343,6 +346,7 @@ def create_app(
     app[PROMPT_RULES_KEY] = prompt_rules
     app[PROMPT_POOLS_KEY] = prompt_pools
     app[INPUT_IMAGES_KEY] = input_images
+    app[PROMPT_IMAGES_KEY] = prompt_images
     cleanup_task: asyncio.Task[None] | None = None
     shutdown_exit_handle: asyncio.TimerHandle | None = None
 
@@ -1087,7 +1091,7 @@ def create_app(
         state = await manager.start(body, seeds=seeds)
         return web.json_response(state, status=201)
 
-    async def upload_input_image(request: web.Request) -> web.Response:
+    async def read_uploaded_image(request: web.Request) -> tuple[bytes, str]:
         if request.content_type != "multipart/form-data":
             raise WorkflowError("请以 multipart image 字段上传图片")
         if request.content_length is not None and request.content_length > request.client_max_size:
@@ -1115,8 +1119,24 @@ def create_app(
             raise WorkflowError("上传 multipart 数据无效") from error
         if found is None:
             raise WorkflowError("缺少 image 文件")
+        return found
+
+    async def upload_input_image(request: web.Request) -> web.Response:
+        found = await read_uploaded_image(request)
         result = await asyncio.to_thread(input_images.add, found[0], filename=found[1])
         return web.json_response(result, status=201)
+
+    async def upload_prompt_image(request: web.Request) -> web.Response:
+        found = await read_uploaded_image(request)
+        result = await asyncio.to_thread(prompt_images.add, found[0], filename=found[1])
+        return web.json_response(result, status=201)
+
+    async def prompt_image_metadata(request: web.Request) -> web.Response:
+        return web.json_response(await asyncio.to_thread(prompt_images.get, request.match_info["asset_id"]))
+
+    async def prompt_image_content(request: web.Request) -> web.FileResponse:
+        path = await asyncio.to_thread(prompt_images.image_path, request.match_info["asset_id"])
+        return web.FileResponse(path, headers={"Content-Type": "image/png", "X-Content-Type-Options": "nosniff"})
 
     async def input_image_from_history(request: web.Request) -> web.Response:
         body = await _json_body(request)
@@ -1136,13 +1156,23 @@ def create_app(
         path = await asyncio.to_thread(input_images.image_path, request.match_info["asset_id"])
         return web.FileResponse(path, headers={"Content-Type": "image/png", "X-Content-Type-Options": "nosniff"})
 
-    async def prompt_assistant_options(_: web.Request) -> web.Response:
-        return web.json_response(await manager.prompt_assistant.options())
+    async def prompt_assistant_options(request: web.Request) -> web.Response:
+        kind = request.query.get("kind", "rewrite")
+        if kind != "reverse":
+            return web.json_response(await manager.prompt_assistant.options(kind))
+        vision, tagger = await asyncio.gather(manager.prompt_assistant.options(kind), manager.prompt_tagger.options())
+        return web.json_response({**vision, "methods": {
+            "metadata": {"available": True, "reason": ""},
+            "vision": {"available": vision["available"], "reason": vision["reason"]},
+            "tagger": tagger,
+        }})
 
     async def create_prompt_job(request: web.Request) -> web.Response:
         body = await _json_body(request)
         if body.get("kind") == "rewrite":
             return web.json_response(await manager.start_rewrite(body), status=201)
+        if body.get("kind") == "reverse":
+            return web.json_response(await manager.start_reverse(body), status=201)
         if set(body) - {"settings", "force"} or not isinstance(body.get("settings"), dict) or not isinstance(body.get("force", False), bool):
             raise WorkflowError("提示词预览需要 settings 对象及可选 force 布尔值")
         validate_settings(body["settings"])
@@ -1564,6 +1594,9 @@ def create_app(
     app.router.add_post("/api/input-images/from-history", input_image_from_history)
     app.router.add_get("/api/input-images/{asset_id}/image", input_image_content)
     app.router.add_get("/api/input-images/{asset_id}", input_image_metadata)
+    app.router.add_post("/api/prompt-images", upload_prompt_image)
+    app.router.add_get("/api/prompt-images/{asset_id}/image", prompt_image_content)
+    app.router.add_get("/api/prompt-images/{asset_id}", prompt_image_metadata)
     app.router.add_get("/api/prompt-assistant/options", prompt_assistant_options)
     app.router.add_post("/api/prompt-jobs", create_prompt_job)
     app.router.add_get("/api/prompt-jobs/{job_id}", get_prompt_job)

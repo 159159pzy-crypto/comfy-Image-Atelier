@@ -58,11 +58,20 @@ public sealed class LauncherConfig
 
 public sealed record Repository(string Id, string Url, string Commit, string[] RequiredClasses);
 public sealed record Artifact(string Id, string Url, long Size, string Sha256, string Executable);
+public sealed record ModelFile(string Path, long Size, string Sha256, string[] Urls)
+{
+    public bool CanDownload => Size > 0 && Regex.IsMatch(Sha256 ?? "", "^[a-fA-F0-9]{64}$") && Urls.Length > 0;
+}
 public sealed record RuntimeManifest(int SchemaVersion, string Version, string Validation, Repository Comfy, string PythonVersion, string TorchVersion, string TorchVisionVersion, string TorchAudioVersion, string TorchIndex, Artifact[] Tools, Repository[] Nodes, Artifact[] TorchWheels, string[] PythonConstraints, string Sam2Commit);
 public sealed record ModelItem(string Id, string Name, string Group, string Category, string RelativePath, string[] Aliases, long Size, string Sha256, string[] Urls, string License, string LicenseUrl)
 {
     public string SourceUrl { get; init; } = "";
-    public bool CanDownload => Size > 0 && Regex.IsMatch(Sha256 ?? "", "^[a-fA-F0-9]{64}$") && Urls.Length > 0;
+    public string Revision { get; init; } = "";
+    public bool Recommended { get; init; }
+    public ModelFile[] Files { get; init; } = [];
+    public bool IsPackage => Files.Length > 0;
+    public bool CanDownload => IsPackage ? Files.All(file => file.CanDownload) && Files.Sum(file => file.Size) == Size
+        : Size > 0 && Regex.IsMatch(Sha256 ?? "", "^[a-fA-F0-9]{64}$") && Urls.Length > 0;
 }
 public sealed record ModelManifest(int SchemaVersion, ModelItem[] Models);
 public sealed record ModelProfileDefinition(string Id, string Label, string ModelName, string ClipName, string VaeName, string ClipType, string Seedvr2Model, string Seedvr2Vae);
@@ -114,6 +123,18 @@ public static class Safety
             foreach (var alias in item.Aliases) Under(Path.GetTempPath(), alias);
             foreach (var url in item.Urls) Https(url);
             if (item.SourceUrl.Length > 0) Https(item.SourceUrl);
+            if (item.IsPackage)
+            {
+                Commit(item.Revision);
+                if (item.Files.Select(file => file.Path.Replace('\\', '/')).Distinct(StringComparer.OrdinalIgnoreCase).Count() != item.Files.Length)
+                    throw new InvalidDataException($"{item.Id} 包含重复文件。");
+                foreach (var file in item.Files)
+                {
+                    Under(Path.GetTempPath(), file.Path);
+                    foreach (var url in file.Urls) Https(url);
+                }
+                if (!item.CanDownload) throw new InvalidDataException($"{item.Id} 模型包下载信息不完整。");
+            }
             if (item.Urls.Length > 0 && !item.CanDownload) throw new InvalidDataException($"{item.Id} 下载信息不完整。");
         }
     }

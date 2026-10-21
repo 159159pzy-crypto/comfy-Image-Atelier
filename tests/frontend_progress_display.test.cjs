@@ -85,15 +85,27 @@ test('rewrite tasks retain queue activity but never refresh image history or cla
   assert.equal(ctx.currentBatch.id, 'rewrite-job');
   assert.equal(ui.stopButton.disabled, false);
   assert.equal(ui.startButton.textContent, '加入队列');
-  assert.equal(ui.batchState.textContent, '正在处理提示词');
+  assert.equal(ui.batchState.textContent, '正在重写提示词');
   assert.equal(ui.sampleProgress.textContent, '正在处理提示词');
   ctx.renderBatch({ ...rewrite, status: 'completed', completed: 1 });
-  assert.equal(ui.batchState.textContent, '提示词处理完成');
+  assert.equal(ui.batchState.textContent, '提示词重写完成');
   assert.equal(ui.stopButton.disabled, true);
   assert.equal(ui.startButton.textContent, '开始生成');
   assert.equal(ctx.lastTerminalBatch, 'last-image:completed:1');
   assert.equal(historyReads.length, 0);
   assert.equal(forwarded.length, 2);
+});
+
+test('reverse jobs show image analysis labels without claiming image generation or refreshing history', () => {
+  const { ctx, ui } = setup();
+  const reads = []; ctx.loadHistory = (...args) => reads.push(args);
+  const reverse = batch({ id: 'reverse-job', kind: 'prompt_preview', stage: 'prompt_processing', total: 1,
+    settings: { kind: 'reverse', workbench: 'single', model_profile: 'anima' } });
+  ctx.renderBatch(reverse);
+  assert.equal(ui.batchState.textContent, '正在反推图像提示词');
+  assert.equal(ui.sampleProgress.textContent, '正在反推图像提示词');
+  ctx.renderBatch({ ...reverse, status: 'completed', completed: 1 });
+  assert.equal(ui.batchState.textContent, '图像反推完成'); assert.deepEqual(reads, []);
 });
 
 test('a local stop exposes unconfirmed remote cancellation and clears it for the next job', () => {

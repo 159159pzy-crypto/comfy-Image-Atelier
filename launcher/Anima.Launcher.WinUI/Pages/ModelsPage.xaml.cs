@@ -55,7 +55,8 @@ public sealed partial class ModelsPage : LauncherPage
         {
             var s = row.Status;
             var source = s.Model.SourceUrl.Length > 0 ? s.Model.SourceUrl : string.Join(" ; ", s.Model.Urls);
-            var verification = s.Model.CanDownload ? s.Model.Sha256 : "仅手动导入；尚未锁定自动下载清单";
+            var verification = s.Model.IsPackage ? string.Join("\n", s.Model.Files.Select(file => file.Path + " · " + file.Sha256))
+                : s.Model.CanDownload ? s.Model.Sha256 : "仅手动导入；尚未锁定自动下载清单";
             Details.Text = $"{s.Model.Name}\n位置：{s.FoundPath ?? s.Destination}\n来源：{source}\nSHA-256：{verification}\n授权：{s.Model.License} {s.Model.LicenseUrl}";
             OpenLocationButton.IsEnabled = !State.Busy;
             OpenLicenseButton.IsEnabled = s.Model.SourceUrl.Length > 0 || s.Model.LicenseUrl.Length > 0 || s.Model.Urls.Length > 0;

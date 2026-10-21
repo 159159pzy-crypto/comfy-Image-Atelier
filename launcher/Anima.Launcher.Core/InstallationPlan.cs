@@ -208,7 +208,7 @@ public static class InstallationPlanner
         catch (FileNotFoundException) { }
         if (python is not null && File.Exists(Path.Combine(plan.ComfyRoot, "folder_paths.py")))
         {
-            try { probe = await Inventory.Probe(plan.ComfyRoot, python, probeScript, ct); }
+            try { probe = await Inventory.Probe(plan.ComfyRoot, python, probeScript, ct, config.ComfyArguments); }
             catch (OperationCanceledException) { throw; }
             catch (InvalidOperationException ex) when (ex.Message.Contains("No module named 'yaml'", StringComparison.Ordinal))
             {

@@ -23,10 +23,11 @@ if (args.FirstOrDefault() == "--http-fixture")
 if (args.FirstOrDefault() == "--assistant-probe")
 {
     using var assistant = new PromptAssistantClient(args.ElementAtOrDefault(1) ?? "http://127.0.0.1:8188");
-    await assistant.Connect(CancellationToken.None);
-    var configuredServices = await assistant.Services(CancellationToken.None);
-    var configuredTemplates = await assistant.Templates(CancellationToken.None);
-    Console.WriteLine($"Prompt Assistant: {configuredServices.Count} services, {configuredServices.Sum(item => item.Models.Count)} LLM models, {configuredTemplates.Count} templates, template_only={assistant.SupportsTemplateOnly}");
+    var mode = args.Contains("--vision") ? AssistantMode.Reverse : AssistantMode.Rewrite;
+    await assistant.Connect(CancellationToken.None, mode);
+    var configuredServices = await assistant.Services(CancellationToken.None, mode);
+    var configuredTemplates = await assistant.Templates(CancellationToken.None, mode);
+    Console.WriteLine($"Prompt Assistant {mode}: {configuredServices.Count} services, {configuredServices.Sum(item => item.Models.Count)} models, {configuredTemplates.Count} templates, template_only={assistant.SupportsTemplateOnly}, vision={assistant.SupportsVision}");
     return;
 }
 if (args.FirstOrDefault() == "--assistant-crud-probe")
@@ -39,6 +40,28 @@ var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../
 var manifestDir = Path.Combine(root, "launcher", "manifests");
 var manifest = JsonFile.Read<RuntimeManifest>(Path.Combine(manifestDir, "launcher-manifest.json"));
 var models = JsonFile.Read<ModelManifest>(Path.Combine(manifestDir, "model-manifest.json"));
+var taggerModels = JsonFile.Read<ModelManifest>(Path.Combine(root, "anima_webui", "tagger-models.json"));
+models = models with { Models = models.Models.Concat(taggerModels.Models).ToArray() };
+if (args.FirstOrDefault() == "--tagger-download")
+{
+    var config = new LauncherConfig { ComfyRoot = Path.GetFullPath(args[1]), Python = Path.GetFullPath(args[2]) };
+    var chosen = taggerModels.Models.Single(model => model.Name == args[3]);
+    Safety.Validate(manifest, new(1, [chosen]));
+    var runtime = await TaggerRuntime.Probe(config, Path.Combine(root, "launcher/scripts/probe_comfy.py"), default);
+    var status = (await Inventory.Scan(runtime, new(1, [chosen]), true, default)).Single();
+    if (status.Destination.Length == 0) throw new IOException("Cannot confirm runtime wd_taggers path.");
+    Console.WriteLine("Launcher package destination: " + status.Destination);
+    using var dl = new Downloads();
+    var lastPercent = -1;
+    var progress = new Progress<DownloadProgress>(value =>
+    {
+        var percent = (int)(100 * value.Received / Math.Max(1, value.Total));
+        if (percent / 5 != lastPercent / 5 || percent == 100) { Console.WriteLine($"{percent}% {value.Stage}"); lastPercent = percent; }
+    });
+    await ModelPackages.Fetch(dl, chosen, status.Destination, config, progress, default);
+    Console.WriteLine("Launcher package final state: " + await ModelPackages.State(chosen, status.Destination, default));
+    return;
+}
 if (args.Contains("--install-new"))
 {
     var targetRoot = Path.GetFullPath(args[Array.IndexOf(args, "--install-new") + 1]);
@@ -67,6 +90,18 @@ if (args.Contains("--startup-only"))
 {
     count += await ServiceStartupTests.Run(work);
     Console.WriteLine($"{count} service startup checks passed; artifacts: {work}");
+    return;
+}
+if (args.Contains("--assistant-only"))
+{
+    count += await PromptAssistantTests.Run(work);
+    Console.WriteLine($"{count} Prompt Assistant checks passed; artifacts: {work}");
+    return;
+}
+count += await ModelPackageTests.Run(work, manifest, taggerModels);
+if (args.Contains("--tagger-only"))
+{
+    Console.WriteLine($"{count} tagger package checks passed; artifacts: {work}");
     return;
 }
 count += await OnboardingTests.Run(work, manifest);

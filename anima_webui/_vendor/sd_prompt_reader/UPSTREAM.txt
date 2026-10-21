@@ -1,0 +1,26 @@
+Stable Diffusion Prompt Reader parser adaptation
+
+Source: https://github.com/receyuki/stable-diffusion-prompt-reader
+
+Version: 1.3.5
+
+Commit: 1a499becb0a88fd28ac3e4e09bd8917ce95c9629
+
+License: MIT; see the adjacent LICENSE, copyright (c) 2023 Rhys Yang.
+
+This package adapts the format recognition, field mappings, and parsing rules
+from `image_data_reader.py` and `format/` into a read-only server parser.
+It does not include the desktop application, CLI, image editing, or resources.
+
+Local changes:
+
+- Use existing Pillow EXIF access instead of piexif or desktop dependencies.
+- Bound JSON/text, XML, stealth bit reads/decompression, and graph traversal.
+- Preserve all reliable ComfyUI output/sampler/SDXL candidates rather than
+  selecting a longest branch or accidentally sharing state between branches.
+- Preserve arbitrary node IDs, zero values, Unicode, large seeds, optional
+  fields, and structured generation parameters without mutating source data.
+- Decode Draw Things XMP by namespace/local name instead of child positions.
+- Keep missing values absent and reject malformed records independently.
+
+Native Anima metadata and storage are implemented outside this package.

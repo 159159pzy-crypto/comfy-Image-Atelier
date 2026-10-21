@@ -34,7 +34,8 @@ Add-Type -AssemblyName System.IO.Compression
 $stream = [System.IO.File]::Create($payload)
 $archive = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Create)
 try {
-    $files = @('run.py', 'LICENSE', 'README.md', 'pyproject.toml', 'launcher/version.txt')
+    $files = @('run.py', 'LICENSE', 'README.md', 'pyproject.toml', 'launcher/version.txt',
+        'anima_webui/_vendor/sd_prompt_reader/LICENSE', 'anima_webui/_vendor/sd_prompt_reader/UPSTREAM.txt')
     if ($sourceKind -eq 'git-checkout') {
         $files += @(& git -C $repo -c core.quotePath=false ls-files --cached --others --exclude-standard -- anima_webui static templates) |
             Where-Object { $_ -match '\.(py|json|js|css|html)$' }

@@ -5,7 +5,7 @@ namespace Anima.Launcher.Core;
 public sealed record ProbeResult(string Root, string Python, Dictionary<string, string[]> Paths);
 public sealed record ModelStatus(ModelItem Model, string State, string? FoundPath, string Destination)
 {
-    public bool Missing => State is "缺失" or "大小异常" or "哈希异常";
+    public bool Missing => State is "缺失" or "大小异常" or "哈希异常" or "文件不完整" or "目录待确认";
 }
 public sealed record NodeStatus(string Name, string State, string Commit, string Path = "");
 
@@ -28,9 +28,9 @@ public static class Inventory
         var candidates = new[] { manual, Path.Combine(root, ".venv", "Scripts", "python.exe"), Path.Combine(root, "venv", "Scripts", "python.exe"), Path.Combine(Path.GetDirectoryName(root)!, "python_embeded", "python.exe"), Path.Combine(Path.GetDirectoryName(root)!, "python_embedded", "python.exe"), Path.Combine(root, "python_embeded", "python.exe") };
         return candidates.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p) && File.Exists(p)) ?? throw new FileNotFoundException("未找到 ComfyUI Python，请在设置中选择该环境的 python.exe。");
     }
-    public static async Task<ProbeResult> Probe(string root, string python, string script, CancellationToken ct)
+    public static async Task<ProbeResult> Probe(string root, string python, string script, CancellationToken ct, IEnumerable<string>? arguments = null)
     {
-        var result = await Commands.Run(python, [script, root], root, null, ct, timeout: TimeSpan.FromSeconds(30));
+        var result = await Commands.Run(python, new[] { script, root }.Concat(arguments ?? []).ToArray(), root, null, ct, timeout: TimeSpan.FromSeconds(30));
         return JsonSerializer.Deserialize<ProbeResult>(result, JsonFile.Options) ?? throw new InvalidDataException("模型路径探测失败。");
     }
     public static async Task<List<ModelStatus>> Scan(ProbeResult probe, ModelManifest manifest, bool hashes, CancellationToken ct)
@@ -39,6 +39,19 @@ public static class Inventory
         foreach (var item in manifest.Models)
         {
             ct.ThrowIfCancellationRequested();
+            if (item.IsPackage)
+            {
+                var packageRoots = probe.Paths.GetValueOrDefault(item.Category) ?? [];
+                if (packageRoots.Length != 1)
+                {
+                    results.Add(new(item, "目录待确认", null, ""));
+                    continue;
+                }
+                var packagePath = Safety.Under(packageRoots[0], item.RelativePath);
+                var packageState = await ModelPackages.State(item, packagePath, ct);
+                results.Add(new(item, packageState, Directory.Exists(packagePath) ? packagePath : null, packagePath));
+                continue;
+            }
             var dirs = probe.Paths.GetValueOrDefault(item.Category) ?? [Path.Combine(probe.Root, "models", item.Category)];
             var relative = item.RelativePath;
             if (item.Category == "ultralytics" && relative.Replace('\\', '/').Split('/') is [var detector, ..] && detector is "bbox" or "segm")
@@ -82,7 +95,8 @@ public static class Inventory
         foreach (var repo in manifest.Nodes)
         {
             var found = repo.Id.Equals(AnimaToolsDiscovery.NodeId, StringComparison.OrdinalIgnoreCase) ? AnimaToolsDiscovery.Resolve(root)
-                : repo.Id.Equals(PromptAssistantCompatibility.NodeId, StringComparison.OrdinalIgnoreCase) ? PromptAssistantCompatibility.ResolveDirectory(root) : null;
+                : repo.Id.Equals(PromptAssistantCompatibility.NodeId, StringComparison.OrdinalIgnoreCase) ? PromptAssistantCompatibility.ResolveDirectory(root)
+                : repo.Id.Equals(TaggerRuntime.NodeId, StringComparison.OrdinalIgnoreCase) ? TaggerRuntime.ResolveNode(root) : null;
             paths[repo.Id] = found ?? Path.Combine(Path.GetFullPath(root), "custom_nodes", repo.Id);
         }
         return paths;

@@ -10,12 +10,13 @@ internal sealed class ModelRow(ModelStatus status) : INotifyPropertyChanged
     private bool selected;
     public ModelStatus Status { get; } = status;
     public string Group => Status.Model.Group;
-    public string Name => Status.Model.Name;
+    public string Name => Status.Model.Name + (Status.Model.Recommended ? " · 推荐" : "");
     public string StateText => Status.State + (!Status.Model.CanDownload ? " / 手动" : "");
     public string SizeText => $"{Status.Model.Size / 1048576d:N0} MiB";
     public string PathText => Status.FoundPath ?? Status.Destination;
     /// <summary>Only downloadable, still-missing, not-yet-present files may be selected.</summary>
-    public bool CanSelect => Status.Model.CanDownload && Status.Missing && Status.FoundPath is null;
+    public bool CanSelect => Status.Model.CanDownload && Status.Missing && Status.Destination.Length > 0
+        && (Status.FoundPath is null || Status.Model.IsPackage);
     public bool Selected
     {
         get => selected;

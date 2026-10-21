@@ -25,6 +25,7 @@
                                     <MenuFlyoutItem Text="Checkpoint 底模" Tag="checkpoints" Click="Folder_Click" />
                                     <MenuFlyoutItem Text="VAE" Tag="vae" Click="Folder_Click" />
                                     <MenuFlyoutItem Text="文本编码器" Tag="text_encoders" Click="Folder_Click" />
+                                    <MenuFlyoutItem Text="本地反推模型" Tag="wd_taggers" Click="Folder_Click" />
                                 </MenuFlyout>
                             </Button.Flyout>
                         </Button>
@@ -54,6 +55,7 @@
                     </Grid>
                     </ContentControl>
                     <TextBlock x:Name="EmptyNote" Text="还没有扫描模型。先导入或安装 ComfyUI，再点击「重新扫描」。" Style="{StaticResource StudioBodyStyle}" Margin="8,14" />
+                    <TextBlock Text="本地反推为可选功能，推荐 PixAI 0.9；只下载勾选的模型。每个模型包全部校验后才可识别，暂停或取消可保留进度续传。" Style="{StaticResource StudioBodyStyle}" FontSize="11" />
                     <ListView x:Name="ModelList" ItemsSource="{x:Bind ModelView.View, Mode=OneWay}"
                         SelectionMode="Single" MaxHeight="420" MinHeight="120"
                         ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled">

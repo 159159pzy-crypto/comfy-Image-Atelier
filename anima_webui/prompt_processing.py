@@ -1,4 +1,4 @@
-"""Pure text graphs and durable prompt snapshots for single-image jobs."""
+"""Independent prompt graphs and durable snapshots for single-image jobs."""
 from __future__ import annotations
 
 import copy
@@ -9,6 +9,35 @@ from typing import Any
 from .workflow import WorkflowError
 
 OUTPUT_NODE = "studio_prompt_result"
+
+
+def build_reverse_graph(snapshot: dict[str, Any], client_id: str, seed: int, image: str) -> dict[str, Any]:
+    """Analyze only the uploaded image with the frozen visual template."""
+    return {"client_id": client_id, "prompt": {
+        "studio_reverse_image": {"class_type": "LoadImage", "inputs": {"image": image}},
+        "studio_prompt_reverse": {"class_type": "ImageCaptionNode", "inputs": {
+            "image": ["studio_reverse_image", 0], "rule": snapshot["rule"],
+            "custom_rule": True, "custom_rule_content": snapshot["template_content"],
+            "user_prompt": "", "vlm_service": snapshot["vlm_service"],
+            "ollama_auto_unload": True, "seed": seed,
+        }},
+        OUTPUT_NODE: {"class_type": "PreviewAny", "inputs": {"source": ["studio_prompt_reverse", 0]}},
+    }}
+
+
+def build_tagger_graph(snapshot: dict[str, Any], client_id: str, image: str) -> dict[str, Any]:
+    """Use the source workflow's tagger with one image and no gallery branch."""
+    settings = snapshot["tagger"]
+    return {"client_id": client_id, "prompt": {
+        "studio_reverse_image": {"class_type": "LoadImage", "inputs": {"image": image}},
+        "studio_prompt_tagger": {"class_type": "WDTimmTagger", "inputs": {
+            "image": ["studio_reverse_image", 0], "model_name": settings["model"],
+            "dtype": "auto", "general_threshold": settings["general_threshold"],
+            "character_threshold": settings["character_threshold"],
+            "exclude_tags": settings["exclude_tags"], "add_rating": False, "batch_size": 1,
+        }},
+        OUTPUT_NODE: {"class_type": "PreviewAny", "inputs": {"source": ["studio_prompt_tagger", 0]}},
+    }}
 
 
 def build_rewrite_graph(snapshot: dict[str, Any], client_id: str, seed: int) -> dict[str, Any]:
@@ -102,7 +131,7 @@ def extract_prompt_result(entry: dict[str, Any]) -> str:
     output = (entry.get("outputs") or {}).get(OUTPUT_NODE) or {}
     values = output.get("text")
     if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], str) or not values[0].strip():
-        raise WorkflowError("提示词处理未返回单个非空文本，已停止生图")
+        raise WorkflowError("提示词处理未返回单个非空文本")
     return values[0]
 
 

@@ -17,9 +17,10 @@ from .prompt_rules import PromptRuleStore
 from .prompt_pools import PromptPoolStore
 from .model_profiles import get_model_profile
 from .prompt_jobs import PromptJobStore
-from .prompt_assistant import PromptAssistant, generation_settings, rewrite_fingerprint
+from .prompt_assistant import PromptAssistant, generation_settings, request_identity, rewrite_fingerprint
+from .prompt_tagger import PromptTagger
 from .single_workbench import active_lora_pipelines
-from .prompt_processing import (build_prompt_graph, build_rewrite_graph, compose_prompt, extract_prompt_result,
+from .prompt_processing import (build_prompt_graph, build_reverse_graph, build_tagger_graph, build_rewrite_graph, compose_prompt, extract_prompt_result,
                                 final_prompts, prompt_fingerprint, validate_prompt_nodes)
 from .workflow import MAX_SAMPLE_SEED, WorkflowError, WorkflowTemplates, migrate_settings, validate_loras, validate_settings
 
@@ -69,6 +70,7 @@ class BatchManager:
         prompt_rules: PromptRuleStore | None = None,
         prompt_pools: PromptPoolStore | None = None,
         input_images: Any | None = None,
+        prompt_images: Any | None = None,
     ):
         self.templates = templates
         self.history = history
@@ -81,8 +83,10 @@ class BatchManager:
         self.prompt_rules = prompt_rules
         self.prompt_pools = prompt_pools
         self.input_images = input_images
+        self.prompt_images = prompt_images
         self.prompt_jobs = PromptJobStore(history)
         self.prompt_assistant = PromptAssistant(comfy)
+        self.prompt_tagger = PromptTagger(comfy)
         # 排队中的批次(仅内存;WebUI 重启后队列清空,历史记录只在真正开跑时创建)。
         self.queue: list[dict[str, Any]] = []
         self.shutting_down = False
@@ -480,6 +484,43 @@ class BatchManager:
             issues.extend(random_sampling_resource_issues(settings, resources))
         return issues
 
+    async def start_reverse(self, payload: dict[str, Any]) -> dict[str, Any]:
+        async with self._start_lock:
+            self._ensure_accepting()
+            self.history.ensure_writable()
+            kind, profile = request_identity(payload)
+            if kind != "reverse" or self.prompt_images is None:
+                raise WorkflowError("图像反推服务不可用")
+            asset = await asyncio.to_thread(self.prompt_images.get, payload["image_id"])
+            metadata = asset["metadata"]
+            method = payload.get("method", "metadata")
+            has_metadata = metadata.get("source") == "metadata" and bool(metadata.get("candidates"))
+            if has_metadata or method == "metadata":
+                # Local extraction is independent of both ComfyUI and its queue.
+                settings = {"kind": "reverse", "workbench": "single", "model_profile": profile,
+                            "image_id": asset["id"], "source": "metadata", "method": "metadata"}
+                self._ensure_accepting()
+                job = await self.prompt_jobs.create(settings, rewrite_fingerprint(settings))
+                return await self.prompt_jobs.update(job["id"], status="completed",
+                                                     result={**metadata, "image_id": asset["id"], "method": "metadata",
+                                                             "outcome": "found" if has_metadata else "no_metadata"})
+            active_settings = (self.state or {}).get("settings", {}) if self.active() else {}
+            waiting = [entry.get("settings", {}) for entry in self.queue]
+            if any(item.get("kind") == "reverse" and item.get("model_profile", "anima") == profile
+                   for item in [active_settings, *waiting]):
+                raise BatchConflict("此模型档案已有反推任务，请等待完成或取消后重试")
+            if self.active() and len(self.queue) >= MAX_QUEUE:
+                raise BatchConflict(f"队列已满(最多 {MAX_QUEUE} 个)")
+            settings = (await self.prompt_tagger.prepare(payload) if method == "tagger"
+                        else await self.prompt_assistant.prepare(payload))
+            self._ensure_accepting()
+            job = await self.prompt_jobs.create(settings, rewrite_fingerprint(settings))
+            if self.active():
+                self.queue.append({"queue_id": job["id"], "kind": "prompt_preview", "settings": settings, "job_id": job["id"]})
+            else:
+                await self._begin_prompt_preview(job)
+            return await self.prompt_jobs.get(job["id"])
+
     async def start_rewrite(self, payload: dict[str, Any]) -> dict[str, Any]:
         async with self._start_lock:
             self._ensure_accepting()
@@ -538,7 +579,20 @@ class BatchManager:
             if self.stop_requested:
                 raise ComfyAborted("收到停止请求")
             rewrite = settings.get("kind") == "rewrite"
-            if rewrite:
+            reverse = settings.get("kind") == "reverse"
+            if reverse:
+                method = settings.get("method", "vision")  # Old frozen visual jobs lack method.
+                snapshot = (await self.prompt_tagger.transport(settings) if method == "tagger"
+                            else await self.prompt_assistant.transport(settings))
+                path = await asyncio.to_thread(self.prompt_images.image_path, settings["image_id"])
+                body = await asyncio.to_thread(path.read_bytes)
+                if self.stop_requested:
+                    raise ComfyAborted("收到停止请求")
+                image = await self.comfy.upload_image(body, "reverse-" + settings["image_id"] + ".png")
+                graph = (build_tagger_graph(snapshot, self.client_id, image) if method == "tagger" else
+                         build_reverse_graph(snapshot, self.client_id,
+                                             int(settings.get("seed", secrets.randbelow(2**31))), image))
+            elif rewrite:
                 snapshot = await self.prompt_assistant.transport(settings)
                 graph = build_rewrite_graph(snapshot, self.client_id, secrets.randbelow(2**31))
             else:
@@ -564,7 +618,20 @@ class BatchManager:
                 raise ComfyAborted("收到停止请求")
             if not text.strip():
                 raise WorkflowError("提示词处理结果为空")
-            result = {"text": text} if rewrite else final_prompts(settings, text)
+            if reverse:
+                if len(text) > 100000:
+                    raise WorkflowError("反推结果过长，请调整识别设置后重试")
+                tagger = method == "tagger"
+                source, label = ("tagger", "本地标签") if tagger else ("ai", "视觉 AI")
+                recognition = ({"method": "tagger", **settings["tagger"]} if tagger else
+                               {"method": "vision", "model": settings["model_name"],
+                                "template": settings["template_name"], **({"seed": settings["seed"]} if "seed" in settings else {})})
+                result = {"source": source, "method": method, "format": "WDTimmTagger" if tagger else "AI",
+                          "text": text, "negative": "", "parameters": {}, "recognition": recognition,
+                          "image_id": settings["image_id"], "warnings": [],
+                          "candidates": [{"id": source, "label": label, "text": text, "negative": "", "parameters": {}}]}
+            else:
+                result = {"text": text} if rewrite else final_prompts(settings, text)
             if self.state and self.state.get("kind") == "prompt_preview":
                 # Match generation's terminal transition before its final DB
                 # await; a late Stop must not overwrite the completed job.
@@ -581,8 +648,10 @@ class BatchManager:
             await self.prompt_jobs.update(job_id, status="error", error=message)
             raise WorkflowError(message) from None
         except Exception as error:
-            if settings.get("kind") == "rewrite":
-                message = str(error) if isinstance(error, WorkflowError) else "提示词重写失败，请在启动器中检查服务配置"
+            if settings.get("kind") in {"rewrite", "reverse"}:
+                label = "图像反推" if settings["kind"] == "reverse" else "提示词重写"
+                hint = "本地模型与节点" if settings.get("method") == "tagger" else "服务配置"
+                message = str(error) if isinstance(error, WorkflowError) else f"{label}失败，请在启动器中检查{hint}"
                 await self.prompt_jobs.update(job_id, status="error", error=message)
                 raise WorkflowError(message) from None
             await self.prompt_jobs.update(job_id, status="error", error=str(error))
@@ -789,6 +858,8 @@ class BatchManager:
                 "count": entry["settings"].get("count", 1),
                 "model_name": entry["settings"].get("model_name", ""),
                 "kind": entry.get("kind", "generation"),
+                **({"prompt_kind": entry["settings"].get("kind", "legacy_preview")}
+                   if entry.get("kind") == "prompt_preview" else {}),
                 "workbench": entry["settings"].get("workbench", "random"),
             }
             for index, entry in enumerate(self.queue)
@@ -1217,7 +1288,9 @@ class BatchManager:
             async with asyncio.timeout(CANCEL_PROMPT_TIMEOUT):
                 await self._cancel_current_prompt()
         except (ComfyError, asyncio.TimeoutError) as error:
-            warning = str(error) or "取消请求超时，远端任务可能继续执行"
+            warning = ("取消请求未确认，远端任务可能继续执行；请在 ComfyUI 中检查"
+                       if (self.state or {}).get("kind") == "prompt_preview"
+                       else str(error) or "取消请求超时，远端任务可能继续执行")
             if self.state is not None:
                 self.state["cancel_warning"] = warning
             logger.warning("ComfyUI 任务取消未确认；本地任务将继续收尾: %s", warning)
