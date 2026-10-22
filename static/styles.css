@@ -990,8 +990,8 @@ html.image-preview-open #detailImage { visibility: hidden; }
   display: block;
   width: auto;
   height: auto;
-  max-width: min(92vw, calc(100vw - 48px));
-  max-height: min(92dvh, calc(100dvh - 48px));
+  max-width: none;
+  max-height: none;
   object-fit: contain;
   border-radius: var(--r-md);
   box-shadow: inset 0 1px 0 var(--edge), var(--shadow-lg);
@@ -1002,7 +1002,6 @@ html.image-preview-open #detailImage { visibility: hidden; }
   pointer-events: auto;
   transform-origin: center;
 }
-.image-preview-dialog[open] .image-preview-image { will-change: transform; }
 .image-preview-image.is-zoomed { cursor: grab; }
 .image-preview-image.is-interacting { cursor: grabbing; }
 .image-preview-status {

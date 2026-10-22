@@ -9,6 +9,7 @@ import logging
 import os
 import threading
 import webbrowser
+from email.utils import formatdate
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlsplit
@@ -40,6 +41,7 @@ from .prompt_assistant import generation_settings
 from .prompt_pools import PromptPoolStore, parse_prompt_import, parse_prompt_import_details
 from .runner import BatchConflict, BatchManager
 from .style_presets import StylePresetStore
+from .thumbnails import ThumbnailStore
 from .workflow import WorkflowError, WorkflowTemplates, normalize_lora_path, validate_settings
 from .model_profiles import (
     MODEL_PROFILE_IDS,
@@ -67,6 +69,7 @@ PROMPT_RULES_KEY: web.AppKey[Any] = web.AppKey("prompt_rules", object)
 PROMPT_POOLS_KEY: web.AppKey[Any] = web.AppKey("prompt_pools", object)
 INPUT_IMAGES_KEY: web.AppKey[Any] = web.AppKey("input_images", object)
 PROMPT_IMAGES_KEY: web.AppKey[Any] = web.AppKey("prompt_images", object)
+THUMBNAILS_KEY: web.AppKey[Any] = web.AppKey("thumbnails", object)
 ALLOWED_HOSTNAMES_KEY: web.AppKey[frozenset[str]] = web.AppKey(
     "allowed_hostnames", frozenset
 )
@@ -289,6 +292,7 @@ def create_app(
     storage = Path(data_dir) if data_dir is not None else root / "data"
     client = comfy or ComfyClient()
     history = HistoryStore(history_path or storage / "history.sqlite3")
+    thumbnails = ThumbnailStore(storage / "history-thumbnails", client, history=history)
     catalog = PromptCatalog(root, anima_tools_dir)
     custom_prompts = CustomPromptStore(
         custom_prompts_path or storage / "custom_prompts.json", catalog
@@ -349,6 +353,7 @@ def create_app(
     app[PROMPT_POOLS_KEY] = prompt_pools
     app[INPUT_IMAGES_KEY] = input_images
     app[PROMPT_IMAGES_KEY] = prompt_images
+    app[THUMBNAILS_KEY] = thumbnails
     cleanup_task: asyncio.Task[None] | None = None
     shutdown_exit_handle: asyncio.TimerHandle | None = None
 
@@ -1487,9 +1492,31 @@ def create_app(
         state = await manager.start(settings, seeds=seeds, regeneration=regeneration)
         return web.json_response(state, status=201)
 
+    async def delete_history_record(image_id: int) -> bool:
+        if not await history.delete_image(image_id):
+            return False
+        await thumbnails.discard(image_id)
+        return True
+
     async def delete_history(request: web.Request) -> web.Response:
         image_id = _image_id(request.match_info["image_id"])
-        if not await history.delete_image(image_id):
+        deletion = asyncio.create_task(delete_history_record(image_id))
+        try:
+            deleted = await asyncio.shield(deletion)
+        except asyncio.CancelledError:
+            # The database worker may already have committed. Finish removing
+            # derived files even when the HTTP caller is cancelled repeatedly.
+            while not deletion.done():
+                try:
+                    await asyncio.shield(deletion)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not deletion.cancelled():
+                deletion.exception()
+            raise
+        if not deleted:
             raise KeyError(image_id)
         return web.json_response({"deleted": True})
 
@@ -1497,6 +1524,24 @@ def create_app(
         record = await history.get_image(_image_id(request.match_info["image_id"]))
         body, content_type = await client.image_bytes(record)
         return web.Response(body=body, content_type=content_type.split(";", 1)[0])
+
+    async def thumbnail(request: web.Request) -> web.Response:
+        image_id = _image_id(request.match_info["image_id"])
+        record = await history.get_image(image_id)
+        result = await thumbnails.get(record)
+        headers = {
+            "Cache-Control": "private, max-age=3600",
+            "ETag": f'"{result.etag}"',
+            "Last-Modified": formatdate(result.modified, usegmt=True),
+        }
+        if "If-None-Match" in request.headers:
+            unchanged = any(tag.value in {"*", result.etag} for tag in request.if_none_match or ())
+        else:
+            since = request.if_modified_since
+            unchanged = since is not None and int(result.modified) <= int(since.timestamp())
+        if unchanged:
+            return web.Response(status=304, headers=headers)
+        return web.Response(body=result.body, content_type="image/webp", headers=headers)
 
     async def reveal_history_image(request: web.Request) -> web.Response:
         authority = parse_authority(request.headers.get("Host", ""))
@@ -1641,6 +1686,7 @@ def create_app(
     app.router.add_delete(r"/api/history/{image_id:\d+}", delete_history)
     app.router.add_post(r"/api/history/{image_id:\d+}/reveal", reveal_history_image)
     app.router.add_get(r"/api/images/{image_id:\d+}", image)
+    app.router.add_get(r"/api/images/{image_id:\d+}/thumbnail", thumbnail)
     app.router.add_get("/", index)
     app.router.add_get("/favicon.ico", favicon)
     app.router.add_static("/static/", root / "static", show_index=False)
@@ -1650,13 +1696,16 @@ def create_app(
             await manager.shutdown()
         finally:
             try:
-                close = getattr(client, "close", None)
-                if close:
-                    result = close()
-                    if asyncio.iscoroutine(result):
-                        await result
+                await thumbnails.close()
             finally:
-                await history.close()
+                try:
+                    close = getattr(client, "close", None)
+                    if close:
+                        result = close()
+                        if asyncio.iscoroutine(result):
+                            await result
+                finally:
+                    await history.close()
 
     async def cleanup(_: web.Application) -> None:
         nonlocal cleanup_task

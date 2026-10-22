@@ -1,7 +1,7 @@
 using Anima.Launcher.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media;
+using Windows.Foundation;
 
 namespace Anima.Launcher;
 
@@ -12,9 +12,9 @@ public sealed class PromptAssistantPanel : UserControl
     private readonly ComboBox services = new() { HorizontalAlignment = HorizontalAlignment.Stretch, DisplayMemberPath = "Name", PlaceholderText = "先加载服务与模板" };
     private readonly ComboBox models = new() { HorizontalAlignment = HorizontalAlignment.Stretch, DisplayMemberPath = "Name", PlaceholderText = "此服务已添加的 LLM 模型" };
     private readonly ComboBox templates = new() { HorizontalAlignment = HorizontalAlignment.Stretch, DisplayMemberPath = "Name", PlaceholderText = "选择系统提示词" };
-    private readonly TextBlock status = new() { TextWrapping = TextWrapping.Wrap };
-    private readonly TextBlock serviceDetail = new() { TextWrapping = TextWrapping.Wrap };
-    private readonly TextBlock templateDetail = new() { TextWrapping = TextWrapping.Wrap, MaxLines = 3 };
+    private readonly TextBlock status = BodyText("");
+    private readonly TextBlock serviceDetail = BodyText("");
+    private readonly TextBlock templateDetail = BodyText("");
     private readonly StackPanel body = new() { Spacing = 10, Margin = new Thickness(0, 10, 0, 0) };
     private readonly List<Button> loadedActions = [];
     private bool loaded;
@@ -22,11 +22,8 @@ public sealed class PromptAssistantPanel : UserControl
 
     public PromptAssistantPanel()
     {
-        body.Children.Add(new TextBlock
-        {
-            Text = "连接当前 ComfyUI 的 Prompt Assistant。文本重写与图像反推共用服务，分别管理模型与系统提示词。配置由插件保存，Anima / Krea 2 共用。",
-            TextWrapping = TextWrapping.Wrap,
-        });
+        templateDetail.MaxLines = 3;
+        body.Children.Add(BodyText("连接当前 ComfyUI 的 Prompt Assistant。文本重写与图像反推共用服务，分别管理模型与系统提示词。配置由插件保存，Anima / Krea 2 共用。"));
         body.Children.Add(Row(Button("加载 / 刷新", async () => await Run(async (client, ct) => await Reload(client, ct))),
             Button("检查 / 修复重写纯模板支持", Repair)));
         body.Children.Add(modePicker);
@@ -78,13 +75,23 @@ public sealed class PromptAssistantPanel : UserControl
     }
     private static Button Button(string text, Func<Task> action)
     {
-        var button = new Button { Content = text };
+        var button = new Button
+        {
+            Content = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap },
+            HorizontalAlignment = HorizontalAlignment.Left,
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, text);
         button.Click += async (_, _) => await action();
         return button;
     }
-    private static StackPanel Row(params UIElement[] children)
+    private static TextBlock BodyText(string text) => new()
     {
-        var panel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        Text = text,
+        Style = (Style)Application.Current.Resources["StudioBodyStyle"],
+    };
+    private static Panel Row(params UIElement[] children)
+    {
+        var panel = new AssistantActionPanel();
         foreach (var child in children) panel.Children.Add(child);
         return panel;
     }
@@ -97,6 +104,7 @@ public sealed class PromptAssistantPanel : UserControl
     {
         if (!IsEnabled) return;
         IsEnabled = false;
+        status.Style = (Style)Application.Current.Resources["StudioBodyStyle"];
         status.Text = "正在连接提示词助手…";
         try
         {
@@ -117,7 +125,11 @@ public sealed class PromptAssistantPanel : UserControl
             loadedEnvironment = environment;
             await operation(client, CancellationToken.None);
         }
-        catch (Exception error) { status.Text = error.Message; }
+        catch (Exception error)
+        {
+            status.Style = (Style)Application.Current.Resources["StudioErrorTextStyle"];
+            status.Text = error.Message;
+        }
         finally { IsEnabled = true; UpdateActions(); }
     }
 
@@ -171,14 +183,24 @@ public sealed class PromptAssistantPanel : UserControl
 
     private async Task ShowEditor(string title, StackPanel fields, Func<Task> save)
     {
-        var error = new TextBlock { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Microsoft.UI.Colors.OrangeRed) };
+        var error = new TextBlock { Style = (Style)Application.Current.Resources["StudioErrorTextStyle"] };
         fields.Children.Add(error);
-        var dialog = new ContentDialog
+        var root = XamlRoot;
+        var scroll = new ScrollViewer
         {
-            XamlRoot = XamlRoot, Title = title,
-            Content = new ScrollViewer { Content = fields, MaxHeight = 560, VerticalScrollBarVisibility = ScrollBarVisibility.Auto },
-            PrimaryButtonText = "保存", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Primary,
+            Content = fields,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollMode = ScrollMode.Disabled,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
         };
+        void ResizeContent(XamlRoot sender, XamlRootChangedEventArgs args) => FitContent();
+        void FitContent()
+        {
+            fields.Width = Math.Clamp(root.Size.Width - 120, 200, 440);
+            scroll.MaxHeight = Math.Clamp(root.Size.Height - 280, 120, 560);
+        }
+        FitContent();
+        var dialog = Dialogs.Create(root, title, scroll, "保存");
         dialog.PrimaryButtonClick += async (_, args) =>
         {
             var deferral = args.GetDeferral();
@@ -186,12 +208,14 @@ public sealed class PromptAssistantPanel : UserControl
             catch (Exception ex) { error.Text = ex.Message; args.Cancel = true; }
             finally { deferral.Complete(); }
         };
-        await dialog.ShowAsync();
+        root.Changed += ResizeContent;
+        try { await dialog.ShowAsync(); }
+        finally { root.Changed -= ResizeContent; }
     }
 
     private Task ServiceEditor(AssistantService? selected) => Run(async (client, ct) =>
     {
-        var name = new TextBox { Header = "服务名称", Text = selected?.Name ?? "", MinWidth = 370 };
+        var name = new TextBox { Header = "服务名称", Text = selected?.Name ?? "" };
         var type = new ComboBox { Header = "协议", ItemsSource = new[] { "openai_compatible", "ollama" }, IsEnabled = selected is null, HorizontalAlignment = HorizontalAlignment.Stretch };
         type.SelectedItem = selected?.Type ?? "openai_compatible";
         if (selected is not null && type.SelectedItem is null) type.ItemsSource = new[] { selected.Type };
@@ -226,7 +250,7 @@ public sealed class PromptAssistantPanel : UserControl
         if (SelectedService() is not { } service) { status.Text = "请先选择服务。"; return; }
         var selected = existing ? models.SelectedItem as AssistantModel : null;
         if (existing && selected is null) { status.Text = "请先选择模型。"; return; }
-        var name = new TextBox { Header = "模型名称", Text = selected?.Name ?? "", IsReadOnly = existing, MinWidth = 370 };
+        var name = new TextBox { Header = "模型名称", Text = selected?.Name ?? "", IsReadOnly = existing };
         var temperature = new NumberBox { Header = "Temperature", Minimum = 0, Maximum = 2, Value = selected?.Temperature ?? .7, SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Inline, SmallChange = .1 };
         var topP = new NumberBox { Header = "Top P", Minimum = 0, Maximum = 1, Value = selected?.TopP ?? .9, SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Inline, SmallChange = .05 };
         var tokens = new NumberBox { Header = "Max Tokens", Minimum = 1, Maximum = int.MaxValue, Value = selected?.MaxTokens ?? 4096, SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Inline };
@@ -235,21 +259,26 @@ public sealed class PromptAssistantPanel : UserControl
         if (!existing)
         {
             var available = new ComboBox { PlaceholderText = "也可手动填写模型名称", HorizontalAlignment = HorizontalAlignment.Stretch };
-            var fetchStatus = new TextBlock { TextWrapping = TextWrapping.Wrap };
+            var fetchStatus = BodyText("");
             var fetch = Button("从供应商获取模型列表", async () =>
             {
+                fetchStatus.Style = (Style)Application.Current.Resources["StudioBodyStyle"];
                 try
                 {
                     available.ItemsSource = await client.RemoteModels(service.Id, ct, Mode);
                     fetchStatus.Text = Mode == AssistantMode.Reverse ? "已获取模型列表，请选择支持图像输入的视觉模型。" : "已获取可用模型。";
                 }
-                catch (Exception error) { fetchStatus.Text = error.Message; }
+                catch (Exception error)
+                {
+                    fetchStatus.Style = (Style)Application.Current.Resources["StudioErrorTextStyle"];
+                    fetchStatus.Text = error.Message;
+                }
             });
             available.SelectionChanged += (_, _) => { if (available.SelectedItem is string modelName) name.Text = modelName; };
             fields.Children.Add(fetch); fields.Children.Add(available); fields.Children.Add(fetchStatus);
         }
         fields.Children.Add(temperature); fields.Children.Add(topP); fields.Children.Add(tokens);
-        if (!service.AdvancedParameters) fields.Children.Add(new TextBlock { Text = "该服务尚未启用模型参数；可在编辑服务中开启。", TextWrapping = TextWrapping.Wrap });
+        if (!service.AdvancedParameters) fields.Children.Add(BodyText("该服务尚未启用模型参数；可在编辑服务中开启。"));
         await ShowEditor(existing ? "编辑模型参数" : Mode == AssistantMode.Reverse ? "添加 VLM 视觉模型" : "添加 LLM 模型", fields, async () =>
         {
             await client.SaveModel(service.Id, name.Text, temperature.Value, topP.Value, double.IsFinite(tokens.Value) ? (int)tokens.Value : 0, existing, ct, Mode);
@@ -267,14 +296,14 @@ public sealed class PromptAssistantPanel : UserControl
 
     private Task TemplateEditor(AssistantTemplate? selected) => Run(async (client, ct) =>
     {
-        var name = new TextBox { Header = "模板名称", Text = selected?.Name ?? "", MinWidth = 370 };
+        var name = new TextBox { Header = "模板名称", Text = selected?.Name ?? "" };
         var category = new TextBox { Header = "分类（可选）", Text = selected?.Category ?? "" };
         var content = new TextBox { Header = "系统提示词", Text = selected?.Content ?? "", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 230 };
         var fields = new StackPanel { Spacing = 10 };
         fields.Children.Add(name); fields.Children.Add(category); fields.Children.Add(content);
-        fields.Children.Add(new TextBlock { Text = Mode == AssistantMode.Reverse
+        fields.Children.Add(BodyText(Mode == AssistantMode.Reverse
             ? "此模板决定 AI 如何描述图片，包括输出语言、画面细节和提示词格式。"
-            : "按原文发送所选系统提示词；语言与重写要求由此模板决定。", TextWrapping = TextWrapping.Wrap });
+            : "按原文发送所选系统提示词；语言与重写要求由此模板决定。"));
         await ShowEditor(selected is null ? "新增系统提示词" : "编辑系统提示词", fields, async () =>
         {
             var id = await client.SaveTemplate(selected?.Id, name.Text, content.Text, category.Text, ct, selected, Mode);
@@ -296,4 +325,48 @@ public sealed class PromptAssistantPanel : UserControl
         await client.DeleteTemplate(template.Id, ct, Mode);
         await Reload(client, ct);
     });
+}
+
+/// <summary>Keep actions readable when the window or text scale changes.</summary>
+internal sealed class AssistantActionPanel : Panel
+{
+    private const double Gap = 8;
+
+    protected override Size MeasureOverride(Size availableSize)
+    {
+        var limit = double.IsFinite(availableSize.Width) ? Math.Max(0, availableSize.Width) : double.PositiveInfinity;
+        double x = 0, y = 0, rowHeight = 0, width = 0;
+        foreach (var child in Children)
+        {
+            child.Measure(new Size(limit, double.PositiveInfinity));
+            var size = child.DesiredSize;
+            if (x > 0 && x + size.Width > limit)
+            {
+                width = Math.Max(width, x - Gap);
+                y += rowHeight + Gap;
+                x = rowHeight = 0;
+            }
+            x += size.Width + Gap;
+            rowHeight = Math.Max(rowHeight, size.Height);
+        }
+        return new Size(Math.Max(width, Math.Max(0, x - Gap)), y + rowHeight);
+    }
+
+    protected override Size ArrangeOverride(Size finalSize)
+    {
+        double x = 0, y = 0, rowHeight = 0;
+        foreach (var child in Children)
+        {
+            var size = child.DesiredSize;
+            if (x > 0 && x + size.Width > finalSize.Width)
+            {
+                y += rowHeight + Gap;
+                x = rowHeight = 0;
+            }
+            child.Arrange(new Rect(x, y, Math.Min(size.Width, finalSize.Width), size.Height));
+            x += size.Width + Gap;
+            rowHeight = Math.Max(rowHeight, size.Height);
+        }
+        return finalSize;
+    }
 }

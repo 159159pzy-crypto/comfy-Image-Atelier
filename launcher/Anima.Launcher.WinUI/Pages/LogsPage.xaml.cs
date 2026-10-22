@@ -86,6 +86,15 @@ public sealed partial class LogsPage : LauncherPage
 
     private void OpenDir_Click(object sender, RoutedEventArgs e) => Program.Open(Path.Combine(Program.StateDir, "logs"));
 
+    private void Toolbar_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        var narrow = e.NewSize.Width < 610;
+        Grid.SetColumn(FollowTailBox, narrow ? 0 : 1);
+        Grid.SetRow(FollowTailBox, narrow ? 1 : 0);
+        Grid.SetColumnSpan(LogActions, narrow ? 2 : 1);
+        LogActions.Orientation = e.NewSize.Width < 390 ? Orientation.Vertical : Orientation.Horizontal;
+    }
+
     private void Copy_Click(object sender, RoutedEventArgs e)
     {
         try

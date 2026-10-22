@@ -480,11 +480,14 @@ internal sealed partial class LauncherState : IDisposable
         ResolvePaths();
         var models = modelIds.Select(id => Program.Models.Models.SingleOrDefault(model => model.Id == id)
             ?? throw new InvalidDataException("模型清单中已不存在此资源，请重新扫描：" + id)).ToArray();
-        var probe = await TaggerRuntime.Probe(Config, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
+        var script = Path.Combine(Program.Assets, "probe_comfy.py");
+        var probe = ModelProbePolicy.NeedsTaggerRuntime(models)
+            ? await TaggerRuntime.Probe(Config, script, ct)
+            : await Inventory.Probe(Config.ComfyRoot, Config.Python, script, ct, Config.ComfyArguments);
         return await Task.Run(() => Inventory.Scan(probe, new ModelManifest(Program.Models.SchemaVersion, models), hashes, ct), ct);
     }
 
-    private async Task DownloadModelIdsAsync(string[] modelIds, CancellationToken ct)
+    private async Task DownloadModelIdsAsync(string[] modelIds, CancellationToken ct, bool refreshInventory = true)
     {
         if (modelIds.Length == 0)
         {
@@ -501,7 +504,7 @@ internal sealed partial class LauncherState : IDisposable
         foreach (var item in resolved.Where(item => !item.Missing && item.Model.Category == "diffusion_models"))
             await ModelMetadata.EnsureDefaultAsync(Config, Program.Runtime, Program.Models, Program.ModelProfiles,
                 item.FoundPath!, ct, AppendLog);
-        await Scan(ct);
+        if (refreshInventory) await Scan(ct);
         SetStatus(missing.Count == 0 ? "当前环境已有所选模型，校验通过，无需下载。"
             : "所选模型下载并校验完成。若 ComfyUI 已运行，请在任务空闲时重新启动以刷新清单。");
     }

@@ -24,11 +24,13 @@ public sealed partial class MainWindow : Window
     private bool minimizeNotified;
     private int selectedPage;
     private bool downloadCancelable;
+    private string statusBrushKey = "StudioSecondaryBrush";
 
     public MainWindow(App app, bool forceShow)
     {
         this.forceShow = forceShow;
         InitializeComponent();
+        StudioTheme.ScopeResources(RootGrid);
         Title = "Anima Random Studio · 安装与启动";
         SystemBackdrop = new MicaBackdrop();
         ExtendsContentIntoTitleBar = true;
@@ -58,7 +60,7 @@ public sealed partial class MainWindow : Window
         WireState();
 
         GoToPage(State.SetupActive ? 5 : 0);
-        RootGrid.ActualThemeChanged += (_, _) => UpdateNavigation();
+        RootGrid.ActualThemeChanged += (_, _) => RefreshThemeChrome();
         RootGrid.SizeChanged += (_, e) => BrandCopy.Visibility = e.NewSize.Width < 720 ? Visibility.Collapsed : Visibility.Visible;
 
         CreateTray();
@@ -74,7 +76,8 @@ public sealed partial class MainWindow : Window
         State.StatusChanged += text => DispatcherQueue.TryEnqueue(() =>
         {
             StatusText.Text = text;
-            StatusText.Foreground = ThemeBrush("StudioSecondaryBrush");
+            statusBrushKey = "StudioSecondaryBrush";
+            StatusText.Foreground = ThemeBrush(statusBrushKey);
         });
         State.ProgressChanged += value => DispatcherQueue.TryEnqueue(() =>
         {
@@ -99,7 +102,8 @@ public sealed partial class MainWindow : Window
         State.TaskFailed += ex => DispatcherQueue.TryEnqueue(async () =>
         {
             State.AppendLog(ex.Message);
-            StatusText.Foreground = ThemeBrush("StudioDangerBrush");
+            statusBrushKey = "StudioDangerBrush";
+            StatusText.Foreground = ThemeBrush(statusBrushKey);
             StatusText.Text = ex.Message;
             ShowWindow();
             if (!State.SetupActive && Content?.XamlRoot is { } root) await Dialogs.Error(root, ex.Message);
@@ -214,7 +218,8 @@ public sealed partial class MainWindow : Window
         catch (Exception ex)
         {
             State.AppendLog(ex.ToString());
-            StatusText.Foreground = ThemeBrush("StudioDangerBrush");
+            statusBrushKey = "StudioDangerBrush";
+            StatusText.Foreground = ThemeBrush(statusBrushKey);
             StatusText.Text = ex.Message;
         }
     }
@@ -282,9 +287,15 @@ public sealed partial class MainWindow : Window
             "light" => ElementTheme.Light,
             _ => ElementTheme.Default,
         };
+        RefreshThemeChrome();
+    }
+
+    private void RefreshThemeChrome()
+    {
         AppWindow.TitleBar.ButtonBackgroundColor = Colors.Transparent;
         AppWindow.TitleBar.ButtonInactiveBackgroundColor = Colors.Transparent;
-        AppWindow.TitleBar.ButtonForegroundColor = element.ActualTheme == ElementTheme.Dark ? Colors.White : Colors.Black;
+        AppWindow.TitleBar.ButtonForegroundColor = RootGrid.ActualTheme == ElementTheme.Dark ? Colors.White : Colors.Black;
+        StatusText.Foreground = ThemeBrush(statusBrushKey);
         UpdateNavigation();
     }
 

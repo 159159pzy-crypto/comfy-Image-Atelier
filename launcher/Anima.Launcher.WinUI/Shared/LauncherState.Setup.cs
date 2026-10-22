@@ -156,6 +156,7 @@ internal sealed partial class LauncherState
         setupInstallAction = null;
         SetupError = "";
         SetupMissingModels = [];
+        ResetSetupModels();
     }
 
     public void MoveSetupTo(SetupStep step)
@@ -305,9 +306,11 @@ internal sealed partial class LauncherState
             Setup.Step = SetupStep.Complete;
             setupRetryAvailable = false;
             PersistSetup();
-            SetupNotice = SetupMissingModels.Count > 0
-                ? "环境已接入。部分基础模型需要在模型资源页补齐。" : "环境已准备好。点击“开始创作”启动服务并打开工作台。";
-            SetStatus("安装准备已完成。");
+            SetupNotice = "";
+            SetStatus("环境已接入，正在确认基础模型…");
+            SetupCompletionOperation = SetupCompletionOperation.ReviewModels;
+            await ScanSetupModelsAsync(ct);
+            SetupCompletionOperation = SetupCompletionOperation.None;
         };
         setupRetryAvailable = true;
         await Run(setupInstallAction, applyDrafts: false, setupOperation: true);
@@ -327,6 +330,10 @@ internal sealed partial class LauncherState
         if (Busy || Setup.Step != SetupStep.Complete) return;
         SetupError = "";
         setupRetryAvailable = false;
+        setupModelResumeAvailable = false;
+        setupModelResumePlan = null;
+        setupModelPreviewPlan = null;
+        SetupCompletionOperation = SetupCompletionOperation.StartWorkbench;
         await Run(async ct =>
         {
             await StartServicesAsync(ct);
@@ -350,6 +357,7 @@ internal sealed partial class LauncherState
         Setup.Step = SetupStep.Finished;
         PersistSetup();
         SetupActive = false;
+        ResetSetupModels();
         SetStatus("环境已配置。可以从概览启动工作台。");
         NotifySetup();
     }
@@ -393,6 +401,11 @@ internal sealed partial class LauncherState
         var selected = Program.ModelProfiles.RequiredModels(Program.Models, SetupActive ? Setup.Draft.SelectedProfile : Config.SelectedProfile)
             .Select(m => m.Id).ToHashSet();
         SetupMissingModels = scan.Where(m => selected.Contains(m.Model.Id) && m.Missing).Select(m => m.Model.Name).ToArray();
+        if (SetupActive && Setup.Step is SetupStep.Installing or SetupStep.Complete)
+        {
+            SetupModelReview = BuildSetupModelReview(scan);
+            SetupModelsReadiness = SetupModelReview.Readiness;
+        }
     }
 
     private void UpdateSetupSystem(string gpu)
@@ -411,15 +424,6 @@ internal sealed partial class LauncherState
 
     public async Task RefreshSetupCompletionAsync()
     {
-        if (!SetupActive || Setup.Step != SetupStep.Complete || Busy) return;
-        await Run(async ct =>
-        {
-            SetStatus("正在确认已安装环境和基础模型…");
-            var probe = await Inventory.Probe(Config.ComfyRoot, Config.Python, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
-            UpdateSetupMissingModels(await Inventory.Scan(probe, Program.Models, false, ct));
-            SetupNotice = SetupMissingModels.Count > 0
-                ? "环境已接入。以下基础模型仍需补齐。" : "环境已准备好，可以开始创作。";
-            SetStatus("环境检查完成。");
-        }, applyDrafts: false, setupOperation: true);
+        await ReviewSetupModelsAsync(showPreview: false);
     }
 }

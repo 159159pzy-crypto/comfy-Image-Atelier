@@ -16,7 +16,7 @@
             </StackPanel>
             <Border Style="{StaticResource StudioPanelStyle}" Padding="22">
                 <StackPanel Spacing="12">
-                    <StackPanel Orientation="Horizontal" Spacing="8">
+                    <StackPanel x:Name="FolderActions" Orientation="Horizontal" Spacing="8" SizeChanged="FolderActions_SizeChanged">
                         <Button Content="LoRA 文件夹" Tag="loras" Click="Folder_Click" />
                         <Button Content="底模文件夹" Tag="diffusion_models" Click="Folder_Click" />
                         <Button x:Name="MoreFoldersButton" Content="更多文件夹">
@@ -36,8 +36,9 @@
             <Border Style="{StaticResource StudioPanelStyle}" Padding="18">
                 <StackPanel Spacing="12">
                     <ContentControl x:Name="ModelActions" HorizontalContentAlignment="Stretch" IsTabStop="False">
-                    <Grid ColumnSpacing="8">
+                    <Grid x:Name="DownloadActionsGrid" ColumnSpacing="8" RowSpacing="10" SizeChanged="DownloadActions_SizeChanged">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                         <StackPanel Orientation="Horizontal" Spacing="8">
                             <Button Content="重新扫描" Click="Rescan_Click" />
                             <Button Content="更多操作">
@@ -51,7 +52,7 @@
                                 </Button.Flyout>
                             </Button>
                         </StackPanel>
-                        <Button Grid.Column="1" Content="下载所选模型" Click="Download_Click" Style="{StaticResource StudioPrimaryButtonStyle}" />
+                        <Button x:Name="DownloadButton" Grid.Column="1" Content="下载所选模型" Click="Download_Click" Style="{StaticResource StudioPrimaryButtonStyle}" />
                     </Grid>
                     </ContentControl>
                     <TextBlock x:Name="EmptyNote" Text="还没有扫描模型。先导入或安装 ComfyUI，再点击「重新扫描」。" Style="{StaticResource StudioBodyStyle}" Margin="8,14" />
@@ -99,7 +100,7 @@
             <Expander Header="模型详情与来源" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
                 <StackPanel Spacing="14">
                     <TextBlock x:Name="Details" Text="选择一个模型查看来源、校验与授权。" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" />
-                    <StackPanel Orientation="Horizontal" Spacing="8">
+                    <StackPanel x:Name="DetailActions" Orientation="Horizontal" Spacing="8" SizeChanged="DetailActions_SizeChanged">
                         <Button x:Name="OpenLocationButton" Content="打开所在文件夹" Click="OpenModelDir_Click" IsEnabled="False" />
                         <Button x:Name="OpenLicenseButton" Content="查看来源与授权" Click="OpenLicense_Click" IsEnabled="False" />
                     </StackPanel>

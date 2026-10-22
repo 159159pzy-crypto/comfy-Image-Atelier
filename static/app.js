@@ -457,7 +457,8 @@ let currentBatch = null;
 let selectedRecord = null;
 let detailContext = null;
 const imagePreview = {
-  phase: "closed", token: 0, zoom: 1, x: 0, y: 0, width: 0, height: 0,
+  phase: "closed", token: 0, zoom: 1, fit: 1, x: 0, y: 0, width: 0, height: 0,
+  renderFrame: null, zoomFrame: null,
   animation: null, pointers: new Map(), gesture: null, tap: null, backdropPointer: null,
   navigationRequest: 0, preloaded: new Map(), swipe: null,
   context: null,
@@ -2044,7 +2045,7 @@ function card(record, index) {
   button.type = "button";
   button.dataset.recordId = String(record.id);
   button.setAttribute("aria-label", `查看 ${record.filename || "生成结果"}`);
-  button.innerHTML = `<img loading="lazy" decoding="async" fetchpriority="low" src="/api/images/${record.id}" alt="Anima 生成结果"><span class="image-failure" hidden>图片加载失败</span><div class="card-copy"><strong>${escapeHtml(record.filename)}</strong><span>#${record.sequence} · Seed ${record.sample_seed}</span></div>`;
+  button.innerHTML = `<img loading="lazy" decoding="async" fetchpriority="low" src="/api/images/${record.id}/thumbnail" alt="Anima 生成结果"><span class="image-failure" hidden>图片加载失败</span><div class="card-copy"><strong>${escapeHtml(record.filename)}</strong><span>#${record.sequence} · Seed ${record.sample_seed}</span></div>`;
   button.addEventListener("click", () => openDetail(record));
   const image = button.querySelector("img");
   const markLoaded = () => {
@@ -2077,6 +2078,7 @@ function renderHistoryPage(data) {
   historyPages = Number(data.pages) || 1;
   historyItems = Array.isArray(data.items) ? data.items : [];
   cacheHistoryPage(data);
+  for (const image of ui.gallery.querySelectorAll("img")) image.removeAttribute("src");
   ui.gallery.replaceChildren(...historyItems.map(card));
   ui.emptyState.hidden = historyItems.length > 0;
   const historyUnavailable = config.storage_status?.history?.available === false;
@@ -2185,6 +2187,8 @@ function finishDetailClose() {
   resetRevealImageFile();
   const context = detailContext;
   closeImagePreview({ immediate: true, restoreFocus: false });
+  ui.detailImage.onload = ui.detailImage.onerror = null;
+  ui.detailImage.removeAttribute("src");
   ++regenerationRequest;
   regenerationOptions = null;
   detailContext = null;
@@ -2281,11 +2285,27 @@ function clearPreviewCache() {
   for (const promise of imagePreview.preloaded.values()) promise.release?.();
   imagePreview.preloaded.clear();
 }
-function trimPreviewCache() {
+function trimPreviewCache(protectedRecord = null) {
   const current = String(currentPreviewRecord()?.id);
+  const protectedKey = protectedRecord ? String(protectedRecord.id) : null;
+  const keep = new Set([current]);
+  const location = selectedHistoryLocation();
+  if (location.index >= 0) {
+    for (const offset of [-1, 0, 1]) {
+      const record = location.items[location.index + offset];
+      if (record) keep.add(String(record.id));
+    }
+  }
+  // A cross-page navigation target is decoded before it becomes current.
+  if (protectedKey !== null) keep.add(protectedKey);
   for (const [key, promise] of imagePreview.preloaded) {
-    if (imagePreview.preloaded.size <= 5) break;
-    if (key === current) continue;
+    if (keep.has(key)) continue;
+    imagePreview.preloaded.delete(key);
+    promise.release?.();
+  }
+  for (const [key, promise] of imagePreview.preloaded) {
+    if (imagePreview.preloaded.size <= 3) break;
+    if (key === current || key === protectedKey) continue;
     imagePreview.preloaded.delete(key);
     promise.release?.();
   }
@@ -2297,6 +2317,7 @@ function preloadRecord(record) {
   if (cached) {
     imagePreview.preloaded.delete(key);
     imagePreview.preloaded.set(key, cached);
+    trimPreviewCache(record);
     return cached;
   }
   const image = new Image();
@@ -2312,11 +2333,13 @@ function preloadRecord(record) {
     });
   promise.release = () => { released = true; image.src = ""; };
   imagePreview.preloaded.set(key, promise);
-  trimPreviewCache();
+  trimPreviewCache(record);
   return promise;
 }
 
 function preloadPreviewNeighbors() {
+  if (imagePreview.phase !== "open") return;
+  trimPreviewCache();
   const location = selectedHistoryLocation();
   if (location.index < 0) return;
   for (const direction of [-1, 1]) {
@@ -2481,12 +2504,20 @@ async function navigatePreview(direction, focusTarget = null) {
 }
 
 function imagePreviewFrame() {
-  return { transform: ui.imagePreviewImage.style.transform || "none", clipPath: "inset(0px round 18px)", opacity: 1 };
+  const style = ui.imagePreviewImage.style;
+  return { width: style.width, height: style.height, transform: style.transform || "none", clipPath: "inset(0px round 18px)", opacity: 1 };
 }
 
 function cancelImagePreviewAnimation() {
   imagePreview.animation?.cancel();
   imagePreview.animation = null;
+  if (imagePreview.zoomFrame != null) cancelAnimationFrame(imagePreview.zoomFrame);
+  imagePreview.zoomFrame = null;
+  if (imagePreview.renderFrame != null) {
+    cancelAnimationFrame(imagePreview.renderFrame);
+    imagePreview.renderFrame = null;
+    applyImagePreviewTransform();
+  }
 }
 
 function animateImagePreview(from, to, duration, onFinish = () => {}) {
@@ -2518,7 +2549,7 @@ function animateImagePreviewVeil(toOpacity, duration, onFinish = () => {}) {
 
 function liveImagePreviewFrame() {
   const style = getComputedStyle(ui.imagePreviewImage);
-  return { transform: style.transform, clipPath: style.clipPath, opacity: style.opacity };
+  return { width: style.width, height: style.height, transform: style.transform, clipPath: style.clipPath, opacity: style.opacity };
 }
 
 function clampImagePreviewOffset() {
@@ -2530,21 +2561,41 @@ function clampImagePreviewOffset() {
 
 function applyImagePreviewTransform() {
   clampImagePreviewOffset();
-  ui.imagePreviewImage.style.transform = "translate3d(" + imagePreview.x + "px, " + imagePreview.y + "px, 0) scale(" + imagePreview.zoom + ")";
+  // Resize the original bitmap's layout box at every zoom level. A permanent
+  // scale() layer can keep magnifying the raster created at the initial fit size.
+  ui.imagePreviewImage.style.width = imagePreview.width * imagePreview.zoom + "px";
+  ui.imagePreviewImage.style.height = imagePreview.height * imagePreview.zoom + "px";
+  ui.imagePreviewImage.style.transform = "translate(" + imagePreview.x + "px, " + imagePreview.y + "px)";
   ui.imagePreviewImage.classList.toggle("is-zoomed", imagePreview.zoom > 1);
+}
+
+function scheduleImagePreviewRender() {
+  if (imagePreview.renderFrame != null) return;
+  imagePreview.renderFrame = requestAnimationFrame(() => {
+    imagePreview.renderFrame = null;
+    if (imagePreview.phase === "open") applyImagePreviewTransform();
+  });
+}
+
+function imagePreviewMaxZoom() {
+  return IMAGE_PREVIEW_MAX_ZOOM / (imagePreview.fit || 1);
 }
 
 function layoutImagePreview() {
   const image = ui.imagePreviewImage;
   const stage = ui.imagePreviewStage;
+  if (!image.naturalWidth || !image.naturalHeight || !stage.clientWidth || !stage.clientHeight) return;
+  const fitted = imagePreview.zoom <= 1.0001;
+  const actualScale = (imagePreview.fit || 1) * imagePreview.zoom;
   const style = getComputedStyle(stage);
-  const availableWidth = Math.min(stage.clientWidth * .92, stage.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight));
-  const availableHeight = Math.min(stage.clientHeight * .92, stage.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom));
+  const availableWidth = Math.max(1, Math.min(stage.clientWidth * .92, stage.clientWidth - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0)));
+  const availableHeight = Math.max(1, Math.min(stage.clientHeight * .92, stage.clientHeight - (parseFloat(style.paddingTop) || 0) - (parseFloat(style.paddingBottom) || 0)));
   const fit = Math.min(1, availableWidth / image.naturalWidth, availableHeight / image.naturalHeight);
+  imagePreview.fit = fit;
   imagePreview.width = image.naturalWidth * fit;
   imagePreview.height = image.naturalHeight * fit;
-  image.style.width = imagePreview.width + "px";
-  image.style.height = imagePreview.height + "px";
+  imagePreview.zoom = fitted ? 1 : clampPreview(actualScale / fit, 1, imagePreviewMaxZoom());
+  if (imagePreview.zoom === 1) imagePreview.x = imagePreview.y = 0;
   applyImagePreviewTransform();
 }
 
@@ -2557,7 +2608,9 @@ function imagePreviewSourceFrame() {
   const dialog = sourceContainer.getBoundingClientRect();
   const stage = ui.imagePreviewStage.getBoundingClientRect();
   const fit = getComputedStyle(sourceElement).objectFit === "contain" ? Math.min : Math.max;
-  const scale = fit(source.width / imagePreview.width, source.height / imagePreview.height);
+  const width = imagePreview.width * (imagePreview.zoom || 1);
+  const height = imagePreview.height * (imagePreview.zoom || 1);
+  const scale = fit(source.width / width, source.height / height);
   const left = Math.max(source.left, dialog.left + 1, stage.left);
   const top = Math.max(source.top, dialog.top + 1, stage.top);
   const right = Math.min(source.right, dialog.right - 1, stage.right);
@@ -2565,15 +2618,16 @@ function imagePreviewSourceFrame() {
   if (!scale || right <= left || bottom <= top) return { ...imagePreviewFrame(), opacity: 0 };
   const cx = source.left + source.width / 2;
   const cy = source.top + source.height / 2;
-  const imageLeft = cx - imagePreview.width * scale / 2;
-  const imageTop = cy - imagePreview.height * scale / 2;
+  const imageLeft = cx - width * scale / 2;
+  const imageTop = cy - height * scale / 2;
   const insets = [
     (top - imageTop) / scale,
-    (imageLeft + imagePreview.width * scale - right) / scale,
-    (imageTop + imagePreview.height * scale - bottom) / scale,
+    (imageLeft + width * scale - right) / scale,
+    (imageTop + height * scale - bottom) / scale,
     (left - imageLeft) / scale,
   ].map(value => Math.max(0, value) + "px").join(" ");
   return {
+    width: width + "px", height: height + "px",
     transform: "translate3d(" + (cx - stage.left - stage.width / 2) + "px, " + (cy - stage.top - stage.height / 2) + "px, 0) scale(" + scale + ")",
     clipPath: "inset(" + insets + " round " + (18 / scale) + "px)",
     opacity: 1,
@@ -2708,6 +2762,7 @@ function closeImagePreview({ immediate = false, restoreFocus = true } = {}) {
   if (imagePreview.phase === "closed") return;
   if (immediate) return finishImagePreviewClose(restoreFocus);
   if (imagePreview.phase === "closing") return;
+  if (imagePreview.phase === "open") cancelImagePreviewAnimation();
   ++imagePreview.token; // Invalidate an in-flight decode before starting the exit.
   ++imagePreview.navigationRequest;
   const hasImage = !ui.imagePreviewImage.hidden;
@@ -2720,23 +2775,44 @@ function closeImagePreview({ immediate = false, restoreFocus = true } = {}) {
   }
 }
 
-// During manipulation, update transforms directly so the picture follows the pointer.
+// Zoom uses real layout dimensions, including every frame of a double-click.
+// State is the currently displayed tween position so an interruption never jumps.
 function setImagePreviewZoom(nextZoom, focalPoint = null, smooth = false) {
-  if (imagePreview.phase !== "open") return;
-  const from = liveImagePreviewFrame();
+  if (imagePreview.phase !== "open" || !Number.isFinite(nextZoom)) return;
+  if (smooth || imagePreview.zoomFrame != null || imagePreview.animation) cancelImagePreviewAnimation();
+  const from = { zoom: imagePreview.zoom, x: imagePreview.x, y: imagePreview.y };
   const previousZoom = imagePreview.zoom;
-  imagePreview.zoom = clampPreview(nextZoom, 1, IMAGE_PREVIEW_MAX_ZOOM);
+  imagePreview.zoom = clampPreview(nextZoom, 1, imagePreviewMaxZoom());
   if (imagePreview.zoom === 1) {
     imagePreview.x = imagePreview.y = 0;
   } else if (focalPoint) {
     const stage = ui.imagePreviewStage.getBoundingClientRect();
     const ratio = imagePreview.zoom / previousZoom;
-    imagePreview.x = (focalPoint.x - stage.left - stage.width / 2) * (1 - ratio) + imagePreview.x * ratio;
-    imagePreview.y = (focalPoint.y - stage.top - stage.height / 2) * (1 - ratio) + imagePreview.y * ratio;
+    imagePreview.x = ((focalPoint.clientX ?? focalPoint.x) - stage.left - stage.width / 2) * (1 - ratio) + imagePreview.x * ratio;
+    imagePreview.y = ((focalPoint.clientY ?? focalPoint.y) - stage.top - stage.height / 2) * (1 - ratio) + imagePreview.y * ratio;
   }
-  applyImagePreviewTransform();
-  if (smooth) animateImagePreview(from, imagePreviewFrame(), 220);
-  else cancelImagePreviewAnimation();
+  clampImagePreviewOffset();
+  if (!smooth || imagePreviewReducedMotion()) {
+    scheduleImagePreviewRender();
+    return;
+  }
+  const to = { zoom: imagePreview.zoom, x: imagePreview.x, y: imagePreview.y };
+  Object.assign(imagePreview, from);
+  const start = performance.now();
+  const step = now => {
+    imagePreview.zoomFrame = null;
+    if (imagePreview.phase !== "open") return;
+    const progress = clampPreview((now - start) / 220, 0, 1);
+    const eased = 1 - Math.pow(1 - progress, 3);
+    for (const key of ["zoom", "x", "y"]) imagePreview[key] = from[key] + (to[key] - from[key]) * eased;
+    applyImagePreviewTransform();
+    if (progress < 1) imagePreview.zoomFrame = requestAnimationFrame(step);
+  };
+  imagePreview.zoomFrame = requestAnimationFrame(step);
+}
+
+function toggleImagePreviewZoom(focalPoint) {
+  setImagePreviewZoom(imagePreview.zoom < 1.01 ? 1 / (imagePreview.fit || 1) : 1, focalPoint, true);
 }
 
 function resetImagePreviewTransform() {
@@ -2759,12 +2835,8 @@ function imagePreviewPointerDown(event) {
   // During the entry animation, let it settle: grabbing mid-entry would snap
   // the pan offset through clamp logic and look like a jump.
   if (imagePreview.phase !== "open" || (event.pointerType === "mouse" && event.button !== 0)) return;
-  // Continue from the presentation transform if a double-click zoom was still settling.
-  const current = new DOMMatrixReadOnly(getComputedStyle(ui.imagePreviewImage).transform);
+  // The tween already stores its displayed dimensions and pan position.
   cancelImagePreviewAnimation();
-  imagePreview.zoom = current.a;
-  imagePreview.x = current.e;
-  imagePreview.y = current.f;
   applyImagePreviewTransform();
   ui.imagePreviewImage.setPointerCapture(event.pointerId);
   imagePreview.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, time: performance.now(), moved: false });
@@ -2789,7 +2861,7 @@ function imagePreviewPointerMove(event) {
     const [a, b] = points;
     const [startA, startB] = gesture.points;
     const startDistance = Math.max(1, Math.hypot(startA.x - startB.x, startA.y - startB.y));
-    imagePreview.zoom = clampPreview(gesture.zoom * Math.hypot(a.x - b.x, a.y - b.y) / startDistance, 1, IMAGE_PREVIEW_MAX_ZOOM);
+    imagePreview.zoom = clampPreview(gesture.zoom * Math.hypot(a.x - b.x, a.y - b.y) / startDistance, 1, imagePreviewMaxZoom());
     const stage = ui.imagePreviewStage.getBoundingClientRect();
     const ratio = imagePreview.zoom / gesture.zoom;
     imagePreview.x = (a.x + b.x) / 2 - stage.left - stage.width / 2 - ((startA.x + startB.x) / 2 - stage.left - stage.width / 2 - gesture.x) * ratio;
@@ -2798,7 +2870,8 @@ function imagePreviewPointerMove(event) {
     imagePreview.x = gesture.x + point.x - gesture.points[0].x;
     imagePreview.y = gesture.y + point.y - gesture.points[0].y;
   }
-  applyImagePreviewTransform();
+  clampImagePreviewOffset();
+  scheduleImagePreviewRender();
   event.preventDefault();
 }
 
@@ -2824,7 +2897,7 @@ function imagePreviewPointerUp(event) {
   if (event.type === "pointerup" && event.pointerType === "touch" && !point.moved && performance.now() - point.time < 300) {
     const previous = imagePreview.tap;
     if (previous && performance.now() - previous.time < 300 && Math.hypot(point.x - previous.x, point.y - previous.y) < 30) {
-      setImagePreviewZoom(imagePreview.zoom < 1.01 ? 2 : 1, point, true);
+      toggleImagePreviewZoom(point);
       imagePreview.tap = null;
     } else imagePreview.tap = { x: point.x, y: point.y, time: performance.now() };
   }
@@ -5811,7 +5884,7 @@ ui.imagePreviewImage.addEventListener("lostpointercapture", imagePreviewPointerU
 ui.imagePreviewStage.addEventListener("wheel", imagePreviewWheel, { passive: false });
 ui.imagePreviewImage.addEventListener("dblclick", (event) => {
   event.preventDefault();
-  setImagePreviewZoom(imagePreview.zoom < 1.01 ? 2 : 1, event, true);
+  toggleImagePreviewZoom(event);
 });
 ui.imagePreviewVeil.addEventListener("pointerdown", (event) => {
   if (event.button === 0) imagePreview.backdropPointer = { id: event.pointerId, x: event.clientX, y: event.clientY };
@@ -5848,7 +5921,7 @@ ui.imagePreviewDialog.addEventListener("keydown", (event) => {
     const amount = event.shiftKey ? 80 : 24;
     imagePreview.x += event.key === "ArrowLeft" ? amount * -1 : event.key === "ArrowRight" ? amount : 0;
     imagePreview.y += event.key === "ArrowUp" ? amount * -1 : event.key === "ArrowDown" ? amount : 0;
-    applyImagePreviewTransform();
+    scheduleImagePreviewRender();
   }
 });
 ui.imagePreviewDialog.addEventListener("cancel", (event) => {

@@ -3,6 +3,7 @@ using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Navigation;
 using Microsoft.UI.Text;
 using Windows.Storage.Pickers;
@@ -17,14 +18,23 @@ public sealed partial class SetupPage : LauncherPage
     private bool pythonExplicit;
     private bool pauseRequested;
     private string localError = "";
+    private string displayedError = "";
     private SetupStep? displayedStep;
     private string stageSignature = "";
+    private object? renderedModelReview;
+    private object? renderedPreflight;
 
     public SetupPage()
     {
         InitializeComponent();
         SourceBox.ItemsSource = Program.Sources.Profiles;
         SourceBox.DisplayMemberPath = nameof(SourceProfile.Name);
+        ActualThemeChanged += (_, _) =>
+        {
+            stageSignature = "";
+            renderedModelReview = null;
+            if (active) Refresh();
+        };
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
@@ -54,6 +64,15 @@ public sealed partial class SetupPage : LauncherPage
     private void OnProgress(string _) => OnChanged();
     private void OnPercent(int _) => OnChanged();
     private static Visibility Visible(bool value) => value ? Visibility.Visible : Visibility.Collapsed;
+
+    // Initial navigation runs before App.Window is assigned. Resolve brushes
+    // from this page rather than depending on the not-yet-published shell.
+    private Brush PageBrush(string key)
+    {
+        var theme = new Windows.UI.ViewManagement.AccessibilitySettings().HighContrast ? "HighContrast"
+            : ActualTheme == ElementTheme.Light ? "Light" : "Default";
+        return (Brush)((ResourceDictionary)Application.Current.Resources.ThemeDictionaries[theme])[key];
+    }
 
     private void LoadFields()
     {
@@ -117,17 +136,28 @@ public sealed partial class SetupPage : LauncherPage
         ErrorBar.Message = string.IsNullOrEmpty(localError) ? State.SetupError : localError;
         if (localError.Length == 0 && step == SetupStep.Review && State.SetupPreflight is { CanInstall: false })
             ErrorBar.Message = "检查未通过，请查看下方检查结果并处理后重试。";
+        if (localError.Length == 0 && step == SetupStep.Complete && State.SetupModelsReadiness == SetupModelReadiness.ScanFailed
+            && State.SetupCompletionOperation != SetupCompletionOperation.StartWorkbench && ErrorBar.Message.Length > 0)
+            ErrorBar.Message = "基础模型检查未完成。请确认已连接的 ComfyUI 目录和 Python 可用，再重新检查；详细原因见日志。";
         ErrorBar.IsOpen = !string.IsNullOrWhiteSpace(ErrorBar.Message);
+        if (ErrorBar.IsOpen && displayedError != ErrorBar.Message) BodyScroll.ChangeView(null, 0, null, true);
+        displayedError = ErrorBar.Message;
         NoticeBar.Message = State.SetupNotice;
-        NoticeBar.IsOpen = !string.IsNullOrWhiteSpace(State.SetupNotice);
+        NoticeBar.IsOpen = !string.IsNullOrWhiteSpace(State.SetupNotice)
+            && step != SetupStep.Review
+            && step != SetupStep.Complete;
         LocationFields.IsEnabled = !State.Busy;
         BackButton.IsEnabled = !State.Busy;
         SecondaryButton.IsEnabled = !State.Busy;
-        OpenModelsButton.IsEnabled = !State.Busy;
+        DetectAgainButton.IsEnabled = !State.Busy;
+        DetectAgainButton.Content = State.Busy ? "正在检测…" : "重新检测";
+        RecheckModelsButton.IsEnabled = !State.Busy;
+        ModelReviewHost.IsEnabled = !State.Busy;
+        IssueActionsHost.IsEnabled = !State.Busy;
         PrimaryButton.IsEnabled = !State.Busy;
         SecondaryButton.Visibility = Visibility.Collapsed;
-        BackButton.Visibility = Visible(step != SetupStep.Complete);
-        BackButton.Content = step == SetupStep.Welcome ? "稍后设置" : "上一步";
+        BackButton.Visibility = Visibility.Visible;
+        BackButton.Content = step == SetupStep.Welcome ? "稍后设置" : step == SetupStep.Complete ? "稍后打开" : "上一步";
         CheckProgress.Visibility = Visible(State.Busy && step == SetupStep.Review);
 
         switch (step)
@@ -157,7 +187,9 @@ public sealed partial class SetupPage : LauncherPage
                 PrimaryButton.Content = State.Busy ? "正在检查…" : State.SetupCanInstall
                     ? (!State.Setup.Fresh && !State.SetupImportNeedsRepair ? "完成导入"
                         : State.Setup.InstallStarted ? "继续安装" : "开始安装") : "重新检查";
-                FooterHint.Text = State.SetupCanInstall ? "已检查当前选项，可以开始安装。" : "处理上方问题后重新检查。";
+                FooterHint.Text = State.SetupCanInstall
+                    ? State.Setup.Fresh ? "确认后再开始下载与安装。" : "确认后连接现有环境，补齐缺少的节点。"
+                    : "处理上方问题后重新检查。";
                 break;
             case SetupStep.Installing:
                 UpdateInstallation();
@@ -170,14 +202,7 @@ public sealed partial class SetupPage : LauncherPage
                     : State.SetupCanResume ? "继续使用本次任务的安装选项。" : "重新检查后继续，已完成内容会复用。";
                 break;
             case SetupStep.Complete:
-                CompletionSummary.Text = (State.Setup.Fresh ? "Anima 环境和基础模型已完成安装。" : "现有 ComfyUI 已导入，所需环境与节点已检查。")
-                    + "\n" + State.Setup.Draft.ComfyRoot;
-                MissingModelsPanel.Visibility = Visible(State.SetupMissingModels.Count > 0);
-                MissingModelsText.Text = string.Join("\n", State.SetupMissingModels.Select(name => "• " + name));
-                PrimaryButton.Content = State.Busy ? "正在启动…" : string.IsNullOrEmpty(State.SetupError) ? "开始创作" : "重试启动";
-                SecondaryButton.Content = "稍后打开";
-                SecondaryButton.Visibility = Visibility.Visible;
-                FooterHint.Text = State.Busy ? State.SetupStatusText : "可以立即打开工作台，也可以稍后再开始。";
+                UpdateCompletion();
                 break;
         }
     }
@@ -265,6 +290,8 @@ public sealed partial class SetupPage : LauncherPage
         var preflight = State.SetupPreflight;
         ReviewSummary.Text = State.Busy ? "正在检查环境、可复用文件和各磁盘空间…"
             : State.SetupCanInstall ? "检查通过。以下是这次安装会准备的内容。" : "还不能开始安装，请处理检查结果中的问题。";
+        ReviewMode.Text = State.Setup.Fresh ? "安装完整环境" : "连接已有 ComfyUI";
+        ReviewLocation.Text = "位置：" + (plan?.ComfyRoot ?? State.Setup.Draft.ComfyRoot);
         PlanContents.Text = plan is null ? "完成检查后显示安装内容。"
             : string.Join("\n", plan.Stages.Select(stage => "• " + stage)) + $"\n\n环境：{plan.ComfyRoot}\nPython：{plan.CreateConfig().Python}\n工具与缓存：{plan.RuntimeRoot}";
         DownloadEstimate.Text = plan is null ? "等待计算下载量" : $"已知剩余下载 {Bytes(plan.EstimatedDownloadBytes)}";
@@ -281,6 +308,7 @@ public sealed partial class SetupPage : LauncherPage
         IssuesPanel.Visibility = Visible(preflight is not null && preflight.Issues.Length > 0);
         IssuesSummary.Text = preflight is null ? "" : string.Join("\n\n",
             preflight.Issues.Select(issue => (issue.Blocking ? "需处理：" : "提示：") + issue.Message));
+        UpdateIssueActions();
     }
 
     private void UpdateInstallation()
@@ -296,14 +324,174 @@ public sealed partial class SetupPage : LauncherPage
         if (signature == stageSignature) return;
         stageSignature = signature;
         StageList.ItemsSource = State.SetupStages.Select(stage => new SetupStageRow(
-            StageTitle(stage.StageId), stage.Detail, StageState(stage.Status), StageMarker(stage.Status))).ToArray();
+            StageTitle(stage.StageId), stage.Detail, StageState(stage.Status), StageMarker(stage.Status),
+            PageBrush(stage.Status switch
+            {
+                SetupStageStatus.Complete => "StudioSuccessBrush",
+                SetupStageStatus.Failed => "StudioDangerBrush",
+                SetupStageStatus.Paused => "StudioWarningBrush",
+                SetupStageStatus.Running => "StudioAccentBrush",
+                _ => "StudioSecondaryBrush"
+            }))).ToArray();
+    }
+
+    private SetupCompletionPresentation CompletionPresentation() => SetupCompletionPresentation.Resolve(
+        State.SetupModelsReadiness, State.SetupModelReviewVisible, State.SetupCanDownloadModels,
+        State.SetupCanResumeModels,
+        State.SetupCompletionOperation == SetupCompletionOperation.StartWorkbench && State.SetupError.Length > 0,
+        State.SetupError.Length > 0);
+
+    private void UpdateCompletion()
+    {
+        var presentation = CompletionPresentation();
+        CompletionTitle.Text = presentation.Title;
+        CompletionHelp.Text = presentation.Description;
+        CompletionSummary.Text = (State.Setup.Fresh ? "独立创作环境已安装。" : "现有 ComfyUI 已连接。")
+            + "\n" + State.Config.ComfyRoot;
+        var ready = State.SetupModelsReadiness == SetupModelReadiness.Ready;
+        var attention = State.SetupModelsReadiness is SetupModelReadiness.NeedsAttention or SetupModelReadiness.ScanFailed;
+        CompletionIcon.Glyph = ready ? "\uE73E" : attention ? "\uE7BA" : "\uE946";
+        CompletionIcon.Foreground = PageBrush(ready ? "StudioSuccessBrush" : attention ? "StudioWarningBrush" : "StudioAccentBrush");
+        MissingModelsPanel.Visibility = Visible(State.SetupMissingModels.Count > 0 && !State.SetupModelReviewVisible);
+        MissingModelsText.Text = string.Join("\n", State.SetupMissingModels.Select(name => "• " + name));
+        ModelReviewPanel.Visibility = Visible(State.SetupModelReviewVisible && State.SetupModelReview is not null);
+        if (State.SetupModelReview is { } review && !ReferenceEquals(review, renderedModelReview))
+        {
+            renderedModelReview = review;
+            ModelDownloadEstimate.Text = $"可下载 {review.DownloadableItems.Length} 项 · 已知剩余下载 {Bytes(review.RemainingBytes)}";
+            ModelReviewItems.Children.Clear();
+            foreach (var item in review.Items)
+            {
+                var row = new StackPanel { Spacing = 6 };
+                row.Children.Add(new TextBlock
+                {
+                    Text = item.Name + " · " + item.Status.State,
+                    TextWrapping = TextWrapping.Wrap,
+                    FontWeight = FontWeights.SemiBold,
+                    Foreground = PageBrush("StudioTextBrush")
+                });
+                row.Children.Add(BodyText("位置：" + item.Location));
+                row.Children.Add(BodyText("来源：" + item.Source));
+                if (!string.IsNullOrWhiteSpace(item.Issue)) row.Children.Add(BodyText(item.Issue));
+                if (!string.IsNullOrWhiteSpace(item.OpenDirectory) && !string.IsNullOrWhiteSpace(item.Issue))
+                {
+                    var folder = item.OpenDirectory;
+                    var open = new Button { Content = "打开文件夹处理", HorizontalAlignment = HorizontalAlignment.Left };
+                    open.Click += (_, _) => RunUi(() =>
+                    {
+                        var existing = folder;
+                        while (!Directory.Exists(existing)) existing = Path.GetDirectoryName(existing)
+                            ?? throw new DirectoryNotFoundException("未找到可打开的目录，请检查模型位置。");
+                        Program.Open(existing);
+                    });
+                    row.Children.Add(open);
+                }
+                ModelReviewItems.Children.Add(row);
+            }
+        }
+        var downloading = State.Busy && State.SetupCompletionOperation == SetupCompletionOperation.DownloadModels;
+        CompletionProgressPanel.Visibility = Visible(State.Busy);
+        CompletionProgress.IsIndeterminate = !downloading || State.SetupDownloadPercent < 0;
+        CompletionProgress.Value = Math.Max(0, State.SetupDownloadPercent);
+        CompletionOperationText.Text = State.SetupStatusText;
+        CompletionTransfer.Text = downloading ? State.ProgressText : "";
+        PrimaryButton.Content = State.Busy
+            ? downloading ? pauseRequested ? "正在暂停…" : "暂停" : State.SetupCompletionOperation == SetupCompletionOperation.StartWorkbench ? "正在启动…" : "正在检查…"
+            : presentation.PrimaryLabel;
+        PrimaryButton.IsEnabled = downloading ? !pauseRequested : !State.Busy && presentation.PrimaryAction != SetupCompletionAction.None;
+        SecondaryButton.Content = "先打开工作台";
+        SecondaryButton.Visibility = Visible(presentation.AllowOpenAnyway);
+        FooterHint.Text = State.Busy ? State.SetupStatusText
+            : State.SetupCompletionOperation == SetupCompletionOperation.StartWorkbench && State.SetupError.Length > 0
+                ? "启动未完成。查看日志并处理问题后，可以重试。"
+                : State.SetupCanResumeModels ? "已完成的下载会保留，可以继续下载或稍后再开始。"
+                : State.SetupModelsReadiness == SetupModelReadiness.ScanFailed ? "检查未完成。可以查看日志、重新检查或先打开工作台。"
+                : ready ? "服务连接检查通过后打开工作台。" : "推荐先准备基础模型；已有其他模型时，也可先打开工作台。";
+    }
+
+    private static TextBlock BodyText(string text) => new()
+    {
+        Text = text,
+        Style = (Style)Application.Current.Resources["StudioBodyStyle"],
+        IsTextSelectionEnabled = true
+    };
+
+    private void UpdateIssueActions()
+    {
+        var preflight = State.SetupPreflight;
+        if (preflight is not null && ReferenceEquals(preflight, renderedPreflight)) return;
+        renderedPreflight = preflight;
+        IssueActions.Children.Clear();
+        if (preflight is null)
+        {
+            // Path/Python validation can fail before a plan is available.
+            if (State.Busy || string.IsNullOrWhiteSpace(State.SetupError)) return;
+            IssuesPanel.Visibility = Visibility.Visible;
+            AddIssueAction("检查目录与 Python", () => EditLocation(!State.Setup.Fresh));
+            return;
+        }
+        var codes = preflight.Issues.Select(issue => issue.Code).ToHashSet();
+        if (codes.Overlaps(["target_not_empty", "target_access", "directory_access", "volume_unavailable", "disk_space"]))
+            AddIssueAction("更换安装位置", () => EditLocation(false));
+        if (codes.Overlaps(["python", "import_probe"]))
+            AddIssueAction("检查目录与 Python", () => EditLocation(true));
+        if (codes.Overlaps(["system", "nvidia_missing", "nvidia_driver", "nvidia_probe", "target_not_empty"]))
+            AddIssueAction("连接已有 ComfyUI", () => State.SetSetupMode(false));
+        if (codes.Overlaps(["nvidia_missing", "nvidia_driver", "nvidia_probe"]))
+            AddIssueAction("返回重新检测显卡", () => State.MoveSetupTo(SetupStep.Welcome));
+        if (codes.Contains("cache_invalid"))
+            AddIssueAction("查看日志与文件位置", Shell.ShowSetupLogs);
+    }
+
+    private void AddIssueAction(string text, Action action)
+    {
+        var button = new Button { Content = text, HorizontalAlignment = HorizontalAlignment.Left };
+        button.Click += (_, _) => { if (!State.Busy) RunUi(action); };
+        IssueActions.Children.Add(button);
+    }
+
+    private void EditLocation(bool python)
+    {
+        State.MoveSetupTo(SetupStep.Location);
+        Refresh();
+        if (python)
+        {
+            PythonSettings.IsExpanded = true;
+            PythonBox.Focus(FocusState.Programmatic);
+        }
+        else RootBox.Focus(FocusState.Programmatic);
+    }
+
+    private void WelcomeChoices_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        var narrow = e.NewSize.Width < 620;
+        Grid.SetColumn(ImportChoice, narrow ? 0 : 1);
+        Grid.SetRow(ImportChoice, narrow ? 1 : 0);
+        Grid.SetColumnSpan(ImportChoice, narrow ? 2 : 1);
+        Grid.SetColumnSpan((FrameworkElement)WelcomeChoices.Children[0], narrow ? 2 : 1);
+    }
+
+    private async void DetectAgain_Click(object sender, RoutedEventArgs e)
+    {
+        if (State.Busy) return;
+        localError = "";
+        try { await State.RefreshSetupSystemAsync(); }
+        catch (Exception ex) { ShowLocalError(ex); }
+    }
+
+    private async void RecheckModels_Click(object sender, RoutedEventArgs e)
+    {
+        if (State.Busy) return;
+        localError = "";
+        try { await State.ReviewSetupModelsAsync(); }
+        catch (Exception ex) { ShowLocalError(ex); }
     }
 
     private static string StageTitle(string id) => id switch
     {
-        "tools" => "准备安装工具", "comfy" => "准备 ComfyUI", "python" => "准备 Python 环境",
-        "torch" => "安装 CUDA / PyTorch", "dependencies" => "安装运行依赖", "nodes" => "准备必要节点",
-        "validation" => "验证运行依赖", "models" => "准备基础模型", "verify" => "最终检查", _ => id
+        "tools" => "准备安装工具", "comfy" => "准备 ComfyUI", "python" => "准备独立运行环境",
+        "torch" => "准备显卡运行环境", "dependencies" => "安装运行所需组件", "nodes" => "准备必要节点",
+        "validation" => "检查运行组件", "models" => "准备基础模型", "verify" => "最终检查", _ => id
     };
     private static string StageState(SetupStageStatus status) => status switch
     {
@@ -386,7 +574,8 @@ public sealed partial class SetupPage : LauncherPage
         localError = "";
         if (State.Busy)
         {
-            if (State.Setup.Step == SetupStep.Installing)
+            if (State.Setup.Step == SetupStep.Installing ||
+                State.Setup.Step == SetupStep.Complete && State.SetupCompletionOperation == SetupCompletionOperation.DownloadModels)
             {
                 pauseRequested = true;
                 State.PauseTask();
@@ -396,6 +585,7 @@ public sealed partial class SetupPage : LauncherPage
         }
         try
         {
+            localError = "";
             switch (State.Setup.Step)
             {
                 case SetupStep.Welcome:
@@ -415,7 +605,13 @@ public sealed partial class SetupPage : LauncherPage
                     else await State.CheckSetupAsync();
                     break;
                 case SetupStep.Complete:
-                    await State.StartSetupWorkbenchAsync();
+                    switch (CompletionPresentation().PrimaryAction)
+                    {
+                        case SetupCompletionAction.ReviewModels: await State.ReviewSetupModelsAsync(); break;
+                        case SetupCompletionAction.DownloadModels: await State.DownloadSetupModelsAsync(); break;
+                        case SetupCompletionAction.ResumeModels: await State.ResumeSetupModelsAsync(); break;
+                        case SetupCompletionAction.StartWorkbench: await State.StartSetupWorkbenchAsync(); break;
+                    }
                     break;
             }
         }
@@ -434,13 +630,21 @@ public sealed partial class SetupPage : LauncherPage
                 case SetupStep.Location: State.MoveSetupTo(SetupStep.Welcome); break;
                 case SetupStep.Review:
                 case SetupStep.Installing: State.MoveSetupTo(SetupStep.Location); break;
+                case SetupStep.Complete: State.FinishSetup(); break;
             }
         });
     }
 
-    private void Secondary_Click(object sender, RoutedEventArgs e)
+    private async void Secondary_Click(object sender, RoutedEventArgs e)
     {
         if (State.Busy) return;
+        if (State.Setup.Step == SetupStep.Complete)
+        {
+            localError = "";
+            try { await State.StartSetupWorkbenchAsync(); }
+            catch (Exception ex) { ShowLocalError(ex); }
+            return;
+        }
         RunUi(() =>
         {
             switch (State.Setup.Step)
@@ -449,19 +653,10 @@ public sealed partial class SetupPage : LauncherPage
                     State.SetSetupMode(false);
                     break;
                 case SetupStep.Installing: State.MoveSetupTo(SetupStep.Location); break;
-                case SetupStep.Complete: State.FinishSetup(); break;
             }
         });
     }
 
-    private void EditLocation_Click(object sender, RoutedEventArgs e)
-    {
-        if (!State.Busy) RunUi(() => State.MoveSetupTo(SetupStep.Location));
-    }
-    private void OpenModels_Click(object sender, RoutedEventArgs e)
-    {
-        if (!State.Busy) RunUi(() => State.FinishSetup(openModels: true));
-    }
     private void Logs_Click(object sender, RoutedEventArgs e) => RunUi(Shell.ShowSetupLogs);
     private void RunUi(Action action)
     {
@@ -478,4 +673,4 @@ public sealed partial class SetupPage : LauncherPage
     }
 }
 
-public sealed record SetupStageRow(string Title, string Detail, string State, string Marker);
+public sealed record SetupStageRow(string Title, string Detail, string State, string Marker, Brush Brush);

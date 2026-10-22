@@ -208,29 +208,51 @@ function previewContext() {
   const images = [], pending = [];
   const ctx = vm.createContext({
     imagePreview: { phase: 'open', context: {}, preloaded: new Map(), pointers: new Set(), token: 0, navigationRequest: 0 },
-    currentPreviewRecord: () => ({ id: 1 }),
+    currentRecord: { id: 1 }, records: Array.from({ length: 12 }, (_, index) => ({ id: index + 1 })),
+    currentPreviewRecord: () => ctx.currentRecord,
+    selectedHistoryLocation: () => ({ items: ctx.records, index: ctx.records.findIndex(record => record.id === ctx.currentRecord.id) }),
     Image: function() { this.decode = () => { const gate = deferred(); pending.push(gate); return gate.promise; }; images.push(this); },
     cancelImagePreviewAnimation() {},
     document: { documentElement: { classList: { remove() {} } } },
     ui: { imagePreviewVeil: { getAnimations: () => [] }, imagePreviewImage: { classList: { remove() {} }, removeAttribute() {} }, imagePreviewStatus: {}, imagePreviewAnnouncement: {}, imagePreviewDialog: { classList: { remove() {} }, dataset: {} } },
   });
-  load(ctx, 'clearPreviewCache', 'trimPreviewCache', 'preloadRecord', 'finishImagePreviewClose');
+  load(ctx, 'clearPreviewCache', 'trimPreviewCache', 'preloadRecord', 'preloadPreviewNeighbors', 'finishImagePreviewClose');
   return { ctx, images, pending };
 }
-test('decoded preview cache holds at most five images and protects the current image', async () => {
+test('decoded preview cache retains only the current image and its two neighbors', async () => {
   const { ctx, pending, images } = previewContext();
-  for (let id = 1; id <= 12; id++) { const value = ctx.preloadRecord({ id }); pending.shift().resolve(); await value; }
-  assert.equal(ctx.imagePreview.preloaded.size, 5);
-  assert.ok(ctx.imagePreview.preloaded.has('1'));
-  assert.ok(ctx.imagePreview.preloaded.has('12'));
-  await ctx.preloadRecord({ id: 9 });
-  const next = ctx.preloadRecord({ id: 13 }); pending.shift().resolve(); await next;
-  assert.ok(ctx.imagePreview.preloaded.has('9'), 'reading a cached image updates its recency');
-  assert.equal(ctx.imagePreview.preloaded.has('10'), false);
-  assert.equal(images[1].src, '', 'eviction releases the decoded image reference');
+  ctx.currentRecord = { id: 6 };
+  for (const id of [5, 6, 7]) { const value = ctx.preloadRecord({ id }); pending.shift().resolve(); await value; }
+  assert.equal(ctx.imagePreview.preloaded.size, 3);
+  ctx.currentRecord = { id: 7 };
+  ctx.preloadPreviewNeighbors();
+  pending.shift().resolve(); await ctx.imagePreview.preloaded.get('8');
+  assert.deepEqual([...ctx.imagePreview.preloaded.keys()].sort(), ['6', '7', '8']);
+  assert.equal(images[0].src, '', 'leaving the neighbor window releases its decoded image');
   ctx.finishImagePreviewClose();
   assert.equal(ctx.imagePreview.preloaded.size, 0);
   assert.ok(images.every(image => image.src === ''));
+});
+test('cache eviction protects a navigation target until its decode becomes current', async () => {
+  const { ctx, pending, images } = previewContext();
+  ctx.currentRecord = { id: 2 };
+  for (const id of [1, 2, 3]) { const value = ctx.preloadRecord({ id }); pending.shift().resolve(); await value; }
+  const target = ctx.preloadRecord({ id: 10 }), decode = pending.shift();
+  assert.equal(ctx.imagePreview.preloaded.size, 3);
+  assert.ok(ctx.imagePreview.preloaded.has('2'));
+  assert.ok(ctx.imagePreview.preloaded.has('10'));
+  assert.equal(images.at(-1).src, '/api/images/10');
+  ctx.imagePreview.phase = 'switching';
+  ctx.preloadPreviewNeighbors();
+  assert.ok(ctx.imagePreview.preloaded.has('10'), 'background prefetch must not evict the uncommitted navigation target');
+  decode.resolve(); assert.ok(await target);
+  ctx.currentRecord = { id: 10 };
+  ctx.imagePreview.phase = 'open';
+  ctx.preloadPreviewNeighbors();
+  for (const item of pending.splice(0)) item.resolve();
+  await Promise.all(ctx.imagePreview.preloaded.values());
+  assert.deepEqual([...ctx.imagePreview.preloaded.keys()].sort(), ['10', '11', '9']);
+  assert.equal(images[1].src, '', 'the former current image is released after navigation commits');
 });
 test('closing a viewer invalidates a pending decode without deleting a newer same-id cache entry', async () => {
   const { ctx, pending } = previewContext();

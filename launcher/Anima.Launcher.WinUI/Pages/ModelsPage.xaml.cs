@@ -85,6 +85,21 @@ public sealed partial class ModelsPage : LauncherPage
         if (!State.Busy) State.SelectBaseGroup();
     }
 
+    private void DownloadActions_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        var narrow = e.NewSize.Width < 560;
+        Grid.SetColumn(DownloadButton, narrow ? 0 : 1);
+        Grid.SetRow(DownloadButton, narrow ? 1 : 0);
+        Grid.SetColumnSpan(DownloadButton, narrow ? 2 : 1);
+        DownloadButton.HorizontalAlignment = narrow ? HorizontalAlignment.Stretch : HorizontalAlignment.Right;
+    }
+
+    private void FolderActions_SizeChanged(object sender, SizeChangedEventArgs e) =>
+        FolderActions.Orientation = e.NewSize.Width < 460 ? Orientation.Vertical : Orientation.Horizontal;
+
+    private void DetailActions_SizeChanged(object sender, SizeChangedEventArgs e) =>
+        DetailActions.Orientation = e.NewSize.Width < 360 ? Orientation.Vertical : Orientation.Horizontal;
+
     private async void Folder_Click(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement { Tag: string category } anchor)

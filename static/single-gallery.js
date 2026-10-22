@@ -33,9 +33,10 @@ function singleGalleryMode(active) {
   }
   else {
     singleGalleryInvalidate();
-    ++state.frameRequest; state.framePending = false; state.requestedFrame = "";
+    singleGalleryClearLive();
     ++state.finishRequest; state.finishingPromise = null;
     if (imagePreview.context?.kind === "single") closeImagePreview({ immediate: true, restoreFocus: false });
+    singleGalleryCanvas();
   }
 }
 async function singleGalleryLoad({ more = false, refresh = false } = {}) {
@@ -93,7 +94,7 @@ function singleGalleryRefresh() { return singleGalleryLoad({ refresh: true }); }
 function singleGalleryCanvas() {
   const state = singleGalleryState;
   if (!state.ready) return;
-  const record = state.lastCompleted, source = state.live?.src || (!state.busy && !state.finishingBatch && record ? `/api/images/${record.id}` : "");
+  const record = state.lastCompleted, source = state.active ? state.live?.src || (!state.busy && !state.finishingBatch && record ? `/api/images/${record.id}` : "") : "";
   const image = singleGalleryElement("singlePreviewImage"), open = singleGalleryElement("singlePreviewOpen");
   if (source !== state.canvasSource) { state.canvasSource = source; state.canvasError = ""; }
   if (source && image.getAttribute("src") !== source) image.src = source;

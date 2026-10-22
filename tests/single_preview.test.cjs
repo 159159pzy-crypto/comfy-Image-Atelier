@@ -272,10 +272,26 @@ test('leaving during final decode and returning restarts final loading with new 
   await flush();
   assert.equal(h.decodes.length, 2);
   h.decodes[0].resolve(); await flush();
-  assert.equal(h.image.src, 'blob:previous');
+  assert.equal(h.image.getAttribute('src'), null);
+  assert.ok(h.revoked.includes('blob:previous'), 'a hidden workbench releases its live frame');
   assert.equal(h.state.finishingBatch, 'batch-1');
   h.decodes[1].resolve(); await flush();
   assert.equal(h.image.src, '/api/images/2');
+});
+
+test('inactive single workbench releases its canvas and later updates cannot reattach an original', async () => {
+  const h = setup();
+  assert.equal(h.image.src, '/api/images/1');
+  h.ctx.singleGalleryMode(false);
+  assert.equal(h.image.getAttribute('src'), null);
+  assert.equal(h.image.hidden, true);
+  h.ctx.singleGalleryCanvas();
+  h.ctx.singleGalleryBatch({ id: 'other', status: 'running', settings: { workbench: 'random' } });
+  assert.equal(h.image.getAttribute('src'), null);
+  h.ctx.singleGalleryMode(true);
+  await flush();
+  assert.equal(h.image.src, '/api/images/1');
+  assert.equal(h.image.hidden, false);
 });
 
 test('a completion received while inactive loads its final image on return', async () => {

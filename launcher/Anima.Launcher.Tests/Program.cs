@@ -105,6 +105,7 @@ if (args.Contains("--tagger-only"))
     return;
 }
 count += await OnboardingTests.Run(work, manifest);
+count += await SetupCompletionTests.Run(work);
 if (args.Contains("--onboarding-only"))
 {
     Console.WriteLine($"{count} onboarding checks passed; artifacts: {work}");
