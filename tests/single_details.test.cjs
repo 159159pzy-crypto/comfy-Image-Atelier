@@ -151,13 +151,13 @@ test('reference load failure only changes the thumbnail status and late image ev
   const classes = new Set();
   const reference = { isConnected: true, querySelector: selector => selector === 'img' ? thumbnail : status,
     classList: { toggle(name, value) { value ? classes.add(name) : classes.delete(name); } } };
-  const label = { firstChild: { textContent: '' } }, source = {};
-  ctx.document = { getElementById: () => source };
+  const label = { firstChild: { textContent: '' } }, promptHost = { append() {} }, outputSize = {};
   ctx.selectedRecord = saved;
-  ctx.ui = { detailDialog: { classList: { add() {} } }, detailStats: { innerHTML: '' },
+  ctx.ui = { detailDialog: { classList: { toggle() {}, remove() {} } }, detailStats: { innerHTML: '', querySelector: () => outputSize },
+    detailMain: { append() {} }, detailScroll: { append() {} },
     detailPositive: { closest: () => label }, detailNegative: { closest: () => label },
-    detailSelection: { innerHTML: '', querySelector: () => reference },
-    detailImage: { complete: false }, variantButton: {}, variantModes: { querySelectorAll: () => [] },
+    detailSelection: { innerHTML: '', querySelector: selector => selector === '[data-single-prompts]' ? promptHost : reference, querySelectorAll: () => [] },
+    detailImage: { complete: false, naturalWidth: 1024, naturalHeight: 1536, getAttribute: () => '/api/images/7' }, variantButton: {}, variantModes: { querySelectorAll: () => [] },
     replayDrawer: { querySelector: () => ({}) } };
   ctx.renderSingleDetail(saved);
   assert.doesNotMatch(ctx.ui.detailStats.innerHTML, /a{64}/);
@@ -165,7 +165,112 @@ test('reference load failure only changes the thumbnail status and late image ev
   thumbnail.onerror();
   assert.equal(thumbnail.hidden, true); assert.equal(status.hidden, false);
   assert.equal(ctx.ui.detailStats.innerHTML, params);
+  ctx.ui.detailImage.onload();
+  assert.equal(outputSize.textContent, '1024 × 1536');
   ctx.selectedRecord = { id: 8 };
   thumbnail.naturalWidth = thumbnail.naturalHeight = 100; thumbnail.onload();
   assert.equal(status.hidden, false, 'stale thumbnail event is ignored');
+  ctx.ui.detailImage.naturalWidth = 888;
+  ctx.ui.detailImage.onload();
+  assert.equal(outputSize.textContent, '1024 × 1536', 'stale image dimensions are ignored');
+});
+
+test('the compact summary keeps historical model, zero seed and independent image dimensions', () => {
+  const ctx = context(), saved = record(), before = JSON.stringify(saved);
+  const rows = ctx.singleDetailSummary(ctx.singleDetailData(saved)), summary = new Map(rows);
+  assert.deepEqual([...summary.keys()], ['主模型', '生成／采样', '图像种子', '底图尺寸', '最终图片尺寸']);
+  assert.deepEqual(Array.from(rows, row => row[2]), ['model', 'generation-sampling', 'sample-seed', 'base-size', 'output-size']);
+  assert.equal(summary.get('主模型'), 'actual/model');
+  assert.equal(summary.get('图像种子'), 0);
+  assert.equal(summary.get('生成／采样'), '文生图 · 普通采样');
+  assert.equal(summary.get('底图尺寸'), '512 × 768');
+  assert.equal(summary.get('最终图片尺寸'), '读取中…');
+  assert.equal(JSON.stringify(saved), before);
+});
+
+test('summary combines recorded generation and sampling modes without inventing legacy defaults', () => {
+  const ctx = context(), saved = record();
+  saved.settings.generation_mode = 'img2img'; saved.settings.base_mode = 'dual_sampler';
+  assert.equal(new Map(ctx.singleDetailSummary(ctx.singleDetailData(saved))).get('生成／采样'), '图生图 · 双采样');
+  delete saved.settings.base_mode;
+  assert.equal(new Map(ctx.singleDetailSummary(ctx.singleDetailData(saved))).get('生成／采样'), '图生图 · 未记录');
+  delete saved.settings.generation_mode;
+  assert.equal(new Map(ctx.singleDetailSummary(ctx.singleDetailData(saved))).get('生成／采样'), undefined);
+  saved.settings.base_mode = 'normal';
+  assert.equal(new Map(ctx.singleDetailSummary(ctx.singleDetailData(saved))).get('生成／采样'), '未记录 · 普通采样');
+  const legacy = ctx.singleDetailSummary(ctx.singleDetailData({}));
+  assert.equal(new Map(legacy).get('图像种子'), undefined);
+  assert.match(ctx.singleDetailRows(legacy), /data-detail-value="generation-sampling"><dt>生成／采样<\/dt><dd>未记录<\/dd>/);
+});
+
+test('summary model hover text is complete and escaped, and seeds remain complete including zero', () => {
+  const ctx = context(), saved = record();
+  saved.bound_resources.unet = 'folder/"<model>' + ' long-model'.repeat(30) + '.safetensors';
+  saved.sample_seed = '18446744073709551615';
+  let markup = ctx.singleDetailRows(ctx.singleDetailSummary(ctx.singleDetailData(saved)));
+  assert.match(markup, /data-detail-value="model"/);
+  assert.ok(markup.includes(`title="${ctx.escapeHtml(saved.bound_resources.unet)}"`));
+  assert.doesNotMatch(markup, /<model>/);
+  assert.match(markup, /data-detail-value="sample-seed"><dt>图像种子<\/dt><dd>18446744073709551615<\/dd>/);
+  saved.sample_seed = 0;
+  markup = ctx.singleDetailRows(ctx.singleDetailSummary(ctx.singleDetailData(saved)));
+  assert.match(markup, /data-detail-value="sample-seed"><dt>图像种子<\/dt><dd>0<\/dd>/);
+});
+
+test('all six groups start closed and retain model, prompt, LoRA, repair and reference snapshots', () => {
+  const ctx = context(), saved = record();
+  saved.settings.generation_mode = 'img2img';
+  saved.settings.single.input_image_id = 'saved-reference';
+  saved.settings.single.resize_mode = 'pad';
+  saved.settings.single.weight_dtype = 'fp8_e4m3fn';
+  saved.settings.single.prefix = '<script>saved prefix</script>';
+  saved.settings.single.positive_prompt = 'long saved prompt '.repeat(300);
+  const markup = ctx.singleDetailGroups(ctx.singleDetailData(saved));
+  assert.deepEqual([...markup.matchAll(/data-single-detail-group="([^"]+)"/g)].map(match => match[1]), ['models', 'prompts', 'sampling', 'loras', 'repairs', 'reference']);
+  assert.doesNotMatch(markup, /<details[^>]*\bopen\b/);
+  assert.match(markup, /fp8_e4m3fn/);
+  assert.match(markup, /actual\/lora/);
+  assert.match(markup, /long saved prompt /);
+  assert.match(markup, /&lt;script>saved prefix/);
+  assert.match(markup, /saved-reference\/image/);
+  assert.match(markup, /适应并留边/);
+  assert.match(markup, /1 项启用/);
+  assert.match(markup, /Sesqui 潜空间模型/);
+});
+
+test('sparse legacy records show unknown statuses while txt2img reference is explicitly inapplicable', () => {
+  const ctx = context();
+  const old = ctx.singleDetailGroups(ctx.singleDetailData({ settings: { workbench: 'single' } }));
+  assert.match(old, /采样阶段<\/span><small>未记录/);
+  assert.match(old, /参考图<\/span><small>未记录/);
+  assert.doesNotMatch(old, /<small>1 段|未使用<\/p>/);
+  assert.match(ctx.singleDetailGroups(ctx.singleDetailData(record())), /文生图未使用参考图/);
+});
+
+test('opening one top-level historical group closes its siblings and leaves nested details independent', () => {
+  const ctx = context();
+  const groups = Array.from({ length: 6 }, () => ({ open: false, addEventListener(name, handler) { this.toggle = handler; } }));
+  ctx.bindSingleDetailGroups({ querySelectorAll: () => groups });
+  groups[0].open = true; groups[0].toggle();
+  groups[2].open = true; groups[2].toggle();
+  assert.deepEqual(groups.map(group => group.open), [false, false, true, false, false, false]);
+  groups[2].open = false; groups[2].toggle();
+  assert.ok(groups.every(group => !group.open));
+});
+
+test('switching workbenches preserves shared prompt nodes and returns drawers to their original home', () => {
+  const ctx = context(), positive = {}, negative = {}, classes = new Set();
+  const mount = () => ({ append(...children) { this.children = children; }, scrollTop: 500 });
+  ctx.ui = { detailMain: mount(), detailScroll: mount(), detailDrawerHome: mount(), replayDrawer: {}, variantDrawer: {},
+    detailPositive: { closest: () => positive }, detailNegative: { closest: () => negative },
+    detailDialog: { classList: { toggle(name, value) { value ? classes.add(name) : classes.delete(name); }, remove(name) { classes.delete(name); } } } };
+  ctx.singleDetailLayout(true);
+  assert.deepEqual(ctx.ui.detailMain.children, [positive, negative]);
+  assert.deepEqual(ctx.ui.detailScroll.children, [ctx.ui.replayDrawer, ctx.ui.variantDrawer]);
+  assert.equal(ctx.ui.detailScroll.scrollTop, 0);
+  assert.equal(classes.has('is-single-detail'), true);
+  classes.add('is-regenerating');
+  ctx.singleDetailLayout(false);
+  assert.deepEqual(ctx.ui.detailDrawerHome.children, [ctx.ui.replayDrawer, ctx.ui.variantDrawer]);
+  assert.equal(classes.size, 0);
 });

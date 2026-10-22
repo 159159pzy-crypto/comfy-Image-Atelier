@@ -14,8 +14,9 @@ from aiohttp.test_utils import TestClient, TestServer
 APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_DIR))
 
-from anima_webui.server import COMFY_KEY, MANAGER_KEY, create_app  # noqa: E402
+from anima_webui.server import COMFY_KEY, HISTORY_KEY, MANAGER_KEY, create_app  # noqa: E402
 from anima_webui.comfy import ComfyError  # noqa: E402
+from anima_webui.image_location import ImageLocationError  # noqa: E402
 from anima_webui.workflow import DEFAULT_SETTINGS  # noqa: E402
 
 
@@ -1013,6 +1014,50 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_history_record_returns_404(self):
         self.assertEqual((await self.client.get("/api/images/999")).status, 404)
+
+    async def test_reveal_image_uses_history_record_for_both_workbenches(self):
+        headers = {"Origin": str(self.client.make_url("/")).rstrip("/")}
+        history = self.client.server.app[HISTORY_KEY]
+        for workbench in ("single", "random"):
+            record = {"id": 51, "filename": "saved.png", "subfolder": "saved/folder", "file_type": "output", "settings": {"workbench": workbench}}
+            with self.subTest(workbench=workbench), mock.patch.object(history, "get_image", new=mock.AsyncMock(return_value=record)) as get_record, mock.patch("anima_webui.server.reveal_image") as reveal:
+                response = await self.client.post("/api/history/51/reveal", json={}, headers=headers)
+                self.assertEqual(response.status, 200)
+                self.assertEqual(await response.json(), {"opened": True})
+                get_record.assert_awaited_once_with(51)
+                reveal.assert_called_once_with(record, await self.comfy.status(), self.comfy.base_url)
+
+    async def test_reveal_requires_direct_local_same_origin_json_request(self):
+        origin = str(self.client.make_url("/")).rstrip("/")
+        with mock.patch("anima_webui.server.reveal_image") as reveal:
+            for headers in ({}, {"Origin": "http://localhost:1234"}, {"Origin": origin, "Sec-Fetch-Site": "cross-site"},
+                            {"Origin": origin, "Forwarded": "for=192.0.2.1"}, {"Origin": origin, "X-Forwarded-For": "127.0.0.1"}):
+                with self.subTest(headers=headers):
+                    response = await self.client.post("/api/history/51/reveal", json={}, headers=headers)
+                    self.assertEqual(response.status, 403)
+            with mock.patch("anima_webui.server.ipaddress.ip_address", return_value=mock.Mock(is_loopback=False)):
+                response = await self.client.post("/api/history/51/reveal", json={}, headers={"Origin": origin})
+                self.assertEqual(response.status, 403)
+            response = await self.client.post("/api/history/51/reveal", data="{}", headers={"Origin": origin, "Content-Type": "text/plain"})
+            self.assertEqual(response.status, 415)
+            response = await self.client.post("/api/history/51/reveal", json={"path": "C:/arbitrary.png"}, headers={"Origin": origin})
+            self.assertEqual(response.status, 400)
+            reveal.assert_not_called()
+
+    async def test_reveal_missing_record_and_errors_do_not_report_success(self):
+        headers = {"Origin": str(self.client.make_url("/")).rstrip("/")}
+        with mock.patch("anima_webui.server.reveal_image") as reveal:
+            response = await self.client.post("/api/history/999/reveal", json={}, headers=headers)
+            self.assertEqual(response.status, 404)
+            response = await self.client.post("/api/history/9223372036854775808/reveal", json={}, headers=headers)
+            self.assertEqual(response.status, 400)
+            reveal.assert_not_called()
+        with mock.patch.object(self.client.server.app[HISTORY_KEY], "get_image", new=mock.AsyncMock(return_value={"id": 51})), mock.patch("anima_webui.server.reveal_image", side_effect=ImageLocationError("原图文件不存在，可能已被移动或删除", code="image_file_missing", status=404)):
+            response = await self.client.post("/api/history/51/reveal", json={}, headers=headers)
+            self.assertEqual(response.status, 404)
+            self.assertEqual((await response.json())["code"], "image_file_missing")
+        response = await self.client.get("/api/history/51/reveal")
+        self.assertEqual(response.status, 405)
 
     async def test_non_numeric_image_id_returns_404_not_500(self):
         # 回归 #P2-1:此前 int() 裸抛 ValueError 变成 500。

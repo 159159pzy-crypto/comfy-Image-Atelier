@@ -879,6 +879,7 @@ test('decoded single image commits its detail before entry animation and Esc can
 
 test('closing single detail returns focus to canvas and never reopens fullscreen', () => {
   const ctx = galleryContext();
+  ctx.resetRevealImageFile = () => {};
   vm.runInContext(functionSource('finishDetailClose'), ctx);
   const canvas = ctx.document.getElementById('singlePreviewOpen');
   ctx.detailContext = { origin: 'single', returnFocus: canvas };
@@ -892,6 +893,7 @@ test('closing single detail returns focus to canvas and never reopens fullscreen
 
 test('disabled single canvas returns detail focus to its preview region unless settings loading suppresses it', () => {
   const ctx = galleryContext();
+  ctx.resetRevealImageFile = () => {};
   vm.runInContext(functionSource('finishDetailClose'), ctx);
   const canvas = ctx.document.getElementById('singlePreviewOpen');
   const region = ctx.document.getElementById('singlePreview');

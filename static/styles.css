@@ -884,11 +884,16 @@ dialog::backdrop { background: rgba(0, 0, 0, .32); backdrop-filter: blur(8px); }
 .detail-layout figure { min-height: 620px; margin: 0; background: var(--surface-muted); }
 .detail-layout figure img { width: 100%; height: 100%; display: block; object-fit: cover; }
 .detail-copy { min-width: 0; padding: 32px; }
+.detail-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; padding-right: 18px; }
+.detail-header > div { min-width: 0; }
+.detail-header .kicker { display: block; overflow-wrap: anywhere; }
+.detail-header > .button { flex-shrink: 0; }
+.detail-scroll, .detail-main, .detail-footer, .detail-drawer-home { display: contents; }
 .detail-copy dl { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 20px 0; }
 .detail-copy dl div { padding: 10px 12px; background: var(--surface-muted); border: 0; border-radius: 13px; }
 .detail-copy dt { color: var(--text-tertiary); font-size: 9.5px; }
 .detail-copy dd { margin: 4px 0 0; font-size: 11.5px; font-weight: 560; font-variant-numeric: tabular-nums; }
-.detail-copy > label { display: grid; gap: 6px; margin-top: 13px; color: var(--text-secondary); font-size: 10.5px; }
+.detail-main > label { display: grid; gap: 6px; margin-top: 13px; color: var(--text-secondary); font-size: 10.5px; }
 .selection-summary { margin: 18px 0; }
 .selection-summary > div { display: grid; gap: 7px; margin-top: 8px; }
 .selection-summary > div > span { display: grid; grid-template-columns: 45px 1fr; gap: 8px; color: var(--text); font-size: 10.5px; }

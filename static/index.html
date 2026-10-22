@@ -14,9 +14,9 @@
       document.documentElement.dataset.theme = theme;
     })();
   </script>
-  <link rel="stylesheet" href="/static/styles.css?v=20261020-rewrite">
+  <link rel="stylesheet" href="/static/styles.css?v=20261022-compact-details">
   <link rel="stylesheet" href="/static/single-layout.css?v=20261022-reverse">
-  <link rel="stylesheet" href="/static/single-details.css?v=20261017-detail-fill">
+  <link rel="stylesheet" href="/static/single-details.css?v=20261022-aligned-details">
 </head>
 <body>
   <div class="ambient" aria-hidden="true"></div>
@@ -561,12 +561,19 @@
     <div class="detail-layout">
       <figure><img id="detailImage" tabindex="0" role="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="imagePreviewDialog" aria-label="展开全尺寸图片预览" title="点击查看全尺寸图片" alt="生成结果"></figure>
       <div class="detail-copy">
-        <span id="detailMeta" class="kicker"></span>
-        <h2>生成详情</h2>
+        <header class="detail-header">
+          <div><span id="detailMeta" class="kicker"></span><h2>生成详情</h2></div>
+          <button id="revealImageFile" class="button ghost compact" type="button" title="在资源管理器中选中原图">打开所在文件夹</button>
+        </header>
+        <div id="detailScroll" class="detail-scroll">
+        <div id="detailMain" class="detail-main">
         <dl id="detailStats"></dl>
         <section id="detailSelection" class="selection-summary"></section>
         <label>完整提示词<textarea id="detailPositive" rows="8" readonly></textarea></label>
         <label>负面提示词<textarea id="detailNegative" rows="5" readonly></textarea></label>
+        </div>
+        </div>
+        <footer class="detail-footer">
         <div class="dialog-actions reproduce-actions">
           <button id="reproduceImage" class="button" type="button" title="查看原种子重跑选项" aria-expanded="false" aria-controls="replayDrawer">复现此图</button>
           <div class="variant-group">
@@ -574,6 +581,7 @@
             <button id="variantButton" class="button" type="button" title="查看变体与重新抽取选项" aria-expanded="false" aria-controls="variantDrawer">再抽变体</button>
           </div>
         </div>
+        <div id="detailDrawerHome" class="detail-drawer-home">
         <section id="replayDrawer" class="regeneration-drawer replay-drawer" aria-labelledby="replayDrawerTitle" hidden>
           <header><div><span class="kicker">REPLAY</span><h3 id="replayDrawerTitle">按原种子重跑</h3></div><button id="closeReplayDrawer" class="icon-button dark" type="button" title="收起" aria-label="收起原种子重跑选项">×</button></header>
           <p>冻结历史最终提示词，沿用原设置与双种子。资源文件内容被覆盖时无法识别，不承诺像素级一致。</p>
@@ -599,8 +607,10 @@
           </fieldset>
           <div class="regeneration-footer"><label class="regeneration-count"><span>生成数量</span><input id="variantDrawerCount" type="number" min="1" max="100" value="4"></label><button id="confirmVariant" class="button primary" type="button" disabled>生成同提示词变体</button></div>
         </section>
+        </div>
         <div class="history-transfer-actions"><button id="sendToSingle" class="button ghost compact" type="button">送到单图工作台</button><button id="useAsInputImage" class="button ghost compact" type="button">用作图生图</button></div>
         <div class="dialog-actions"><button id="restoreSettings" class="button primary" type="button">载入设置</button><span></span><button id="deleteRecord" class="button danger" type="button">删除记录</button></div>
+        </footer>
       </div>
     </div>
   </dialog>
@@ -656,7 +666,7 @@
   <script src="/static/single-workbench.js?v=20261022-reverse" defer></script>
   <script src="/static/single-input.js?v=20261022-reverse" defer></script>
   <script src="/static/single-compatibility.js?v=20261017-detail-fill" defer></script>
-  <script src="/static/single-details.js?v=20261017-detail-fill" defer></script>
-  <script src="/static/app.js?v=20261022-reverse" defer></script>
+  <script src="/static/single-details.js?v=20261022-aligned-details" defer></script>
+  <script src="/static/app.js?v=20261022-compact-details" defer></script>
 </body>
 </html>

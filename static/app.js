@@ -135,6 +135,10 @@ const ui = Object.fromEntries(
     "imagePreviewStatus",
     "imagePreviewAnnouncement",
     "detailMeta",
+    "revealImageFile",
+    "detailScroll",
+    "detailMain",
+    "detailDrawerHome",
     "detailStats",
     "detailSelection",
     "detailPositive",
@@ -461,6 +465,7 @@ const imagePreview = {
 let regenerationOptions = null;
 let regenerationRequest = 0;
 let regenerationTrigger = null;
+let revealFileRequest = 0;
 let historyPage = 1;
 let historyPages = 1;
 let historyItems = [];
@@ -2100,7 +2105,33 @@ async function loadHistory(page = historyPage) {
   }
 }
 
+function resetRevealImageFile() {
+  ++revealFileRequest;
+  ui.revealImageFile.disabled = false;
+  ui.revealImageFile.textContent = "打开所在文件夹";
+  ui.revealImageFile.removeAttribute("aria-busy");
+}
+
+async function revealSelectedImageFile() {
+  if (!selectedRecord || ui.revealImageFile.disabled) return;
+  const record = selectedRecord, requestId = ++revealFileRequest;
+  ui.revealImageFile.disabled = true;
+  ui.revealImageFile.textContent = "正在定位…";
+  ui.revealImageFile.setAttribute("aria-busy", "true");
+  try {
+    const result = await request(`/api/history/${encodeURIComponent(record.id)}/reveal`, { method: "POST", body: JSON.stringify({}) });
+    if (requestId !== revealFileRequest || selectedRecord !== record) return;
+    if (!result?.opened) throw new Error("未能打开所在文件夹，请重试。");
+    toast("已在文件夹中选中原图");
+  } catch (error) {
+    if (requestId === revealFileRequest && selectedRecord === record) toast(error.message || "打开所在文件夹失败，请重试。");
+  } finally {
+    if (requestId === revealFileRequest && selectedRecord === record) resetRevealImageFile();
+  }
+}
+
 function renderDetail(record) {
+  resetRevealImageFile();
   ui.detailImage.src = `/api/images/${record.id}`;
   ui.detailImage.alt = record.filename ? `生成结果：${record.filename}` : "生成结果";
   ui.detailMeta.textContent = `${record.created_at || ""} · ${record.filename || ""}`;
@@ -2134,7 +2165,7 @@ function updateDetailRecord(record) {
   selectedRecord = record;
   ++regenerationRequest;
   regenerationOptions = null;
-  closeRegenerationDrawers(false);
+  closeRegenerationDrawers(false, true);
   renderDetail(record);
   if (detailContext?.origin === "single" && typeof singleGalleryState !== "undefined") singleGalleryState.viewerRecord = record;
 }
@@ -2151,6 +2182,7 @@ function suppressDetailReturnFocus() {
 }
 function finishDetailClose() {
   if (ui.detailDialog.open) return;
+  resetRevealImageFile();
   const context = detailContext;
   closeImagePreview({ immediate: true, restoreFocus: false });
   ++regenerationRequest;
@@ -2516,7 +2548,7 @@ function layoutImagePreview() {
   applyImagePreviewTransform();
 }
 
-// Reproduce object-fit:cover without stretching; reveal the cropped edges as it opens.
+// Match the visible bitmap for both cropped thumbnails and contained detail images.
 function imagePreviewSourceFrame() {
   const sourceElement = imagePreview.context?.sourceElement || ui.detailImage;
   const sourceContainer = imagePreview.context?.sourceContainer || ui.detailDialog;
@@ -2524,7 +2556,8 @@ function imagePreviewSourceFrame() {
   const source = sourceElement.getBoundingClientRect();
   const dialog = sourceContainer.getBoundingClientRect();
   const stage = ui.imagePreviewStage.getBoundingClientRect();
-  const scale = Math.max(source.width / imagePreview.width, source.height / imagePreview.height);
+  const fit = getComputedStyle(sourceElement).objectFit === "contain" ? Math.min : Math.max;
+  const scale = fit(source.width / imagePreview.width, source.height / imagePreview.height);
   const left = Math.max(source.left, dialog.left + 1, stage.left);
   const top = Math.max(source.top, dialog.top + 1, stage.top);
   const right = Math.min(source.right, dialog.right - 1, stage.right);
@@ -2809,21 +2842,33 @@ function imagePreviewWheel(event) {
   setImagePreviewZoom(imagePreview.zoom * Math.exp(-clampPreview(delta, -500, 500) * .0015), { x: event.clientX, y: event.clientY });
 }
 
-function collapseRegenerationDrawer(drawer) {
-  if (drawer.hidden || drawer.classList.contains("closing")) return;
-  drawer.classList.add("closing");
-  setTimeout(() => {
+function collapseRegenerationDrawer(drawer, immediately = false) {
+  if (drawer.hidden) return;
+  if (immediately || ui.detailDialog.classList.contains("is-single-detail")) {
     drawer.hidden = true;
     drawer.classList.remove("closing");
+    drawer.regenerationCloseToken = null;
+    return;
+  }
+  if (drawer.classList.contains("closing")) return;
+  const closeToken = {};
+  drawer.regenerationCloseToken = closeToken;
+  drawer.classList.add("closing");
+  setTimeout(() => {
+    if (drawer.regenerationCloseToken !== closeToken || !drawer.classList.contains("closing")) return;
+    drawer.hidden = true;
+    drawer.classList.remove("closing");
+    drawer.regenerationCloseToken = null;
   }, 200);
 }
 
-function closeRegenerationDrawers(restoreFocus = true) {
+function closeRegenerationDrawers(restoreFocus = true, immediately = false) {
   const hadOpen = !ui.replayDrawer.hidden || !ui.variantDrawer.hidden;
-  collapseRegenerationDrawer(ui.replayDrawer);
-  collapseRegenerationDrawer(ui.variantDrawer);
+  collapseRegenerationDrawer(ui.replayDrawer, immediately);
+  collapseRegenerationDrawer(ui.variantDrawer, immediately);
   ui.reproduceImage.setAttribute("aria-expanded", "false");
   ui.variantButton.setAttribute("aria-expanded", "false");
+  ui.detailDialog.classList.remove("is-regenerating");
   if (restoreFocus && hadOpen && regenerationTrigger && document.contains(regenerationTrigger))
     regenerationTrigger.focus({ preventScroll: true });
   regenerationTrigger = null;
@@ -2881,17 +2926,24 @@ async function loadRegenerationOptions() {
 
 async function openRegenerationDrawer(kind, trigger) {
   const drawer = kind === "replay" ? ui.replayDrawer : ui.variantDrawer;
-  const wasOpen = !drawer.hidden || drawer.classList.contains("closing");
+  const wasOpen = !drawer.hidden && !drawer.classList.contains("closing");
   closeRegenerationDrawers(false);
   if (wasOpen) {
     trigger.focus({ preventScroll: true });
     return;
   }
   regenerationTrigger = trigger;
+  drawer.regenerationCloseToken = null;
   drawer.classList.remove("closing");
   drawer.hidden = false;
+  if (ui.detailDialog.classList.contains("is-single-detail")) {
+    ui.detailDialog.classList.add("is-regenerating");
+    ui.detailScroll.scrollTop = 0;
+  }
   trigger.setAttribute("aria-expanded", "true");
+  const record = selectedRecord;
   await loadRegenerationOptions();
+  if (selectedRecord !== record || drawer.hidden || drawer.classList.contains("closing")) return;
   const focusTarget = kind === "replay" ? ui.confirmReplay : ui.variantModes.querySelector("input:checked");
   focusTarget?.focus({ preventScroll: true });
 }
@@ -5811,6 +5863,7 @@ ui.imagePreviewDialog.addEventListener("close", () => {
   restoreImagePreviewCloseFocus();
 });
 ui.detailDialog.addEventListener("close", finishDetailClose);
+ui.revealImageFile.addEventListener("click", revealSelectedImageFile);
 new ResizeObserver(() => {
   if (imagePreview.phase === "open") {
     cancelImagePreviewAnimation();

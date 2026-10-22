@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -22,6 +23,7 @@ from .persistence import StorageReadOnlyError
 from .custom_prompts import CustomPromptStore
 from .favorites import FavoriteSavePendingError, FavoritesService, FavoritesExtensionStore, favorite_key
 from .input_images import InputImageStore, MAX_IMAGE_BYTES
+from .image_location import ImageLocationError, reveal_image
 from .prompt_images import PromptImageStore
 from .single_workbench import SINGLE_DEFAULTS, active_lora_pipelines
 from .history import HistoryStore
@@ -1496,6 +1498,29 @@ def create_app(
         body, content_type = await client.image_bytes(record)
         return web.Response(body=body, content_type=content_type.split(";", 1)[0])
 
+    async def reveal_history_image(request: web.Request) -> web.Response:
+        authority = parse_authority(request.headers.get("Host", ""))
+        origin = parse_origin(request.headers.get("Origin", ""))
+        peer = request.transport.get_extra_info("peername") if request.transport else None
+        try:
+            local_peer = bool(peer) and ipaddress.ip_address(peer[0]).is_loopback
+        except ValueError:
+            local_peer = False
+        if (not local_peer or not authority or authority[0] not in LOCAL_HOSTNAMES
+                or origin != (request.scheme, authority[0], authority[1] or (443 if request.scheme == "https" else 80))
+                or any(name.lower() == "forwarded" or name.lower().startswith("x-forwarded-") for name in request.headers)):
+            raise web.HTTPForbidden(reason="打开所在文件夹仅允许在本机工作台中操作")
+        body = await _json_body(request)
+        if body:
+            raise WorkflowError("打开所在文件夹仅接受作品 ID，不接受文件路径")
+        record = await history.get_image(_image_id(request.match_info["image_id"]))
+        stats = await client.status()
+        try:
+            await asyncio.to_thread(reveal_image, record, stats, getattr(client, "base_url", ""))
+        except ImageLocationError as error:
+            return web.json_response({"error": str(error), "code": error.code}, status=error.status)
+        return web.json_response({"opened": True})
+
     async def index(_: web.Request) -> web.FileResponse:
         return web.FileResponse(root / "static" / "index.html")
 
@@ -1614,6 +1639,7 @@ def create_app(
         r"/api/history/{image_id:\d+}/regenerate", regenerate_history
     )
     app.router.add_delete(r"/api/history/{image_id:\d+}", delete_history)
+    app.router.add_post(r"/api/history/{image_id:\d+}/reveal", reveal_history_image)
     app.router.add_get(r"/api/images/{image_id:\d+}", image)
     app.router.add_get("/", index)
     app.router.add_get("/favicon.ico", favicon)

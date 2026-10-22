@@ -3,7 +3,7 @@ function singleDetailValue(value) {
   return value === undefined || value === null ? "未记录" : typeof value === "boolean" ? (value ? "开启" : "关闭") : String(value);
 }
 function singleDetailRows(rows) {
-  return rows.map(([label, value, key]) => `<div${key ? ` data-detail-value="${escapeHtml(key)}"` : ""}><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(singleDetailValue(value))}</dd></div>`).join("");
+  return rows.map(([label, value, key]) => `<div${key ? ` data-detail-value="${escapeHtml(key)}"` : ""}><dt>${escapeHtml(label)}</dt><dd${key === "model" ? ` title="${escapeHtml(singleDetailValue(value))}"` : ""}>${escapeHtml(singleDetailValue(value))}</dd></div>`).join("");
 }
 function singleDetailOtherParameters(groups = []) {
   const content = groups.filter(group => group.rows?.length).map(group => `<div class="single-detail-parameter-group"><h4>${escapeHtml(group.title)}</h4><dl>${singleDetailRows(group.rows)}</dl></div>`).join("");
@@ -102,18 +102,58 @@ function singleDetailData(record) {
   const lorasKnown = stages.every(stage => stage.pipeline === "primary" ? Array.isArray(settings.loras) : stage.pipeline === "secondary" && Array.isArray(single.loras_secondary));
   return { basic, stages, loras, lorasKnown, repairs, positive, negative, zeroNegative, promptSources };
 }
-function renderSingleDetail(record) {
-  const data = singleDetailData(record);
-  ui.detailDialog.classList.add("is-single-detail");
-  ui.detailStats.innerHTML = singleDetailRows(data.basic.filter(([label]) => label !== "参考图"));
-  ui.detailPositive.value = data.positive ?? "未记录";
-  ui.detailNegative.value = data.negative ?? "未记录";
+function singleDetailSummary(data) {
+  const basic = new Map(data.basic), generation = basic.get("生成方式"), sampling = basic.get("底图模式");
+  const mode = generation == null && sampling == null ? undefined : `${singleDetailValue(generation)} · ${singleDetailValue(sampling)}`;
+  return [
+    ["主模型", basic.get("主模型"), "model"],
+    ["生成／采样", mode, "generation-sampling"],
+    ["图像种子", basic.get("图像种子"), "sample-seed"],
+    ["底图尺寸", basic.get("底图尺寸"), "base-size"],
+    ["最终图片尺寸", basic.get("最终图片尺寸"), "output-size"],
+  ];
+}
+function singleDetailGroups(data) {
+  const group = (id, title, status, content) => `<details class="single-detail-section" data-single-detail-group="${id}" name="single-detail-groups"><summary><span>${title}</span><small>${escapeHtml(status)}</small></summary><div class="single-detail-group-content">${content}</div></details>`;
   const textArea = ([label, value]) => `<label>${escapeHtml(label)}<textarea rows="3" readonly>${escapeHtml(singleDetailValue(value))}</textarea></label>`;
   const referenceRow = data.basic.find(([label]) => label === "参考图");
-  ui.detailSelection.innerHTML = (referenceRow ? singleDetailReferenceMarkup(referenceRow[1]) : "")
-    + `<section class="single-detail-section"><h3>采样阶段</h3>${data.stages.filter(stage => stage.rows.length).map(stage => `<details open><summary>${escapeHtml(stage.title)}</summary><dl>${singleDetailRows([...stage.rows, ["LoRA 来源", stage.pipelineLabel], ["负向条件", stage.zeroNegative === true ? "置零" : stage.zeroNegative === false ? "使用负面提示词" : undefined]])}</dl>${singleDetailOtherParameters(stage.otherGroups)}</details>`).join("")}</section>`
-    + `<section class="single-detail-section"><h3>实际使用的 LoRA</h3>${data.loras.length ? data.loras.map(item => `<div class="single-detail-lora"><strong>${escapeHtml(singleDetailValue(item.filename))}</strong><span>强度 ${escapeHtml(singleDetailValue(item.strength))}</span><small>${escapeHtml(item.stages)}</small></div>`).join("") : `<p>${data.lorasKnown ? "未使用" : "未记录"}</p>`}</section>`
-    + `<section class="single-detail-section"><h3>放大与修复</h3>${data.repairs.map(stage => stage.enabled ? `<details open><summary>${escapeHtml(stage.title)}<span>已启用</span></summary><dl>${singleDetailRows(stage.rows)}</dl>${singleDetailOtherParameters(stage.otherGroups)}</details>` : `<div class="single-detail-off"><span>${escapeHtml(stage.title)}</span><span>${stage.enabled === false ? "未启用" : "未记录"}</span></div>`).join("")}</section>`;
+  const models = data.basic.filter(([label]) => !["生成方式", "底图模式", "图像种子", "底图尺寸", "最终图片尺寸", "参考图", "尺寸适配"].includes(label));
+  const modelExtras = data.stages[0]?.otherGroups?.filter(item => ["模型与文本编码", "Krea 变化控制"].includes(item.title)) || [];
+  const samplers = data.stages.filter(stage => stage.rows.length);
+  const repairsEnabled = data.repairs.filter(stage => stage.enabled).length;
+  const repairStatus = repairsEnabled ? `${repairsEnabled} 项启用` : data.repairs.every(stage => stage.enabled === false) ? "未启用" : "未记录完整状态";
+  const sources = data.promptSources.length ? `<details class="single-detail-prompt-sources"><summary>原始输入与阶段提示词 · ${data.promptSources.length}</summary>${data.promptSources.map(textArea).join("")}</details>` : "";
+  return group("models", "模型与编码", singleDetailValue(new Map(data.basic).get("模型档案")), `<dl>${singleDetailRows(models)}</dl>${singleDetailOtherParameters(modelExtras)}`)
+    + group("prompts", "提示词", data.zeroNegative === true ? "负向条件置零" : data.zeroNegative === false ? "正向 / 负向" : "负向条件未记录", `<div data-single-prompts></div>${sources}`)
+    + group("sampling", "采样阶段", new Map(data.basic).get("底图模式") ? `${samplers.length} 段` : "未记录", samplers.map(stage => `<section class="single-detail-stage"><h3>${escapeHtml(stage.title)}</h3><dl>${singleDetailRows([...stage.rows, ["LoRA 来源", stage.pipelineLabel], ["负向条件", stage.zeroNegative === true ? "置零" : stage.zeroNegative === false ? "使用负面提示词" : undefined]])}</dl>${singleDetailOtherParameters(stage.otherGroups)}</section>`).join(""))
+    + group("loras", "实际使用的 LoRA", data.loras.length ? `${data.loras.length} 项` : data.lorasKnown ? "未使用" : "未记录", data.loras.length ? data.loras.map(item => `<div class="single-detail-lora"><strong>${escapeHtml(singleDetailValue(item.filename))}</strong><span>强度 ${escapeHtml(singleDetailValue(item.strength))}</span><small>${escapeHtml(item.stages)}</small></div>`).join("") : `<p>${data.lorasKnown ? "未使用" : "未记录"}</p>`)
+    + group("repairs", "放大与修复", repairStatus, data.repairs.map(stage => stage.enabled ? `<section class="single-detail-stage"><h3>${escapeHtml(stage.title)}<small>已启用</small></h3><dl>${singleDetailRows(stage.rows)}</dl>${singleDetailOtherParameters(stage.otherGroups)}</section>` : `<div class="single-detail-off"><span>${escapeHtml(stage.title)}</span><span>${stage.enabled === false ? "未启用" : "未记录"}</span></div>`).join(""))
+    + group("reference", "参考图", referenceRow ? referenceRow[1] ? "已保存" : "未记录" : new Map(data.basic).get("生成方式") === "文生图" ? "不适用" : "未记录", referenceRow ? singleDetailReferenceMarkup(referenceRow[1]) + `<dl>${singleDetailRows(data.basic.filter(([label]) => label === "尺寸适配"))}</dl>` : `<p>${new Map(data.basic).get("生成方式") === "文生图" ? "文生图未使用参考图" : "参考图未记录"}</p>`);
+}
+function bindSingleDetailGroups(container) {
+  const groups = [...container.querySelectorAll("[data-single-detail-group]")];
+  for (const group of groups) group.addEventListener("toggle", () => {
+    if (group.open) for (const other of groups) if (other !== group) other.open = false;
+  });
+}
+function singleDetailLayout(single) {
+  // Keep the shared prompt nodes alive while rebuilding groups or switching workbenches.
+  ui.detailMain.append(ui.detailPositive.closest("label"), ui.detailNegative.closest("label"));
+  const target = single ? ui.detailScroll : ui.detailDrawerHome;
+  target.append(ui.replayDrawer, ui.variantDrawer);
+  ui.detailScroll.scrollTop = 0;
+  ui.detailDialog.classList.toggle("is-single-detail", single);
+  ui.detailDialog.classList.remove("is-regenerating");
+}
+function renderSingleDetail(record) {
+  const data = singleDetailData(record);
+  singleDetailLayout(true);
+  ui.detailStats.innerHTML = singleDetailRows(singleDetailSummary(data));
+  ui.detailPositive.value = data.positive ?? "未记录";
+  ui.detailNegative.value = data.negative ?? "未记录";
+  ui.detailSelection.innerHTML = singleDetailGroups(data);
+  ui.detailSelection.querySelector("[data-single-prompts]").append(ui.detailPositive.closest("label"), ui.detailNegative.closest("label"));
+  bindSingleDetailGroups(ui.detailSelection);
   const reference = ui.detailSelection.querySelector("[data-single-reference]");
   if (reference) {
     const thumbnail = reference.querySelector("img"), status = reference.querySelector("[data-reference-status]");
@@ -126,13 +166,6 @@ function renderSingleDetail(record) {
     thumbnail.onload = thumbnail.onerror = updateReference;
     if (thumbnail.complete) updateReference();
   }
-  let sources = document.getElementById("singleDetailPromptSources");
-  if (!sources) {
-    sources = document.createElement("details"); sources.id = "singleDetailPromptSources"; sources.className = "single-detail-prompt-sources";
-    ui.detailNegative.closest("label").after(sources);
-  }
-  sources.hidden = !data.promptSources.length; sources.open = false;
-  sources.innerHTML = `<summary>原始输入与阶段提示词</summary>${data.promptSources.map(textArea).join("")}`;
   const image = ui.detailImage, expected = `/api/images/${record.id}`;
   const setSize = () => {
     if (selectedRecord !== record || image.getAttribute("src") !== expected) return;
@@ -147,9 +180,7 @@ function renderSingleDetail(record) {
   ui.detailNegative.closest("label").firstChild.textContent = data.zeroNegative ? "底图负面提示词 · 编码后条件置零" : "底图负面提示词";
 }
 function resetSingleDetail() {
-  ui.detailDialog.classList.remove("is-single-detail");
-  const sources = document.getElementById("singleDetailPromptSources");
-  if (sources) sources.hidden = true;
+  singleDetailLayout(false);
   ui.detailImage.onload = ui.detailImage.onerror = null;
   ui.variantButton.textContent = "再抽变体";
   singleDetailActions(false);
