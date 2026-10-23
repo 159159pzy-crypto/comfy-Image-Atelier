@@ -27,6 +27,7 @@ jobs:
           python-version: '3.11'
       - run: python -m pip install -e '.[dev]'
       - run: python launcher/scripts/export_model_profiles.py --check
+      - run: python launcher/scripts/test_bundle_manifest.py
       - name: Audit launcher dependencies
         shell: pwsh
         run: |
@@ -53,12 +54,17 @@ jobs:
       - name: Verify candidate ZIP and provenance
         shell: pwsh
         run: ./launcher/scripts/Test-LauncherCandidate.ps1 -CandidateDirectory '${{ github.workspace }}/dist/ci-candidate' -ExpectedCommit '${{ github.sha }}' -RequireClean
+      - name: Verify isolated per-user installation, repair and uninstall
+        shell: pwsh
+        run: ./launcher/scripts/Test-LauncherInstaller.ps1 -CandidateDirectory '${{ github.workspace }}/dist/ci-candidate'
       - uses: actions/upload-artifact@v4
         with:
-          name: AnimaRandomStudio-win-x64-unsigned
+          name: AnimaRandomStudio-win-x64
           if-no-files-found: error
           path: |
-            dist/ci-candidate/AnimaRandomStudio-win-x64-unsigned.zip
+            dist/ci-candidate/AnimaRandomStudio.exe
+            dist/ci-candidate/AnimaRandomStudio-Setup-win-x64.exe
+            dist/ci-candidate/AnimaRandomStudio-portable-win-x64.zip
             dist/ci-candidate/SHA256SUMS.txt
             dist/ci-candidate/build-info.json
   release:
@@ -72,7 +78,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: AnimaRandomStudio-win-x64-unsigned
+          name: AnimaRandomStudio-win-x64
           path: dist/release
       - name: Verify and publish the complete ZIP
         shell: pwsh
@@ -84,7 +90,7 @@ jobs:
           $version = [System.IO.File]::ReadAllText('launcher/version.txt').Trim()
           if ($env:RELEASE_TAG -notin @($version, "v$version")) { throw 'Tag must match launcher/version.txt.' }
           ./launcher/scripts/Test-LauncherCandidate.ps1 -CandidateDirectory dist/release -ExpectedCommit $env:RELEASE_SHA -ExpectedVersion $version -RequireClean
-          gh release create $env:RELEASE_TAG --verify-tag --draft --title $version --notes-file RELEASE_NOTES.md dist/release/AnimaRandomStudio-win-x64-unsigned.zip dist/release/SHA256SUMS.txt dist/release/build-info.json
+          gh release create $env:RELEASE_TAG --verify-tag --draft --title $version --notes-file RELEASE_NOTES.md dist/release/AnimaRandomStudio.exe dist/release/AnimaRandomStudio-Setup-win-x64.exe dist/release/AnimaRandomStudio-portable-win-x64.zip dist/release/SHA256SUMS.txt dist/release/build-info.json
           if ($LASTEXITCODE -ne 0) { throw 'Release creation failed; existing assets were not overwritten.' }
           gh release edit $env:RELEASE_TAG --draft=false --latest
           if ($LASTEXITCODE -ne 0) { throw 'Assets are uploaded as a draft; publishing the release failed.' }

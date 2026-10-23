@@ -23,6 +23,11 @@
                     </StackPanel>
                 </Grid>
             </Border>
+            <launch:Card x:Name="SoftwareUpdateNotice" Header="发现软件新版本" IconGlyph="&#xE777;" Visibility="Collapsed">
+                <launch:Card.ActionContent>
+                    <Button Content="查看更新" Click="SoftwareUpdate_Click" />
+                </launch:Card.ActionContent>
+            </launch:Card>
             <Border Style="{StaticResource StudioPanelStyle}" Padding="22,18">
                 <Grid ColumnSpacing="18" RowSpacing="12" SizeChanged="Folders_SizeChanged">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>

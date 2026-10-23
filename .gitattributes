@@ -1,2 +1,4 @@
 # Preserve the hash-checked upstream source fixtures, including original trailing spaces.
 launcher/tests/fixtures/prompt-assistant/pinned/** text eol=lf whitespace=-blank-at-eol
+# Local acceptance history stays in Git but is not part of source release archives.
+docs/launcher-onboarding-style-acceptance-2026-10-22.md export-ignore

@@ -75,6 +75,7 @@ internal sealed partial class LauncherState
             SetupNotice = "发现上次未完成的安装。重新检查后继续，已完成的文件和步骤会自动复用。";
         if (route == SetupStep.Location && saved?.InstallFinished == true)
             SetupNotice = "上次配置的环境文件发生变化，请重新检查目录。";
+        SynchronizeSetupVersion();
         ResetSetupStages();
     }
 
@@ -97,9 +98,12 @@ internal sealed partial class LauncherState
 
     public void NotifySetup() => SetupChanged?.Invoke();
 
+    private void SynchronizeSetupVersion() => RuntimePolicies.SynchronizeManagedSetupVersion(Setup.Draft, Config, Path.Combine(Program.StateDir, "versions"));
+
     private void PersistSetup()
     {
         if (setupWriteError is not null) throw new IOException(setupWriteError);
+        SynchronizeSetupVersion();
         JsonFile.Write(setupFile, Setup);
     }
 
@@ -178,6 +182,7 @@ internal sealed partial class LauncherState
 
     private LauncherConfig SetupConfiguration()
     {
+        SynchronizeSetupVersion();
         var draft = Setup.Draft.Clone();
         // Runtime/service fields belong to the active launcher, never to stale UI drafts.
         draft.AppRoot = Config.AppRoot;
@@ -186,6 +191,8 @@ internal sealed partial class LauncherState
         draft.WebPort = Config.WebPort;
         draft.Theme = Config.Theme;
         draft.StartOnLaunch = Config.StartOnLaunch;
+        draft.AutoCheckUpdates = Config.AutoCheckUpdates;
+        draft.PinnedAppRoot = Config.PinnedAppRoot;
         if (Setup.Fresh)
         {
             if (SetupLegacyDirectRoot)

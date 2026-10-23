@@ -28,7 +28,7 @@ public sealed partial class SettingsPage : LauncherPage
     }
 
     private void OnReloaded() => DispatcherQueue.TryEnqueue(() => { if (active) LoadFields(); });
-    private void OnBusy(bool busy) => DispatcherQueue.TryEnqueue(() => SettingsPanel.IsEnabled = !busy);
+    private void OnBusy(bool busy) => DispatcherQueue.TryEnqueue(() => PreferencesPanel.IsEnabled = !busy);
 
     private void LoadFields()
     {
@@ -50,7 +50,7 @@ public sealed partial class SettingsPage : LauncherPage
                 : !string.IsNullOrWhiteSpace(c.PinnedAppRoot) ? $"当前版本：{current}（已固定回退版本）；主动应用新版才更新。"
                 : current == bundled ? $"当前版本：{current}（与内嵌一致）"
                 : $"当前版本：{current}；内嵌版本：{bundled}（下次启动服务时更新）";
-            SettingsPanel.IsEnabled = !State.Busy;
+            PreferencesPanel.IsEnabled = !State.Busy;
         }
         finally { loading = false; }
     }

@@ -7,6 +7,8 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using Anima.Launcher.Core;
 
+if (await LauncherUpdateProcessTests.TryHandleFixture(args)) return;
+
 if (args.FirstOrDefault() == "--exit-fixture")
 {
     Console.WriteLine("ready");
@@ -86,6 +88,13 @@ async Task ThrowsType<T>(Func<Task> operation, string label) where T : Exception
     catch (T) { Check(true, label); return; }
     throw new Exception("Expected " + typeof(T).Name + ": " + label);
 }
+if (args.Contains("--updates-only"))
+{
+    count += await LauncherUpdateTests.Run(work);
+    count += await LauncherUpdateProcessTests.Run(work, manifest);
+    Console.WriteLine($"{count} software update checks passed; artifacts: {work}");
+    return;
+}
 if (args.Contains("--startup-only"))
 {
     count += await ServiceStartupTests.Run(work);
@@ -113,6 +122,8 @@ if (args.Contains("--onboarding-only"))
 }
 count += await ServiceStartupTests.Run(work);
 count += await ReleaseRecoveryTests.Run(work, manifest);
+count += await LauncherUpdateTests.Run(work);
+count += await LauncherUpdateProcessTests.Run(work, manifest);
 count += await PromptAssistantTests.Run(work);
 if (args.Contains("--recovery-only"))
 {

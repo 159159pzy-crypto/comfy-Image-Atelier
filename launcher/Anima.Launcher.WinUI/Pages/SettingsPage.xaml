@@ -17,6 +17,10 @@
                 <TextBlock Text="主题、启动偏好与高级设置。切换页面会保留未保存的选项。" Style="{StaticResource StudioBodyStyle}" />
             </StackPanel>
 
+            <launch:SoftwareUpdatePanel />
+
+            <ContentControl x:Name="PreferencesPanel" HorizontalContentAlignment="Stretch">
+            <StackPanel Spacing="14">
             <launch:Card Header="自动启动服务" IconGlyph="&#xE768;" Description="默认关闭。启用后，打开启动器即启动服务并打开工作台。">
                 <launch:Card.ActionContent>
                     <ToggleSwitch x:Name="StartOnLaunchBox" OnContent="已开启" OffContent="手动启动" Toggled="Startup_Changed" />
@@ -115,6 +119,8 @@
                 </StackPanel>
             </Expander>
 
+            </StackPanel>
+            </ContentControl>
         </StackPanel>
     </ScrollViewer>
 </local:LauncherPage>

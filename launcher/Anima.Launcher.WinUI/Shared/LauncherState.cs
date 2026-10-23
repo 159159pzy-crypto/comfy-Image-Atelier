@@ -259,9 +259,11 @@ internal sealed partial class LauncherState : IDisposable
         }
     }
 
-    // Resume always uses the original task's snapshot. To change install sources
-    // or paths, review a new plan on the environment page instead.
-    public Task ResumeTaskAsync() => CanRetry ? Run(retryAction!, retryConfig is null, retryConfig, retryFresh) : Task.CompletedTask;
+    // Environment tasks resume their reviewed snapshot. A software download
+    // does not own settings and must retain edits made while it was paused.
+    public Task ResumeTaskAsync() => !CanRetry ? Task.CompletedTask
+        : retryAction == (Func<CancellationToken, Task>)DownloadSoftwareUpdateCoreAsync ? DownloadSoftwareUpdateAsync()
+        : Run(retryAction!, retryConfig is null, retryConfig, retryFresh);
 
     public void PauseTask() => task?.Cancel();
     public void CancelTaskAndDownloads() { cancelDownloads = true; task?.Cancel(); }
@@ -725,8 +727,8 @@ internal sealed partial class LauncherState : IDisposable
                 previous.AppRoot = liveConfig.AppRoot;
             }
             if (await IsWorkbenchBusyAsync(ct)) throw new IOException("工作台正在生成，请等待任务完成后切换版本。");
-            if (!await Services.TryStopWebUiAsync(previous, Path.Combine(Program.StateDir, "versions"), ct))
-                throw new IOException("当前工作台无法安全停止，请先停止占用端口的程序。");
+            var stopped = await Services.TryStopWebUiWhenIdleAsync(previous, Path.Combine(Program.StateDir, "versions"), ct);
+            if (stopped != IdleShutdownResult.Stopped) throw new IdleShutdownException(stopped);
         }
         Config = previous.Clone();
         Config.AppRoot = target;
@@ -910,6 +912,76 @@ internal sealed partial class LauncherState : IDisposable
 
     // --- Versioning ---
 
+    public Task ApplySoftwareUpdateAsync(bool workbenchWasRunning, CancellationToken ct) =>
+        ApplySoftwareUpdateAsync(Config.Clone(), workbenchWasRunning, ct);
+
+    /// <summary>
+    /// Candidate startup uses the transaction's proven prior configuration, not
+    /// page drafts. Stopped services stay stopped; a running workbench must grant
+    /// its atomic idle shutdown before the candidate is started.
+    /// </summary>
+    public async Task ApplySoftwareUpdateAsync(LauncherConfig previous, bool workbenchWasRunning, CancellationToken ct)
+    {
+        if (!RuntimePolicies.CanApplyBundledSoftwareUpdate(previous, Path.Combine(Program.StateDir, "versions"), workbenchWasRunning))
+            throw new IOException("当前使用源码工作台，无法自动替换其目录；请先切换到启动器内置工作台。");
+        var next = previous.Clone();
+        next.AppRoot = Program.AppRoot;
+        next.PinnedAppRoot = "";
+        await Services.SwitchWorkbenchWhenIdleAsync(previous, next, Program.Runtime,
+            Path.Combine(Program.StateDir, "versions"), workbenchWasRunning, ct);
+        // Do not publish either the workbench pointer or pin removal until the
+        // requested service transition has completed successfully.
+        JsonFile.Write(Path.Combine(Program.StateDir, "launcher.previous.json"), previous);
+        Config = next;
+        Save();
+        UpgradePending = false;
+        Reloaded();
+        SetStatus(workbenchWasRunning ? "新版启动器和工作台已就绪。" : "新版启动器已就绪；工作台保持停止状态。");
+    }
+
+    /// <summary>
+    /// Runs in the restored launcher after a failed candidate. A candidate that
+    /// has since accepted work is kept intact instead of force-killed or hidden
+    /// behind a configuration pointing to an unrelated old snapshot.
+    /// </summary>
+    public async Task RecoverSoftwareUpdateAsync(LauncherConfig previous, bool workbenchWasRunning, CancellationToken ct)
+    {
+        var restored = previous.Clone();
+        var live = restored.Clone();
+        if (await ServiceManager.PortOpen(restored.WebPort, ct))
+        {
+            var health = await ServiceManager.Json(restored.WebUrl + "/api/launcher-health", ct);
+            if (!ServiceManager.IsWorkbenchHealth(health)
+                || !health!.Value.TryGetProperty("app_dir", out var directory)
+                || directory.ValueKind != JsonValueKind.String || !PathUnderVersionsRoot(directory.GetString()!))
+                throw new IdleShutdownException(IdleShutdownResult.IdentityMismatch);
+            live.AppRoot = directory.GetString()!;
+            if (!ServiceManager.IsOurWebUi(health, live)) throw new IdleShutdownException(IdleShutdownResult.IdentityMismatch);
+            if (!workbenchWasRunning || !SamePath(live.AppRoot, restored.AppRoot))
+            {
+                var stopped = workbenchWasRunning
+                    ? await Services.TryStopWebUiWhenIdleAsync(live, Path.Combine(Program.StateDir, "versions"), ct)
+                    : IdleShutdownResult.IdentityMismatch;
+                if (stopped != IdleShutdownResult.Stopped)
+                {
+                    // Preserve the live context (including a deliberate version
+                    // pin) if newer user work prevents recovery.
+                    Config = live;
+                    Config.PinnedAppRoot = live.AppRoot;
+                    Save();
+                    Reloaded();
+                    throw new IdleShutdownException(stopped);
+                }
+            }
+        }
+        if (workbenchWasRunning) await Services.StartWebUIForSoftwareUpdateAsync(restored, Program.Runtime, ct);
+        Config = restored;
+        Save();
+        UpgradePending = false;
+        Reloaded();
+        SetStatus(workbenchWasRunning ? "更新未完成，已恢复原工作台服务。" : "更新未完成，原版本已恢复，工作台保持停止状态。");
+    }
+
     public async Task ApplyBundledVersionAsync(CancellationToken ct)
     {
         if (SamePath(Config.AppRoot, Program.AppRoot))
@@ -963,7 +1035,7 @@ internal sealed partial class LauncherState : IDisposable
         if (string.IsNullOrWhiteSpace(Config.ComfyRoot)) throw new InvalidDataException("请先选择 ComfyUI 目录：新建选空目录，导入选含 main.py 的目录。");
     }
 
-    public void Dispose() => Downloads.Dispose();
+    public void Dispose() { DisposeSoftwareUpdates(); Downloads.Dispose(); }
 }
 
 public sealed record EnvironmentFields(string ComfyRoot, string Python, string SourceId, string GitMirror, string HfMirror, string PipIndex, string CustomRepository, bool Fresh = false, bool PythonExplicit = false);

@@ -20,7 +20,7 @@ public static class Commands
         if (env is not null) foreach (var pair in env) info.Environment[pair.Key] = pair.Value;
         return info;
     }
-    public static async Task<string> Run(string exe, IEnumerable<string> args, string cwd, Action<string>? log, CancellationToken ct, IDictionary<string, string>? env = null, TimeSpan? timeout = null)
+    public static async Task<string> Run(string exe, IEnumerable<string> args, string cwd, Action<string>? log, CancellationToken ct, IDictionary<string, string>? env = null, TimeSpan? timeout = null, bool terminateOnFailure = true)
     {
         ct.ThrowIfCancellationRequested();
         using var process = new Process { StartInfo = Info(exe, args, cwd, env) };
@@ -34,8 +34,8 @@ public static class Commands
         try { await process.WaitForExitAsync(deadline.Token); process.WaitForExit(); }
         catch
         {
-            try { process.Kill(true); await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); } catch { }
-            if (!ct.IsCancellationRequested && deadline.IsCancellationRequested) throw new TimeoutException($"{Path.GetFileName(exe)} 执行超时，已终止；请查看日志确认是否长时间无输出。");
+            if (terminateOnFailure) { try { process.Kill(true); await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); } catch { } }
+            if (!ct.IsCancellationRequested && deadline.IsCancellationRequested) throw new TimeoutException($"{Path.GetFileName(exe)} 执行超时，{(terminateOnFailure ? "已终止" : "已保留进程，未强制结束")}；请查看日志确认是否长时间无输出。");
             throw;
         }
         if (process.ExitCode != 0)
@@ -58,6 +58,19 @@ public static class Commands
 
 public sealed class PortConflictException(int port) : Exception($"端口 {port} 被其他程序或其他目录的实例占用，请修改端口后重试。") { public int Port { get; } = port; }
 public sealed record OwnedProcess(int Pid, long StartTimeUtcTicks, string Executable, string Role, string? ShutdownToken = null);
+public enum IdleShutdownResult { Stopped, Busy, Unsupported, MissingToken, IdentityMismatch, Failed }
+
+public sealed class IdleShutdownException(IdleShutdownResult result) : IOException(result switch
+{
+    IdleShutdownResult.Busy => "工作台正在处理或等待任务，请完成任务后重试更新。",
+    IdleShutdownResult.Unsupported => "当前工作台不支持安全更新停机，请正常停止工作台后重试。",
+    IdleShutdownResult.MissingToken => "无法取得当前工作台的停机凭据，请正常停止工作台后重试。",
+    IdleShutdownResult.IdentityMismatch => "工作台进程或运行目录已变化，现有服务保持运行，请重试更新。",
+    _ => "无法确认工作台已安全停止，未强制结束任何进程，请检查服务后重试。",
+})
+{
+    public IdleShutdownResult Result { get; } = result;
+}
 
 public sealed class ServiceManager(string stateDir, Action<string> log)
 {
@@ -214,6 +227,34 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
         return args;
     }
 
+    /// <summary>
+    /// Restore only the workbench during an update. ComfyUI's existing running or
+    /// stopped state is preserved. A failed or cancelled startup retains the child
+    /// and its ownership record for the coordinator's atomic idle-shutdown check.
+    /// </summary>
+    public async Task StartWebUIForSoftwareUpdateAsync(LauncherConfig config, RuntimeManifest manifest, CancellationToken ct)
+    {
+        config.Validate();
+        ct.ThrowIfCancellationRequested();
+        if (!await PortOpen(config.WebPort, ct))
+        {
+            var nodes = Inventory.ResolveNodeDirectories(config.ComfyRoot, manifest);
+            var token = SupportsShutdownEndpoint(config.AppRoot) ? Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant() : null;
+            var args = WebUiArguments(config, Path.Combine(stateDir, "resource-paths.json"), nodes);
+            if (token is not null) { args.Add("--shutdown-token"); args.Add(token); }
+            var process = await StartProcess(config.Python, args, config.AppRoot, "WebUI", ct,
+                PrepareRuntimeEnvironment(config), token, preserveOnFailure: true);
+            await Ready(config.WebUrl + "/api/launcher-health", process, ct, "WebUI", Path.Combine(stateDir, "logs", "WebUI.log"));
+        }
+        var health = await Json(config.WebUrl + "/api/launcher-health", ct);
+        if (!IsWorkbenchHealth(health) || !IsOurWebUi(health, config)) throw new PortConflictException(config.WebPort);
+        var status = await Json(config.WebUrl + "/api/status", ct);
+        if (status is not { ValueKind: JsonValueKind.Object } value || !value.TryGetProperty("online", out var online)
+            || online.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            throw new IOException("新版工作台的状态检查未通过；现有进程已保留，等待安全恢复。");
+        log(online.ValueKind == JsonValueKind.True ? "工作台已就绪；ComfyUI 保持原状态。" : "工作台已就绪（ComfyUI 离线，未启动或停止其进程）。");
+    }
+
     /// <summary>Child-process overrides only; never changes the launcher's or user's environment.</summary>
     public static Dictionary<string, string> BuildRuntimeEnvironment(LauncherConfig config, bool hasManagedMarker = false)
     {
@@ -297,7 +338,7 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
         }
         return bindings;
     }
-    private async Task<Process> StartProcess(string exe, IEnumerable<string> args, string cwd, string role, CancellationToken ct, IDictionary<string, string>? env = null, string? shutdownToken = null)
+    private async Task<Process> StartProcess(string exe, IEnumerable<string> args, string cwd, string role, CancellationToken ct, IDictionary<string, string>? env = null, string? shutdownToken = null, bool preserveOnFailure = false)
     {
         var logs = Path.Combine(stateDir, "logs"); Directory.CreateDirectory(logs);
         var logPath = Path.Combine(logs, role + ".log");
@@ -305,7 +346,7 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
         // Give the long-lived child real log file handles, not pipes owned by the launcher.
         // Otherwise closing the tray would break Python stdout/stderr on the next write.
         const string script = "import subprocess,sys,json,os; f=open(sys.argv[1],'ab',buffering=0); p=subprocess.Popen(json.loads(sys.argv[2]),cwd=sys.argv[3],stdin=subprocess.DEVNULL,stdout=f,stderr=f,creationflags=0x08000000); print(p.pid)";
-        var pid = await Commands.Run(exe, ["-c", script, logPath, JsonSerializer.Serialize(new[] { exe }.Concat(args)), cwd], cwd, null, ct, env);
+        var pid = await Commands.Run(exe, ["-c", script, logPath, JsonSerializer.Serialize(new[] { exe }.Concat(args)), cwd], cwd, null, ct, env, terminateOnFailure: !preserveOnFailure);
         Process? process = null;
         long started;
         try
@@ -318,7 +359,7 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
         catch (Exception ex)
         {
             var failure = StartupFailure(process, role, logPath, ex);
-            TryKill(pid.Trim());
+            if (!preserveOnFailure) TryKill(pid.Trim());
             process?.Dispose();
             throw failure;
         }
@@ -425,6 +466,121 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
     {
         try { return health is { } value && value.ValueKind == JsonValueKind.Object && value.TryGetProperty("app", out var app) && app.GetString() == WorkbenchAppName; }
         catch { return false; }
+    }
+
+    private static bool SupportsIdleShutdown(JsonElement? health, string appRoot)
+    {
+        if (health is { } value && value.TryGetProperty("idle_shutdown_supported", out var supported))
+            return supported.ValueKind == JsonValueKind.True;
+        // Release 1.1.0 predates the capability flag but already implements the
+        // atomic guard. This fallback is only used for the proven local snapshot.
+        try
+        {
+            return File.ReadAllText(Path.Combine(appRoot, "anima_webui", "server.py")).Contains("await manager.begin_idle_shutdown()", StringComparison.Ordinal)
+                && File.ReadAllText(Path.Combine(appRoot, "anima_webui", "runner.py")).Contains("async def begin_idle_shutdown(", StringComparison.Ordinal);
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Atomically asks a proven, owned snapshot to stop only while idle. Refusal,
+    /// missing credentials, unsupported old servers and network failures never
+    /// authorize terminating the process. Optional deadlines support bounded callers.
+    /// </summary>
+    public async Task<IdleShutdownResult> TryStopWebUiWhenIdleAsync(LauncherConfig config, string versionsRoot,
+        CancellationToken ct = default, TimeSpan? requestTimeout = null, TimeSpan? exitTimeout = null)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (!await PortOpen(config.WebPort, ct)) return IdleShutdownResult.Stopped;
+        if (!PathUnder(versionsRoot, config.AppRoot)) return IdleShutdownResult.IdentityMismatch;
+        var health = await Json(config.WebUrl + "/api/launcher-health", ct);
+        if (!IsWorkbenchHealth(health) || !IsOurWebUi(health, config)) return IdleShutdownResult.IdentityMismatch;
+        var pid = await FindPortOwner(config.WebPort, ct);
+        if (pid <= 0) return !await PortOpen(config.WebPort, ct) ? IdleShutdownResult.Stopped : IdleShutdownResult.IdentityMismatch;
+        try
+        {
+            using var process = Process.GetProcessById(pid);
+            var identity = new OwnedProcess(pid, process.StartTime.ToUniversalTime().Ticks, process.MainModule!.FileName!, "WebUI");
+            var record = records.SingleOrDefault(r => r.Role == "WebUI" && SameProcessIdentity(r, identity));
+            if (string.IsNullOrEmpty(record?.ShutdownToken)) return IdleShutdownResult.MissingToken;
+            if (!SupportsIdleShutdown(health, config.AppRoot)) return IdleShutdownResult.Unsupported;
+            var latest = await Json(config.WebUrl + "/api/launcher-health", ct);
+            if (!IsWorkbenchHealth(latest) || !IsOurWebUi(latest, config)
+                || !SupportsIdleShutdown(latest, config.AppRoot)
+                || await FindPortOwner(config.WebPort, ct) != pid || !ProcessStillMatches(identity))
+                return IdleShutdownResult.IdentityMismatch;
+            ct.ThrowIfCancellationRequested();
+            using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            {
+                deadline.CancelAfter(requestTimeout ?? TimeSpan.FromSeconds(10));
+                try
+                {
+                    using var body = new StringContent(JsonSerializer.Serialize(new { token = record.ShutdownToken }), Encoding.UTF8, "application/json");
+                    using var response = await Http.PostAsync(config.WebUrl + "/api/launcher-shutdown", body, deadline.Token);
+                    if (response.StatusCode == System.Net.HttpStatusCode.Conflict) return IdleShutdownResult.Busy;
+                    if (response.StatusCode is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.MethodNotAllowed)
+                        return IdleShutdownResult.Unsupported;
+                    if (response.StatusCode is System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.Unauthorized)
+                        return IdleShutdownResult.Failed;
+                    // A success, lost response or server cleanup error may all be
+                    // followed by exit. Observe the original process, never kill it.
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or IOException) { }
+            }
+            var until = Stopwatch.StartNew();
+            var limit = exitTimeout ?? TimeSpan.FromSeconds(10);
+            do
+            {
+                ct.ThrowIfCancellationRequested();
+                if (process.HasExited)
+                {
+                    ForgetOwned(pid);
+                    if (await PortOpen(config.WebPort, ct)) return IdleShutdownResult.IdentityMismatch;
+                    log($"工作台进程 {pid} 已空闲停机。");
+                    return IdleShutdownResult.Stopped;
+                }
+                if (!ProcessStillMatches(identity)) return IdleShutdownResult.IdentityMismatch;
+                await Task.Delay(TimeSpan.FromMilliseconds(100), ct);
+            } while (until.Elapsed < limit);
+            return IdleShutdownResult.Failed;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception or IOException)
+        {
+            log("工作台安全停机未完成：" + ex.Message);
+            return IdleShutdownResult.Failed;
+        }
+    }
+
+    /// <summary>
+    /// Switch a bundled workbench while retaining the pre-update running state.
+    /// This method never writes launcher configuration and never force-stops work.
+    /// </summary>
+    public async Task SwitchWorkbenchWhenIdleAsync(LauncherConfig previous, LauncherConfig target, RuntimeManifest manifest,
+        string versionsRoot, bool workbenchWasRunning, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (!File.Exists(Path.Combine(target.AppRoot, "run.py"))) throw new IOException("目标工作台版本资源不存在。");
+        var running = await PortOpen(previous.WebPort, ct);
+        if (!workbenchWasRunning)
+        {
+            // A service started after the update snapshot belongs to a newer
+            // user action; do not silently stop it or change its configuration.
+            if (running) throw new IdleShutdownException(IdleShutdownResult.IdentityMismatch);
+            return;
+        }
+        if (running)
+        {
+            var health = await Json(previous.WebUrl + "/api/launcher-health", ct);
+            if (!IsWorkbenchHealth(health)) throw new IdleShutdownException(IdleShutdownResult.IdentityMismatch);
+            if (!IsOurWebUi(health, target))
+            {
+                var stopped = await TryStopWebUiWhenIdleAsync(previous, versionsRoot, ct);
+                if (stopped != IdleShutdownResult.Stopped) throw new IdleShutdownException(stopped);
+            }
+        }
+        await StartWebUIForSoftwareUpdateAsync(target, manifest, ct);
     }
 
     /// <summary>

@@ -30,6 +30,7 @@ public sealed class LauncherConfig
     public bool SetupComplete { get; set; }
     public bool InstallPending { get; set; }
     public bool StartOnLaunch { get; set; }
+    public bool AutoCheckUpdates { get; set; } = true;
     public string SelectedProfile { get; set; } = "anima";
     public string PinnedAppRoot { get; set; } = "";
     public int ComfyPort { get; set; } = 8188;

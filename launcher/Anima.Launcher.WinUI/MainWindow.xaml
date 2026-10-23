@@ -2,6 +2,7 @@
 <Window x:Class="Anima.Launcher.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ContentControl x:Name="RootInteraction" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
     <Grid x:Name="RootGrid" Background="{ThemeResource StudioBackgroundBrush}">
         <Grid.RowDefinitions>
             <RowDefinition Height="32" />
@@ -90,4 +91,5 @@
             </Grid>
         </Border>
     </Grid>
+    </ContentControl>
 </Window>

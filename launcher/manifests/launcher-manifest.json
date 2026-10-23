@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "version": "1.1.0",
+  "version": "1.2.0",
   "validation": "Windows x64. Release packages include the launcher, self-contained runtime, application resources, third-party notices and SHA-256 checksums. ComfyUI and models are downloaded separately.",
   "comfy": {
     "id": "ComfyUI",

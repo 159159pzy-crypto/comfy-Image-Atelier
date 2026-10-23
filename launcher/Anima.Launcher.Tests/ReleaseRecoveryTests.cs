@@ -193,6 +193,96 @@ internal static class ReleaseRecoveryTests
         }
         finally { await EndFixture(endpointA); await EndFixture(endpointB); }
 
+        var idleState = Path.Combine(recovery, "idle-shutdown-state");
+        var idleVersions = Path.Combine(idleState, "versions");
+        const string shutdownToken = "fixture-idle-token";
+        foreach (var scenario in new[]
+        {
+            (Mode: "busy", Token: shutdownToken, Result: IdleShutdownResult.Busy),
+            (Mode: "unsupported", Token: shutdownToken, Result: IdleShutdownResult.Unsupported),
+            (Mode: "unsupported-endpoint", Token: shutdownToken, Result: IdleShutdownResult.Unsupported),
+            (Mode: "idle", Token: (string?)null, Result: IdleShutdownResult.MissingToken),
+            (Mode: "idle", Token: "wrong-token", Result: IdleShutdownResult.Failed),
+            (Mode: "timeout-live", Token: shutdownToken, Result: IdleShutdownResult.Failed),
+            (Mode: "timeout-exit", Token: shutdownToken, Result: IdleShutdownResult.Stopped),
+            (Mode: "idle", Token: shutdownToken, Result: IdleShutdownResult.Stopped),
+            (Mode: "legacy-idle", Token: shutdownToken, Result: IdleShutdownResult.Stopped),
+            (Mode: "legacy-unsafe", Token: shutdownToken, Result: IdleShutdownResult.Unsupported),
+            (Mode: "identity-changed", Token: shutdownToken, Result: IdleShutdownResult.IdentityMismatch),
+        })
+        {
+            var config = new LauncherConfig { AppRoot = Path.Combine(idleVersions, scenario.Mode), DataDir = Path.Combine(idleState, "data"), ComfyPort = 18183 };
+            if (scenario.Mode == "legacy-idle")
+            {
+                Directory.CreateDirectory(Path.Combine(config.AppRoot, "anima_webui"));
+                File.WriteAllText(Path.Combine(config.AppRoot, "anima_webui", "server.py"), "await manager.begin_idle_shutdown()\n");
+                File.WriteAllText(Path.Combine(config.AppRoot, "anima_webui", "runner.py"), "async def begin_idle_shutdown(self):\n");
+            }
+            using var endpoint = await StartFixture(config, scenario.Mode);
+            try
+            {
+                JsonFile.Write(Path.Combine(idleState, "processes.json"), new[] { Record(endpoint) with { ShutdownToken = scenario.Token } });
+                var manager = new ServiceManager(idleState, _ => { });
+                manager.RecoverOwned();
+                var result = await manager.TryStopWebUiWhenIdleAsync(config, idleVersions, requestTimeout: TimeSpan.FromMilliseconds(100), exitTimeout: TimeSpan.FromMilliseconds(700));
+                Check(result == scenario.Result, $"idle-only shutdown classifies {scenario.Mode}/{scenario.Token ?? "no-token"} as {scenario.Result}");
+                Check(scenario.Result == IdleShutdownResult.Stopped ? endpoint.HasExited : !endpoint.HasExited,
+                    $"idle-only shutdown never force-kills a refused or unconfirmed {scenario.Mode} process");
+            }
+            finally { await EndFixture(endpoint); }
+        }
+
+        // The target contains a workbench entry, but deliberately unusable runtime
+        // settings. A stopped upgrade must never attempt to launch either service.
+        var stoppedState = Path.Combine(recovery, "stopped-update-state");
+        var stoppedVersions = Path.Combine(stoppedState, "versions");
+        var previousConfig = new LauncherConfig
+        {
+            AppRoot = Path.Combine(stoppedVersions, "old"), DataDir = Path.Combine(stoppedState, "data"),
+            Python = Path.Combine(stoppedState, "missing-python.exe"), ComfyRoot = Path.Combine(stoppedState, "missing-comfy"),
+            PinnedAppRoot = Path.Combine(stoppedVersions, "old"),
+        };
+        var unusedPort = new TcpListener(IPAddress.Loopback, 0);
+        unusedPort.Start();
+        previousConfig.WebPort = ((IPEndPoint)unusedPort.LocalEndpoint).Port;
+        unusedPort.Stop();
+        var targetConfig = previousConfig.Clone();
+        targetConfig.AppRoot = Path.Combine(stoppedVersions, "new");
+        targetConfig.PinnedAppRoot = "";
+        Directory.CreateDirectory(targetConfig.AppRoot);
+        File.WriteAllText(Path.Combine(targetConfig.AppRoot, "run.py"), "# fixture, must not run\n");
+        var stoppedManager = new ServiceManager(stoppedState, _ => { });
+        Check(RuntimePolicies.CanApplyBundledSoftwareUpdate(new LauncherConfig(), stoppedVersions, false),
+            "an unconfigured stopped launcher can adopt its first updated bundle");
+        Check(!RuntimePolicies.CanApplyBundledSoftwareUpdate(new LauncherConfig { SetupComplete = true }, stoppedVersions, false)
+            && !RuntimePolicies.CanApplyBundledSoftwareUpdate(new LauncherConfig(), stoppedVersions, true),
+            "missing runtime identity is not accepted for a configured or running workbench");
+        Check(!RuntimePolicies.CanApplyBundledSoftwareUpdate(new LauncherConfig { AppRoot = Path.Combine(stoppedState, "source") }, stoppedVersions, false),
+            "an unfinished source checkout is not replaced by a bundled update");
+        await stoppedManager.SwitchWorkbenchWhenIdleAsync(previousConfig, targetConfig, manifest, stoppedVersions, false);
+        Check(!File.Exists(Path.Combine(stoppedState, "processes.json")) && !await ServiceManager.PortOpen(previousConfig.WebPort),
+            "software upgrade of a stopped workbench does not start or register either service");
+        Check(previousConfig.PinnedAppRoot.EndsWith("old") && previousConfig.DataDir == targetConfig.DataDir,
+            "software service transition preserves the caller's prior pin and data context");
+        using (var newUserService = await StartFixture(previousConfig, "idle"))
+        {
+            try
+            {
+                targetConfig.WebPort = previousConfig.WebPort;
+                try
+                {
+                    await stoppedManager.SwitchWorkbenchWhenIdleAsync(previousConfig, targetConfig, manifest, stoppedVersions, false);
+                    Check(false, "a service started after the stopped snapshot blocks replacement");
+                }
+                catch (IdleShutdownException ex)
+                {
+                    Check(ex.Result == IdleShutdownResult.IdentityMismatch && !newUserService.HasExited,
+                        "a service started after the stopped snapshot blocks replacement and stays alive");
+                }
+            }
+            finally { await EndFixture(newUserService); }
+        }
+
         if (failures.Count > 0) throw new Exception($"{failures.Count} release recovery regression(s): " + string.Join("; ", failures));
         return passed;
     }
@@ -204,12 +294,12 @@ internal static class ReleaseRecoveryTests
         (Task<string>)typeof(Installer).GetMethod("Tool", PrivateInstance)!.Invoke(installer, [id, config, CancellationToken.None])!;
     private static OwnedProcess Record(Process process) => new(process.Id, process.StartTime.ToUniversalTime().Ticks, process.MainModule!.FileName!, "WebUI");
 
-    private static async Task<Process> StartFixture(LauncherConfig config)
+    private static async Task<Process> StartFixture(LauncherConfig config, string shutdownMode = "")
     {
         var info = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         if (string.Equals(Path.GetFileNameWithoutExtension(Environment.ProcessPath), "dotnet", StringComparison.OrdinalIgnoreCase))
             info.ArgumentList.Add(Assembly.GetEntryAssembly()!.Location);
-        foreach (var argument in new[] { "--http-fixture", config.AppRoot, config.DataDir, config.ComfyUrl }) info.ArgumentList.Add(argument);
+        foreach (var argument in new[] { "--http-fixture", config.AppRoot, config.DataDir, config.ComfyUrl, shutdownMode }) info.ArgumentList.Add(argument);
         var process = Process.Start(info)!;
         try
         {
@@ -233,19 +323,58 @@ internal static class ReleaseRecoveryTests
         listener.Start();
         Console.WriteLine(((IPEndPoint)listener.LocalEndpoint).Port);
         Console.Out.Flush();
+        var healthRequests = 0;
         while (true)
         {
-            using var client = await listener.AcceptTcpClientAsync();
+            var client = await listener.AcceptTcpClientAsync();
+            _ = ServeRequest(client);
+        }
+
+        async Task ServeRequest(TcpClient client)
+        {
+            using var connection = client;
             using var stream = client.GetStream();
             using var reader = new StreamReader(stream, Encoding.UTF8, leaveOpen: true);
-            var request = await reader.ReadLineAsync();
-            if (request is null) continue; // PortOpen connects without sending HTTP.
-            while (await reader.ReadLineAsync() is { Length: > 0 }) { }
-            var payload = JsonSerializer.Serialize(new { app = ServiceManager.WorkbenchAppName, app_dir = args[1], data_dir = args[2], comfy_url = args[3] });
-            var bytes = Encoding.UTF8.GetBytes(payload);
-            var headers = Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {bytes.Length}\r\nConnection: close\r\n\r\n");
-            await stream.WriteAsync(headers);
-            await stream.WriteAsync(bytes);
+            try
+            {
+                var request = await reader.ReadLineAsync();
+                if (request is null) return; // PortOpen connects without sending HTTP.
+                var length = 0;
+                while (await reader.ReadLineAsync() is { Length: > 0 } header)
+                    if (header.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase)) int.TryParse(header[15..].Trim(), out length);
+                var body = new char[length];
+                if (length > 0) await reader.ReadBlockAsync(body.AsMemory());
+                var mode = args.ElementAtOrDefault(4) ?? "";
+                var status = 200;
+                var stop = false;
+                string payload;
+                if (request.StartsWith("POST /api/launcher-shutdown ", StringComparison.Ordinal))
+                {
+                    var validToken = false;
+                    try { using var parsed = JsonDocument.Parse(new string(body)); validToken = parsed.RootElement.GetProperty("token").GetString() == "fixture-idle-token"; } catch { }
+                    if (!validToken) status = 403;
+                    else if (mode == "busy") status = 409;
+                    else if (mode == "unsupported-endpoint") status = 404;
+                    else if (mode == "timeout-live") await Task.Delay(5000);
+                    else if (mode == "timeout-exit") { await Task.Delay(300); Environment.Exit(0); }
+                    else stop = true;
+                    payload = "{\"stopping\":true}";
+                }
+                else
+                {
+                    var health = new Dictionary<string, object> { ["app"] = ServiceManager.WorkbenchAppName, ["app_dir"] = args[1], ["data_dir"] = args[2], ["comfy_url"] = args[3] };
+                    if (mode.Length > 0 && !mode.StartsWith("legacy-")) health["idle_shutdown_supported"] = mode != "unsupported";
+                    if (mode == "identity-changed" && Interlocked.Increment(ref healthRequests) > 1)
+                        health["data_dir"] = args[2] + "-other";
+                    payload = JsonSerializer.Serialize(health);
+                }
+                var bytes = Encoding.UTF8.GetBytes(payload);
+                var headers = Encoding.ASCII.GetBytes($"HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {bytes.Length}\r\nConnection: close\r\n\r\n");
+                await stream.WriteAsync(headers);
+                await stream.WriteAsync(bytes);
+                if (stop) { await Task.Delay(100); Environment.Exit(0); }
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException) { }
         }
     }
 }

@@ -1,14 +1,20 @@
-> **1.1.0（beta）仍为测试版，建议升级前备份用户数据。**
+> **1.2.0（beta）仍为测试版，建议升级前备份用户数据。**
 
 作者没跑路！！！因为作者是学生，所以更新频率会比较慢，但有issue作者也会及时修复的
 
 ## 下载与启动
 
-**Windows 用户请下载附件 `AnimaRandomStudio-win-x64-unsigned.zip`，完整解压到新文件夹后，直接双击根目录的 `AnimaRandomStudio.exe`。Source code 是开发源码，不包含启动器；请保留 EXE 同目录的所有文件。**
+**Windows 用户可以选择安装版 `AnimaRandomStudio-Setup-win-x64.exe`、直接运行的 `AnimaRandomStudio.exe`，或只含同一 EXE 的 `AnimaRandomStudio-portable-win-x64.zip`。程序运行依赖内嵌，首次启动自动提取，无需保留同目录 DLL。Source code 是开发源码。**
 
 首次打开且尚未配置环境时自动进入安装向导，完成后点击「开始创作」；已有环境可从「概览」启动工作台。启动器包含 .NET、Windows App Runtime 和应用资源；ComfyUI、节点和模型首次配置时另行下载。支持 Windows 10 1809 及以上的 x64 系统；新建环境需要支持 CUDA 12.8 的 NVIDIA 驱动（570.65 或更新版本）。
 
-## 相比 1.0.1 更新了什么
+## 1.2.0 启动器更新
+
+- 设置内检查正式 Release、查看版本说明、下载与校验，任务空闲后重启更新。下载失败可重试，更新失败保留可用版本。
+- 安装版按用户安装，创建开始菜单入口并可选桌面快捷方式；拒绝降级，允许同版本修复，不强制关闭服务，卸载保留数据和模型。
+- EXE、ZIP 内 EXE 与安装程序内 EXE 保持一致；校验和覆盖三个下载文件，内嵌逐文件清单与第三方许可。
+
+## 工作台改进
 
 ### 启动器与首次安装
 
@@ -43,13 +49,15 @@
 ## 升级与校验
 
 1. 等待生成与队列空闲，停止旧工作台并退出旧启动器，再备份 `%LOCALAPPDATA%/AnimaRandomStudio` 整个目录；旧源码版另备份原项目 `data`。不要在工作台仍写入时仅复制数据库文件。
-2. 完整解压新版 ZIP 到新目录，再运行新 EXE。
-3. 在设置中选择「应用内置新版」，空闲时切换工作台；仅替换 EXE 或只启动新启动器，不等于已应用新版工作台。旧源码版 `data` 不会自动迁移。
+2. 1.1.0 及更早版本需最后一次手动下载新启动器；从 1.2.0 起，在设置中检查、下载并重启更新。
+3. 软件内更新同时更新启动器和内置工作台；完整验证成功后解除旧工作台固定回退，失败保留原设置。原来停止的服务保持停止，无法安全停机时拒绝更新。工作台仍可单独「应用内置新版」或「回退上一版」；旧源码版 `data` 不会自动迁移。
 4. Prompt Assistant 首次安装纯模板兼容补丁后需重启 ComfyUI；补丁只支持清单锁定的已验证版本，未知或修改过的插件会明确拒绝。源码用户升级后需重新安装依赖。
 
-`SHA256SUMS.txt` 用于验证 ZIP；包内 `FILES.sha256` 覆盖全部运行文件，`build-info.json` 记录版本及来源提交。当前包未签署代码签名，名称中的 `unsigned` 即表示未签名。
+`SHA256SUMS.txt` 用于验证独立 EXE、ZIP 和 Setup；单文件内部 `FILES.sha256` 覆盖内嵌运行文件，`build-info.json` 记录版本及来源提交。当前包未签署代码签名。
 
 ## 验证范围
+
+本轮新增单文件提取、EXE/ZIP 一致性、安装器、启动器更新与恢复检查；具体通过项以候选包验收结果为准。以下数量为既有工作台回归记录，不代替本轮结果。
 
 - 本地 Windows 环境通过 606 项 Python 测试、370 个子测试、201 项前端测试、7 项 Prompt Assistant 补丁测试和 263 项启动器核心检查；针对 Python 3.13 补充明确的 JSON 深度边界，并修正 SQLite 执行计划与超时边界测试的跨环境兼容性。
 - 通过版本与发布内容检查、静态检查、脚本语法检查及打包完整性回归。
@@ -61,6 +69,6 @@
 - 启动器「底模文件夹」入口仍有已知问题，可使用资源管理器手动打开实际模型目录。
 - Krea 2、SeedVR2 等可选资源需按模型资源页提示准备；安装节点不代表已经下载模型。
 - 新版向导的全新环境联网安装至首次出图尚未完成完整实机验收，不将自动化回归等同于该验收。
-- 托管 PyTorch 2.11.0 保留一项有明确触发范围的上游依赖限制，详情见[依赖说明](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.1.0/docs/dependencies.md)。
+- 托管 PyTorch 2.11.0 保留一项有明确触发范围的上游依赖限制，详情见[依赖说明](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.2.0/docs/dependencies.md)。
 
-完整变化见[更新日志](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.1.0/CHANGELOG.md)，使用步骤见[启动器说明](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.1.0/launcher/README.md)。
+完整变化见[更新日志](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.2.0/CHANGELOG.md)，使用步骤见[启动器说明](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.2.0/launcher/README.md)。

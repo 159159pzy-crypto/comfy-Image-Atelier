@@ -25,6 +25,7 @@ public sealed partial class ServicesPage : LauncherPage
         active = true;
         State.BusyChanged += OnBusy;
         State.FieldsReloaded += OnReloaded;
+        State.SoftwareUpdateChanged += OnReloaded;
         Apply();
         await Refresh();
         if (active) timer.Start();
@@ -36,6 +37,7 @@ public sealed partial class ServicesPage : LauncherPage
         timer.Stop();
         State.BusyChanged -= OnBusy;
         State.FieldsReloaded -= OnReloaded;
+        State.SoftwareUpdateChanged -= OnReloaded;
         base.OnNavigatedFrom(e);
     }
 
@@ -62,6 +64,8 @@ public sealed partial class ServicesPage : LauncherPage
 
     private void Apply()
     {
+        SoftwareUpdateNotice.Visibility = State.SoftwareUpdateNotice.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        SoftwareUpdateNotice.Description = State.SoftwareUpdateNotice;
         var busy = State.Busy;
         var draft = State.PendingEnvironmentFields;
         var selectedRoot = draft?.ComfyRoot ?? State.Config.ComfyRoot;
@@ -145,6 +149,8 @@ public sealed partial class ServicesPage : LauncherPage
         Shell.GoToPage(1);
         if (string.IsNullOrWhiteSpace(State.Config.ComfyRoot)) State.SetSetupMode(false);
     }
+
+    private void SoftwareUpdate_Click(object sender, RoutedEventArgs e) => Shell.GoToPage(4);
 
     private async void Folder_Click(object sender, RoutedEventArgs e)
     {

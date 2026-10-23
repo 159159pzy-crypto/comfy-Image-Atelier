@@ -52,3 +52,11 @@ class LauncherStorageTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(Path(health["data_dir"]), Path(temp).resolve())
                 self.assertTrue((Path(temp) / "history.sqlite3").is_file())
                 self.assertEqual(Path(health["app_dir"]), ROOT)
+                self.assertFalse(health["idle_shutdown_supported"])
+
+    async def test_health_advertises_idle_shutdown_only_with_launcher_token(self):
+        with TemporaryDirectory() as temp:
+            app = create_app(data_dir=temp, shutdown_token="launcher-owned-fixture")
+            async with TestClient(TestServer(app)) as client:
+                response = await client.get("/api/launcher-health")
+                self.assertTrue((await response.json())["idle_shutdown_supported"])

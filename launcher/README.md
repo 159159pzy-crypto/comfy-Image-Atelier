@@ -2,7 +2,9 @@
 
 ## 安装与使用
 
-从 [1.1.0 Release](https://github.com/159159pzy-crypto/comfyui-random-image-generation/releases/tag/1.1.0) 下载 `AnimaRandomStudio-win-x64-unsigned.zip`，完整解压到新文件夹后，直接运行根目录的 `AnimaRandomStudio.exe`。源码 ZIP 不包含 EXE。
+1.2.0 起，从 [最新 Release](https://github.com/159159pzy-crypto/comfyui-random-image-generation/releases/latest) 下载 `AnimaRandomStudio-Setup-win-x64.exe` 安装，或直接下载 `AnimaRandomStudio.exe` 运行。`AnimaRandomStudio-portable-win-x64.zip` 仅包含同一份 EXE。源码 ZIP 不包含 EXE。运行依赖自动提取到用户缓存，EXE 旁无需 DLL 或资源文件。
+
+安装版默认按用户安装到 `%LOCALAPPDATA%/Programs/AnimaRandomStudio`，也可选择其他位置；创建开始菜单入口，可选桌面快捷方式；卸载保留用户数据、模型和环境。
 
 首次打开且尚未配置环境时，启动器直接进入五步安装向导。已有环境的用户进入「概览」，也可从「安装环境」重新打开向导。以下说明对应当前源码；上面的已发布版本可能尚未包含最新的向导与界面改进。
 
@@ -25,9 +27,13 @@ Anima Tools 按其 `js` 目录中的四个数据文件识别，支持 `-main`、
 
 ## 升级与数据
 
-新版 ZIP 解压到新目录，退出旧启动器后运行新 EXE，再在设置中选择「应用内置新版」。保留完整目录；仅替换 EXE 会缺少运行资源。需要时可在空闲时回退上一工作台版本。
+默认每 24 小时后台检查正式 Release，可在「设置」中关闭自动检查或手动检查。查看版本说明和下载大小后开始下载，支持暂停、续传和重试；下载不会打断生图。下载完成并等待任务空闲后，点击重启更新，一次更新启动器和内置工作台。
 
-配置、日志和用户数据默认保存在 `%LOCALAPPDATA%/AnimaRandomStudio`。迁移前先等待任务空闲、停止工作台并退出启动器，再备份整个目录；旧源码版的数据在原项目的 `data` 中。启动器不会自动把旧源码版的数据迁入新位置。
+完整更新验证成功后解除旧工作台的固定回退；失败恢复原版本和原配置，保留原固定设置。原来运行的工作台会安全停止并恢复，原来停止的服务保持停止；无法安全停机时拒绝更新，不强制结束任务。工作台的「应用内置新版」与「回退上一版」仍可单独使用。
+
+1.1.0 及更早版本没有联网自更新功能，需要最后一次下载带更新功能的新版本。此后可直接从软件内更新。安装版拒绝降级，安装相同版本可修复；安装或卸载前需先退出启动器，安装程序不会强制结束服务。
+
+便携版、安装版和旧入口共享配置、历史及更新状态，默认目录为 `%LOCALAPPDATA%/AnimaRandomStudio`。移动便携 EXE 不会迁移历史、模型或 ComfyUI。迁移前先等待任务空闲、停止工作台并退出启动器，再备份整个目录；旧源码版的数据在原项目的 `data` 中。启动器不会自动把旧源码版的数据迁入新位置。
 
 ## 提示词助手
 
@@ -59,7 +65,7 @@ python launcher/scripts/patch_prompt_assistant.py --root '<Prompt Assistant 插�
 
 `--check` 不修改文件：返回码 0 表示已安装，2 表示已识别但待安装，1 表示不支持或文件异常。补丁脚本内嵌在启动器 Core 程序集中，发布包不依赖源码目录。
 
-可将 `templates/workflow_ui_v2.json` 拖进 ComfyUI 检查缺失节点；应用实际提交使用 `templates/workflow_api_v2.json`。节点及版本见 [运行清单](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.1.0/launcher/manifests/launcher-manifest.json)。
+可将 `templates/workflow_ui_v2.json` 拖进 ComfyUI 检查缺失节点；应用实际提交使用 `templates/workflow_api_v2.json`。节点及版本见 [运行清单](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.2.0/launcher/manifests/launcher-manifest.json)。
 
 ## 本地图像反推模型
 
@@ -89,7 +95,9 @@ pwsh ./launcher/scripts/Test-LauncherPackage.ps1
 pwsh ./Build-Launcher.ps1
 ```
 
-输出位于新的 `dist/candidates/<构建编号>` 目录：完整 ZIP、`SHA256SUMS.txt` 和 `build-info.json`。`candidate.json` 仅用于本地定位构建输出，不作为 Release 附件。包内 `FILES.sha256` 覆盖全部其他文件；构建来源、版本和应用负载哈希写入 `build-info.json`。正式发布要求提交已保存、工作树干净。
+输出位于新的 `dist/candidates/<构建编号>`：独立 `AnimaRandomStudio.exe`、仅含相同 EXE 的 ZIP、`AnimaRandomStudio-Setup-win-x64.exe`、三份下载文件的 `SHA256SUMS.txt` 及 `build-info.json`。`candidate.json` 仅用于本地定位输出。单文件内部的 `FILES.sha256` 覆盖所有内嵌运行文件（排除清单自身与外层 EXE）；来源资料和第三方许可随 EXE 内嵌。正式发布要求提交已保存、工作树干净。
+
+构建脚本下载锁定的 Inno Setup 6.7.3 到忽略的 `tools` 目录，验证官方 SHA-256 与 Pyrsys B.V. 数字签名后准备编译器。安装程序始终包含与便携版逐字节相同的最终 EXE。
 
 只需本地检查启动器改动时，可先编译与运行向导检查，再生成独立候选包：
 
@@ -98,12 +106,13 @@ dotnet build launcher/Anima.Launcher.WinUI/Anima.Launcher.WinUI.csproj -c Releas
 dotnet run -c Release --project launcher/Anima.Launcher.Tests -- --onboarding-only
 pwsh ./Build-Launcher.ps1 -CandidateDirectory './dist/candidates/launcher-ui-review'
 pwsh ./launcher/scripts/Test-LauncherCandidate.ps1 -CandidateDirectory './dist/candidates/launcher-ui-review'
+pwsh ./launcher/scripts/Test-LauncherInstaller.ps1 -CandidateDirectory './dist/candidates/launcher-ui-review'
 ```
 
 候选目录必须不存在；重复构建时换一个新目录。省略 `-InstallRootEntry` 和 `-InstallShortcut` 时，构建不会替换根目录启动入口或桌面快捷方式。开发中的候选包可以包含未提交改动，`build-info.json` 会如实标记 `sourceDirty`，不等同于正式发布包。打包会重新生成 `launcher/payload.zip`，其中包含构建时当前工作树的工作台文件。
 
 原生界面验收使用单独的 `ANIMA_LAUNCHER_HOME` 目录，并给候选 EXE 传入 `--show`，避免复用日常配置或自动启动服务。编译和向导逻辑检查不能代替浅色、深色、小窗口及原生弹窗的实际检查。
 
-需要源码目录的双击入口时，可运行 `pwsh ./Build-Launcher.ps1 -InstallRootEntry`；生成的根目录 EXE 依赖同级 `.launcher`，两者均不进入 Git。普通用户使用上面的完整 ZIP 即可。
+需要源码目录的双击入口时，可运行 `pwsh ./Build-Launcher.ps1 -InstallRootEntry`；部署到根目录的 EXE 与发布单文件一致，不依赖同级 `.launcher`；替换前旧入口备份在 `.launcher` 中。普通构建不会修改根入口或快捷方式。
 
-包内附带第三方许可和依赖清单；ComfyUI、节点与模型单独下载。已知依赖限制见 [依赖说明](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.1.0/docs/dependencies.md)。
+包内附带第三方许可和依赖清单；ComfyUI、节点与模型单独下载。已知依赖限制见 [依赖说明](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.2.0/docs/dependencies.md)。

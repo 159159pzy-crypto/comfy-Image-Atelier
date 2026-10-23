@@ -17,7 +17,12 @@
     <SelfContained>true</SelfContained>
     <DebugType>embedded</DebugType>
     <CsWinRTIncludesProjectionAttributes>true</CsWinRTIncludesProjectionAttributes>
-    <EnableMsixTooling>false</EnableMsixTooling>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <PublishSingleFile>true</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <AnimaPython Condition="'$(AnimaPython)' == ''">python</AnimaPython>
     <!-- Publish must still emit the compiled XAML .xbf files + app .pri, or the window crashes (0xc000027b). -->
     <EnablePriGenTooling>true</EnablePriGenTooling>
     <IncludePackageReferencesDuringMarkupCompilation>true</IncludePackageReferencesDuringMarkupCompilation>
@@ -34,6 +39,11 @@
     <EmbeddedResource Include="../payload.zip" Condition="Exists('../payload.zip')" />
     <Content Include="app.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="$(AnimaBundleContentDir)/*" Condition="'$(AnimaBundleContentDir)' != ''">
+      <Link>%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
   </ItemGroup>
   <ItemGroup>
@@ -60,13 +70,26 @@
     app package resource index (*.pri) into the publish folder, so the published exe crashes
     with a stowed 0xc000027b in Microsoft.UI.Xaml.dll. Inject them into ResolvedFileToPublish.
   -->
-  <Target Name="_PublishXamlResources" AfterTargets="ComputeFilesToPublish">
+  <Target Name="_PublishXamlResources" AfterTargets="ComputeFilesToPublish" Condition="'$(PublishSingleFile)' != 'true'">
     <ItemGroup>
       <ResolvedFileToPublish Include="$(OutDir)$(TargetName).pri" Condition="Exists('$(OutDir)$(TargetName).pri')">
         <RelativePath>$(TargetName).pri</RelativePath>
         <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       </ResolvedFileToPublish>
 
+    </ItemGroup>
+  </Target>
+  <Target Name="_AnimaBundleInventory" AfterTargets="PrepareForBundle" Condition="'$(PublishSingleFile)' == 'true'">
+    <PropertyGroup>
+      <_AnimaBundleList>$(IntermediateOutputPath)anima-bundle-inputs.txt</_AnimaBundleList>
+      <_AnimaBundleInventory>$(IntermediateOutputPath)FILES.sha256</_AnimaBundleInventory>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(_AnimaBundleList)" Lines="@(FilesToBundle->'%(FullPath)|%(RelativePath)')" Overwrite="true" Encoding="UTF-8" />
+    <Exec Command="&quot;$(AnimaPython)&quot; &quot;$(MSBuildProjectDirectory)/../scripts/export_bundle_manifest.py&quot; --inputs &quot;$(_AnimaBundleList)&quot; --apphost &quot;$(AppHostFile)&quot; --output &quot;$(_AnimaBundleInventory)&quot;" />
+    <ItemGroup>
+      <FilesToBundle Include="$(_AnimaBundleInventory)">
+        <RelativePath>FILES.sha256</RelativePath>
+      </FilesToBundle>
     </ItemGroup>
   </Target>
 </Project>

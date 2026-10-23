@@ -1,4 +1,7 @@
 import pytest
+import subprocess
+
+from scripts import check_release_content as release_content
 
 from scripts.check_release_content import MACHINE_PATH, check_path
 
@@ -29,3 +32,17 @@ def test_machine_path_scan_allows_web_links():
     assert not MACHINE_PATH.search("[download](https://github.com/example/releases)")
     assert MACHINE_PATH.search(r"Install into C:\Users\example\studio")
     assert MACHINE_PATH.search("Install into /home/example/studio")
+
+
+def test_source_release_respects_export_ignore_without_allowing_internal_notes(tmp_path, monkeypatch):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs/acceptance.md").write_text("Internal evidence", encoding="utf-8")
+    (tmp_path / ".gitattributes").write_text("docs/acceptance.md export-ignore\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("Product guide", encoding="utf-8")
+    monkeypatch.setattr(release_content, "ROOT", tmp_path)
+    release_content.check_release_content()
+    # Removing the explicit archive exclusion restores the original rejection.
+    (tmp_path / ".gitattributes").write_text("", encoding="utf-8")
+    with pytest.raises(ValueError, match="Unapproved Markdown"):
+        release_content.check_release_content()

@@ -8,6 +8,33 @@ public enum WorkbenchActivity { Unknown, Idle, Busy }
 /// <summary>Pure decisions shared by the launcher UI and its regression tests.</summary>
 public static class RuntimePolicies
 {
+    public static bool SynchronizeManagedSetupVersion(LauncherConfig draft, LauncherConfig current, string versionsRoot)
+    {
+        if (string.IsNullOrWhiteSpace(current.AppRoot)) return false;
+        try
+        {
+            var versions = Path.GetFullPath(versionsRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            if (!string.IsNullOrWhiteSpace(draft.AppRoot)
+                && !Path.GetFullPath(draft.AppRoot).StartsWith(versions, StringComparison.OrdinalIgnoreCase)) return false;
+            var changed = draft.AppRoot != current.AppRoot || draft.PinnedAppRoot != current.PinnedAppRoot;
+            draft.AppRoot = current.AppRoot;
+            draft.PinnedAppRoot = current.PinnedAppRoot;
+            return changed;
+        }
+        catch { return false; }
+    }
+
+    public static bool CanApplyBundledSoftwareUpdate(LauncherConfig previous, string versionsRoot, bool workbenchWasRunning)
+    {
+        if (string.IsNullOrWhiteSpace(previous.AppRoot)) return !previous.SetupComplete && !workbenchWasRunning;
+        try
+        {
+            var versions = Path.GetFullPath(versionsRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            return Path.GetFullPath(previous.AppRoot).StartsWith(versions, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
     public static LauncherConfig SnapshotConfig(LauncherConfig config)
     {
         var snapshot = config.Clone();

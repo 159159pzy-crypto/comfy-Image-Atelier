@@ -1578,6 +1578,7 @@ def create_app(
             "app_dir": str(root.resolve()),
             "data_dir": str(storage.resolve()),
             "comfy_url": getattr(client, "base_url", "local"),
+            "idle_shutdown_supported": shutdown_token is not None,
         })
 
     async def launcher_shutdown(request: web.Request) -> web.Response:

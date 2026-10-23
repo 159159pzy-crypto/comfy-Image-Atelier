@@ -39,6 +39,15 @@ def check_release_content() -> None:
         ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT,
     ).decode("utf-8").split("\0")
     names = [name for name in names if name]
+    # Match GitHub's source archives: keep internal evidence in Git without
+    # publishing it or weakening the public-document allowlist.
+    attributes = subprocess.check_output(
+        ["git", "check-attr", "-z", "--stdin", "export-ignore"],
+        input=("\0".join(names) + "\0").encode("utf-8"), cwd=ROOT,
+    ).decode("utf-8").split("\0")
+    excluded = {attributes[i] for i in range(0, len(attributes) - 2, 3)
+                if attributes[i + 2] == "set"}
+    names = [name for name in names if name not in excluded]
     for name in names:
         check_path(name)
         path = ROOT / name

@@ -25,6 +25,7 @@ public sealed partial class MainWindow : Window
     private int selectedPage;
     private bool downloadCancelable;
     private string statusBrushKey = "StudioSecondaryBrush";
+    private readonly DispatcherTimer updateTimer = new() { Interval = TimeSpan.FromHours(1) };
 
     public MainWindow(App app, bool forceShow)
     {
@@ -49,7 +50,7 @@ public sealed partial class MainWindow : Window
         }
         var size = AppWindow.Size;
         AppWindow.Move(new PointInt32(area.X + (area.Width - size.Width) / 2, area.Y + (area.Height - size.Height) / 2));
-        try { AppWindow.SetIcon("app.ico"); } catch { }
+        try { AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "app.ico")); } catch { }
 
         State = new LauncherState(() => Content?.XamlRoot, ShowWindow)
         {
@@ -58,6 +59,9 @@ public sealed partial class MainWindow : Window
         };
         app.State = State; // Pages resolve state via App.Shared during navigation.
         WireState();
+        State.SoftwareUpdateExitRequested += () => DispatcherQueue.TryEnqueue(() => Exit(false));
+        Program.UpdateExitRequested += OnSoftwareUpdateExit;
+        updateTimer.Tick += async (_, _) => await State.CheckSoftwareUpdatesAsync(false);
 
         GoToPage(State.SetupActive ? 5 : 0);
         RootGrid.ActualThemeChanged += (_, _) => RefreshThemeChrome();
@@ -202,10 +206,22 @@ public sealed partial class MainWindow : Window
         firstActivate = false;
         try
         {
+            if (Program.UpdateContext is not null)
+            {
+                RootInteraction.IsEnabled = false;
+                await State.CompleteSoftwareUpdateStartupAsync();
+                RootInteraction.IsEnabled = true;
+                // The coordinator controls service startup and preserves prior state.
+                // Do not run normal auto-start again after either commit or recovery.
+                if (reallyClose || State.SoftwareUpdateExitPending) return;
+            }
+            _ = State.InitializeSoftwareUpdatesAsync();
+            updateTimer.Start();
             var info = await State.DetectSystem();
             State.SystemInfoText = info;
             State.Reloaded();
             await State.RefreshSetupCompletionAsync();
+            if (Program.UpdateContext is not null) return;
             if (!State.SetupActive) State.OfferUpgradeIfNeeded();
             // Opening the launcher is read-only by default. Starting services is an
             // explicit primary action unless the user opted in to auto-start.
@@ -223,6 +239,8 @@ public sealed partial class MainWindow : Window
             StatusText.Text = ex.Message;
         }
     }
+
+    private void OnSoftwareUpdateExit() => DispatcherQueue.TryEnqueue(State.RequestSoftwareUpdateExit);
 
     private void OnClosing(AppWindow sender, AppWindowClosingEventArgs args)
     {
@@ -262,6 +280,8 @@ public sealed partial class MainWindow : Window
         reallyClose = true;
         try
         {
+            updateTimer.Stop();
+            Program.UpdateExitRequested -= OnSoftwareUpdateExit;
             if (stop) State.Services.StopOwned();
             try { tray?.Dispose(); } catch { }
             tray = null;

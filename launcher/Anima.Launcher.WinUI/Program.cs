@@ -27,6 +27,207 @@ internal static class Program
     internal static string ShowEventName => "Local\\AnimaRandomStudioShow" + InstanceSuffix;
     /// <summary>Owned by the first instance; created before the window so early second instances can wait on it.</summary>
     internal static EventWaitHandle? ShowSignal;
+    internal static UpdateTransaction? UpdateContext { get; private set; }
+    internal static bool IsUpdateRecovery { get; private set; }
+    internal static event Action? UpdateExitRequested;
+    private static EventWaitHandle? updateExitSignal;
+
+    internal static async Task CompleteUpdateAsync(bool success, string? error = null)
+    {
+        if (UpdateContext is not { } context) return;
+        if (IsUpdateRecovery) { if (!success) Log("旧工作台恢复失败：" + error); else SyncInstalledVersion(Version); return; }
+        var store = new LauncherUpdateStore(StateDir);
+        JsonFile.Write(store.ReceiptPath(context.Id), new UpdateReady(context.Token, success, error, AppRoot, Environment.ProcessId));
+        if (!success) return;
+        for (var i = 0; i < 200; i++)
+        {
+            var active = store.Load();
+            if (active.PendingTransactionId is null && active.Active?.Sha256 == context.Candidate.Sha256
+                && active.Active.Version == context.Candidate.Version) { SyncInstalledVersion(Version); return; }
+            var current = store.ReadTransaction(context.Id, context.Token);
+            if (current.Phase == "committed") { SyncInstalledVersion(Version); return; }
+            if (current.Phase is "rolling-back" or "failed" or "recovery-required") throw new IOException(current.Error ?? "更新验证失败，正在恢复旧版本。");
+            await Task.Delay(100);
+        }
+        throw new IOException("更新提交未完成，已保留恢复记录。");
+    }
+
+    private static string Argument(string[] args, string name)
+    {
+        var index = Array.IndexOf(args, name);
+        return index >= 0 && index + 1 < args.Length ? args[index + 1] : "";
+    }
+    private static void Report(string[] args, object value)
+    {
+        var report = Argument(args, "--report");
+        if (report.Length > 0) JsonFile.Write(Path.GetFullPath(report), value);
+        else { AttachConsole(0xFFFFFFFF); Console.WriteLine(JsonSerializer.Serialize(value, JsonFile.Options)); }
+    }
+    private static LauncherPackageInfo PackageInfo()
+    {
+        var directory = AppContext.BaseDirectory;
+        var build = JsonFile.Read<JsonElement>(Path.Combine(directory, "build-info.json"));
+        LauncherUpdates.ValidateBuildInfo(build, Version);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var files = new List<LauncherPackageFile>();
+        foreach (var line in File.ReadLines(Path.Combine(directory, "FILES.sha256")))
+        {
+            if (line.Length == 0) continue;
+            var match = System.Text.RegularExpressions.Regex.Match(line, "^([a-fA-F0-9]{64})  (.+)$");
+            if (!match.Success || !seen.Add(match.Groups[2].Value) || match.Groups[2].Value.Equals("FILES.sha256", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("启动器内嵌文件清单格式无效。");
+            var relative = match.Groups[2].Value;
+            var path = Safety.Under(directory, relative);
+            LauncherUpdateStore.RequireNoLinks(Path.GetDirectoryName(path)!);
+            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) throw new InvalidDataException("启动器资源不能是链接。");
+            using var input = File.OpenRead(path);
+            var hash = Convert.ToHexString(SHA256.HashData(input)).ToLowerInvariant();
+            if (!hash.Equals(match.Groups[1].Value, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("启动器资源校验失败：" + relative);
+            files.Add(new(relative, input.Length, hash));
+        }
+        foreach (var required in new[] { "AnimaRandomStudio.dll", "Anima.Launcher.Core.dll", "AnimaRandomStudio.pri", "Microsoft.UI.Xaml.dll", "System.Private.CoreLib.dll", "build-info.json", "LICENSE", "THIRD-PARTY-NOTICES.txt" })
+            if (!seen.Contains(required)) throw new InvalidDataException("启动器包缺少 " + required);
+        return new(1, Version, "single-exe-v1", Environment.ProcessPath!, directory, build, files.ToArray());
+    }
+    private static bool RunningLauncher()
+    {
+        if (!Mutex.TryOpenExisting("Local\\AnimaRandomStudioLauncher" + InstanceSuffix, out var mutex)) return false;
+        using (mutex)
+        {
+            bool acquired;
+            try { acquired = mutex.WaitOne(0); } catch (AbandonedMutexException) { acquired = true; }
+            if (acquired) mutex.ReleaseMutex();
+            return !acquired;
+        }
+    }
+    private static void ListenForUpdateExit(UpdateTransaction transaction)
+    {
+        updateExitSignal = new EventWaitHandle(false, EventResetMode.AutoReset, LauncherUpdateCoordinator.ExitEventName(transaction));
+        new Thread(() => { try { updateExitSignal.WaitOne(); UpdateExitRequested?.Invoke(); } catch (ObjectDisposedException) { } })
+            { IsBackground = true, Name = "UpdateExit" }.Start();
+    }
+    private static void SyncInstalledVersion(string version)
+    {
+        if (!LauncherUpdateStore.SamePath(StateDir, DefaultStateDir)) return;
+        try
+        {
+            const string uninstall = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\AnimaRandomStudio_is1";
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(uninstall, writable: true);
+            if (key?.GetValue("DisplayName") as string != "Anima Random Studio") return;
+            var location = key.GetValue("InstallLocation") as string;
+            if (string.IsNullOrWhiteSpace(location)) return;
+            var entry = Path.Combine(location, "AnimaRandomStudio.exe");
+            var previous = UpdateContext?.Previous.Executable ?? Environment.ProcessPath!;
+            var knownEntries = new LauncherUpdateStore(StateDir).Load().EntryPaths;
+            if (LauncherUpdateStore.SamePath(entry, previous) || LauncherUpdateStore.SamePath(entry, Environment.ProcessPath!)
+                || knownEntries.Any(path => LauncherUpdateStore.SamePath(path, entry))) key.SetValue("DisplayVersion", version);
+        }
+        catch (Exception ex) { Log("安装信息版本同步失败：" + ex.Message); }
+    }
+
+    private static int? RouteInstalledVersion(LauncherUpdates updates, string[] args)
+    {
+        var configPath = Path.Combine(StateDir, "launcher.json");
+        LauncherConfig? config = null;
+        if (File.Exists(configPath))
+        {
+            try { config = JsonFile.Read<LauncherConfig>(configPath); config.Validate(); }
+            catch { return null; } // Existing configuration recovery UI owns malformed config.
+            var versions = Path.GetFullPath(Path.Combine(StateDir, "versions")) + Path.DirectorySeparatorChar;
+            if (config.AppRoot.Length > 0 && !Path.GetFullPath(config.AppRoot).StartsWith(versions, StringComparison.OrdinalIgnoreCase)) return null;
+        }
+        using var gate = new Mutex(false, updates.Store.MutexName);
+        bool acquired;
+        try { acquired = gate.WaitOne(TimeSpan.FromMinutes(4)); } catch (AbandonedMutexException) { acquired = true; }
+        if (!acquired) throw new IOException("更新正在进行，请稍后重新打开启动器。");
+        try
+        {
+            var state = updates.Store.Load();
+            if (File.Exists(Path.Combine(AppContext.BaseDirectory, "build-info.json"))
+                && !state.EntryPaths.Any(path => LauncherUpdateStore.SamePath(path, Environment.ProcessPath!)))
+            {
+                state.EntryPaths.Add(Environment.ProcessPath!);
+                if (state.EntryPaths.Count > 32) state.EntryPaths.RemoveAt(0);
+                updates.Store.Save(state);
+            }
+            if (state.PendingTransactionId is { } pending)
+            {
+                var transaction = updates.Store.ReadTransaction(pending);
+                if (LauncherUpdateStore.IsRunning(transaction.Parent)) { WakeRunningInstance(); return 0; }
+                var recovered = new LauncherUpdateCoordinator(updates, Log).Run(transaction.Id, transaction.Token, recoverOnly: true);
+                var after = updates.Store.ReadTransaction(transaction.Id, transaction.Token);
+                if (after.Phase == "recovery-required")
+                {
+                    var message = "上次更新尚不能安全恢复，当前生图服务保持运行。请等待生成和排队任务完成后，重新打开启动器重试。\n\n" + after.Error;
+                    if (args.Contains("--diagnose")) Console.Error.WriteLine(message); else NativeMessage(message, "更新恢复待重试", true);
+                }
+                return recovered;
+            }
+            if (state.Active is null)
+            {
+                // Build/debug output has no release metadata. Do not register it as a distributable.
+                if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "build-info.json"))) return null;
+                PackageInfo();
+                state.Active = updates.ImportAsync(Environment.ProcessPath!, Version, default).GetAwaiter().GetResult();
+                updates.Store.Save(state);
+                return null;
+            }
+            updates.Store.ValidateInstalled(state.Active, managed: false);
+            var currentVersion = LauncherUpdates.ParseVersion(Version);
+            var activeVersion = LauncherUpdates.ParseVersion(state.Active.Version);
+            if (currentVersion == activeVersion && !LauncherUpdateStore.SamePath(state.Active.Executable, Environment.ProcessPath!)
+                && !Downloads.Verify(state.Active.Executable, state.Active.Size, state.Active.Sha256, default).GetAwaiter().GetResult())
+            {
+                if (RunningLauncher()) { WakeRunningInstance(); return 0; }
+                PackageInfo();
+                var source = updates.IdentifyAsync(Environment.ProcessPath!, Version, default).GetAwaiter().GetResult();
+                if (source.Sha256 != state.Active.Sha256 || source.Size != state.Active.Size) throw new IOException("当前入口与待修复的同版本文件不一致，请使用原始发行文件修复。");
+                state.Active = updates.ImportAsync(Environment.ProcessPath!, Version, default, allowRepair: true).GetAwaiter().GetResult();
+                updates.Store.Save(state);
+            }
+            if (currentVersion > activeVersion && !args.Contains("--diagnose"))
+            {
+                var local = updates.IdentifyAsync(Environment.ProcessPath!, Version, default).GetAwaiter().GetResult();
+                if (!updates.IsFailed(local))
+                {
+                    if (RunningLauncher()) throw new IOException("请先从托盘退出正在运行的启动器，再打开此新版；现有服务可以保留。");
+                    PackageInfo();
+                    local = updates.ImportAsync(Environment.ProcessPath!, Version, default).GetAwaiter().GetResult();
+                    config ??= new LauncherConfig { DataDir = Path.Combine(StateDir, "data") };
+                    var running = ServiceManager.PortOpen(config.WebPort).GetAwaiter().GetResult();
+                    if (running)
+                    {
+                        var health = ServiceManager.Json(config.WebUrl + "/api/launcher-health", default).GetAwaiter().GetResult();
+                        if (!ServiceManager.IsOurWebUi(health, config)) throw new IOException("工作台端口由其他环境占用，不能切换版本。");
+                    }
+                    // Prepare commits under its own synchronous mutex after async hashing.
+                    // Do not hold this thread-affine gate while waiting for that continuation.
+                    gate.ReleaseMutex(); acquired = false;
+                    var transaction = updates.PrepareAsync(local, config, running, default).GetAwaiter().GetResult();
+                    updates.StartCoordinator(transaction);
+                    return 0;
+                }
+            }
+            if (LauncherUpdateStore.SamePath(state.Active.Executable, Environment.ProcessPath!)) return null;
+            if (!Downloads.Verify(state.Active.Executable, state.Active.Size, state.Active.Sha256, default).GetAwaiter().GetResult())
+                throw new IOException("活动启动器文件缺失或校验失败，原版本文件已保留，请重新运行已安装的有效启动器。");
+            var info = new ProcessStartInfo(state.Active.Executable)
+            {
+                UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(state.Active.Executable)!,
+                CreateNoWindow = args.Contains("--diagnose"), RedirectStandardOutput = args.Contains("--diagnose"), RedirectStandardError = args.Contains("--diagnose")
+            };
+            foreach (var arg in args) info.ArgumentList.Add(arg);
+            info.Environment["ANIMA_LAUNCHER_HOME"] = StateDir;
+            // Do not keep the update gate while the forwarded launcher enters it.
+            gate.ReleaseMutex(); acquired = false;
+            using var process = Process.Start(info) ?? throw new IOException("无法打开活动启动器。");
+            if (!args.Contains("--diagnose")) return 0;
+            var output = process.StandardOutput.ReadToEndAsync(); var error = process.StandardError.ReadToEndAsync();
+            process.WaitForExit(); Console.Write(output.GetAwaiter().GetResult()); Console.Error.Write(error.GetAwaiter().GetResult());
+            return process.ExitCode;
+        }
+        finally { if (acquired) gate.ReleaseMutex(); }
+    }
 
     internal static void Log(string text)
     {
@@ -94,6 +295,26 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        var raw = args.Contains("--package-info") || args.Contains("--installation-status");
+        if (raw)
+        {
+            try
+            {
+                if (args.Contains("--package-info")) Report(args, PackageInfo());
+                else
+                {
+                    var updates = new LauncherUpdateStore(StateDir);
+                    var updating = updates.InProgress(); var running = RunningLauncher();
+                    var active = updates.Load().Active;
+                    if (active is not null) updates.ValidateInstalled(active, managed: false);
+                    var effectiveVersion = active is not null && LauncherUpdates.ParseVersion(active.Version) > LauncherUpdates.ParseVersion(Version) ? active.Version : Version;
+                    Report(args, new { protocolVersion = 1, version = Version, effectiveVersion, executablePath = Environment.ProcessPath, stateDirectory = StateDir,
+                        updateInProgress = updating, running, canInstall = !updating && !running, reason = updating ? "软件更新尚未结束。" : running ? "请先退出启动器。" : "" });
+                }
+                return 0;
+            }
+            catch (Exception ex) { AttachConsole(0xFFFFFFFF); Console.Error.WriteLine(ex.Message); return 1; }
+        }
         if (args.Contains("--version"))
         {
             AttachConsole(0xFFFFFFFF);
@@ -104,6 +325,28 @@ internal static class Program
         if (diagnose) AttachConsole(0xFFFFFFFF); // Attach to the parent console; EXE stays a GUI app.
         try
         {
+            using var updates = new LauncherUpdates(StateDir, Environment.ProcessPath!, Version, Log);
+            if (args.Contains("--apply-update"))
+                return new LauncherUpdateCoordinator(updates, Log).Run(Argument(args, "--apply-update"), Argument(args, "--update-token"));
+            var candidate = args.Contains("--update-candidate");
+            IsUpdateRecovery = args.Contains("--recover-update");
+            if (candidate || IsUpdateRecovery)
+            {
+                UpdateContext = updates.Store.ReadTransaction(Argument(args, candidate ? "--update-candidate" : "--recover-update"), Argument(args, "--update-token"));
+                var expected = candidate ? UpdateContext.Candidate : UpdateContext.Previous;
+                if (!LauncherUpdateStore.SamePath(expected.Executable, Environment.ProcessPath!) || expected.Version != Version
+                    || candidate && !LauncherUpdateStore.IsRunning(UpdateContext.Coordinator)) throw new InvalidDataException("更新启动上下文不匹配。");
+                var state = updates.Store.Load();
+                if (candidate && state.PendingTransactionId != UpdateContext.Id
+                    || IsUpdateRecovery && (UpdateContext.Phase != "failed" || state.PendingTransactionId is not null || state.Active != UpdateContext.Previous))
+                    throw new InvalidDataException("此更新启动请求已失效。");
+                ListenForUpdateExit(UpdateContext);
+            }
+            else if (!Path.GetFileNameWithoutExtension(Environment.ProcessPath!).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+            {
+                var result = RouteInstalledVersion(updates, args);
+                if (result.HasValue) return result.Value;
+            }
             Directory.CreateDirectory(StateDir);
             Log("启动器初始化");
             // Resource extraction is serialized across GUI launches and concurrent --diagnose
@@ -127,7 +370,10 @@ internal static class Program
                 return 0;
             }
             ShowSignal = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
-            var forceShow = args.Contains("--show");
+            // Retry a prior registry write failure on ordinary startup. Candidate
+            // versions synchronize only after the update transaction commits.
+            if (UpdateContext is null) SyncInstalledVersion(Version);
+            var forceShow = args.Contains("--show") || UpdateContext is not null;
             WinRT.ComWrappersSupport.InitializeComWrappers();
             Application.Start(_ =>
             {
@@ -142,6 +388,11 @@ internal static class Program
         catch (Exception ex)
         {
             Log(ex.ToString());
+            if (UpdateContext is not null)
+            {
+                try { CompleteUpdateAsync(false, ex.Message).GetAwaiter().GetResult(); } catch { }
+                return 1;
+            }
             if (diagnose) Console.Error.WriteLine(ex.Message);
             else NativeMessage(ex.Message, "启动器错误", true);
             return 1;
