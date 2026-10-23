@@ -2,6 +2,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import call, patch
 
 import sys
 
@@ -11,7 +12,7 @@ sys.path.insert(0, str(APP_DIR))
 from anima_webui.comfy import ComfyAborted  # noqa: E402
 from anima_webui.history import HistoryStore  # noqa: E402
 from anima_webui.runner import BatchConflict, BatchManager  # noqa: E402
-from anima_webui.workflow import DEFAULT_SETTINGS  # noqa: E402
+from anima_webui.workflow import DEFAULT_SETTINGS, MAX_SAMPLE_SEED  # noqa: E402
 
 
 class FakeTemplates:
@@ -350,10 +351,55 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_fixed_seeds_reproduce_submission(self):
         # 0.2.0:携带固定种子复现历史图片,提交给 ComfyUI 的种子必须一字不差。
         seeds = {"sample_seed": 123456789, "prompt_seed": 42}
-        await self.manager.start({**DEFAULT_SETTINGS, "count": 1}, seeds=seeds)
-        await self.manager.wait()
-        self.assertEqual(self.comfy.submissions[0]["sample_seed"], 123456789)
-        self.assertEqual(self.comfy.submissions[0]["prompt_seed"], 42)
+        with patch("anima_webui.runner.secrets.randbelow") as random_seed:
+            await self.manager.start({**DEFAULT_SETTINGS, "count": 3}, seeds=seeds)
+            result = await self.manager.wait()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual([item["sample_seed"] for item in self.comfy.submissions], [123456789] * 3)
+        self.assertEqual([item["prompt_seed"] for item in self.comfy.submissions], [42] * 3)
+        random_seed.assert_not_called()
+
+    async def test_fixed_sample_seed_keeps_prompt_random_for_each_image(self):
+        prompt_seeds = [0, 71, 2**31 - 1]
+        with patch("anima_webui.runner.secrets.randbelow", side_effect=prompt_seeds) as random_seed:
+            await self.manager.start({**DEFAULT_SETTINGS, "count": 3}, seeds={"sample_seed": 0})
+            result = await self.manager.wait()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual([item["sample_seed"] for item in self.comfy.submissions], [0] * 3)
+        self.assertEqual([item["prompt_seed"] for item in self.comfy.submissions], prompt_seeds)
+        self.assertEqual(random_seed.call_args_list, [call(2**31)] * 3)
+        history = sorted((await self.history.list_images())["items"], key=lambda item: item["sequence"])
+        self.assertEqual([item["sample_seed"] for item in history], [0] * 3)
+        self.assertEqual([item["prompt_seed"] for item in history], prompt_seeds)
+
+    async def test_omitted_seeds_randomize_both_values_for_each_image(self):
+        with patch("anima_webui.runner.secrets.randbelow", side_effect=[11, 12, 21, 22]) as random_seed:
+            await self.manager.start({**DEFAULT_SETTINGS, "count": 2})
+            result = await self.manager.wait()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual([(item["sample_seed"], item["prompt_seed"]) for item in self.comfy.submissions], [(11, 12), (21, 22)])
+        self.assertEqual(random_seed.call_args_list, [call(MAX_SAMPLE_SEED + 1), call(2**31)] * 2)
+
+    async def test_queued_sample_only_seeds_keep_each_batch_policy(self):
+        self.comfy.block = asyncio.Event()
+        await self.manager.start(
+            {**DEFAULT_SETTINGS, "count": 1}, seeds={"sample_seed": 8, "prompt_seed": 9},
+        )
+        async with asyncio.timeout(2):
+            while not self.comfy.submissions:
+                await asyncio.sleep(0)
+        with patch("anima_webui.runner.secrets.randbelow", side_effect=[12, 13]):
+            queued = await self.manager.start(
+                {**DEFAULT_SETTINGS, "count": 2}, seeds={"sample_seed": MAX_SAMPLE_SEED},
+            )
+            self.assertEqual(queued["status"], "queued")
+            self.comfy.block.set()
+            result = await self.manager.wait()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(
+            [(item["sample_seed"], item["prompt_seed"]) for item in self.comfy.submissions],
+            [(8, 9), (MAX_SAMPLE_SEED, 12), (MAX_SAMPLE_SEED, 13)],
+        )
 
     async def test_frozen_replay_bypasses_catalog_and_prompt_rules(self):
         manager = BatchManager(FakeTemplates(), self.history, self.comfy, FakeCatalog())
@@ -398,7 +444,12 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(submitted["resolved_selection"]["pose"][0]["id"], "pose:new")
 
     async def test_invalid_seeds_are_rejected(self):
-        for bad in ({"sample_seed": -1, "prompt_seed": 1}, {"sample_seed": 1}, {"x": 1}, [1, 2], {"sample_seed": True, "prompt_seed": 1}):
+        for bad in (
+            {}, {"prompt_seed": 1}, {"sample_seed": -1}, {"sample_seed": MAX_SAMPLE_SEED + 1},
+            {"sample_seed": True}, {"sample_seed": 1.0}, {"x": 1}, [1, 2],
+            {"sample_seed": 1, "prompt_seed": None}, {"sample_seed": 1, "prompt_seed": True},
+            {"sample_seed": 1, "prompt_seed": -1}, {"sample_seed": 1, "prompt_seed": 2**31},
+        ):
             with self.subTest(seeds=bad):
                 with self.assertRaises(ValueError):
                     await self.manager.start({**DEFAULT_SETTINGS, "count": 1}, seeds=bad)
@@ -535,7 +586,7 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
                         "enabled": True,
                         "second_sampler": {
                             "enabled": True,
-                            "sampler_name": "euler",
+                            "sampler_name": "dpmpp_2m",
                             "scheduler": "karras",
                         },
                     },
@@ -572,7 +623,7 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             {(item["type"], item["name"]) for item in issues},
             {
-                ("second_sampler", "euler"),
+                ("second_sampler", "dpmpp_2m"),
                 ("second_scheduler", "karras"),
                 ("seedvr2_sampler", "heun"),
                 ("seedvr2_scheduler", "normal"),
@@ -581,7 +632,7 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        resources["samplers"].extend(["euler", "heun"])
+        resources["samplers"].extend(["dpmpp_2m", "heun"])
         resources["schedulers"].extend(["karras", "normal"])
         self.assertEqual(BatchManager._resource_inventory_issues(settings, resources), [])
 
@@ -597,16 +648,16 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
             "second_sampler": {
                 **DEFAULT_SETTINGS["second_sampler"],
                 "enabled": True,
-                "sampler_name": "euler",
+                "sampler_name": "heun",
                 "scheduler": "karras",
             },
         }
         issues = await self.manager.resource_issues(settings)
         self.assertEqual(
             {(item["type"], item["name"]) for item in issues},
-            {("second_sampler", "euler"), ("second_scheduler", "karras")},
+            {("second_sampler", "heun"), ("second_scheduler", "karras")},
         )
-        self.comfy.available_samplers.append("euler")
+        self.comfy.available_samplers.append("heun")
         self.comfy.available_schedulers.append("karras")
         self.assertEqual(await self.manager.resource_issues(settings), [])
 
@@ -616,7 +667,7 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
             "second_sampler": {
                 **DEFAULT_SETTINGS["second_sampler"],
                 "enabled": True,
-                "sampler_name": "euler",
+                "sampler_name": "heun",
                 "scheduler": "karras",
             },
         }
@@ -624,7 +675,7 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
             await self.manager.start(settings)
         self.assertIsNone(self.manager.state)
 
-        self.comfy.available_samplers.append("euler")
+        self.comfy.available_samplers.append("heun")
         with self.assertRaisesRegex(ValueError, "2ndSampler Scheduler 不可用"):
             await self.manager.start(settings)
         self.assertIsNone(self.manager.state)

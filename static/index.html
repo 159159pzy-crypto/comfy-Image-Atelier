@@ -14,9 +14,9 @@
       document.documentElement.dataset.theme = theme;
     })();
   </script>
-  <link rel="stylesheet" href="/static/styles.css?v=20261022-compact-details">
-  <link rel="stylesheet" href="/static/single-layout.css?v=20261022-reverse">
-  <link rel="stylesheet" href="/static/single-details.css?v=20261022-aligned-details">
+  <link rel="stylesheet" href="/static/styles.css?v=20261024-motion">
+  <link rel="stylesheet" href="/static/single-layout.css?v=20261024-motion">
+  <link rel="stylesheet" href="/static/single-details.css?v=20261024-motion">
 </head>
 <body>
   <div class="ambient" aria-hidden="true"></div>
@@ -143,81 +143,48 @@
           <div class="details-content parameter-grid">
             <label class="field"><span>宽度</span><input id="width" type="number" min="64" max="4096" step="8"></label>
             <label class="field"><span>高度</span><input id="height" type="number" min="64" max="4096" step="8"></label>
-            <label class="field"><span>步数</span><input id="steps" type="number" min="1" max="150" step="1"></label>
-            <label class="field"><span>CFG</span><input id="cfg" type="number" min="0.1" max="30" step="0.1"></label>
-            <label class="field"><span>Sampler</span><select id="sampler_name"><option value="">正在读取 Sampler...</option></select></label>
-            <label class="field"><span>Scheduler</span><select id="scheduler"><option value="">正在读取 Scheduler...</option></select></label>
-            <label class="field"><span>底图模式</span><select id="base_mode"><option value="normal">普通底图</option><option value="dual_sampler">底图－双采样器</option></select><small class="field-hint">两种模式二选一。</small></label>
-            <section id="randomDualSection" class="sampling-stage" hidden>
-              <div class="section-heading"><h2>双采样细项</h2></div>
-              <div class="parameter-grid compact-parameter-grid">
-                <label class="field"><span>第二段起始步</span><input id="random_dual_switch_step" type="number" min="0" max="149" step="1" value="15"></label>
-                <label class="field"><span>中间放大倍率</span><input id="random_dual_scale" type="number" min="1" max="2" step="0.05" value="1"></label>
-                <label class="field"><span>第二段 CFG</span><input id="random_dual_second_cfg" type="number" min="0" max="30" step="0.1" value="4"></label>
-                <label class="field"><span>第二段采样器</span><select id="random_dual_second_sampler_name"><option value="er_sde">er_sde</option></select></label>
-                <label class="field"><span>第二段调度器</span><select id="random_dual_second_scheduler"><option value="simple">simple</option></select></label>
-                <label class="field"><span>中间放大算法</span><select id="random_dual_upscale_method"><option value="sesqui">sesqui</option><option value="bilinear">bilinear</option><option value="bislerp">bislerp</option><option value="nearest-exact">nearest-exact</option><option value="area">area</option><option value="bicubic">bicubic</option></select></label>
-              </div>
-              <p class="field-hint">第一段完整采样，第二段从指定步继续至总步数。</p>
-            </section>
+            <label class="field"><span>底图模式</span><select id="base_mode"><option value="normal">普通底图</option><option value="dual_sampler">底图－双采样器</option></select></label>
+            <section class="sampling-stage sampling-stage-base"><div class="section-heading"><h2 id="baseSamplingTitle">底图</h2></div><div id="baseSamplingFields" class="parameter-grid compact-parameter-grid">
+              <label class="field"><span>步数</span><input id="steps" type="number" min="1" max="150" step="1"></label>
+              <label class="field"><span>CFG</span><input id="cfg" type="number" min="0" max="30" step="0.1"></label>
+              <label class="field"><span>采样器</span><select id="sampler_name"><option value="">正在读取采样器...</option></select></label>
+              <label class="field"><span>调度器</span><select id="scheduler"><option value="">正在读取调度器...</option></select></label>
+              <label class="field"><span>降噪幅度</span><input id="base_denoise" type="number" min="0" max="1" step="0.01" value="1"></label>
+              <label class="switch-row base-krea-toggle"><span>是否 K2 多样性增强</span><input id="krea_variance_enabled" type="checkbox"></label>
+              <section id="randomDualSection" hidden><div class="parameter-grid compact-parameter-grid">
+                <label class="field"><span>采样器切换步数</span><input id="random_dual_switch_step" type="number" min="0" max="149" step="1" value="15"></label>
+                <label class="field"><span>潜空间放大倍数</span><input id="random_dual_scale" type="number" min="1" max="2" step="0.05" value="1"></label>
+                <label class="field"><span>潜空间缩放方法</span><select id="random_dual_model_format"><option value="Wan 2.1">Wan 2.1</option></select></label>
+                <label class="field"><span>CFG 2</span><input id="random_dual_second_cfg" type="number" min="0" max="30" step="0.1" value="8"></label>
+                <label class="field"><span>采样器 2</span><select id="random_dual_second_sampler_name"><option value="euler">euler</option></select></label>
+                <label class="field"><span>调度器 2</span><select id="random_dual_second_scheduler"><option value="simple">simple</option></select></label>
+                <label hidden><select id="random_dual_upscale_method"><option value="sesqui">sesqui</option><option value="bilinear">bilinear</option><option value="bislerp">bislerp</option><option value="nearest-exact">nearest-exact</option><option value="area">area</option><option value="bicubic">bicubic</option></select></label>
+              </div></section>
+            </div></section>
             <div class="sampling-stage sampling-stage-latent">
-              <label class="switch-row"><span><strong>潜空间放大</strong><small>放大底图后可选择跟随主模型/LoRA 的二次采样</small></span><input id="latent_upscale_enabled" type="checkbox"></label>
+              <label class="switch-row"><span><strong>潜空间放大</strong><small>放大并使用当前模型及 LoRA 细化</small></span><input id="latent_upscale_enabled" type="checkbox"></label>
               <div id="latentUpscaleFields" class="repair-parameters">
-                <label class="field"><span>放大倍率</span><input id="latent_upscale_scale" type="number" min="0.01" max="64" step="0.01"></label>
-                <label class="field"><span>放大算法</span><select id="latent_upscale_method"><option value="sesqui">sesqui</option><option value="bilinear">bilinear</option><option value="bislerp">bislerp</option><option value="nearest-exact">nearest-exact</option><option value="area">area</option><option value="bicubic">bicubic</option></select></label>
-                <label class="switch-row"><span><strong>后二次采样</strong><small>使用当前主模型及 LoRA</small></span><input id="latent_second_sampler_enabled" type="checkbox"></label>
+                <label class="field"><span>放大倍数</span><input id="latent_upscale_scale" type="number" min="0.01" max="64" step="0.01"></label>
+                <label class="field"><span>缩放方法</span><select id="latent_model_format"><option value="Wan 2.1">Wan 2.1</option></select></label>
+                <label class="field" hidden><span>旧放大算法</span><select id="latent_upscale_method"><option value="sesqui">sesqui</option><option value="bilinear">bilinear</option><option value="bislerp">bislerp</option><option value="nearest-exact">nearest-exact</option><option value="area">area</option><option value="bicubic">bicubic</option></select></label>
+                <label class="switch-row" hidden><span><strong>后二次采样</strong><small>使用当前主模型及 LoRA</small></span><input id="latent_second_sampler_enabled" type="checkbox"></label>
                 <div id="latentSecondSamplerFields" class="parameter-grid compact-parameter-grid">
                   <label class="field"><span>步数</span><input id="latent_second_sampler_steps" type="number" min="1" max="150" step="1"></label>
                   <label class="field"><span>CFG</span><input id="latent_second_sampler_cfg" type="number" min="0.1" max="30" step="0.1"></label>
-                  <label class="field"><span>Sampler</span><select id="latent_second_sampler_name"><option value="">读取中...</option></select></label>
-                  <label class="field"><span>Scheduler</span><select id="latent_second_scheduler"><option value="">读取中...</option></select></label>
-                  <label class="field"><span>Denoise</span><input id="latent_second_sampler_denoise" type="number" min="0" max="1" step="0.01"></label>
+                  <label class="field"><span>采样器</span><select id="latent_second_sampler_name"><option value="">读取中...</option></select></label>
+                  <label class="field"><span>调度器</span><select id="latent_second_scheduler"><option value="">读取中...</option></select></label>
+                  <label class="field"><span>降噪幅度</span><input id="latent_second_sampler_denoise" type="number" min="0" max="1" step="0.01"></label>
                 </div>
               </div>
             </div>
-            <div class="sampling-stage sampling-stage-seedvr2">
-              <label class="switch-row"><span><strong>SeedVR2 放大与修复</strong><small>选择实际安装的模型与节点参数</small></span><input id="seedvr2_enabled" type="checkbox"></label>
-              <div id="seedvr2Fields" class="repair-parameters parameter-grid">
-                <label class="field"><span>SeedVR2 模型</span><select id="seedvr2_model_name"><option value="">读取中...</option></select></label>
-                <label class="field"><span>SeedVR2 VAE</span><select id="seedvr2_vae_name"><option value="">读取中...</option></select></label>
-                <label class="field"><span>权重类型</span><select id="seedvr2_weight_dtype"><option value="default">default</option><option value="fp8_e4m3fn">fp8_e4m3fn</option><option value="fp8_e4m3fn_fast">fp8_e4m3fn_fast</option></select></label>
-                <label class="field"><span>放大倍率</span><input id="seedvr2_scale_by" type="number" min="0.01" max="64" step="0.01"></label>
-                <label class="field"><span>色彩校正</span><select id="seedvr2_color_correction_method"><option value="lab">lab</option><option value="wavelet">wavelet</option><option value="disabled">disabled</option></select></label>
-                <label class="field"><span>采样步数</span><input id="seedvr2_sampler_steps" type="number" min="1" max="150" step="1"></label>
-                <label class="field"><span>采样 CFG</span><input id="seedvr2_sampler_cfg" type="number" min="0.1" max="30" step="0.1"></label>
-                <label class="field"><span>Sampler</span><select id="seedvr2_sampler_name"><option value="">读取中...</option></select></label>
-                <label class="field"><span>Scheduler</span><select id="seedvr2_scheduler"><option value="">读取中...</option></select></label>
-                <label class="field"><span>Denoise</span><input id="seedvr2_sampler_denoise" type="number" min="0" max="1" step="0.01"></label>
-                <fieldset class="sampling-fieldset"><legend>编码分块</legend>
-                  <label class="field"><span>Tile size</span><input id="seedvr2_encode_tile_size" type="number" min="64" step="1"></label>
-                  <label class="field"><span>Overlap</span><input id="seedvr2_encode_overlap" type="number" min="0" step="1"></label>
-                  <label class="field"><span>Temporal size</span><input id="seedvr2_encode_temporal_size" type="number" min="1" step="1"></label>
-                  <label class="field"><span>Temporal overlap</span><input id="seedvr2_encode_temporal_overlap" type="number" min="0" step="1"></label>
-                </fieldset>
-                <fieldset class="sampling-fieldset"><legend>解码分块</legend>
-                  <label class="field"><span>Tile size</span><input id="seedvr2_decode_tile_size" type="number" min="64" step="1"></label>
-                  <label class="field"><span>Overlap</span><input id="seedvr2_decode_overlap" type="number" min="0" step="1"></label>
-                  <label class="field"><span>Temporal size</span><input id="seedvr2_decode_temporal_size" type="number" min="1" step="1"></label>
-                  <label class="field"><span>Temporal overlap</span><input id="seedvr2_decode_temporal_overlap" type="number" min="0" step="1"></label>
-                </fieldset>
-              </div>
-            </div>
-            <div class="sampling-stage sampling-stage-nvidia">
-              <label class="switch-row"><span><strong>N 卡放大</strong><small>当前节点没有独立模型输入，不显示虚构的模型项</small></span><input id="nvidia_upscale_enabled" type="checkbox"></label>
-              <div id="nvidiaUpscaleFields" class="repair-parameters parameter-grid">
-                <label class="field"><span>缩放方式</span><select id="nvidia_resize_type"><option value="scale by multiplier">scale by multiplier</option></select></label>
-                <label class="field"><span>倍率</span><input id="nvidia_scale" type="number" min="1" max="4" step="0.01"></label>
-                <label class="field"><span>质量</span><select id="nvidia_quality"><option value="LOW">LOW</option><option value="MEDIUM">MEDIUM</option><option value="HIGH">HIGH</option><option value="ULTRA">ULTRA</option></select></label>
-              </div>
-            </div>
             <div class="sampling-stage sampling-stage-face">
-              <label class="switch-row"><span><strong>脸部细化</strong><small>ForbiddenVisionFaceProcessorIntegrated 具体参数</small></span><input id="face_refine_enabled" type="checkbox"></label>
+              <label class="switch-row"><span><strong>脸部细化</strong><small>脸部采样与降噪</small></span><input id="face_refine_enabled" type="checkbox"></label>
               <div id="faceRefineFields" class="repair-parameters parameter-grid">
                 <label class="field"><span>步数</span><input id="face_steps" type="number" min="1" max="150" step="1"></label>
                 <label class="field"><span>CFG</span><input id="face_cfg_scale" type="number" min="0.1" max="30" step="0.1"></label>
-                <label class="field"><span>Sampler</span><select id="face_sampler"><option value="">读取中...</option></select></label>
-                <label class="field"><span>Scheduler</span><select id="face_scheduler"><option value="">读取中...</option></select></label>
-                <label class="field"><span>Denoise</span><input id="face_denoise_strength" type="number" min="0" max="1" step="0.01"></label>
+                <label class="field"><span>采样器</span><select id="face_sampler"><option value="">读取中...</option></select></label>
+                <label class="field"><span>调度器</span><select id="face_scheduler"><option value="">读取中...</option></select></label>
+                <label class="field"><span>降噪幅度</span><input id="face_denoise_strength" type="number" min="0" max="1" step="0.01"></label>
                 <label class="field"><span>人脸选择</span><input id="face_selection" type="number" min="0" step="1"></label>
                 <label class="field"><span>检测置信度</span><input id="face_detection_confidence" type="number" min="0" max="1" step="0.01"></label>
                 <label class="field"><span>手动旋转</span><select id="face_manual_rotation"><option value="None">None</option><option value="90° CW">90° CW</option><option value="90° CCW">90° CCW</option><option value="180°">180°</option></select></label>
@@ -242,6 +209,46 @@
                   <label class="switch-row"><span>最终细化</span><input id="face_enable_final_refinement" type="checkbox"></label>
                   <label class="switch-row"><span>卸载至 CPU</span><input id="face_offload_models_to_cpu" type="checkbox"></label>
                 </div>
+              </div>
+            </div>
+            <div class="sampling-stage sampling-stage-seedvr2">
+              <label class="switch-row"><span><strong>SeedVR2 放大与修复</strong><small>选择模型、VAE 和颜色匹配方法</small></span><input id="seedvr2_enabled" type="checkbox"></label>
+              <div id="seedvr2Fields" class="repair-parameters parameter-grid">
+                <label class="field"><span>SeedVR2 模型</span><select id="seedvr2_model_name"><option value="">读取中...</option></select></label>
+                <label class="field"><span>配套 VAE</span><select id="seedvr2_vae_name"><option value="">读取中...</option></select></label>
+                <label class="field"><span>权重类型</span><select id="seedvr2_weight_dtype"><option value="default">default</option><option value="fp8_e4m3fn">fp8_e4m3fn</option><option value="fp8_e4m3fn_fast">fp8_e4m3fn_fast</option></select></label>
+                <label class="field"><span>颜色匹配方法</span><select id="seedvr2_color_correction_method"><option value="lab">lab</option><option value="wavelet">wavelet</option><option value="disabled">disabled</option></select></label>
+                <label class="field"><span>放大倍数</span><input id="seedvr2_scale_by" type="number" min="0.01" max="64" step="0.01"></label>
+                <label class="field"><span>采样步数</span><input id="seedvr2_sampler_steps" type="number" min="1" max="150" step="1"></label>
+                <label class="field"><span>采样 CFG</span><input id="seedvr2_sampler_cfg" type="number" min="0.1" max="30" step="0.1"></label>
+                <label class="field"><span>采样器</span><select id="seedvr2_sampler_name"><option value="">读取中...</option></select></label>
+                <label class="field"><span>调度器</span><select id="seedvr2_scheduler"><option value="">读取中...</option></select></label>
+                <label class="field"><span>降噪幅度</span><input id="seedvr2_sampler_denoise" type="number" min="0" max="1" step="0.01"></label>
+                <fieldset class="sampling-fieldset"><legend>编码分块</legend>
+                  <label class="field"><span>Tile size</span><input id="seedvr2_encode_tile_size" type="number" min="64" step="1"></label>
+                  <label class="field"><span>Overlap</span><input id="seedvr2_encode_overlap" type="number" min="0" step="1"></label>
+                  <label class="field"><span>Temporal size</span><input id="seedvr2_encode_temporal_size" type="number" min="1" step="1"></label>
+                  <label class="field"><span>Temporal overlap</span><input id="seedvr2_encode_temporal_overlap" type="number" min="0" step="1"></label>
+                </fieldset>
+                <fieldset class="sampling-fieldset"><legend>解码分块</legend>
+                  <label class="field"><span>Tile size</span><input id="seedvr2_decode_tile_size" type="number" min="64" step="1"></label>
+                  <label class="field"><span>Overlap</span><input id="seedvr2_decode_overlap" type="number" min="0" step="1"></label>
+                  <label class="field"><span>Temporal size</span><input id="seedvr2_decode_temporal_size" type="number" min="1" step="1"></label>
+                  <label class="field"><span>Temporal overlap</span><input id="seedvr2_decode_temporal_overlap" type="number" min="0" step="1"></label>
+                </fieldset>
+              </div>
+            </div>
+            <div class="sampling-stage sampling-stage-nvidia">
+              <label class="switch-row"><span><strong>N 卡放大</strong><small>N 卡放大后应用 DLSS 色彩处理</small></span><input id="nvidia_upscale_enabled" type="checkbox"></label>
+              <div id="nvidiaUpscaleFields" class="repair-parameters parameter-grid">
+                <label class="field"><span>缩放方式</span><select id="nvidia_resize_type"><option value="scale by multiplier">scale by multiplier</option></select></label>
+                <label class="field"><span>放大倍数</span><input id="nvidia_scale" type="number" min="1" max="4" step="0.01"></label>
+                <label class="field" hidden><span>质量</span><select id="nvidia_quality"><option value="LOW">LOW</option><option value="MEDIUM">MEDIUM</option><option value="HIGH">HIGH</option><option value="ULTRA">ULTRA</option></select></label>
+                <label class="field"><span>风格</span><select id="nvidia_dlss_style"><option value="默认">默认</option><option value="自然">自然</option><option value="电影">电影</option><option value="风格3">风格3</option></select></label>
+                <label class="field"><span>强度</span><input id="nvidia_dlss_intensity" type="number" min="0" max="1" step="0.01" value="1"></label>
+                <label class="field"><span>局部光影</span><input id="nvidia_dlss_local_tone" type="number" min="0" max="1" step="0.05" value="1"></label>
+                <label class="field"><span>局部细节</span><input id="nvidia_dlss_local_struct" type="number" min="0" max="1" step="0.05" value="1"></label>
+                <label class="field"><span>输出混合</span><input id="nvidia_dlss_output_mix" type="number" min="0" max="1" step="0.01" value="1"></label>
               </div>
             </div>
           </div>
@@ -275,7 +282,6 @@
   </main>
 
   <div class="command-deck glass" role="group" aria-label="生成控制">
-    <img id="livePreview" class="live-preview" alt="实时预览" hidden>
     <label class="quantity-field"><span>批次数量</span><input id="count" form="settingsForm" type="number" min="1" max="1000" step="1" required></label>
     <div class="batch-summary" aria-live="polite">
       <div class="batch-summary-copy"><span id="batchState">等待任务</span><small id="sampleProgress" hidden></small><button id="queueBadge" class="queue-badge" type="button" hidden aria-haspopup="true" aria-expanded="false">队列 0</button><strong id="progressCount">0 / 0</strong></div>
@@ -657,16 +663,17 @@
     </form>
   </dialog>
   <div id="toast" role="status" aria-live="polite"></div>
-  <script src="/static/workbench-parameters.js?v=20261017-detail-fill" defer></script>
-  <script src="/static/single-layout.js?v=20261017-detail-fill" defer></script>
-  <script src="/static/single-gallery.js?v=20261020-rewrite" defer></script>
-  <script src="/static/shared-favorites.js?v=20261020-favorites" defer></script>
-  <script src="/static/prompt-reverse.js?v=20261022-reverse" defer></script>
+  <script src="/static/motion.js?v=20261024-motion" defer></script>
+  <script src="/static/workbench-parameters.js?v=20261024-workflow-parameters" defer></script>
+  <script src="/static/single-layout.js?v=20261024-motion" defer></script>
+  <script src="/static/single-gallery.js?v=20261024-motion" defer></script>
+  <script src="/static/shared-favorites.js?v=20261024-motion" defer></script>
+  <script src="/static/prompt-reverse.js?v=20261024-motion" defer></script>
   <script src="/static/prompt-assistant.js?v=20261022-reverse" defer></script>
-  <script src="/static/single-workbench.js?v=20261022-reverse" defer></script>
+  <script src="/static/single-workbench.js?v=20261024-motion" defer></script>
   <script src="/static/single-input.js?v=20261022-reverse" defer></script>
-  <script src="/static/single-compatibility.js?v=20261017-detail-fill" defer></script>
-  <script src="/static/single-details.js?v=20261022-aligned-details" defer></script>
-  <script src="/static/app.js?v=20261022-compact-details" defer></script>
+  <script src="/static/single-compatibility.js?v=20261024-single-ui" defer></script>
+  <script src="/static/single-details.js?v=20261024-motion" defer></script>
+  <script src="/static/app.js?v=20261024-motion" defer></script>
 </body>
 </html>

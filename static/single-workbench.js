@@ -25,7 +25,7 @@ function singleWorkbenchDefaultSettings(profile = "anima") {
   const single = {
     positive_prompt: "", prefix: "", suffix: "", input_image_id: "", denoise: .65, resize_mode: "crop", unlock_resources: true, weight_dtype: "default",
     vae_encode: encode, vae_decode: encode, loras_secondary: [], secondary_managed_triggers: [], normal_pipeline: "primary",
-    dual: { switch_step: 15, scale: 1.0, upscale_method: "sesqui", model_format: "Wan 2.1", half_precision: true, first_pipeline: "primary", second_pipeline: "primary", second_cfg: 4, second_sampler_name: "er_sde", second_scheduler: "simple", first_add_noise: true, second_add_noise: true, first_leftover_noise: true, second_leftover_noise: false },
+    dual: { switch_step: 15, scale: 1.0, upscale_method: "sesqui", model_format: "Wan 2.1", half_precision: true, first_pipeline: "primary", second_pipeline: "primary", second_cfg: 8, second_sampler_name: "euler", second_scheduler: "simple", first_add_noise: true, second_add_noise: true, first_leftover_noise: true, second_leftover_noise: false },
     zero_negative: false, secondary_zero_negative: false,
     krea_variance: { enabled: false, randomize_percent: 50, auto_strength_factor: 1, strength: 20, noise_insert: "noise on beginning steps", steps_switchover_percent: 25, mask_starts_at: "beginning", mask_percent: 0, noise_distribution: "uniform", granularity: "values" },
     prompt_processing: { expand: processing, oc: { ...processing, custom_rule: true, character: "", features: "" } },
@@ -33,7 +33,7 @@ function singleWorkbenchDefaultSettings(profile = "anima") {
     latent: { upscale_method: "sesqui", model_format: "Wan 2.1", half_precision: true, pipeline: "secondary" }, face_pipeline: "secondary",
     dlss: { enabled: false, style: "电影", intensity: 1, local_tone: 1, local_struct: 1, output_view: "处理", output_mix: 1, gpu_gen: "Auto" },
   };
-  return { ...settings, workbench: "single", generation_mode: "txt2img", model_profile: profile, count: 1, base_mode: "normal",
+  return { ...settings, ...(typeof sharedSamplingDefaults === "function" ? (() => { const value = sharedSamplingDefaults(); delete value.seedMode; delete value.seed; return value; })() : {}), workbench: "single", generation_mode: "txt2img", model_profile: profile, count: 1, base_mode: "normal",
     clip_name: settings.clip_name || profileConfig(profile).clip_name || "", vae_name: settings.vae_name || profileConfig(profile).vae_name || "", clip_type: settings.clip_type || profileConfig(profile).clip_type || "",
     single: singleWorkbenchUnifiedDefaults(singleWorkbenchMerge(single, typeof config !== "undefined" ? config.single_defaults || config.defaults?.single : {})) };
 }
@@ -91,15 +91,16 @@ function singleWorkbenchBuild() {
     '<div class="single-prompt-tools"><button id="singleFavoriteOpen" type="button" class="button ghost compact">♡ 共享收藏</button><button id="singleFavoriteSave" type="button" class="button ghost compact">收藏提示词</button><button id="singleNormalize" type="button" class="button ghost compact">规范当前提示词框</button><button id="singleManagePromptRules" type="button" class="button ghost compact">管理规范与替换</button><button id="singleUndoNormalization" type="button" class="button ghost compact" hidden>撤销上次规范</button></div><p id="singleNormalizationStatus" class="field-hint" role="status"></p>' +
     sharedFavoritesPanelMarkup("single") + '</section>' +
     '<div id="singleParameterTabs" role="tablist" aria-label="参数分类"><span id="singleTabIndicator" aria-hidden="true"></span>' +
-    [["common","常用参数"],["prompt","提示词处理"],["repair","放大修复"],["more","更多设置"]].map(([id,label]) => '<button id="singleCategory_' + id + '" type="button" role="tab" data-single-category="' + id + '" aria-selected="' + (id === "common") + '" tabindex="' + (id === "common" ? 0 : -1) + '">' + label + '</button>').join("") + '</div>' +
-    '<section id="singleSeedSection" class="control-section" data-single-group="common"><div id="singleSeedControls"><div class="section-heading"><h2>随机种子</h2><button id="singleRollSeed" type="button" class="button ghost compact">换一个</button></div><div class="single-advanced-grid"><label class="field"><span>种子方式</span><select id="singleSeedMode"><option value="random">每次随机</option><option value="fixed">固定种子</option></select></label><label class="field"><span>图像种子</span><input id="singleSampleSeed" type="number" min="0" max="1125899906842624" step="1" value="0"></label></div></div></section>';
+    [["common","常用参数"],["prompt","提示词处理"],["repair","放大修复"],["more","风格预设"]].map(([id,label]) => '<button id="singleCategory_' + id + '" type="button" role="tab" data-single-category="' + id + '" aria-selected="' + (id === "common") + '" tabindex="' + (id === "common" ? 0 : -1) + '">' + label + '</button>').join("") + '</div>' +
+    '<section id="singleSeedSection" hidden><div id="singleSeedControls"><label class="field"><span>随机种</span><div class="shared-seed-controls"><input id="singleSampleSeed" aria-label="随机种" type="number" min="0" max="1125899906842624" step="1" value="0"><select id="singleSeedMode" aria-label="种子方式"><option value="fixed">固定种子</option><option value="random">每次随机</option></select><button id="singleRollSeed" type="button" class="button ghost compact">换一个</button></div></label></div></section>';
   html += promptAssistantMarkup();
   html += singleWorkbenchSection("双采样细项", number("dual.switch_step", "第二段起始步", 0, 149, 1) + number("dual.scale", "中间放大倍率", 1, 8, .05) + number("dual.second_cfg", "第二段 CFG", 0, 30, .1) + field("dual.second_sampler_name", "第二段采样器") + field("dual.second_scheduler", "第二段调度器") + field("dual.upscale_method", "中间放大算法", "text", upscalers) + '<p class="field-hint wide">第一段完整采样，第二段从指定步继续至总步数。</p>', "common", "singleDualSection");
   html += '<div id="singleLatentMethodField">' + field("latent.upscale_method", "放大算法", "text", upscalers) + '</div>';
-  html += singleWorkbenchToggleSection("DLSS 色彩处理", "dlss.enabled", field("dlss.style", "风格", "text", ["默认", "自然", "电影", "风格3"]) + number("dlss.intensity", "强度", 0, 1, .05) + number("dlss.output_mix", "输出混合", 0, 1, .01), "repair", "singleDlssSection");
-  html += '<section id="singleCompatibilitySection" class="control-section" data-single-group="more"><div class="section-heading"><h2>兼容设置</h2><span id="singleCompatibilityCount"></span></div><p class="field-hint">旧配置中的特殊参数仍按原值生效。恢复默认仅重置已精简的参数，并让各阶段共用当前 LoRA 列表。</p><dl id="singleCompatibilityValues"></dl><button id="singleResetCompatibility" type="button" class="button ghost compact">恢复精简参数默认值</button><p id="singleCompatibilityStatus" class="field-hint" role="status"></p></section>';
+  html += '<section id="singleCompatibilitySection" class="control-section" data-single-group="more" data-single-when="compatibility" hidden><div class="section-heading"><h2>兼容设置</h2><span id="singleCompatibilityCount"></span></div><p class="field-hint">旧配置中的特殊参数仍按原值生效。恢复默认仅重置已精简的参数，并让各阶段共用当前 LoRA 列表。</p><dl id="singleCompatibilityValues"></dl><button id="singleResetCompatibility" type="button" class="button ghost compact">恢复精简参数默认值</button></section>';
   document.getElementById("singleWorkbenchControls").innerHTML = html;
-  document.getElementById("singleDualSection").dataset.singleWhen = "dual";
+  document.getElementById("singleDualSection").hidden = true;
+  document.getElementById("singleDualSection").dataset.singleWhen = "legacy";
+  document.getElementById("singleLatentMethodField").hidden = true;
 }
 
 function singleWorkbenchRead(settings) {
@@ -109,6 +110,9 @@ function singleWorkbenchRead(settings) {
   const result = { ...settings, workbench: "single", generation_mode: singleWorkbenchState.generationMode, count: 1, single: singleWorkbenchClone(single), negative_prompt: document.getElementById("singleNegative").value,
     ...singleWorkbenchResourceValues({ ...settings, single, ...singleWorkbenchState.resourceValues }),
     extra_prompt: "", quality_prompt: "", manual_artist: "", krea_prompt_pool: { enabled: false, ids: [] } };
+  if (typeof readRandomDualControls === "function") Object.assign(result.single.dual, readRandomDualControls());
+  if (typeof sharedParameterState !== "undefined" && settings.upscalers?.latent) Object.assign(result.single.latent, { upscale_method: settings.upscalers.latent.upscale_method, model_format: settings.upscalers.latent.model_format, half_precision: settings.upscalers.latent.half_precision });
+  if (settings.krea_variance) result.single.krea_variance = singleWorkbenchClone(settings.krea_variance);
   for (const stage of Object.values(result.single.prompt_processing || {})) stage.enabled = false;
   result.single.prompt_job_id = ""; result.single.processed_prompt_override = null;
   for (const section of SECTIONS) { result[`random_${section}`] = false; result[`fixed_${section}`] = ""; }
@@ -140,7 +144,6 @@ function singleWorkbenchApply(raw) {
     document.querySelectorAll("[data-single-path]").forEach(element => { const value = singleWorkbenchPath(singleWorkbenchState.single, element.dataset.singlePath); if (element.type === "checkbox") element.checked = Boolean(value); else if (element.tagName === "SELECT") ensureSelectValue(element, String(value ?? "")); else element.value = value ?? ""; });
     document.getElementById("singleNegative").value = raw.negative_prompt || "";
     singleWorkbenchState.resourceValues = singleWorkbenchResourceValues({ ...full, ...raw });
-    singleWorkbenchRenderCompatibility();
     singleWorkbenchRenderProcessed();
     void singleWorkbenchRestoreInput();
   } else if (raw.workbench === "random") singleWorkbenchState.mode = "random";
@@ -149,14 +152,16 @@ function singleWorkbenchApply(raw) {
 }
 function singleWorkbenchCapture() {
   const settings = readSettings();
-  return { settings: singleWorkbenchClone(settings), profileDrafts: singleWorkbenchClone(profileDrafts), seedMode: document.getElementById("singleSeedMode").value, seed: document.getElementById("singleSampleSeed").value, promptSeed: singleWorkbenchState.promptSeed };
+  return { settings: singleWorkbenchClone(settings), profileDrafts: singleWorkbenchClone(profileDrafts), seedMode: document.getElementById("singleSeedMode").value, seed: document.getElementById("singleSampleSeed").value, promptSeed: singleWorkbenchState.promptSeed, samplingModes: typeof sharedSamplingDrafts === "function" ? sharedSamplingDrafts() : {} };
 }
 function singleWorkbenchLegacyDrafts(settings, legacyProfiles) {
   const drafts = {};
   for (const [profile, stored] of Object.entries(legacyProfiles || {})) {
     if (!["anima", "krea2"].includes(profile) || !stored || typeof stored !== "object") continue;
     const restored = { ...singleWorkbenchClone(settings), model_profile: profile, workbench: "random", generation_mode: "txt2img" };
-    for (const key of ["model_name", "base_mode", "dual", "steps", "cfg", "sampler_name", "scheduler", "upscalers", "extra_prompt", "loras", "pools"]) if (stored[key] !== undefined) restored[key] = singleWorkbenchClone(stored[key]);
+    for (const key of ["model_name", "base_mode", "base_denoise", "krea_variance", "dual", "steps", "cfg", "sampler_name", "scheduler", "upscalers", "extra_prompt", "loras", "pools"]) if (stored[key] !== undefined) restored[key] = singleWorkbenchClone(stored[key]);
+    restored.base_denoise = stored.base_denoise ?? 1;
+    restored.krea_variance = typeof sharedKreaFromSettings === "function" ? sharedKreaFromSettings({ ...stored, workbench: "random", model_profile: profile }) : { enabled: profile === "krea2", ...(stored.krea_variance || {}) };
     restored.lora_managed_triggers = singleWorkbenchClone(stored.managedTriggers || []);
     restored.krea_prompt_pool = { enabled: Boolean(stored.kreaPromptPoolEnabled), ids: singleWorkbenchClone(stored.kreaPromptPoolSelection || []) };
     for (const section of SECTIONS) { restored[`random_${section}`] = stored.modes?.[section] === "pool"; restored[`fixed_${section}`] = stored.modes?.[section] === "fixed" ? stored.fixed?.[section] || "" : ""; restored[`random_${section}_count`] = Number(stored.counts?.[section] || 1); }
@@ -181,6 +186,7 @@ function singleWorkbenchSwitch(mode, profile = currentProfile(), { save = true, 
   if (!singleWorkbenchState.ready) return;
   if (save) singleWorkbenchPersist();
   const state = singleWorkbenchState;
+  const animateMode = save && state.mode !== mode;
   state.promptRevision++;
   singleWorkbenchCancelInput({ render: false });
   clearTimeout(state.promptPoll);
@@ -194,18 +200,26 @@ function singleWorkbenchSwitch(mode, profile = currentProfile(), { save = true, 
   profileDrafts = singleWorkbenchClone(target?.profileDrafts || {});
   const next = settings || target?.settings || (mode === "single" ? singleWorkbenchDefaultSettings(profile) : randomWorkbenchDefaultSettings(profile));
   applySettings({ ...next, workbench: mode, model_profile: profile });
-  document.getElementById("singleSeedMode").value = target?.seedMode || "random";
+  document.getElementById("singleSeedMode").value = target?.seedMode || (target ? "random" : "fixed");
   document.getElementById("singleSampleSeed").value = target?.seed || "0";
   state.promptSeed = Number(target?.promptSeed || 0);
+  if (typeof sharedSamplingRestoreDrafts === "function") sharedSamplingRestoreDrafts(settings ? null : target?.samplingModes);
   state.restoring = false;
-  singleWorkbenchRenderMode();
+  singleWorkbenchRenderMode({ animate: animateMode });
   singleWorkbenchPersist();
   if (mode === "single") void singleWorkbenchLoadFavorites();
   else if (typeof historyDirty !== "undefined" && historyDirty) void loadHistory(historyPage);
   // applySettings refreshes a changed model profile; same-profile workbench
   // changes reuse its inventory. Startup performs its own initial refresh.
 }
-function singleWorkbenchRenderMode() {
+function singleWorkbenchPositionIndicator({ immediate = false } = {}) {
+  if (typeof animateStudioIndicator !== "function" || singleWorkbenchState.restoring) return;
+  const indicator = document.querySelector("#workbenchSwitch .workbench-switch-thumb");
+  const button = document.querySelector(`#workbenchSwitch [data-workbench="${singleWorkbenchState.mode}"]`);
+  if (!indicator || !button) return;
+  animateStudioIndicator(indicator, { x: button.offsetLeft - indicator.offsetLeft, width: button.offsetWidth }, { immediate });
+}
+function singleWorkbenchRenderMode({ animate = false } = {}) {
   const active = singleWorkbenchActive();
   document.body.dataset.workbench = active ? "single" : "random";
   document.getElementById("singleWorkbenchControls").hidden = !active;
@@ -216,33 +230,38 @@ function singleWorkbenchRenderMode() {
   document.querySelector(".panel-title .kicker").textContent = active ? "ADVANCED WORKBENCH" : "COMPOSITION";
   if (active) ui.count.value = 1;
   ui.base_mode.disabled = active && singleWorkbenchState.generationMode === "img2img";
-  ui.latent_upscale_method.closest("label").hidden = active;
+  ui.latent_upscale_method.closest("label").hidden = true;
   singleWorkbenchRefreshLimits();
   updateGenerationAvailability();
   if (typeof singleWorkbenchLayout === "function") singleWorkbenchLayout();
   if (typeof singleGalleryMode === "function") singleGalleryMode(active);
   if (typeof sharedParameterVisibility === "function") sharedParameterVisibility();
   if (typeof promptAssistantRender === "function") promptAssistantRender();
+  // Applying a draft renders once while restoring. Preserve the old indicator
+  // until the final render knows whether this was a user switch or a restore.
+  if (!singleWorkbenchState.restoring) {
+    const previous = singleWorkbenchState.motionMode;
+    const changed = previous !== singleWorkbenchState.mode;
+    singleWorkbenchPositionIndicator({ immediate: previous === undefined || changed && !animate });
+    if (changed && animate && typeof StudioMotion !== "undefined") {
+      const workspace = document.querySelector(".workspace");
+      if (workspace) StudioMotion.presence(workspace, true, {
+        from: { opacity: .72 }, response: .24, damping: 1, restart: true, manageInert: false,
+        render: values => { workspace.style.opacity = String(values.opacity); },
+      });
+    }
+    singleWorkbenchState.motionMode = singleWorkbenchState.mode;
+  }
 }
 function singleWorkbenchRefreshLimits() {
-  if (!singleWorkbenchState.ready) return;
-  const dualSesqui = document.getElementById("single_dual_upscale_method").value === "sesqui";
-  const dualScale = document.getElementById("single_dual_scale");
-  dualScale.max = dualSesqui ? "2" : "8";
-  dualScale.title = dualSesqui ? "SesquiLSR 倍率为 1–2" : "倍率为 1–8";
-  const switchStep = document.getElementById("single_dual_switch_step");
-  if (switchStep && ui.steps) switchStep.max = String(Math.max(0, Number(ui.steps.value) - 1));
-  const latentSesqui = (singleWorkbenchActive() ? document.getElementById("single_latent_upscale_method").value : ui.latent_upscale_method?.value) === "sesqui";
-  ui.latent_upscale_scale.min = latentSesqui ? "1" : "0.01";
-  ui.latent_upscale_scale.max = latentSesqui ? "2" : "64";
-  ui.latent_upscale_scale.title = latentSesqui ? "SesquiLSR 倍率为 1–2；算法在单图的后处理管线中选择" : "潜空间放大倍率";
   if (typeof sharedParameterVisibility === "function") sharedParameterVisibility();
 }
+
 function singleWorkbenchSeeds() {
   if (document.getElementById("singleSeedMode").value !== "fixed") return null;
   const sample_seed = Number(document.getElementById("singleSampleSeed").value), prompt_seed = Number(singleWorkbenchState.promptSeed || 0);
-  if (!Number.isSafeInteger(sample_seed) || sample_seed < 0 || sample_seed > 2 ** 50 || !Number.isSafeInteger(prompt_seed) || prompt_seed < 0 || prompt_seed > 2147483647) throw new Error("请输入有效的非负整数种子");
-  return { sample_seed, prompt_seed };
+  if (!Number.isSafeInteger(sample_seed) || sample_seed < 0 || sample_seed > 2 ** 50 || singleWorkbenchActive() && (!Number.isSafeInteger(prompt_seed) || prompt_seed < 0 || prompt_seed > 2147483647)) throw new Error("请输入有效的非负整数种子");
+  return singleWorkbenchActive() ? { sample_seed, prompt_seed } : { sample_seed };
 }
 function singleWorkbenchInvalidatePrompt() {
   if (!singleWorkbenchActive()) return;
@@ -345,7 +364,6 @@ function singleWorkbenchResources() {
     if (!list) { list = document.createElement("datalist"); list.id = listId; input.after(list); input.setAttribute("list", listId); }
     list.replaceChildren(...(values || []).map(value => new Option(value, value)));
   }
-  singleWorkbenchRenderCompatibility();
   if (typeof singleWorkbenchLayout === "function") singleWorkbenchLayout();
 }
 function singleWorkbenchFavoritesChanged(context) {
@@ -372,13 +390,11 @@ function singleWorkbenchShowSettings() {
 function singleWorkbenchRestoreHistory(record) {
   const mode = record.settings?.workbench === "single" ? "single" : "random";
   singleWorkbenchSwitch(mode, record.settings?.model_profile || "anima", { settings: record.settings });
-  if (mode === "single") {
-    document.getElementById("singleSeedMode").value = "fixed";
-    document.getElementById("singleSampleSeed").value = record.sample_seed;
-    singleWorkbenchState.promptSeed = record.prompt_seed;
-    singleWorkbenchLayout();
-    singleWorkbenchPersist();
-  }
+  document.getElementById("singleSeedMode").value = "fixed";
+  document.getElementById("singleSampleSeed").value = record.sample_seed ?? 0;
+  singleWorkbenchState.promptSeed = record.prompt_seed ?? 0;
+  singleWorkbenchLayout();
+  singleWorkbenchPersist();
   singleWorkbenchShowSettings();
 }
 async function singleWorkbenchFromHistory(record, asImage = false) {
@@ -400,7 +416,7 @@ async function singleWorkbenchFromHistory(record, asImage = false) {
   singleWorkbenchState.promptSeed = record.prompt_seed || 0;
   document.getElementById("singleSeedMode").value = "fixed";
   singleWorkbenchLayout();
-  closeImagePreview({ immediate: true, restoreFocus: false }); ui.detailDialog.close();
+  closeImagePreview({ immediate: true, restoreFocus: false }); motionDialog(ui.detailDialog, false);
   singleWorkbenchShowSettings();
   if (asImage) {
     singleWorkbenchCancelInput({ render: false });
@@ -439,13 +455,16 @@ function singleWorkbenchApplyPreset(item) {
     if (sourceWorkbench !== "single" && typeof randomDualFromSettings === "function") snapshot.dual = randomDualFromSettings(item.settings || {});
     delete snapshot.single; delete snapshot.clip_name; delete snapshot.vae_name; delete snapshot.clip_type;
   }
+  const modes = typeof sharedSamplingDrafts === "function" ? sharedSamplingDrafts() : null;
   applySettings({ ...current, ...snapshot, workbench: singleWorkbenchState.mode });
+  if (typeof sharedSamplingRestoreDrafts === "function") sharedSamplingRestoreDrafts(modes);
 }
-function initializeSingleWorkbench() {
+function initializeSingleWorkbench({ legacyRestored = false } = {}) {
   singleWorkbenchBuild();
   const state = singleWorkbenchState;
   state.ready = true;
   if (typeof initializePromptAssistant === "function") initializePromptAssistant();
+  if (legacyRestored) document.getElementById("singleSeedMode").value = "random";
   const legacy = singleWorkbenchCapture();
   state.drafts.random = singleWorkbenchLegacyDrafts(legacy.settings, legacy.profileDrafts);
   state.drafts.random[currentProfile()] = legacy;
@@ -454,10 +473,14 @@ function initializeSingleWorkbench() {
   if (saved) { state.drafts = saved.drafts; singleWorkbenchSwitch(saved.mode === "single" ? "single" : "random", normalizeProfileId(saved.profile), { save: false }); }
   else singleWorkbenchRenderMode();
   document.querySelectorAll("[data-workbench]").forEach(button => { if (button.tagName === "BUTTON") button.addEventListener("click", () => singleWorkbenchSwitch(button.dataset.workbench)); });
-  document.getElementById("workbenchSwitch").addEventListener("keydown", event => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault(); const mode = ["ArrowLeft", "Home"].includes(event.key) ? "single" : "random"; singleWorkbenchSwitch(mode); document.querySelector(`#workbenchSwitch [data-workbench="${mode}"]`).focus(); });
+  document.getElementById("workbenchSwitch").addEventListener("keydown", event => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault(); const mode = ["ArrowLeft", "Home"].includes(event.key) ? "single" : "random"; singleWorkbenchSwitch(mode); document.querySelector(`#workbenchSwitch [data-workbench="${mode}"]`).focus({ preventScroll: true }); });
+  if (typeof ResizeObserver !== "undefined") {
+    state.switchObserver = new ResizeObserver(() => singleWorkbenchPositionIndicator({ immediate: true }));
+    state.switchObserver.observe(document.getElementById("workbenchSwitch"));
+  }
   document.querySelectorAll("[data-single-prompt]").forEach(element => { element.addEventListener("focus", () => state.promptTarget = element); if (element.id !== "singleNegative") element.addEventListener("input", singleWorkbenchInvalidatePrompt); });
   for (const id of ["single_dual_upscale_method", "single_latent_upscale_method"]) document.getElementById(id).addEventListener("change", singleWorkbenchRefreshLimits);
-  ui.settingsForm.addEventListener("change", () => { singleWorkbenchLayout(); if (singleWorkbenchActive()) singleWorkbenchRenderCompatibility(); });
+  ui.settingsForm.addEventListener("change", () => singleWorkbenchLayout());
   document.getElementById("singleResetCompatibility").addEventListener("click", singleWorkbenchResetCompatibility);
   if (typeof initializeSharedParameters === "function") initializeSharedParameters();
   initializeSingleInput();

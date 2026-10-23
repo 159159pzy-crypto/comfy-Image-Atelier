@@ -1,3 +1,4 @@
+const createFrontendContext = require('./helpers/frontend-context.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -12,7 +13,6 @@ function setup() {
   const removedControls = new Set(['singleClipName', 'singleVaeName', 'singleClipType', 'singlePromptSeed']);
   const elements = {
     singleNegative: { value: '' }, singleSeedMode: { value: 'fixed' }, singleSampleSeed: { value: '1234' },
-    singleCompatibilityStatus: { textContent: '' },
     single_positive_prompt: { dataset: { singlePath: 'positive_prompt' }, value: '', type: 'textarea' },
     single_denoise: { dataset: { singlePath: 'denoise' }, value: '', type: 'number' },
   };
@@ -29,7 +29,7 @@ function setup() {
     face_refine: { enabled: false, steps: 20, cfg_scale: 4, sampler: 'euler', scheduler: 'normal', denoise_strength: .3, processing_resolution: 512, detection_confidence: .5, face_positive_prompt: '', offload_models_to_cpu: false },
   };
   let settings = {}, persisted = null, invalidations = 0;
-  const ctx = vm.createContext({
+  const ctx = createFrontendContext({
     console, clearTimeout, setTimeout, config,
     document: {
       getElementById(id) {
@@ -45,6 +45,7 @@ function setup() {
     profileDrafts: { anima: { model_name: 'draft-model' } },
     UPSCALER_CONTROL_IDS: { face_refine: Object.fromEntries(Object.keys(upscalers.face_refine).map(key => [key, `face_${key}`])) },
     singleWorkbenchCancelInput() {}, singleWorkbenchRestoreInput() {},
+    singleWorkbenchLayout() {}, toast() {},
   });
   vm.runInContext(workbenchSource, ctx);
   vm.runInContext(compatibilitySource, ctx);
@@ -159,7 +160,7 @@ test('compatibility lists hidden differences but excludes editable prompt, sampl
     'clip_name', 'single.dual.first_add_noise', 'single.latent.pipeline', 'single.dlss.gpu_gen',
     'single.prompt_processing.expand.seed',
     'upscalers.seedvr2.weight_dtype', 'upscalers.seedvr2.encode.tile_size',
-    'upscalers.nvidia.resize_type', 'upscalers.face_refine.detection_confidence',
+    'upscalers.nvidia.resize_type', 'upscalers.face_refine.detection_confidence', 'upscalers.face_refine.processing_resolution',
   ].sort());
   assert.deepEqual(plain(ctx.singleWorkbenchCompatibilityEntries(defaults)), []);
 });
@@ -214,4 +215,13 @@ test('resetting compatibility resets hidden differences and keeps authored promp
   assert.deepEqual(persisted().settings.single.krea_variance, plain(original.single.krea_variance));
   assert.equal(persisted().promptSeed, 0);
   assert.deepEqual(plain(ctx.singleWorkbenchCompatibilityEntries(saved)), []);
+});
+
+
+test('random fixed image seeds omit prompt_seed so composition keeps changing', () => {
+  const { ctx, state, elements } = setup();
+  state.mode = 'random'; state.promptSeed = 99; elements.singleSampleSeed.value = '0';
+  assert.deepEqual(plain(ctx.singleWorkbenchSeeds()), { sample_seed: 0 });
+  elements.singleSeedMode.value = 'random';
+  assert.equal(ctx.singleWorkbenchSeeds(), null);
 });

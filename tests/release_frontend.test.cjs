@@ -125,7 +125,7 @@ test('submit locks once and posts one immutable snapshot without frontend genera
   await drainSubmit(first, gates); await drainSubmit(second, gates);
   assert.equal(posts.length, 1);
   assert.equal(gates.length, 0, 'backend performs generation normalization once');
-  assert.deepEqual(posts[0], { workbench: 'random', model_profile: 'anima', extra_prompt: 'original', loras: [{ filename: 'old' }] });
+  assert.deepEqual(posts[0], { workbench: 'random', model_profile: 'anima', extra_prompt: 'original', loras: [{ filename: 'old' }], seeds: { sample_seed: 777 } });
   assert.equal(ctx.submitInFlight, false);
 });
 test('fixed single seeds are captured with settings and a failed submit unlocks retry', async () => {

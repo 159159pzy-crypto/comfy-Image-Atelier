@@ -47,7 +47,10 @@ function sharedFavoriteInsert(text, workbench) {
   const suffix = after && !/^[\s,，]/.test(after) ? separator : "";
   target.setRangeText(`${prefix}${text}${suffix}`, start, end, "end");
   const details = target.closest("details");
-  if (details) details.open = true;
+  if (details) {
+    if (typeof StudioMotion !== "undefined") StudioMotion.disclosure(details, true, { immediate: true });
+    else details.open = true;
+  }
   target.focus();
   target.dispatchEvent(new Event("input", { bubbles: true }));
   schedulePersist();
@@ -82,7 +85,7 @@ function sharedFavoritesResetModel() {
   state.targets = {}; state.editor = null; state.groupEditor = null;
   for (const id of ["sharedFavoriteDialog", "sharedFavoriteGroupDialog", "favoriteDialog", "favoriteSelectionDialog", "groupDialog", "childGroupDialog", "deleteGroupDialog", "artistDialog"]) {
     const dialog = document.getElementById(id);
-    if (dialog?.open) dialog.close();
+    if (dialog?.open) motionDialog(dialog, false);
   }
   if (typeof favoritesData !== "undefined") { favoritesData = { groups: [], items: [], favorite_keys: [] }; favoritesAvailable = false; ++favoritesRequest; }
   if (typeof artistFavoritesData !== "undefined") { artistFavoritesData = { groups: [], items: [] }; renderArtistFavorites(); }
@@ -254,7 +257,7 @@ function sharedFavoriteOpen(workbench, { item = null, saved = null, section = nu
   category.value = section; category.disabled = Boolean(item) || profile === "krea2";
   document.getElementById("sharedFavoriteNewGroup").value = "";
   sharedFavoriteEditorError(); sharedFavoriteValidate();
-  document.getElementById("sharedFavoriteDialog").showModal();
+  motionDialog(document.getElementById("sharedFavoriteDialog"), true);
   void sharedFavoriteEditorGroups(editor, saved?.groupIds || (view.groups[section] && view.groups[section] !== "__all__" ? [view.groups[section]] : ["default"]));
 }
 async function sharedFavoriteSave(event) {
@@ -270,7 +273,7 @@ async function sharedFavoriteSave(event) {
     const body = editor.item ? { ...sharedFavoriteItemIdentity(editor.item, editor.section), favorite: true, nickname: title, groupIds } : { title, text, groupIds };
     await request(sharedFavoriteUrl(editor.section, suffix, editor.profile), { method: editor.item ? "PUT" : "POST", body: JSON.stringify(body) });
     if (sharedFavoritesState.editor !== editor || editor.profile !== currentProfile()) return;
-    document.getElementById("sharedFavoriteDialog").close(); sharedFavoritesState.editor = null;
+    motionDialog(document.getElementById("sharedFavoriteDialog"), false); sharedFavoritesState.editor = null;
     toast(editor.item ? "收藏已更新" : "提示词已收藏");
   } catch (error) { if (sharedFavoritesState.editor === editor) sharedFavoriteEditorError(error.message); }
   finally { editor.busy = false; if (sharedFavoritesState.editor === editor) sharedFavoriteValidate(); }
@@ -351,7 +354,7 @@ function sharedFavoriteManageGroups() {
   if (!sharedFavoritesState.data) return;
   sharedFavoritesState.groupEditor = { profile: currentProfile(), section: sharedFavoritesView().section, data: sharedFavoritesState.data, id: "", busy: false };
   sharedFavoriteRenderGroupManager();
-  document.getElementById("sharedFavoriteGroupDialog").showModal();
+  motionDialog(document.getElementById("sharedFavoriteGroupDialog"), true);
 }
 function sharedFavoriteRenderGroupManager() {
   const editor = sharedFavoritesState.groupEditor;
@@ -419,9 +422,9 @@ function initializeSharedFavorites() {
   document.getElementById("sharedFavoriteCreateGroup").addEventListener("click", sharedFavoriteCreateGroup);
   document.getElementById("sharedFavoriteGroupForm").addEventListener("submit", event => { event.preventDefault(); void sharedFavoriteMutateGroup(); });
   document.getElementById("sharedFavoriteGroupNew").addEventListener("click", () => { if (state.groupEditor) state.groupEditor.id = ""; document.getElementById("sharedFavoriteGroupName").value = ""; });
-  for (const button of document.querySelectorAll("[data-close-shared-favorite]")) button.addEventListener("click", () => document.getElementById(button.dataset.closeSharedFavorite).close());
-  document.getElementById("sharedFavoriteDialog").addEventListener("close", () => { state.editor = null; });
-  document.getElementById("sharedFavoriteGroupDialog").addEventListener("close", () => { state.groupEditor = null; });
+  for (const button of document.querySelectorAll("[data-close-shared-favorite]")) button.addEventListener("click", () => motionDialog(document.getElementById(button.dataset.closeSharedFavorite), false));
+  document.getElementById("sharedFavoriteDialog").addEventListener("close", event => { if (!event.currentTarget.open) state.editor = null; });
+  document.getElementById("sharedFavoriteGroupDialog").addEventListener("close", event => { if (!event.currentTarget.open) state.groupEditor = null; });
   window.addEventListener("storage", event => {
     if (event.key !== SHARED_FAVORITES_KEY || !event.newValue) return;
     try { const message = JSON.parse(event.newValue); if (message.model_profile && message.section) sharedFavoritesChanged(message, false); } catch { /* Ignore legacy/non-JSON notifications. */ }

@@ -96,8 +96,8 @@ class FakeComfy:
         return {
             "models": [DEFAULT_SETTINGS["model_name"]],
             "upscale_models": [DEFAULT_SETTINGS["hires"]["model_name"]],
-            "samplers": [DEFAULT_SETTINGS["sampler_name"], "euler"],
-            "schedulers": [DEFAULT_SETTINGS["scheduler"], "karras"],
+            "samplers": [DEFAULT_SETTINGS["sampler_name"], "euler", DEFAULT_SETTINGS["upscalers"]["face_refine"]["sampler"]],
+            "schedulers": [DEFAULT_SETTINGS["scheduler"], "karras", DEFAULT_SETTINGS["upscalers"]["face_refine"]["scheduler"]],
         }
 
     async def resource_classifications(self, kind, *, refresh=False):
@@ -607,8 +607,8 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_resources_and_style_preset_crud(self):
         resources = await (await self.client.get("/api/resources")).json()
         self.assertEqual(resources["models"], [DEFAULT_SETTINGS["model_name"]])
-        self.assertEqual(resources["samplers"], [DEFAULT_SETTINGS["sampler_name"], "euler"])
-        self.assertEqual(resources["schedulers"], [DEFAULT_SETTINGS["scheduler"], "karras"])
+        self.assertEqual(resources["samplers"], [DEFAULT_SETTINGS["sampler_name"], "euler", DEFAULT_SETTINGS["upscalers"]["face_refine"]["sampler"]])
+        self.assertEqual(resources["schedulers"], [DEFAULT_SETTINGS["scheduler"], "karras", DEFAULT_SETTINGS["upscalers"]["face_refine"]["scheduler"]])
         snapshot = {
             key: copy.deepcopy(DEFAULT_SETTINGS[key])
             for key in ("model_name", "loras", "lora_managed_triggers", "hires", "detailers", "manual_artist", "quality_prompt", "extra_prompt", "negative_prompt", "width", "height", "steps", "cfg", "sampler_name", "scheduler")
@@ -1167,6 +1167,31 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             json={**DEFAULT_SETTINGS, "count": 1, "seeds": {"sample_seed": -5, "prompt_seed": 1}},
         )
         self.assertEqual(bad.status, 400)
+
+    async def test_batch_with_sample_only_seed_randomizes_prompts_and_can_replay(self):
+        with mock.patch("anima_webui.runner.secrets.randbelow", side_effect=[123, 456]):
+            response = await self.client.post(
+                "/api/batches",
+                json={**DEFAULT_SETTINGS, "count": 2, "seeds": {"sample_seed": 0}},
+            )
+            self.assertEqual(response.status, 201)
+            result = await self.client.server.app[MANAGER_KEY].wait()
+        self.assertEqual(result["status"], "completed")
+        history = await (await self.client.get("/api/history")).json()
+        images = sorted(history["items"], key=lambda image: image["sequence"])
+        self.assertEqual([image["sample_seed"] for image in images], [0, 0])
+        self.assertEqual([image["prompt_seed"] for image in images], [123, 456])
+
+        with mock.patch("anima_webui.runner.secrets.randbelow") as random_seed:
+            replay = await self.client.post(
+                f"/api/history/{images[0]['id']}/regenerate", json={"mode": "replay"},
+            )
+            self.assertEqual(replay.status, 201)
+            result = await self.client.server.app[MANAGER_KEY].wait()
+        self.assertEqual(result["status"], "completed")
+        random_seed.assert_not_called()
+        replayed = (await (await self.client.get("/api/history")).json())["items"][0]
+        self.assertEqual((replayed["sample_seed"], replayed["prompt_seed"]), (0, 123))
 
     async def _create_history_image(self):
         response = await self.client.post(

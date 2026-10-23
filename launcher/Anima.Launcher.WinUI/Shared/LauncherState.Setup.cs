@@ -27,7 +27,8 @@ internal sealed partial class LauncherState
     public InstallationPlan? SetupPlan { get; private set; }
     public PreflightResult? SetupPreflight { get; private set; }
     public bool SetupCanInstall => !Busy && setupReview.CanInstall && SetupPlan is not null;
-    public bool SetupCanResume => !Busy && setupRetryAvailable && setupInstallAction is not null;
+    public bool SetupCanResume => !Busy && (Setup.InstallFinished && Setup.ModelsPending
+        || setupRetryAvailable && setupInstallAction is not null);
     public bool SetupImportNeedsRepair => setupImportNeedsRepair;
     public bool SetupLegacyDirectRoot => Setup.Fresh && Setup.DirectComfyRoot;
 
@@ -67,12 +68,15 @@ internal sealed partial class LauncherState
             Setup.Fresh = true;
             Setup.InstallStarted = true;
             Setup.InstallFinished = false;
+            Setup.ModelsPending = false;
         }
         if (Setup.Fresh && Setup.InstallStarted && string.IsNullOrWhiteSpace(Setup.Draft.InstallRoot)
             && !string.IsNullOrWhiteSpace(Setup.Draft.ComfyRoot))
             Setup.DirectComfyRoot = true;
         if (route == SetupStep.Installing)
-            SetupNotice = "发现上次未完成的安装。重新检查后继续，已完成的文件和步骤会自动复用。";
+            SetupNotice = Setup.InstallFinished && Setup.ModelsPending
+                ? "环境已安装，所选模型尚未准备完成。点击继续可复用已下载文件。"
+                : "发现上次未完成的安装。重新检查后继续，已完成的文件和步骤会自动复用。";
         if (route == SetupStep.Location && saved?.InstallFinished == true)
             SetupNotice = "上次配置的环境文件发生变化，请重新检查目录。";
         SynchronizeSetupVersion();
@@ -84,6 +88,7 @@ internal sealed partial class LauncherState
         Draft = Config.Clone(),
         Fresh = string.IsNullOrWhiteSpace(Config.ComfyRoot) || Config.InstallPending,
         Step = SetupStep.Welcome,
+        AssistantStatus = AssistantSetupStatus.Pending,
     };
 
     private static string SetupTarget(SetupRecord record)
@@ -133,6 +138,7 @@ internal sealed partial class LauncherState
             Setup.Fresh = fresh;
             Setup.InstallStarted = false;
             Setup.InstallFinished = false;
+            Setup.ModelsPending = false;
             Setup.DirectComfyRoot = false;
             Setup.Draft.Python = "";
             Setup.Draft.PythonExplicit = false;
@@ -146,6 +152,7 @@ internal sealed partial class LauncherState
         if (Busy) return;
         Setup.Draft = draft.Clone();
         Setup.InstallFinished = false;
+        Setup.ModelsPending = false;
         InvalidateSetupReview();
         PersistSetup();
         NotifySetup();
@@ -249,7 +256,7 @@ internal sealed partial class LauncherState
             var draft = SetupConfiguration();
             var fresh = Setup.Fresh;
             var plan = await Task.Run(() => InstallationPlanner.Create(draft, Program.Runtime, Program.StateDir,
-                fresh, Program.Models, Program.ModelProfiles), ct);
+                fresh, Program.Models, Program.ModelProfiles, Setup.OptionalModelIds), ct);
             plan = await InstallationPlanner.PreparePlanAsync(plan, Program.Models, Program.ModelProfiles,
                 Path.Combine(Program.Assets, "probe_comfy.py"), ct);
             var preflight = await InstallationPlanner.PreflightAsync(plan, ct);
@@ -288,6 +295,7 @@ internal sealed partial class LauncherState
         Setup.Step = SetupStep.Installing;
         Setup.InstallStarted = true;
         Setup.InstallFinished = false;
+        Setup.ModelsPending = false;
         SetupError = "";
         SetupNotice = "";
         setupRetryAvailable = false;
@@ -301,23 +309,22 @@ internal sealed partial class LauncherState
             if (!reviewed.Fresh && !setupImportNeedsRepair)
             {
                 UpdateSetupProgress(new("verify", "检查已有环境", SetupStageStatus.Running));
-                await CheckImportAsync(ct);
+                Config.ComfyRoot = Inventory.NormalizeRoot(Config.ComfyRoot);
+                Config.Python = Inventory.FindPython(Config.ComfyRoot, Config.Python);
+                FreshInstallRequested = false;
+                Config.InstallPending = false;
+                Save();
                 UpdateSetupProgress(new("verify", "已有环境已接入", SetupStageStatus.Complete));
             }
-            else await InstallAsync(ct);
+            else await InstallEnvironmentAsync(ct, reviewed, prepareModels: false);
             for (var i = 0; i < setupStages.Count; i++)
                 if (setupStages[i].Status == SetupStageStatus.Pending)
                     setupStages[i] = setupStages[i] with { Status = SetupStageStatus.Complete, Detail = setupStages[i].Detail + " · 已复用" };
             Setup.Draft = Config.Clone();
             Setup.InstallFinished = true;
-            Setup.Step = SetupStep.Complete;
-            setupRetryAvailable = false;
+            Setup.ModelsPending = true;
             PersistSetup();
-            SetupNotice = "";
-            SetStatus("环境已接入，正在确认基础模型…");
-            SetupCompletionOperation = SetupCompletionOperation.ReviewModels;
-            await ScanSetupModelsAsync(ct);
-            SetupCompletionOperation = SetupCompletionOperation.None;
+            await RunSetupSelectedModelsAsync(reviewed.ModelIds.ToArray(), ct);
         };
         setupRetryAvailable = true;
         await Run(setupInstallAction, applyDrafts: false, setupOperation: true);
@@ -329,6 +336,13 @@ internal sealed partial class LauncherState
         if (!SetupCanResume) { await CheckSetupAsync(); return; }
         SetupError = "";
         SetupNotice = "";
+        if (Setup.InstallFinished && Setup.ModelsPending)
+        {
+            var ids = SetupModelSelection.ResolveIds(Program.Models, Program.ModelProfiles,
+                Config.SelectedProfile, Setup.OptionalModelIds).ToArray();
+            await Run(ct => RunSetupSelectedModelsAsync(ids, ct), applyDrafts: false, setupOperation: true);
+            return;
+        }
         await Run(setupInstallAction!, applyDrafts: false, setupOperation: true);
     }
 
@@ -375,9 +389,14 @@ internal sealed partial class LauncherState
         var stages = Setup.Fresh
             ? new[] { ("tools", "准备安装工具"), ("comfy", "准备 ComfyUI"), ("python", "准备 Python"),
                 ("torch", "安装 GPU 运行环境"), ("dependencies", "安装环境依赖"), ("nodes", "准备必要节点"),
-                ("validation", "验证运行依赖"), ("models", "准备 Anima 基础模型"), ("verify", "最终检查") }
-            : new[] { ("tools", "准备安装工具"), ("nodes", "检查与补齐节点"), ("validation", "验证运行依赖"), ("verify", "检查现有环境") };
-        foreach (var (id, label) in stages) setupStages.Add(new(id, label, SetupStageStatus.Pending));
+                ("validation", "验证运行依赖"), ("models", "下载所选模型"), ("verify", "最终检查") }
+            : new[] { ("tools", "准备安装工具"), ("nodes", "检查与补齐节点"), ("validation", "验证运行依赖"), ("models", "下载所选模型"), ("verify", "检查现有环境") };
+        foreach (var (id, label) in stages)
+        {
+            var complete = Setup.InstallFinished && id != "models";
+            setupStages.Add(new(id, complete ? label + " · 环境已就绪" : label,
+                complete ? SetupStageStatus.Complete : SetupStageStatus.Pending));
+        }
     }
 
     private void UpdateSetupProgress(SetupProgress progress)

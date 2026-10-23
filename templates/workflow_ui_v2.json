@@ -1843,6 +1843,14 @@
             "value"
           ],
           [
+            "1450",
+            "scale"
+          ],
+          [
+            "1450",
+            "model_format"
+          ],
+          [
             "1245",
             "noise_seed"
           ],
@@ -2237,6 +2245,14 @@
       ],
       "properties": {
         "proxyWidgets": [
+          [
+            "1064",
+            "scale"
+          ],
+          [
+            "1064",
+            "model_format"
+          ],
           [
             "1248",
             "steps"
@@ -5614,6 +5630,26 @@
           [
             "1418",
             "resize_type.scale"
+          ],
+          [
+            "1492",
+            "style"
+          ],
+          [
+            "1492",
+            "intensity"
+          ],
+          [
+            "1492",
+            "local_tone"
+          ],
+          [
+            "1492",
+            "local_struct"
+          ],
+          [
+            "1492",
+            "output_mix"
           ],
           [
             "1446",
@@ -15050,9 +15086,9 @@
               }
             ],
             "properties": {
+              "Node name for S&R": "SesquiLatentUpscale",
               "aux_id": "LoganBooker/SesquiLSR",
               "ver": "befae004248c403f38b76b9f65fd43b901ea3eaa",
-              "Node name for S&R": "SesquiLatentUpscale",
               "aaaliceControlHostId": "host_1943f2f3-a576-4eb6-8266-39cb5ad5d937"
             },
             "widgets_values": [
@@ -15060,11 +15096,6 @@
               1,
               true
             ],
-            "widgets_values_named": {
-              "model_format": "Wan 2.1",
-              "scale": 1,
-              "half_precision": true
-            },
             "color": "#323",
             "bgcolor": "#535"
           },
@@ -17161,9 +17192,9 @@
               }
             ],
             "properties": {
+              "Node name for S&R": "SesquiLatentUpscale",
               "aux_id": "LoganBooker/SesquiLSR",
               "ver": "befae004248c403f38b76b9f65fd43b901ea3eaa",
-              "Node name for S&R": "SesquiLatentUpscale",
               "aaaliceControlHostId": "host_bb851d29-28d6-4e03-af11-0d2b6bc05a07"
             },
             "widgets_values": [
@@ -17171,11 +17202,6 @@
               1.5,
               true
             ],
-            "widgets_values_named": {
-              "model_format": "Wan 2.1",
-              "scale": 1.5,
-              "half_precision": true
-            },
             "color": "#323",
             "bgcolor": "#535"
           },

@@ -216,6 +216,7 @@ internal sealed partial class LauncherState : IDisposable
         retryable = false;
         cancelDownloads = false;
         ResetTransferProgress();
+        ClearBatchProgress();
         BusyChanged?.Invoke(true);
         TaskStateChanged?.Invoke();
         try
@@ -364,7 +365,9 @@ internal sealed partial class LauncherState : IDisposable
             Path.Combine(Program.Assets, "probe_comfy.py"), ct);
     }
 
-    public async Task InstallAsync(CancellationToken ct)
+    public Task InstallAsync(CancellationToken ct) => InstallEnvironmentAsync(ct);
+
+    private async Task InstallEnvironmentAsync(CancellationToken ct, InstallationPlan? reviewedPlan = null, bool prepareModels = true)
     {
         RequireRoot();
         var fresh = FreshInstallRequested;
@@ -375,7 +378,7 @@ internal sealed partial class LauncherState : IDisposable
             Config.ComfyRoot = Inventory.NormalizeRoot(Config.ComfyRoot);
             Config.Python = Inventory.FindPython(Config.ComfyRoot, Config.Python);
         }
-        var plan = await PlanInstallationAsync(fresh, ct);
+        var plan = reviewedPlan ?? await PlanInstallationAsync(fresh, ct);
         InstallSummaryText = plan.Describe();
         InstallSummaryChanged?.Invoke(InstallSummaryText);
         Config.InstallPending = fresh;
@@ -388,7 +391,7 @@ internal sealed partial class LauncherState : IDisposable
         Config.InstallPending = fresh;
         Save();
         Reloaded();
-        if (fresh)
+        if (fresh && prepareModels)
         {
             UpdateSetupProgress(new("models", "准备 Anima 基础模型", SetupStageStatus.Running));
             SetStatus("环境已安装，正在准备 Anima 基础模型…");
@@ -405,7 +408,7 @@ internal sealed partial class LauncherState : IDisposable
             UpdateSetupProgress(new("models", "基础模型已准备", SetupStageStatus.Complete));
         }
         UpdateSetupProgress(new("verify", "检查模型与节点", SetupStageStatus.Running));
-        await Scan(ct);
+        if (prepareModels) await Scan(ct);
         UpdateSetupProgress(new("verify", "最终检查完成", SetupStageStatus.Complete));
         FreshInstallRequested = false;
         Config.InstallPending = false;
@@ -450,16 +453,7 @@ internal sealed partial class LauncherState : IDisposable
 
     public void RebuildRows(List<ModelStatus> scan)
     {
-        Rows.Clear();
-        Groups.Clear();
-        foreach (var item in scan)
-        {
-            var row = new ModelRow(item);
-            Rows.Add(row);
-            var group = Groups.FirstOrDefault(g => g.Name == item.Model.Group);
-            if (group is null) { group = new ModelGroup(item.Model.Group); Groups.Add(group); }
-            group.Add(row);
-        }
+        ModelListProjection.Refresh(Rows, Groups, scan);
     }
 
     public void SelectBaseGroup()
@@ -522,57 +516,6 @@ internal sealed partial class LauncherState : IDisposable
         SetStatus(model.FoundPath is null ? "当前环境尚无此模型，已打开其下载目录。" : "已打开当前环境中的模型实际位置。");
     }
 
-    private async Task DownloadModelsAsync(List<ModelStatus> selected, CancellationToken ct)
-    {
-        foreach (var item in selected)
-        {
-            if (string.IsNullOrWhiteSpace(item.Destination)) throw new IOException($"{item.Model.Name} 的实际模型目录待确认，请检查 ComfyUI 目录配置后重新扫描。");
-            if (!item.Model.CanDownload) throw new InvalidOperationException($"{item.Model.Name} 暂无可验证下载，请从资源页的来源手动安装。");
-            if (item.FoundPath is not null && !item.Model.IsPackage) throw new IOException($"已有文件校验异常，已保留原文件：{item.FoundPath}。请备份处理后重试。");
-        }
-        foreach (var volume in selected.GroupBy(s => Path.GetPathRoot(s.Destination)))
-            Safety.FreeSpace(volume.Key!, volume.Sum(s => s.Model.IsPackage ? ModelPackages.RemainingBytes(s.Model, s.Destination) : Downloads.RemainingBytes(s.Destination, s.Model.Size, s.Model.Sha256)));
-        downloadQueue = selected;
-        cancelDownloads = false;
-        DownloadCancelable?.Invoke(true);
-        try
-        {
-            foreach (var item in selected)
-            {
-                ct.ThrowIfCancellationRequested();
-                if (item.Model.IsPackage)
-                {
-                    await ModelPackages.Fetch(Downloads, item.Model, item.Destination, Config, DownloadProgress(), ct);
-                    continue;
-                }
-                Exception? failure = null;
-                var done = false;
-                foreach (var source in item.Model.Urls)
-                {
-                    try
-                    {
-                        await Downloads.Fetch(item.Model.Name, Safety.MapSource(source, Config), item.Destination, item.Model.Size, item.Model.Sha256, DownloadProgress(), ct);
-                        done = true;
-                        break;
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException && item.Model.Urls.Length > 1)
-                    {
-                        failure = ex;
-                        AppendLog($"来源 {source} 失败：{ex.Message}；尝试下一来源。");
-                    }
-                }
-                if (!done) throw failure ?? new InvalidOperationException($"{item.Model.Name} 没有可用下载来源。");
-                if (item.Model.Category == "diffusion_models")
-                    await ModelMetadata.EnsureDefaultAsync(Config, Program.Runtime, Program.Models, Program.ModelProfiles,
-                        item.Destination, ct, AppendLog);
-            }
-        }
-        finally
-        {
-            if (cancelDownloads) foreach (var item in downloadQueue.Where(item => !item.Model.IsPackage)) Downloads.CancelPartial(item.Destination);
-            DownloadCancelable?.Invoke(false);
-        }
-    }
     public event Action<bool>? DownloadCancelable;
 
     public async Task OpenModelFolderAsync(string category, FrameworkElement? anchor = null)
@@ -620,7 +563,7 @@ internal sealed partial class LauncherState : IDisposable
         RequireCompletedInstallation();
         ResolvePaths();
         startingRole = "ComfyUI";
-        try { await Services.StartComfy(Config, Program.Runtime, ct); }
+        try { await WithPortRecoveryAsync(() => Services.StartComfy(Config, Program.Runtime, ct), ct); }
         finally { startingRole = null; }
         SetStatus("ComfyUI 已就绪：" + Config.ComfyUrl);
     }
@@ -776,9 +719,19 @@ internal sealed partial class LauncherState : IDisposable
         }
         // A second conflict is common when both ports are taken, or a freed port is raced;
         // offer auto-assign up to three times instead of failing on the second conflict.
+        await WithPortRecoveryAsync(async () => { await EnsureCurrentVersionAsync(ct); await StartWebUIAsync(ct); }, ct);
+        Config.SetupComplete = true;
+        Save();
+        Program.Open(Config.WebUrl);
+        SetStatus("服务已就绪：" + Config.WebUrl);
+        if (Config.StartOnLaunch && !ForceShow) HideWindow?.Invoke();
+    }
+
+    private async Task WithPortRecoveryAsync(Func<Task> start, CancellationToken ct)
+    {
         for (var attempt = 0; ; attempt++)
         {
-            try { await EnsureCurrentVersionAsync(ct); await StartWebUIAsync(ct); break; }
+            try { await start(); break; }
             catch (PortConflictException ex) when (attempt < 2)
             {
                 showWindow();
@@ -793,11 +746,6 @@ internal sealed partial class LauncherState : IDisposable
                 Save();
             }
         }
-        Config.SetupComplete = true;
-        Save();
-        Program.Open(Config.WebUrl);
-        SetStatus("服务已就绪：" + Config.WebUrl);
-        if (Config.StartOnLaunch && !ForceShow) HideWindow?.Invoke();
     }
 
     /// <summary>Stop one managed service by role ("ComfyUI" or "WebUI"). Confirms when stopping ComfyUI while the workbench runs.</summary>
@@ -1051,11 +999,4 @@ public sealed class ServiceInfo
     public string Url { get; set; } = "";
     public string Status { get; set; } = "unconfigured";
     public string Detail { get; set; } = "";
-}
-
-/// <summary>Group header + items for the model ListView grouping.</summary>
-internal sealed class ModelGroup(string name) : List<ModelRow>
-{
-    public string Name { get; } = name;
-    public List<ModelRow> Items => this;
 }

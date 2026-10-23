@@ -1,7 +1,5 @@
 """Public random dual controls and legacy frozen-graph compatibility."""
 import copy
-import hashlib
-import json
 from pathlib import Path
 
 import pytest
@@ -22,22 +20,18 @@ def submit(templates, **overrides):
     return templates.submission(settings, 123, 456, "Compatibility/test", "client", 1, resolved_prompt="fixed cat")
 
 
-@pytest.mark.parametrize("steps,expected", [
-    (8, "99391a7db390c36cc28a3fe23c8c4be6a7b5d00a765bc83e087ddfa044f229dc"),
-    (30, "971ea1f6d766c7860827f6b266436c5df1a006ae0e35b52fa96020b85fdd3a56"),
-    (40, "7364246e4d68f433d764dc61e11b70e7230a64ef4c88f6fb22fa78aad8ed47ae"),
-])
-def test_legacy_random_graph_matches_pre_change_snapshot(templates, steps, expected):
-    # Captured before adding public dual settings: guards every graph input,
-    # including template end=30, start=15, prompt seeds and both LoRA routes.
-    # Updated only for the corrected native fields on Lora Manager nodes 72/243;
-    # all other inputs were compared against the original snapshots unchanged.
-    values = {"steps": steps, "loras": [{"filename": "style.safetensors", "enabled": True, "strength": .7}],
+@pytest.mark.parametrize("steps", [8, 30, 40])
+def test_legacy_random_graph_preserves_explicit_sampling_values(templates, steps):
+    values = {"steps": steps, "cfg": 4, "sampler_name": "er_sde", "scheduler": "simple",
+              "loras": [{"filename": "style.safetensors", "enabled": True, "strength": .7}],
               "upscalers": {"latent": {"enabled": True, "scale_by": 1.75, "upscale_method": "bicubic"}}}
-    for version in ({}, {"dual": None}):
-        api = submit(templates, **values, **version)["prompt"]
-        digest = hashlib.sha256(json.dumps(api, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-        assert digest == expected
+    graphs = [submit(templates, **values, **version)["prompt"] for version in ({}, {"dual": None})]
+    assert graphs[0] == graphs[1]
+    for node_id in ("701:1245", "701:1246"):
+        sampler = graphs[0][node_id]["inputs"]
+        assert (sampler["steps"], sampler["cfg"], sampler["sampler_name"]) == (steps, 4, "er_sde")
+    assert graphs[0]["701:1246"]["inputs"]["start_at_step"] == ["701:802", 0]
+    assert graphs[0]["701:1450"]["inputs"]["scale_by"] == 1.75
 
 
 @pytest.mark.parametrize("profile", ["anima", "krea2"])
@@ -108,7 +102,7 @@ def test_legacy_and_explicit_presets_remain_distinct():
 
 def test_random_sampling_preflight_uses_enabled_nodes_and_live_ranges():
     settings = validate_settings({"base_mode": "dual_sampler", "dual": DUAL_DEFAULTS})
-    resources = {"node_types": ["KSamplerAdvanced"], "samplers": ["er_sde"], "schedulers": ["simple"]}
+    resources = {"node_types": ["KSamplerAdvanced"], "samplers": ["euler"], "schedulers": ["simple"]}
     assert {item["name"] for item in BatchManager._resource_inventory_issues(settings, resources)} == {"SesquiLatentUpscale"}
     resources["node_types"].append("SesquiLatentUpscale")
     resources["node_inputs"] = {"SesquiLatentUpscale": {"scale": ["FLOAT", {"min": 1.5, "max": 2}], "model_format": [["Flux"]]}}

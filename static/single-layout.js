@@ -5,13 +5,30 @@ const singleLayoutState = {
   categoryLayouts: [], categoryPlacement: "original",
 };
 
+// Retarget one spring instead of restarting a timed transition on every render.
+function animateStudioIndicator(indicator, target, { immediate = false } = {}) {
+  if (!indicator || !(target.width > 0) || !Number.isFinite(target.x)) return;
+  const apply = values => {
+    indicator.style.width = `${values.width}px`;
+    indicator.style.transform = `translateX(${values.x}px)`;
+  };
+  if (typeof StudioMotion === "undefined") { apply(target); return; }
+  indicator.dataset.motionIndicator = "true";
+  const previous = indicator.motionIndicatorTarget;
+  if (!immediate && previous?.x === target.x && previous?.width === target.width) return;
+  indicator.motionIndicatorTarget = { ...target };
+  StudioMotion.spring(indicator, "indicator", target, {
+    initial: previous ? undefined : target, response: .3, damping: 1, immediate, onUpdate: apply,
+  });
+}
+
 function initializeSingleLayout() {
   const state = singleLayoutState;
   if (state.initialized) return;
   const controls = document.getElementById("singleWorkbenchControls");
   if (!controls?.children.length) return;
   state.initialized = true;
-  state.singleFields = [...controls.querySelectorAll("input, select, textarea, button")];
+  state.singleFields = [...controls.querySelectorAll("input, select, textarea, button")].filter(field => !field.closest("#singleSeedControls"));
   state.singleDisabled = new Map(state.singleFields.map(field => [field, field.disabled]));
   const cardFor = id => document.getElementById(id)?.closest(".control-section");
   const mark = (element, name, order, group = "", wide = false) => {
@@ -61,8 +78,8 @@ function initializeSingleLayout() {
   document.getElementById("singleNegative")?.closest("label")?.classList.add("single-prompt-negative");
 
   for (const [name, enabledId] of [
-    ["latent", "latent_upscale_enabled"], ["seedvr2", "seedvr2_enabled"],
-    ["nvidia", "nvidia_upscale_enabled"], ["face", "face_refine_enabled"],
+    ["latent", "latent_upscale_enabled"], ["face", "face_refine_enabled"],
+    ["seedvr2", "seedvr2_enabled"], ["nvidia", "nvidia_upscale_enabled"],
   ]) {
     const node = document.querySelector(`.sampling-stage-${name}`);
     if (!node) continue;
@@ -73,11 +90,11 @@ function initializeSingleLayout() {
     mark(wrapper, `post-${name}`, 24 + state.moves.length, "repair");
     state.moves.push({ ...makeMove(node), wrapper, enabled: document.getElementById(enabledId) });
   }
-  state.seed = makeMove(document.getElementById("singleSeedControls"));
+  state.seed = null;
   state.seedSection = document.getElementById("singleSeedSection");
   state.seedTarget = cardFor("width")?.querySelector(".details-content");
-  state.dual = makeMove(document.getElementById("singleDualSection"));
-  state.latentMethod = makeMove(document.getElementById("singleLatentMethodField"));
+  state.dual = null;
+  state.latentMethod = null;
   state.latentTarget = document.getElementById("latent_upscale_scale")?.closest("label");
 
   const hide = node => {
@@ -85,8 +102,8 @@ function initializeSingleLayout() {
   };
   hide(document.getElementById("seedvr2_weight_dtype")?.closest("label"));
   document.querySelectorAll(".sampling-stage-seedvr2 .sampling-fieldset").forEach(hide);
-  hide(document.getElementById("nvidia_resize_type")?.closest("label"));
-  const faceKeep = new Set(["face_steps", "face_cfg_scale", "face_sampler", "face_scheduler", "face_denoise_strength", "face_processing_resolution"]);
+  for (const id of ["nvidia_resize_type", "nvidia_quality", "latent_upscale_method", "latent_second_sampler_enabled", "seedvr2_sampler_steps", "seedvr2_sampler_cfg", "seedvr2_sampler_name", "seedvr2_scheduler", "seedvr2_sampler_denoise"]) hide(document.getElementById(id)?.closest("label"));
+  const faceKeep = new Set(["face_steps", "face_cfg_scale", "face_sampler", "face_scheduler", "face_denoise_strength"]);
   for (const node of document.querySelectorAll("#faceRefineFields > label")) {
     if (!faceKeep.has(node.querySelector("input, select, textarea")?.id)) hide(node);
   }
@@ -96,7 +113,7 @@ function initializeSingleLayout() {
     || document.querySelector(`[data-single-path="prompt_processing.${stage}.enabled"]`)?.closest(".control-section");
   for (const [category, leftCards, rightCards, tailCards] of [
     ["prompt", [processingCard("expand")], [processingCard("oc")], [document.getElementById("singleProcessedSection")]],
-    ["repair", [postCard("latent"), postCard("nvidia"), document.getElementById("singleDlssSection")], [postCard("seedvr2"), postCard("face")], []],
+    ["repair", [postCard("latent"), postCard("face"), postCard("seedvr2"), postCard("nvidia")], [], []],
     ["more", [], [], [cardFor("savePreset"), document.getElementById("singleCompatibilitySection")]],
   ]) {
     const container = document.createElement("div");
@@ -131,7 +148,7 @@ function initializeSingleLayout() {
   const tabs = document.getElementById("singleParameterTabs");
   tabs?.addEventListener("click", event => {
     const button = event.target.closest("[data-single-category]");
-    if (button) singleWorkbenchSelectCategory(button.dataset.singleCategory);
+    if (button) singleWorkbenchSelectCategory(button.dataset.singleCategory, { animate: true });
   });
   tabs?.addEventListener("keydown", event => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
@@ -141,10 +158,10 @@ function initializeSingleLayout() {
     event.preventDefault();
     const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
       : (current + (event.key === "ArrowRight" ? 1 : -1) + buttons.length) % buttons.length;
-    singleWorkbenchSelectCategory(buttons[next].dataset.singleCategory, { focus: true });
+    singleWorkbenchSelectCategory(buttons[next].dataset.singleCategory, { focus: true, animate: true });
   });
   if (tabs && typeof ResizeObserver !== "undefined") {
-    state.tabObserver = new ResizeObserver(singleWorkbenchPositionIndicator);
+    state.tabObserver = new ResizeObserver(() => singleParameterPositionIndicator({ immediate: true }));
     state.tabObserver.observe(tabs);
   }
   document.getElementById("settingsForm")?.addEventListener("invalid", event => {
@@ -200,22 +217,31 @@ function singleWorkbenchPlaceCategoryCards(active) {
   }
 }
 
-function singleWorkbenchPositionIndicator() {
+function singleParameterPositionIndicator({ immediate = false } = {}) {
   if (!singleWorkbenchActive()) return;
   const button = document.querySelector(`#singleParameterTabs [data-single-category="${singleLayoutState.category}"]`);
   const indicator = document.getElementById("singleTabIndicator");
   if (!button || !indicator) return;
-  indicator.style.width = `${button.offsetWidth}px`;
-  indicator.style.transform = `translateX(${button.offsetLeft}px)`;
+  animateStudioIndicator(indicator, { width: button.offsetWidth, x: button.offsetLeft }, { immediate });
 }
 
-function singleWorkbenchSelectCategory(category, { focus = false } = {}) {
+function singleWorkbenchSelectCategory(category, { focus = false, animate = false } = {}) {
   if (!["common", "prompt", "repair", "more"].includes(category)) return;
+  const changed = singleLayoutState.category !== category;
   singleLayoutState.category = category;
   singleWorkbenchLayout();
+  if (changed && typeof StudioMotion !== "undefined") {
+    for (const panel of document.querySelectorAll("#settingsForm [data-single-group]")) {
+      if (panel.hidden) {
+        if (panel.dataset.motionState) StudioMotion.presence(panel, false, { immediate: true, manageInert: false });
+      } else {
+        StudioMotion.presence(panel, true, { from: { opacity: 0, y: 4 }, response: .26, damping: 1, immediate: !animate, manageInert: false });
+      }
+    }
+  }
   const button = document.querySelector(`#singleParameterTabs [data-single-category="${category}"]`);
   if (!button) return;
-  if (focus) button.focus();
+  if (focus) button.focus({ preventScroll: true });
   const tabs = button.parentElement;
   const left = button.offsetLeft, right = left + button.offsetWidth;
   if (left < tabs.scrollLeft) tabs.scrollLeft = Math.max(0, left - 4);
@@ -227,7 +253,10 @@ function singleWorkbenchRevealField(element) {
   const category = element.closest("[data-single-group]")?.dataset.singleGroup;
   if (category) singleWorkbenchSelectCategory(category);
   for (let parent = element.parentElement; parent && parent.id !== "settingsForm"; parent = parent.parentElement) {
-    if (parent.tagName === "DETAILS") parent.open = true;
+    if (parent.tagName === "DETAILS") {
+      if (typeof StudioMotion !== "undefined") StudioMotion.disclosure(parent, true, { immediate: true });
+      else parent.open = true;
+    }
   }
   document.querySelector('.mobile-tabs [data-mobile-view="settings"]')?.click();
 }
@@ -277,10 +306,12 @@ function singleWorkbenchLayout() {
       for (const [field, disabled] of state.singleDisabled) field.disabled = disabled;
       for (const record of state.shared) {
         record.hidden = record.node.hidden;
-        record.open = record.node.open;
+        record.inert = record.node.inert;
+        record.open = record.node.dataset.motionTargetOpen === undefined ? record.node.open : record.node.dataset.motionTargetOpen === "true";
         record.tabIndex = record.summary?.getAttribute("tabindex");
         record.node.classList.add("single-fixed-open");
-        record.node.open = true;
+        if (typeof StudioMotion !== "undefined") StudioMotion.disclosure(record.node, true, { immediate: true });
+        else record.node.open = true;
         record.summary?.setAttribute("tabindex", "-1");
       }
       for (const item of state.hiddenFields) item.originalHidden = item.node.hidden;
@@ -298,8 +329,13 @@ function singleWorkbenchLayout() {
       if (state.latentMethod) state.latentMethod.anchor.after(state.latentMethod.node);
       for (const record of state.shared) {
         record.node.classList.remove("single-fixed-open");
-        if (record.open !== undefined) record.node.open = record.open;
+        if (typeof StudioMotion !== "undefined") StudioMotion.presence(record.node, !record.hidden, { immediate: true, manageInert: false });
+        if (record.open !== undefined) {
+          if (typeof StudioMotion !== "undefined") StudioMotion.disclosure(record.node, record.open, { immediate: true });
+          else record.node.open = record.open;
+        }
         if (record.hidden !== undefined) record.node.hidden = record.hidden;
+        if (record.inert !== undefined) record.node.inert = record.inert;
         if (record.summary) {
           if (record.tabIndex == null) record.summary.removeAttribute("tabindex");
           else record.summary.setAttribute("tabindex", record.tabIndex);
@@ -312,6 +348,8 @@ function singleWorkbenchLayout() {
   // Values remain in the shared controls for history and preset compatibility.
   singleWorkbenchCompactFields(true);
   if (active) {
+    const compatibilityFocused = document.getElementById("singleCompatibilitySection")?.contains(document.activeElement);
+    const hasCompatibility = singleWorkbenchRenderCompatibility();
     document.getElementById("settingsForm").dataset.singleCategory = state.category;
     const tabs = [...document.querySelectorAll("#singleParameterTabs [data-single-category]")];
     for (const button of tabs) {
@@ -325,7 +363,9 @@ function singleWorkbenchLayout() {
     for (const card of panels) {
       const when = card.dataset.singleWhen;
       const available = !when || when === "dual" && ui.base_mode.value === "dual_sampler" && singleWorkbenchState.generationMode !== "img2img"
-        || when === "krea2" && currentProfile() === "krea2" || when === "latent" && ui.latent_upscale_enabled.checked;
+        || when === "krea2" && currentProfile() === "krea2" || when === "latent" && ui.latent_upscale_enabled.checked
+        || when === "compatibility" && hasCompatibility;
+      const restoreCompatibilityFocus = when === "compatibility" && !available && compatibilityFocused;
       card.hidden = card.dataset.singleGroup !== state.category || !available || card === state.seedSection;
       card.dataset.singleUnavailable = String(!available);
       if (when) for (const field of card.querySelectorAll("input, select, textarea, button")) field.disabled = !available;
@@ -333,6 +373,7 @@ function singleWorkbenchLayout() {
       card.setAttribute("role", "tabpanel");
       const tab = tabs.find(button => button.dataset.singleCategory === card.dataset.singleGroup);
       if (tab) card.setAttribute("aria-labelledby", tab.id);
+      if (restoreCompatibilityFocus) tab?.focus({ preventScroll: true });
     }
     for (const panel of document.querySelectorAll("[data-single-enabled]")) {
       const toggle = document.querySelector(`[data-single-path="${panel.dataset.singleEnabled}"]`);
@@ -346,12 +387,13 @@ function singleWorkbenchLayout() {
     if (method) method.disabled = !ui.latent_upscale_enabled.checked;
     const seed = document.getElementById("singleSampleSeed");
     if (seed) seed.disabled = document.getElementById("singleSeedMode")?.value !== "fixed";
-    singleWorkbenchPositionIndicator();
+    singleParameterPositionIndicator();
   } else {
     for (const field of state.singleFields) field.disabled = true;
     for (const record of state.shared) { record.node.removeAttribute("role"); record.node.removeAttribute("aria-labelledby"); }
   }
   singleWorkbenchPlaceCategoryCards(active);
+  if (typeof sharedParameterVisibility === "function") sharedParameterVisibility();
   document.getElementById("randomArchive").hidden = active;
   document.querySelector('[data-mobile-view="gallery"]').textContent = active ? "预览" : "作品库";
   if (active && !state.mobile.matches) {

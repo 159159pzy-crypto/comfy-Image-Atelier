@@ -1,3 +1,4 @@
+const createFrontendContext = require('./helpers/frontend-context.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -14,7 +15,7 @@ function setup() {
     singleRollSeed: { addEventListener(_name, callback) { this.click = callback; } },
   };
   const imported = [], layouts = [], saved = [];
-  const ctx = vm.createContext({
+  const ctx = createFrontendContext({
     document: { getElementById: id => elements[id] },
     profileSettingsDefaults: profile => ({ model_profile: profile, loras: [], negative_prompt: '' }),
     profileConfig: () => ({}), currentProfile: () => 'anima',
@@ -226,4 +227,13 @@ test('changing the main model cancels an in-flight upload but preserves referenc
   state.inputBusy = 'upload';
   change();
   assert.equal(cancellations, 1);
+});
+
+
+test('restoring random history loads its image seed without freezing future random prompts', () => {
+  const { ctx, state, elements } = setup();
+  ctx.singleWorkbenchRestoreHistory({ ...historyRecord('random'), sample_seed: 0 });
+  assert.equal(elements.singleSeedMode.value, 'fixed'); assert.equal(elements.singleSampleSeed.value, 0);
+  assert.equal(state.mode, 'random');
+  assert.deepEqual(plain(ctx.singleWorkbenchSeeds()), { sample_seed: 0 });
 });

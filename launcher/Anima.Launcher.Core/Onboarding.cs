@@ -1,6 +1,7 @@
 namespace Anima.Launcher.Core;
 
-public enum SetupStep { Welcome, Location, Review, Installing, Complete, Finished }
+public enum SetupStep { Welcome, Location, Review, Installing, Complete, Finished, Assistant = 6 }
+public enum AssistantSetupStatus { Legacy = 0, Pending, Configured, Skipped }
 public enum SetupStageStatus { Pending, Running, Complete, Paused, Failed }
 public sealed record SetupProgress(string StageId, string Detail, SetupStageStatus Status);
 
@@ -13,6 +14,9 @@ public sealed class SetupRecord
     public LauncherConfig Draft { get; set; } = new();
     public bool InstallStarted { get; set; }
     public bool InstallFinished { get; set; }
+    public bool ModelsPending { get; set; }
+    public string[] OptionalModelIds { get; set; } = [];
+    public AssistantSetupStatus AssistantStatus { get; set; }
     // Old installations selected the ComfyUI folder itself. Keep that identity
     // when the user temporarily clears the path while editing a recovery draft.
     public bool DirectComfyRoot { get; set; }
@@ -36,13 +40,15 @@ public static class SetupRouting
         {
             // A completion receipt from a different, removed or incomplete environment
             // must never enable a misleading "start creating" screen.
-            return configured && TargetsMatch(current, saved.Draft, saved.Fresh) && HasLaunchFiles(current)
-                ? SetupStep.Complete : SetupStep.Location;
+            if (!configured || !TargetsMatch(current, saved.Draft, saved.Fresh) || !HasLaunchFiles(current))
+                return SetupStep.Location;
+            if (saved.ModelsPending) return SetupStep.Installing;
+            return saved.AssistantStatus == AssistantSetupStatus.Pending ? SetupStep.Assistant : SetupStep.Complete;
         }
         if (saved.InstallStarted) return SetupStep.Installing;
         return saved.Step switch
         {
-            SetupStep.Location or SetupStep.Review or SetupStep.Installing or SetupStep.Complete => SetupStep.Location,
+            SetupStep.Location or SetupStep.Review or SetupStep.Installing or SetupStep.Complete or SetupStep.Assistant => SetupStep.Location,
             _ => SetupStep.Welcome
         };
     }

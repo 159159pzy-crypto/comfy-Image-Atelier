@@ -11,7 +11,14 @@ public sealed record PreflightIssue(string Code, string Message, bool Blocking =
     public override string ToString() => Message;
 }
 public sealed record VolumeEstimate(string Volume, long RequiredBytes, long? AvailableBytes);
-public sealed record InstallationDownload(string Destination, long Size, string Sha256, bool InEnvironment);
+public sealed record InstallationDownload(string Destination, long Size, string Sha256, bool InEnvironment)
+{
+    // Package Fetch preserves a damaged staging file as a backup before replacing it.
+    // Final single-file models and tool caches remain protected from replacement.
+    public bool RepairableStaging { get; init; }
+    public bool RequiresReplacement { get; init; }
+    public long RemainingBytes => RequiresReplacement ? Size : global::Anima.Launcher.Core.Downloads.RemainingBytes(Destination, Size, Sha256);
+}
 public sealed record PreflightResult(ImmutableArray<PreflightIssue> Issues, ImmutableArray<VolumeEstimate> Volumes)
 {
     public bool CanInstall => Issues.All(issue => !issue.Blocking);
@@ -25,7 +32,10 @@ public sealed record InstallationPlan(
     public long EnvironmentReserveBytes { get; init; }
     public long RuntimeReserveBytes { get; init; }
     public ImmutableArray<InstallationDownload> Downloads { get; init; } = [];
+    public ImmutableArray<string> ModelIds { get; init; } = [];
+    public ImmutableArray<ModelStatus> ModelInventory { get; init; } = [];
     public bool ModelPathsDeferred { get; init; }
+    public long DeferredModelBytes { get; init; }
     public LauncherConfig CreateConfig() => JsonSerializer.Deserialize<LauncherConfig>(ConfigurationJson, JsonFile.Options)!;
     public string Describe() => $"{(Fresh ? "新建 NVIDIA 环境" : "补齐现有环境")} · {(SelectedProfile == "anima" ? "Anima" : "Krea 2")}\n" +
         $"ComfyUI：{ComfyRoot}\n运行工具与缓存：{RuntimeRoot}\n" +
@@ -48,7 +58,7 @@ public static class InstallationPlanner
         Path.GetFullPath(string.IsNullOrWhiteSpace(config.RuntimeRoot) ? stateDir : config.RuntimeRoot);
 
     public static InstallationPlan Create(LauncherConfig config, RuntimeManifest manifest, string stateDir, bool fresh,
-        ModelManifest? models = null, ModelProfilesManifest? profiles = null)
+        ModelManifest? models = null, ModelProfilesManifest? profiles = null, IEnumerable<string>? optionalModelIds = null)
     {
         var snapshot = config.Clone();
         snapshot.Validate();
@@ -67,9 +77,16 @@ public static class InstallationPlanner
         snapshot.RuntimeRoot = ResolveRuntimeRoot(snapshot, stateDir);
         if (SameOrInside(snapshot.RuntimeRoot, snapshot.ComfyRoot) || SameOrInside(snapshot.ComfyRoot, snapshot.RuntimeRoot))
             throw new InvalidDataException("运行工具目录与 ComfyUI 目录不能相同或互相包含，请使用同一安装目录下的 ComfyUI 和 runtime。");
-        // Import only repairs nodes; model downloads belong to the fresh-install flow.
-        var required = fresh && models is not null && profiles is not null ? profiles.RequiredModels(models, snapshot.SelectedProfile) : [];
-        var artifacts = required.Where(m => m.CanDownload).Select(m => new InstallationDownload(
+        // Legacy callers importing an environment repair nodes only. The wizard explicitly
+        // supplies its optional selection (including []) to include required models on import.
+        if (optionalModelIds is not null && (models is null || profiles is null))
+            throw new InvalidDataException("所选模型需要完整的模型与档案清单。");
+        var required = (fresh || optionalModelIds is not null) && models is not null && profiles is not null
+            ? SetupModelSelection.Resolve(models, profiles, snapshot.SelectedProfile, optionalModelIds) : [];
+        // A package target must come from the actual path probe. Until then reserve its
+        // byte size on the environment volume, without manufacturing a download directory.
+        var deferredBytes = required.Where(model => model.IsPackage && model.CanDownload).Sum(model => model.Size);
+        var artifacts = required.Where(m => m.CanDownload && !m.IsPackage).Select(m => new InstallationDownload(
             Safety.Under(Path.Combine(snapshot.ComfyRoot, "models"), m.Category + "/" + m.RelativePath), m.Size, m.Sha256, true)).ToList();
         if (fresh)
         {
@@ -78,14 +95,15 @@ public static class InstallationPlanner
                 .Select(t => new InstallationDownload(Path.Combine(snapshot.RuntimeRoot, "cache", t.Id + ".zip"), t.Size, t.Sha256, false)));
         }
         var (environmentReserve, runtimeReserve) = RemainingComponentReserves(snapshot, manifest, stateDir, fresh);
-        var environmentDownloads = artifacts.Where(a => a.InEnvironment).Sum(a => Downloads.RemainingBytes(a.Destination, a.Size, a.Sha256));
-        var runtimeDownloads = artifacts.Where(a => !a.InEnvironment).Sum(a => Downloads.RemainingBytes(a.Destination, a.Size, a.Sha256));
+        var environmentDownloads = deferredBytes + artifacts.Where(a => a.InEnvironment).Sum(a => a.RemainingBytes);
+        var runtimeDownloads = artifacts.Where(a => !a.InEnvironment).Sum(a => a.RemainingBytes);
         var stages = (fresh
-            ? new[] { "检查系统与磁盘", "准备隔离工具", "安装 ComfyUI 与 Python", "安装 CUDA / PyTorch", "安装必要节点", "验证依赖", "下载所选基础模型" }
-            : new[] { "检查现有环境", "补齐缺失节点", "验证依赖", "检查所选基础模型" }).ToImmutableArray();
+            ? new[] { "检查系统与磁盘", "准备隔离工具", "安装 ComfyUI 与 Python", "安装 CUDA / PyTorch", "安装必要节点", "验证依赖", "下载所选模型" }
+            : new[] { "检查现有环境", "补齐缺失节点", "验证依赖", "检查所选模型" }).ToImmutableArray();
         return new(JsonSerializer.Serialize(snapshot, JsonFile.Options), snapshot.ComfyRoot, snapshot.RuntimeRoot,
             snapshot.SelectedProfile, fresh, environmentReserve + environmentDownloads, runtimeReserve + runtimeDownloads, environmentDownloads + runtimeDownloads, stages)
-        { EnvironmentReserveBytes = environmentReserve, RuntimeReserveBytes = runtimeReserve, Downloads = artifacts.ToImmutableArray() };
+        { EnvironmentReserveBytes = environmentReserve, RuntimeReserveBytes = runtimeReserve, Downloads = artifacts.ToImmutableArray(),
+            ModelIds = required.Select(model => model.Id).ToImmutableArray(), DeferredModelBytes = deferredBytes, ModelPathsDeferred = deferredBytes > 0 };
     }
 
     private static (long Environment, long Runtime) RemainingComponentReserves(LauncherConfig config, RuntimeManifest manifest, string stateDir, bool fresh)
@@ -192,25 +210,37 @@ public static class InstallationPlanner
 
     /// <summary>Resolve resumed installations' effective model paths before checking their destination volumes.</summary>
     public static async Task<InstallationPlan> PreparePlanAsync(InstallationPlan plan, ModelManifest models,
-        ModelProfilesManifest profiles, string probeScript, CancellationToken ct)
+        ModelProfilesManifest profiles, string probeScript, CancellationToken ct, bool requireModelPaths = false)
     {
         ct.ThrowIfCancellationRequested();
-        if (!plan.Fresh) return plan;
+        if (!plan.Fresh && plan.ModelIds.IsEmpty) return plan;
         var config = plan.CreateConfig();
+        var selected = SelectedModels(plan, models, profiles);
+        var needsTagger = ModelProbePolicy.NeedsTaggerRuntime(selected);
+        // The review also displays unselected taggers. Runtime uncertainty in this
+        // read-only probe affects only their preview paths, not selected downloads.
+        var previewTaggers = models.Models.Any(model => model.Category == "wd_taggers");
         var paths = new Dictionary<string, string[]>
         {
             ["diffusion_models"] = [Path.Combine(plan.ComfyRoot, "models", "diffusion_models"), Path.Combine(plan.ComfyRoot, "models", "unet")],
             ["text_encoders"] = [Path.Combine(plan.ComfyRoot, "models", "text_encoders"), Path.Combine(plan.ComfyRoot, "models", "clip")],
         };
         var probe = new ProbeResult(plan.ComfyRoot, config.Python, paths);
+        var resolved = false;
         string? python = null;
         try { python = Inventory.FindPython(plan.ComfyRoot, config.Python); }
         catch (FileNotFoundException) { }
         if (python is not null && File.Exists(Path.Combine(plan.ComfyRoot, "folder_paths.py")))
         {
-            try { probe = await Inventory.Probe(plan.ComfyRoot, python, probeScript, ct, config.ComfyArguments); }
+            try
+            {
+                config.Python = python;
+                probe = needsTagger || previewTaggers ? await TaggerRuntime.Probe(config, probeScript, ct)
+                    : await Inventory.Probe(plan.ComfyRoot, python, probeScript, ct, config.ComfyArguments);
+                resolved = true;
+            }
             catch (OperationCanceledException) { throw; }
-            catch (InvalidOperationException ex) when (ex.Message.Contains("No module named 'yaml'", StringComparison.Ordinal))
+            catch (InvalidOperationException ex) when (!requireModelPaths && ex.Message.Contains("No module named 'yaml'", StringComparison.Ordinal))
             {
                 // Dependency installation can be interrupted before PyYAML exists.
                 // Let that stage resume; the UI probes again and checks every real
@@ -219,30 +249,81 @@ public static class InstallationPlanner
             }
             // An interrupted fresh install may not yet have PyYAML. Without an
             // extra-path config, canonical and legacy paths remain safe defaults.
-            catch when (!File.Exists(Path.Combine(plan.ComfyRoot, "extra_model_paths.yaml"))) { }
+            catch when (!requireModelPaths && plan.Fresh && !File.Exists(Path.Combine(plan.ComfyRoot, "extra_model_paths.yaml")))
+            { plan = plan with { ModelPathsDeferred = true }; }
         }
-        return await ResolveModelDestinationsAsync(plan, probe, models, profiles, ct);
+        if (!resolved && requireModelPaths)
+            throw new InvalidDataException("无法确认模型实际下载目录，请先完成环境依赖并重新检查。");
+        var mayDefer = !requireModelPaths && (!resolved || needsTagger && TaggerRuntime.ResolveNode(plan.ComfyRoot) is null);
+        var prepared = await ResolveModelDestinationsAsync(plan, probe, models, profiles, ct, mayDefer);
+        return prepared with { ModelPathsDeferred = prepared.ModelPathsDeferred || !resolved };
     }
 
     public static Task<InstallationPlan> ResolveModelDestinationsAsync(InstallationPlan plan, ProbeResult probe,
-        ModelManifest models, ModelProfilesManifest profiles, CancellationToken ct) => Task.Run(async () =>
+        ModelManifest models, ModelProfilesManifest profiles, CancellationToken ct, bool allowDeferredPackages = false) => Task.Run(async () =>
     {
         ct.ThrowIfCancellationRequested();
-        if (!plan.Fresh) return plan;
+        if (!plan.Fresh && plan.ModelIds.IsEmpty) return plan;
         if (!Path.TrimEndingDirectorySeparator(Path.GetFullPath(probe.Root)).Equals(
                 Path.TrimEndingDirectorySeparator(Path.GetFullPath(plan.ComfyRoot)), StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("模型目录探测结果与安装目标不一致，请重新检查环境。");
-        var selected = new ModelManifest(models.SchemaVersion, profiles.RequiredModels(models, plan.SelectedProfile));
+        var selected = new ModelManifest(models.SchemaVersion, SelectedModels(plan, models, profiles));
         var inventory = await Inventory.Scan(probe, selected, false, ct);
-        var artifacts = plan.Downloads.Where(a => !a.InEnvironment).Concat(inventory.Where(item => item.Model.CanDownload)
-            .Select(item => new InstallationDownload(item.FoundPath ?? item.Destination, item.Model.Size, item.Model.Sha256, true))).ToImmutableArray();
-        return WithRemainingDownloads(plan with { Downloads = artifacts });
+        var artifacts = plan.Downloads.Where(a => !a.InEnvironment).ToList();
+        long deferred = 0;
+        foreach (var item in inventory.Where(item => item.Model.CanDownload))
+        {
+            if (string.IsNullOrWhiteSpace(item.Destination))
+            {
+                if (!allowDeferredPackages) throw new InvalidDataException(item.Model.Name + " 的实际模型目录尚未确认，请检查节点和运行环境后重新扫描。");
+                deferred += item.Model.Size;
+                continue;
+            }
+            if (!item.Model.IsPackage)
+                artifacts.Add(new(item.FoundPath ?? item.Destination, item.Model.Size, item.Model.Sha256, true));
+            else if (item.Missing)
+            {
+                // Fetch publishes a complete, verified directory atomically. Its existing
+                // destination is retained as a backup, so reserve only actual staging files.
+                var staging = ModelPackages.Staging(item.Model, item.Destination);
+                foreach (var file in item.Model.Files)
+                {
+                    var target = Safety.Under(staging, file.Path);
+                    var damaged = File.Exists(target) && !await Downloads.Verify(target, file.Size, file.Sha256, ct);
+                    artifacts.Add(new(target, file.Size, file.Sha256, true)
+                        { RepairableStaging = true, RequiresReplacement = damaged });
+                }
+            }
+        }
+        // Only selected models above contribute download artifacts and disk budgets.
+        // Populate the remaining choices separately so an unreadable/unregistered
+        // optional resource cannot block installation or disappear from review.
+        var included = inventory.Select(item => item.Model.Id).ToHashSet(StringComparer.Ordinal);
+        var previewIds = SetupModelSelection.Choices(models, profiles, plan.SelectedProfile)
+            .SelectMany(choice => choice.ModelIds).ToHashSet(StringComparer.Ordinal);
+        foreach (var model in models.Models.Where(model => previewIds.Contains(model.Id) && !included.Contains(model.Id)))
+        {
+            ct.ThrowIfCancellationRequested();
+            try { inventory.AddRange(await Inventory.Scan(probe, new(models.SchemaVersion, [model]), false, ct)); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            { inventory.Add(new(model, "目录待确认", null, "")); }
+        }
+        return WithRemainingDownloads(plan with { Downloads = artifacts.ToImmutableArray(), ModelInventory = inventory.ToImmutableArray(),
+            DeferredModelBytes = deferred, ModelPathsDeferred = deferred > 0 });
     }, ct);
+
+    private static ModelItem[] SelectedModels(InstallationPlan plan, ModelManifest models, ModelProfilesManifest profiles)
+    {
+        if (plan.ModelIds.IsEmpty) return plan.Fresh ? profiles.RequiredModels(models, plan.SelectedProfile) : [];
+        var byId = models.Models.ToDictionary(model => model.Id, StringComparer.Ordinal);
+        return plan.ModelIds.Distinct().Select(id => byId.TryGetValue(id, out var model) ? model
+            : throw new InvalidDataException("安装计划包含已失效的模型，请重新检查：" + id)).ToArray();
+    }
 
     private static InstallationPlan WithRemainingDownloads(InstallationPlan plan)
     {
-        var environment = plan.Downloads.Where(a => a.InEnvironment).Sum(a => Downloads.RemainingBytes(a.Destination, a.Size, a.Sha256));
-        var runtime = plan.Downloads.Where(a => !a.InEnvironment).Sum(a => Downloads.RemainingBytes(a.Destination, a.Size, a.Sha256));
+        var environment = plan.DeferredModelBytes + plan.Downloads.Where(a => a.InEnvironment).Sum(a => a.RemainingBytes);
+        var runtime = plan.Downloads.Where(a => !a.InEnvironment).Sum(a => a.RemainingBytes);
         return plan with { EnvironmentBytes = plan.EnvironmentReserveBytes + environment, RuntimeBytes = plan.RuntimeReserveBytes + runtime, EstimatedDownloadBytes = environment + runtime };
     }
 
@@ -251,16 +332,22 @@ public static class InstallationPlanner
         // Verification of multi-GB caches must not synchronously block WinUI.
         return await Task.Run(async () =>
         {
-            long environment = 0, runtime = 0;
+            long environment = plan.DeferredModelBytes, runtime = 0;
+            var refreshed = ImmutableArray.CreateBuilder<InstallationDownload>(plan.Downloads.Length);
             foreach (var artifact in plan.Downloads)
             {
                 ct.ThrowIfCancellationRequested();
-                if (File.Exists(artifact.Destination) && !await global::Anima.Launcher.Core.Downloads.Verify(artifact.Destination, artifact.Size, artifact.Sha256, ct))
+                var damaged = File.Exists(artifact.Destination)
+                    && !await global::Anima.Launcher.Core.Downloads.Verify(artifact.Destination, artifact.Size, artifact.Sha256, ct);
+                if (damaged && !artifact.RepairableStaging)
                     throw new InvalidDataException("已有安装文件校验不符，已保留原文件，请备份处理后继续：" + artifact.Destination);
-                var remaining = global::Anima.Launcher.Core.Downloads.RemainingBytes(artifact.Destination, artifact.Size, artifact.Sha256);
+                var current = artifact with { RequiresReplacement = damaged };
+                refreshed.Add(current);
+                var remaining = current.RemainingBytes;
                 if (artifact.InEnvironment) environment += remaining; else runtime += remaining;
             }
-            return plan with { EnvironmentBytes = plan.EnvironmentReserveBytes + environment, RuntimeBytes = plan.RuntimeReserveBytes + runtime, EstimatedDownloadBytes = environment + runtime };
+            return plan with { Downloads = refreshed.ToImmutable(), EnvironmentBytes = plan.EnvironmentReserveBytes + environment,
+                RuntimeBytes = plan.RuntimeReserveBytes + runtime, EstimatedDownloadBytes = environment + runtime };
         }, ct);
     }
 
@@ -273,8 +360,8 @@ public static class InstallationPlanner
 
     public static ImmutableArray<VolumeEstimate> EstimateVolumes(InstallationPlan plan) => new[]
         {
-            (Path: plan.ComfyRoot, Bytes: plan.EnvironmentReserveBytes), (Path: plan.RuntimeRoot, Bytes: plan.RuntimeReserveBytes)
-        }.Concat(plan.Downloads.Select(a => (Path: a.Destination, Bytes: Downloads.RemainingBytes(a.Destination, a.Size, a.Sha256)))
+            (Path: plan.ComfyRoot, Bytes: plan.EnvironmentReserveBytes + plan.DeferredModelBytes), (Path: plan.RuntimeRoot, Bytes: plan.RuntimeReserveBytes)
+        }.Concat(plan.Downloads.Select(a => (Path: a.Destination, Bytes: a.RemainingBytes))
             .Where(a => a.Bytes > 0))
         .GroupBy(x => Path.GetPathRoot(x.Path)!, StringComparer.OrdinalIgnoreCase).Select(group =>
         {

@@ -5,7 +5,7 @@ const singleGalleryState = {
   nextBefore: null, hasMore: false, loading: false, error: "", failedMore: false,
   epoch: 0, request: 0, pending: null,
   lastCompleted: null, live: null, busy: false, waitingBatch: null, terminalKey: "",
-  viewerRecord: null, viewerOpen: false, selectionRequest: 0, navigationIntent: 0,
+  viewerRecord: null, viewerOpen: false, selectionRequest: 0, navigationIntent: 0, navigationCursor: null,
   imageError: null, canvasError: "", canvasSource: "", failedImages: new Set(), retryDirection: null,
   generationKey: "", frameEpoch: 0, frameRequest: 0, framePending: false, requestedFrame: "", batchSnapshot: null,
   finishingBatch: null, finishingOptional: false, finishRequest: 0, finishingPromise: null,
@@ -19,7 +19,7 @@ function singleGalleryMergeRecords(existing, incoming) {
 function singleGalleryInvalidate({ viewer = true } = {}) {
   const state = singleGalleryState;
   state.epoch++; state.request++; state.loading = false; state.pending = null;
-  if (viewer) { state.selectionRequest++; state.navigationIntent++; }
+  if (viewer) { state.selectionRequest++; state.navigationIntent++; state.navigationCursor = null; }
 }
 function singleGalleryMode(active) {
   const state = singleGalleryState;
@@ -162,7 +162,7 @@ function singleGalleryContext() {
     onReady: singleGalleryRender,
     onError: record => { state.imageError = record; if (record) state.failedImages.add(String(record.id)); singleGalleryRender(); },
     // Let a shared history read finish for the canvas, but cancel any pending navigation.
-    onClose: () => { state.viewerOpen = false; state.selectionRequest++; state.navigationIntent++; state.imageError = null; state.retryDirection = null; singleGalleryRender(); },
+    onClose: () => { state.viewerOpen = false; state.selectionRequest++; state.navigationIntent++; state.navigationCursor = null; state.imageError = null; state.retryDirection = null; singleGalleryRender(); },
   };
 }
 function singleGalleryOpenDetail() {
@@ -171,11 +171,12 @@ function singleGalleryOpenDetail() {
   state.imageError = null;
   openDetail(state.lastCompleted, { origin: "single", returnFocus: singleGalleryElement("singlePreviewOpen") });
 }
-async function singleGallerySelect(record, { focus = false } = {}) {
+async function singleGallerySelect(record, { focus = false, navigation = false } = {}) {
   const state = singleGalleryState, context = imagePreview.context;
   if (!record || !state.viewerOpen || context?.kind !== "single" || imagePreview.phase === "closing") return false;
   const requestId = ++imagePreview.navigationRequest, selection = ++state.selectionRequest;
-  ++state.navigationIntent; ++imagePreview.token;
+  if (!navigation) { ++state.navigationIntent; state.navigationCursor = null; }
+  ++imagePreview.token;
   cancelImagePreviewAnimation();
   imagePreview.phase = "switching"; ui.imagePreviewDialog.classList.add("is-navigating");
   state.imageError = null; state.retryDirection = null;
@@ -189,6 +190,9 @@ async function singleGallerySelect(record, { focus = false } = {}) {
     if (selectedRecord !== record) updateDetailRecord(record);
     announcePreview(singleGalleryLabel(record));
   } else {
+    if (typeof restorePreviewCommittedImage === "function") await restorePreviewCommittedImage(requestId, context);
+    if (selection !== state.selectionRequest || requestId !== imagePreview.navigationRequest || imagePreview.context !== context || !state.viewerOpen || imagePreview.phase === "closing") return false;
+    state.navigationCursor = null;
     state.imageError = record;
     state.failedImages.add(String(record.id));
     imagePreview.phase = "open";
@@ -201,40 +205,66 @@ async function singleGallerySelect(record, { focus = false } = {}) {
 }
 async function singleGalleryNavigate(direction, focusTarget = null) {
   const state = singleGalleryState;
-  if (!["open", "error"].includes(imagePreview.phase) || !state.viewerOpen) return;
+  if (!["open", "opening", "switching", "error"].includes(imagePreview.phase) || !state.viewerOpen) return;
   const context = imagePreview.context;
-  const epoch = state.epoch, selection = state.selectionRequest, intent = ++state.navigationIntent;
-  const current = () => epoch === state.epoch && selection === state.selectionRequest && intent === state.navigationIntent && state.viewerOpen;
+  const epoch = state.epoch, intent = ++state.navigationIntent;
+  const requestId = ++imagePreview.navigationRequest;
+  const valid = () => epoch === state.epoch && state.viewerOpen && imagePreview.context === context && imagePreview.phase !== "closing" && imagePreview.phase !== "closed";
+  const current = () => valid() && intent === state.navigationIntent;
   state.retryDirection = direction;
-  if (state.viewerRecord && singleGalleryLocation().index < 0) {
-    while (state.hasMore && Number(state.items.at(-1)?.id) > Number(state.viewerRecord.id)) {
-      const beforeCount = state.items.length;
+  imagePreview.phase = "switching";
+  ui.imagePreviewDialog.classList.add("is-navigating");
+  updatePreviewNavigation();
+  const previous = state.navigationCursor?.context === context && state.navigationCursor.epoch === epoch
+    ? state.navigationCursor.promise : Promise.resolve(state.viewerRecord);
+  const cursor = { context, epoch, promise: previous.then(async from => {
+    let position = () => state.items.findIndex(record => String(record.id) === String(from?.id));
+    while (from && position() < 0 && state.hasMore && Number(state.items.at(-1)?.id) > Number(from.id)) {
+      const count = state.items.length;
       await singleGalleryLoad({ more: true });
-      if (!current() || state.error || state.items.length === beforeCount) return;
+      if (!valid() || state.error || state.items.length === count) return from;
     }
-  }
-  let index = singleGalleryLocation().index + direction;
-  if (singleGalleryLocation().index < 0 && state.viewerRecord) {
-    index = direction > 0 ? state.items.findIndex(record => Number(record.id) < Number(state.viewerRecord.id)) : state.items.findLastIndex(record => Number(record.id) > Number(state.viewerRecord.id));
-  }
-  while (index >= 0) {
-    if (index >= state.items.length) {
-      if (!state.hasMore) break;
-      const beforeCount = state.items.length;
-      await singleGalleryLoad({ more: true });
-      if (!current() || state.error || state.items.length === beforeCount) return;
+    let index = position() + direction;
+    if (position() < 0 && from) index = direction > 0 ? state.items.findIndex(record => Number(record.id) < Number(from.id)) : state.items.findLastIndex(record => Number(record.id) > Number(from.id));
+    while (index >= 0 && valid()) {
+      if (index >= state.items.length) {
+        if (!state.hasMore) break;
+        const count = state.items.length;
+        await singleGalleryLoad({ more: true });
+        if (!valid() || state.error || state.items.length === count) return from;
+      }
+      const record = state.items[index];
+      if (!record) break;
+      if (state.failedImages.has(String(record.id))) { index += direction; continue; }
+      return record;
     }
-    const record = state.items[index];
-    if (!record) break;
-    if (state.failedImages.has(String(record.id))) { index += direction; continue; }
+    return from;
+  }) };
+  state.navigationCursor = cursor;
+  const record = await cursor.promise;
+  if (!current()) return;
+  if (record && !state.error && String(record.id) === String(state.viewerRecord?.id)) {
+    if (typeof restorePreviewCommittedImage === "function") await restorePreviewCommittedImage(requestId, context);
     if (!current()) return;
-    await singleGallerySelect(record);
-    if (!state.viewerOpen || imagePreview.context !== context || !["open", "error"].includes(imagePreview.phase)) return;
+    imagePreview.phase = "open";
+    ui.imagePreviewDialog.classList.remove("is-navigating");
+    state.retryDirection = null;
+    announcePreview(direction < 0 ? "已经是第一张图片" : "已经是最后一张图片");
+    updatePreviewNavigation(); return;
+  }
+  if (record && !state.error) {
+    await singleGallerySelect(record, { navigation: true });
+    if (!current() || !["open", "error"].includes(imagePreview.phase)) return;
     if (focusTarget?.isConnected && !focusTarget.disabled) focusTarget.focus({ preventScroll: true });
     else ui.imagePreviewImage.focus({ preventScroll: true });
     return;
   }
-  state.retryDirection = null;
+  state.navigationCursor = null;
+  if (typeof restorePreviewCommittedImage === "function") await restorePreviewCommittedImage(requestId, context);
+  if (!current()) return;
+  imagePreview.phase = "open";
+  ui.imagePreviewDialog.classList.remove("is-navigating");
+  if (!state.error) state.retryDirection = null;
   announcePreview(state.error || (direction < 0 ? "已经是第一张图片" : "已经是最后一张图片"));
   updatePreviewNavigation();
 }
@@ -377,7 +407,7 @@ function singleGalleryBatch(batch) {
 function singleGalleryDetailClosed() {
   const state = singleGalleryState;
   state.viewerOpen = false; state.viewerRecord = null; state.imageError = null;
-  state.selectionRequest++; state.navigationIntent++; state.retryDirection = null;
+  state.selectionRequest++; state.navigationIntent++; state.navigationCursor = null; state.retryDirection = null;
   singleGalleryRender();
 }
 async function singleGalleryDeleted(id) {

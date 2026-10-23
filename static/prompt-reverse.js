@@ -135,6 +135,14 @@ function promptReverseRenderParameters(parameters, targetId = "reverseParameters
   }
   document.getElementById(targetId).replaceChildren(...rows);
 }
+function promptDeskPositionIndicator({ immediate = false } = {}) {
+  if (typeof animateStudioIndicator !== "function") return;
+  const tabs = document.getElementById("promptDeskTabs");
+  const thumb = tabs?.querySelector(".prompt-desk-thumb");
+  const button = document.getElementById(promptReverseState.mode === "reverse" ? "promptDeskReverse" : "promptDeskRewrite");
+  if (!thumb || !button) return;
+  animateStudioIndicator(thumb, { x: button.offsetLeft - thumb.offsetLeft, width: button.offsetWidth }, { immediate });
+}
 function promptReverseRender() {
   if (!promptReverseState.ready) return;
   const reverse = promptReverseState.mode === "reverse", draft = promptReverseDraft(), runtime = promptReverseRuntime();
@@ -144,6 +152,7 @@ function promptReverseRender() {
   for (const [id, selected] of [["promptDeskRewrite", !reverse], ["promptDeskReverse", reverse]]) {
     get(id).setAttribute("aria-selected", String(selected)); get(id).tabIndex = selected ? 0 : -1;
   }
+  promptDeskPositionIndicator();
   const options = promptReverseState.options || {}, service = (options.services || []).find(item => item.id === draft.service);
   for (const method of PROMPT_REVERSE_METHODS) {
     const selected = draft.method === method;
@@ -197,10 +206,19 @@ function promptReverseRender() {
 }
 function promptReverseSetMode(mode, focus = false) {
   if (!["rewrite", "reverse"].includes(mode)) return;
+  const changed = promptReverseState.mode !== mode;
+  if (changed && typeof StudioMotion !== "undefined") {
+    StudioMotion.presence(document.getElementById(mode === "reverse" ? "promptRewritePanel" : "promptReversePanel"), false, { immediate: true });
+  }
   promptReverseState.mode = mode;
   document.getElementById("reverseInputDropZone").classList.toggle("is-dragging", false);
   promptReversePersist(); promptReverseRender();
-  if (focus) document.getElementById(mode === "reverse" ? "promptDeskReverse" : "promptDeskRewrite").focus();
+  if (changed && typeof StudioMotion !== "undefined") {
+    StudioMotion.presence(document.getElementById(mode === "reverse" ? "promptReversePanel" : "promptRewritePanel"), true, {
+      from: { opacity: 0, y: 4 }, response: .26, damping: 1,
+    });
+  }
+  if (focus) document.getElementById(mode === "reverse" ? "promptDeskReverse" : "promptDeskRewrite").focus({ preventScroll: true });
 }
 async function promptReverseLoadOptions() {
   const token = ++promptReverseState.optionsRequest;
@@ -490,6 +508,10 @@ function initializePromptReverse() {
   } catch { /* Existing rewrite drafts are independent. */ }
   promptReverseState.ready = true;
   const get = id => document.getElementById(id);
+  if (typeof ResizeObserver !== "undefined") {
+    promptReverseState.tabObserver = new ResizeObserver(() => promptDeskPositionIndicator({ immediate: true }));
+    promptReverseState.tabObserver.observe(get("promptDeskTabs"));
+  }
   for (const [id, mode] of [["promptDeskRewrite", "rewrite"], ["promptDeskReverse", "reverse"]]) {
     get(id).addEventListener("click", () => promptReverseSetMode(mode));
     get(id).addEventListener("keydown", event => {

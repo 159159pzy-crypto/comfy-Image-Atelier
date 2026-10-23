@@ -100,6 +100,25 @@ internal static class PromptAssistantTests
         await client.SaveModel("svc", "namespace/model", .4, .8, 1234, false, default);
         await client.SaveModel("svc", "namespace/model", .6, .7, 2345, true, default);
         Check(handler.ParameterWrites == 3 && (await client.Services(default)).Single(item => item.Id == "svc").Models.Single().MaxTokens == 2345, "model CRUD uses plugin parameter contract and verifies the result");
+        await client.SaveModel("svc", "another/model", .3, .9, 512, false, default);
+        await client.SetDefaultModel("svc", "another/model", default);
+        var defaultModels = (await client.Services(default)).Single(item => item.Id == "svc").Models;
+        Check(defaultModels.Count(item => item.IsDefault) == 1 && defaultModels.Single(item => item.IsDefault).Name == "another/model"
+            && defaultModels.Single(item => item.Name == "namespace/model").MaxTokens == 2345,
+            "setting default model preserves parameters and clears only peer default flags");
+        Check(handler.RemoteModelReads == 0 && !handler.Paths.Any(path => path.EndsWith("/services/current")),
+            "saving a default never fetches provider models or changes the plugin current provider");
+        handler.IgnoreDefaultWrites = true;
+        await Reject(() => client.SetDefaultModel("svc", "namespace/model", default), "default model success requires matching readback");
+        handler.IgnoreDefaultWrites = false;
+        await client.SetDefaultModel("svc", "namespace/model", default);
+        var defaultsBeforeInvalid = handler.DefaultWrites;
+        await Reject(() => client.SetDefaultModel("svc", "missing", default), "missing default model rejected before mutation");
+        await Reject(() => client.SetDefaultModel("missing", "namespace/model", default), "missing default service rejected before mutation");
+        await Reject(() => client.SetDefaultModel("svc", " ", default), "empty default model rejected before mutation");
+        await Reject(() => client.SetDefaultModel("svc", "namespace/model", default, (AssistantMode)99), "invalid default model type rejected before mutation");
+        Check(handler.DefaultWrites == defaultsBeforeInvalid, "invalid default choices make no default write");
+        await client.DeleteModel("svc", "another/model", default);
         var remote = await client.RemoteModels("svc", default);
         Check(remote.SequenceEqual(new[] { "remote/model" }), "remote model discovery is explicit and projected");
         await client.DeleteModel("svc", "namespace/model", default);
@@ -121,6 +140,11 @@ internal static class PromptAssistantTests
               "same-name text and vision models have independent parameters");
         Check(!JsonSerializer.Serialize(await client.Services(default, AssistantMode.Reverse)).Contains("secret-key"),
             "vision model projection excludes credentials");
+        await client.SetDefaultModel("svc", "shared/model", default, AssistantMode.Reverse);
+        await client.SetDefaultModel("svc", "shared/model", default);
+        Check((await client.Services(default)).Single(item => item.Id == "svc").Models.Single().IsDefault &&
+              (await client.Services(default, AssistantMode.Reverse)).Single(item => item.Id == "svc").Models.Single().IsDefault,
+              "text and vision default model choices are independent even for identical model names");
         await client.DeleteModel("svc", "shared/model", default, AssistantMode.Reverse);
         Check(!(await client.Services(default, AssistantMode.Reverse)).Single(item => item.Id == "svc").Models.Any() &&
               (await client.Services(default)).Single(item => item.Id == "svc").Models.Count == 1,
@@ -179,6 +203,19 @@ internal static class PromptAssistantTests
         try { await client.Services(default); throw new Exception("missing API failure"); }
         catch (InvalidOperationException ex) { Check(!ex.ToString().Contains("secret-key"), "upstream errors never echo provider secrets"); }
 
+        using var retryHandler = new AssistantHandler { FailNewServiceUpdate = true };
+        using var retryClient = new PromptAssistantClient("http://127.0.0.1:8188", retryHandler);
+        await retryClient.Connect(default);
+        string? retainedServiceId = null;
+        await Reject(() => retryClient.SaveService(null, "openai_compatible", "Wizard", "https://provider.invalid/v1", "new-secret", false, true,
+            default, id => retainedServiceId = id), "wizard retains an acknowledged service identity if a later save step fails");
+        Check(retainedServiceId == "new" && retryHandler.ServiceCreates == 1, "partially created service identity is delivered before later writes");
+        retryHandler.FailNewServiceUpdate = false;
+        await retryClient.SaveService(retainedServiceId, "openai_compatible", "Wizard", "https://provider.invalid/v1", null, false, true, default);
+        Check(retryHandler.ServiceCreates == 1 && (await retryClient.Services(default)).Count(item => item.Name == "Wizard") == 1
+            && retryHandler.LastServiceBody is not null && !retryHandler.LastServiceBody.ContainsKey("api_key"),
+            "retry updates the retained service without duplicate creation or clearing its key");
+
         var comfy = Path.Combine(work, "assistant-discovery");
         var plugin = Path.Combine(comfy, "custom_nodes", "Prompt-Assistant-main");
         Directory.CreateDirectory(Path.Combine(plugin, "node"));
@@ -215,8 +252,13 @@ internal static class PromptAssistantTests
         public readonly List<string> Paths = [];
         public JsonObject? LastServiceBody;
         public int ParameterWrites;
+        public int DefaultWrites;
+        public int ServiceCreates;
+        public int RemoteModelReads;
         public bool Fail;
         public bool MissingVision;
+        public bool IgnoreDefaultWrites;
+        public bool FailNewServiceUpdate;
         public JsonObject Document = JsonNode.Parse("""
             {"expand_prompts":{"one":{"name":"One","content":"old","category":"A","role":"system","showIn":["frontend","node"],"tags":["keep"],"future":{"setting":4}},"two":{"name":"Two","content":"unrelated","role":"system"}},
              "vision_prompts":{"vision":{"name":"Vision","content":"vision"}},"active_prompts":{"expand":"two","vision":"vision"},"future_root":{"keep":true}}
@@ -237,6 +279,7 @@ internal static class PromptAssistantTests
             if (path == "/services")
             {
                 if (request.Method == HttpMethod.Get) return Response(new JsonObject { ["success"] = true, ["services"] = services.DeepClone() });
+                ServiceCreates++;
                 var service = (JsonObject)body!.DeepClone();
                 service["id"] = "new";
                 service["llm_models"] = new JsonArray();
@@ -254,6 +297,8 @@ internal static class PromptAssistantTests
             var entry = services.OfType<JsonObject>().Single(item => item["id"]!.GetValue<string>() == id);
             if (parts.Length == 3)
             {
+                if (FailNewServiceUpdate && id == "new" && request.Method == HttpMethod.Put)
+                    return Response(new JsonObject { ["success"] = false, ["error"] = "new-secret" }, HttpStatusCode.BadRequest);
                 if (request.Method == HttpMethod.Delete) services.Remove(entry);
                 else
                 {
@@ -262,11 +307,15 @@ internal static class PromptAssistantTests
                 }
             }
             else if (request.Method == HttpMethod.Get)
+            {
+                RemoteModelReads++;
                 return Response(JsonNode.Parse("""{"success":true,"models":{"llm":["remote/model"],"vlm":["remote/vision"]}}""")!);
+            }
             else if (request.Method == HttpMethod.Post)
             {
                 var model = (JsonObject)body!.DeepClone();
                 model["name"] = model["model_name"]!.DeepClone();
+                model["is_default"] = entry[body["model_type"]!.GetValue<string>() + "_models"]!.AsArray().Count == 0;
                 entry[body["model_type"]!.GetValue<string>() + "_models"]!.AsArray().Add(model);
             }
             else if (request.Method == HttpMethod.Delete)
@@ -275,6 +324,13 @@ internal static class PromptAssistantTests
                 var modelList = entry[parts[4] + "_models"]!.AsArray();
                 var model = modelList.OfType<JsonObject>().Single(item => item["name"]!.GetValue<string>() == name);
                 modelList.Remove(model);
+            }
+            else if (path.EndsWith("/models/default"))
+            {
+                DefaultWrites++;
+                if (!IgnoreDefaultWrites)
+                    foreach (var model in entry[body!["model_type"]!.GetValue<string>() + "_models"]!.AsArray().OfType<JsonObject>())
+                        model["is_default"] = model["name"]!.GetValue<string>() == body["model_name"]!.GetValue<string>();
             }
             else
             {

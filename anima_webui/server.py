@@ -1086,7 +1086,33 @@ def create_app(
         body = await _json_body(request)
         seeds = body.pop("seeds", None)  # 复现历史图片时携带固定种子,不属于 settings
         if resource_paths is not None:
-            body = {**startup_defaults, **body}
+            supplied = body
+            launch_defaults = startup_defaults
+            if "model_profile" in supplied:
+                try:
+                    profile_defaults = model_profile_defaults(supplied["model_profile"])
+                except ValueError as error:
+                    raise WorkflowError(str(error)) from error
+                if profile_defaults["model_profile"] != startup_defaults["model_profile"]:
+                    for key in ("model_name", "clip_name", "vae_name"):
+                        profile_defaults[key] = templates.resource_paths.get(profile_defaults[key], profile_defaults[key])
+                    launch_defaults = {**startup_defaults, **profile_defaults}
+            body = {**launch_defaults, **supplied}
+            # These fields depend on the submitted mode and legacy values.
+            # Launcher defaults must not hide their absence before migration.
+            for key in ("steps", "dual", "krea_variance"):
+                if key not in supplied:
+                    body.pop(key, None)
+            legacy_single = supplied.get("single")
+            if ("upscalers" not in supplied and isinstance(legacy_single, dict)
+                    and isinstance(legacy_single.get("dlss"), dict)):
+                body["upscalers"] = {
+                    **startup_defaults["upscalers"],
+                    "nvidia": {
+                        **startup_defaults["upscalers"]["nvidia"],
+                        "dlss": dict(legacy_single["dlss"]),
+                    },
+                }
         body = generation_settings(body)
         # Validate the public shape before resource helpers traverse nested
         # fields. Keep the original payload so legacy migration semantics at

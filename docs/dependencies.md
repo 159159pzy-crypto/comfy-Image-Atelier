@@ -13,3 +13,5 @@
 1.1.0 把 aiohttp 下限及托管锁定版本提升至 **3.14.5**，包含 3.14.4 的资源耗尽、初始请求超时及 Secure Cookie 修复，以及后续 WebSocket 兼容修复；参见 [上游更新日志](https://docs.aiohttp.org/en/stable/changes.html) 和 [资源耗尽公告](https://github.com/aio-libs/aiohttp/security/advisories/GHSA-2g87-pp6c-29x5)。Pillow 下限与托管图片处理基线统一为 **12.3**，multidict 保持 **6.9.1**。源码升级需要重新安装依赖；若既有 ComfyUI 环境有冲突，请使用独立工作台虚拟环境，不要忽略依赖冲突。旧版 ZIP 不会因源码清单变更自动更新。
 
 包内 `THIRD-PARTY-NOTICES.txt` 与 `third-party-packages.json` 列出启动器、运行时和构建依赖的版本及许可，并说明并非所有列出的包都被再分发。模型、ComfyUI 和额外节点不在启动器 ZIP 中，使用时遵循各自许可。
+
+1.2.0 将源码图片处理下限和托管 Pillow 升级至 **13.0.0**，包含 [Pillow 13.0.0 安全修复](https://pillow.readthedocs.io/en/stable/releasenotes/13.0.0.html)。同时将托管 Brotli、certifi、GitPython 分别升级至 **1.2.1**、**2026.10.19**、**3.2.1**，修复本次发布审计发现的问题。没有扩大审计例外；既有环境仍需按其依赖约束更新，不能仅凭更新启动器认定原环境依赖已升级。

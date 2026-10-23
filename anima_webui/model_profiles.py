@@ -35,8 +35,8 @@ MODEL_PROFILES: dict[str, dict[str, Any]] = {
         "prompt_mode": "tag_or_natural",
         "defaults": {
             "steps": 30,
-            "cfg": 4.0,
-            "sampler_name": "er_sde",
+            "cfg": 8.0,
+            "sampler_name": "euler",
             "scheduler": "simple",
             "base_mode": "dual_sampler",
         },
@@ -65,9 +65,9 @@ MODEL_PROFILES: dict[str, dict[str, Any]] = {
         "clip_type": "krea2",
         "prompt_mode": "natural_language",
         "defaults": {
-            "steps": 30,
-            "cfg": 4.0,
-            "sampler_name": "er_sde",
+            "steps": 20,
+            "cfg": 8.0,
+            "sampler_name": "euler",
             "scheduler": "simple",
             "base_mode": "normal",
         },

@@ -1189,15 +1189,16 @@
     }
   },
   "701:1450": {
+    "class_type": "SesquiLatentUpscale",
     "inputs": {
-      "samples": [
+      "latent": [
         "701:1245",
         0
       ],
-      "upscale_method": "bilinear",
-      "scale_by": 1.0
+      "model_format": "Wan 2.1",
+      "scale": 1.0,
+      "half_precision": true
     },
-    "class_type": "LatentUpscaleBy",
     "_meta": {
       "title": "潜空间放大（双采样底图）"
     }
@@ -1438,15 +1439,16 @@
     }
   },
   "704:1064": {
+    "class_type": "SesquiLatentUpscale",
     "inputs": {
-      "samples": [
+      "latent": [
         "704:1182",
         0
       ],
-      "upscale_method": "bilinear",
-      "scale_by": 1.0
+      "model_format": "Wan 2.1",
+      "scale": 1.5,
+      "half_precision": true
     },
-    "class_type": "LatentUpscaleBy",
     "_meta": {
       "title": "潜空间放大"
     }
@@ -2099,17 +2101,22 @@
     }
   },
   "1432:1492": {
+    "class_type": "DLSS5NeuralRender",
     "inputs": {
-      "image": [
+      "images": [
         "1432:1418",
         0
       ],
-      "upscale_method": "lanczos",
-      "scale_by": 1.0
+      "style": "电影",
+      "intensity": 1.0,
+      "local_tone": 1.0,
+      "local_struct": 1.0,
+      "output_view": "处理",
+      "output_mix": 1.0,
+      "gpu_gen": "Auto"
     },
-    "class_type": "ImageScaleBy",
     "_meta": {
-      "title": "N卡放大输出"
+      "title": "N卡 DLSS 色彩处理"
     }
   },
   "691:158": {

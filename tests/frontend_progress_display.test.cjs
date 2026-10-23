@@ -1,3 +1,4 @@
+const createFrontendContext = require('./helpers/frontend-context.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -8,8 +9,8 @@ const source = fs.readFileSync(path.join(__dirname, '../static/app.js'), 'utf8')
 function setup() {
   const element = () => ({ hidden: false, textContent: '', style: {}, parentElement: { hidden: true } });
   const ui = Object.fromEntries(['batchState', 'progressCount', 'progressFill', 'sampleFill', 'sampleProgress', 'stopButton', 'startButton', 'batchError'].map(key => [key, element()]));
-  const ctx = vm.createContext({ ui, currentBatch: null, currentQueue: [], lastTerminalBatch: '',
-    renderQueue() {}, renderRandomPreview() {}, updateGenerationAvailability() {}, loadHistory() {} });
+  const ctx = createFrontendContext({ ui, currentBatch: null, currentQueue: [], lastTerminalBatch: '',
+    renderQueue() {}, updateGenerationAvailability() {}, loadHistory() {} });
   for (const name of ['batchProgressLabel', 'renderBatch']) {
     const start = source.indexOf(`function ${name}(`);
     vm.runInContext(source.slice(start, source.indexOf('\n}', start) + 2), ctx);
@@ -21,6 +22,31 @@ function batch(overrides = {}) {
     prompt_id: 'prompt-1', settings: { workbench: 'random', model_profile: 'krea2' }, ...overrides };
 }
 
+test('preview-bearing batches update controls and reach the single workbench without an extra image request', async () => {
+  for (const workbench of ['random', 'single']) {
+    const { ctx, ui } = setup();
+    const forwarded = [], requests = [];
+    ctx.singleWorkbenchBatch = value => forwarded.push(value);
+    ctx.fetch = async url => { requests.push(url); return { ok: false, status: 204 }; };
+    const current = batch({ preview_id: 4, preview_epoch: 1, preview_node: '701:1245',
+      progress_node: '701:1245', progress: { value: 3, max: 30 },
+      settings: { workbench, model_profile: 'krea2' } });
+
+    ctx.renderBatch(current);
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.equal(ctx.currentBatch, current);
+    assert.deepEqual(forwarded, [current]);
+    assert.equal(ui.batchState.textContent, '正在生成');
+    assert.equal(ui.progressCount.textContent, '0 / 40');
+    assert.equal(ui.sampleProgress.textContent, '第一段采样 3/30');
+    assert.equal(ui.sampleFill.style.transform, 'scaleX(0.1)');
+    assert.equal(ui.stopButton.disabled, false);
+    assert.equal(ui.startButton.textContent, '加入队列');
+    assert.deepEqual(requests, []);
+  }
+});
+
 test('Krea model loading and first-step wait remain visible without fabricated progress', () => {
   const { ctx, ui } = setup();
   for (const [node, label] of [['167:56', '正在准备模型'], ['1026:1011', '正在准备提示词'], ['701:1245', '第一段采样 · 等待首步']]) {
@@ -28,7 +54,7 @@ test('Krea model loading and first-step wait remain visible without fabricated p
     assert.equal(ui.sampleProgress.hidden, false);
     assert.equal(ui.sampleProgress.textContent, label);
     assert.equal(ui.sampleFill.parentElement.hidden, true);
-    assert.equal(ui.sampleFill.style.width, '0%');
+    assert.equal(ui.sampleFill.style.transform, 'scaleX(0)');
     assert.equal(ui.progressCount.textContent, '0 / 40');
   }
 });
@@ -39,20 +65,20 @@ test('both profiles show real steps, reset on second sampler and show decode bef
     const current = batch({ settings: { workbench: 'random', model_profile } });
     ctx.renderBatch({ ...current, progress_node: '701:1245', progress: { value: 12, max: 30 } });
     assert.equal(ui.sampleProgress.textContent, '第一段采样 12/30');
-    assert.equal(ui.sampleFill.style.width, '40%');
+    assert.equal(ui.sampleFill.style.transform, 'scaleX(0.4)');
     assert.equal(ui.sampleFill.parentElement.hidden, false);
     ctx.renderBatch({ ...current, progress_node: '701:1246' });
     assert.equal(ui.sampleProgress.textContent, '第二段采样 · 等待首步');
     assert.equal(ui.sampleFill.parentElement.hidden, true);
     ctx.renderBatch({ ...current, progress_node: '701:1246', progress: { value: 3, max: 15 } });
     assert.equal(ui.sampleProgress.textContent, '第二段采样 3/15');
-    assert.equal(ui.sampleFill.style.width, '20%');
+    assert.equal(ui.sampleFill.style.transform, 'scaleX(0.2)');
     ctx.renderBatch({ ...current, progress_node: '701:539' });
     assert.equal(ui.sampleProgress.textContent, '正在解码图像');
     assert.equal(ui.sampleFill.parentElement.hidden, true);
     ctx.renderBatch({ ...current, status: 'completed', completed: 40 });
     assert.equal(ui.sampleProgress.hidden, true);
-    assert.equal(ui.progressFill.style.width, '100%');
+    assert.equal(ui.progressFill.style.transform, 'scaleX(1)');
   }
 });
 

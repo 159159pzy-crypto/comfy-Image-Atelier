@@ -125,8 +125,7 @@ body[data-workbench="single"] .single-postprocess-card .sampling-stage > .switch
 }
 body[data-workbench="single"] .single-toggle-card .single-card-header > .single-card-title { font-size: 14px; font-weight: 600; line-height: 20px; }
 body[data-workbench="single"] .single-card-fields { margin-top: 16px; }
-body[data-workbench="single"] .single-toggle-card:has(> .single-card-header > input:checked),
-body[data-workbench="single"] .single-postprocess-card:has(> .sampling-stage > .switch-row > input:checked) {
+body[data-workbench="single"] .single-toggle-card:not([data-single-group="repair"]):has(> .single-card-header > input:checked) {
   border-color: color-mix(in srgb, var(--accent) 35%, var(--separator));
 }
 
@@ -175,7 +174,7 @@ body[data-workbench="single"] #singleParameterTabs {
   background: var(--chrome-solid);
   box-shadow: var(--shadow-sm), inset 0 1px 0 var(--edge);
   pointer-events: none;
-  transition: transform 220ms cubic-bezier(.2,.75,.25,1), width 220ms cubic-bezier(.2,.75,.25,1);
+  transition: none;
 }
 body[data-workbench="single"] #singleDualSection {
   grid-column: 1 / -1;
@@ -250,7 +249,6 @@ body[data-workbench="single"] .single-preview-heading { flex-shrink: 0; align-it
 body[data-workbench="single"] #singlePreviewStatus { text-align: right; line-height: 1.5; overflow-wrap: anywhere; }
 body[data-workbench="single"] .single-preview-canvas { flex: 1; height: auto; min-height: 0; padding: 8px; }
 .single-preview-hint { flex-shrink: 0; margin: 11px 0 0; text-align: center; color: var(--text-tertiary); font-size: 10px; line-height: 1.5; }
-body[data-workbench="single"] .command-deck .live-preview { display: none; }
 body[data-workbench="single"] .command-deck #batchError { position: static; white-space: normal; overflow-wrap: anywhere; font-size: 10px; margin-top: 7px; }
 #singleCommandSlot .command-deck { position: relative; inset: auto; transform: none; width: 100%; max-width: none; display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; padding: 17px; border-radius: 19px; animation: none; z-index: 3; }
 #singleCommandSlot .top-actions { display: grid; grid-template-columns: 1fr 2fr; gap: 8px; }
@@ -275,7 +273,7 @@ body[data-workbench="single"] .command-deck #batchError { position: static; whit
 .prompt-desk-switch button { position: relative; min-width: 78px; min-height: 32px; padding: 5px 13px; border: 0; border-radius: 999px; background: transparent; color: var(--text-secondary); font: inherit; font-size: 12px; }
 .prompt-desk-switch button[aria-selected="true"] { color: var(--text); font-weight: 600; }
 .prompt-desk-switch button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.prompt-desk-thumb { position: absolute; z-index: -1; inset: 3px auto 3px 3px; width: calc(50% - 3px); border-radius: 999px; background: var(--surface); box-shadow: var(--shadow-sm); transition: transform 220ms var(--spring); }
+.prompt-desk-thumb { position: absolute; z-index: -1; inset: 3px auto 3px 3px; width: calc(50% - 3px); border-radius: 999px; background: var(--surface); box-shadow: var(--shadow-sm); transition: none; }
 .prompt-desk-switch.is-reverse .prompt-desk-thumb { transform: translateX(100%); }
 .prompt-desk-panel { display: grid; min-width: 0; gap: 12px; }
 .prompt-desk-panel .field { margin: 0; }
@@ -348,4 +346,8 @@ body[data-workbench="single"] .command-deck #batchError { position: static; whit
   #singleParameterTabs [data-single-category],
   #singleTabIndicator { transition: none; }
   .prompt-desk-thumb, .image-input-zone { transition: none; }
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  #singleParameterTabs, .single-viewer-feedback,
+  body[data-workbench="single"] .mobile-tabs { background: var(--chrome-solid); backdrop-filter: none; -webkit-backdrop-filter: none; }
 }

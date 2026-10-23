@@ -43,7 +43,7 @@ function element() {
   };
 }
 
-function setup({ width = 4000, height = 3000, reducedMotion = false, devicePixelRatio = 1 } = {}) {
+function setup({ width = 4000, height = 3000, reducedMotion = false, devicePixelRatio = 1, motion = false } = {}) {
   const ui = Object.fromEntries(['imagePreviewImage', 'imagePreviewStage', 'imagePreviewDialog',
     'imagePreviewVeil', 'imagePreviewStatus', 'imagePreviewAnnouncement', 'imagePreviewPrevious',
     'imagePreviewNext', 'imagePreviewTitle', 'closeImagePreview', 'detailImage', 'detailDialog', 'historyCount'].map(name => [name, element()]));
@@ -70,6 +70,7 @@ function setup({ width = 4000, height = 3000, reducedMotion = false, devicePixel
     selectedRecord: { id: 1, filename: 'original.png' }, historyItems: [], historyCache: new Map(), historyPage: 1, historyPages: 1,
     Image: class { decode() { return Promise.resolve(); } }, Element: class {},
   });
+  if (motion) vm.runInContext(fs.readFileSync(path.join(__dirname, '../static/motion.js'), 'utf8'), ctx);
   vm.runInContext(source.slice(source.indexOf('const imagePreview ='), source.indexOf('let regenerationOptions =')), ctx);
   vm.runInContext(source.slice(source.indexOf('const IMAGE_PREVIEW_MAX_ZOOM'), source.indexOf('function collapseRegenerationDrawer')), ctx);
   const doubleClickStart = source.indexOf('ui.imagePreviewImage.addEventListener("dblclick"');
@@ -317,3 +318,106 @@ test('closing cancels queued renders and animation work and releases decoded pre
   h.frame(500); await flush();
   assert.equal(h.image.writes.length, writes, 'late animation callbacks cannot redraw a closed viewer');
 });
+
+for (const phase of ['opening', 'closing']) {
+  test(`pointer input takes over a ${phase} image at its live dimensions without waiting`, async () => {
+    const h = setup({ motion: true });
+    h.state.phase = phase;
+    h.image.style.width = '920px'; h.image.style.height = '690px';
+    h.image.style.transform = 'matrix(0.5, 0, 0, 0.5, 90, -40)';
+    h.image.style.clipPath = 'inset(10px 20px 30px 40px round 18px)';
+    h.image.style.opacity = '.65';
+    h.pointer('Down', 1, 520, 430, { pointerType: 'mouse' });
+    assert.equal(h.state.phase, 'open');
+    near(parseFloat(h.image.style.width), 460); near(parseFloat(h.image.style.height), 345);
+    near(h.state.x, 90); near(h.state.y, -40);
+    assert.doesNotMatch(h.image.style.transform, /scale\(/);
+    assert.equal(h.image.style.clipPath, 'inset(5px 10px 15px 20px round 9px)');
+    h.pointer('Move', 1, 521, 430, { pointerType: 'mouse' }); h.frame();
+    assert.ok(Math.abs(h.state.x - 90) < 1, 'the first pixel of dragging must not clamp the source geometry to center');
+    h.pointer('Up', 1, 521, 430, { pointerType: 'mouse' }); h.settle();
+    near(h.state.zoom, 1); near(h.state.x, 0); near(h.state.y, 0);
+  });
+}
+
+test('spring zoom keeps original pixel dimensions and retargets with continuous velocity', () => {
+  const h = setup({ motion: true });
+  h.doubleClick(); h.frame(16); h.frame(55);
+  const before = h.ctx.StudioMotion.snapshot(h.state, 'view');
+  const displayed = parseFloat(h.image.style.width);
+  h.ctx.setImagePreviewZoom(2, null, true);
+  const after = h.ctx.StudioMotion.snapshot(h.state, 'view');
+  near(after.value.zoom, before.value.zoom); near(after.velocity.zoom, before.velocity.zoom);
+  near(parseFloat(h.image.style.width), displayed);
+  h.settle(); near(parseFloat(h.image.style.width), 1840);
+  assert.doesNotMatch(h.image.style.transform, /scale\(/);
+});
+
+test('drag bounds resist overscroll then settle and a new drag cancels the old spring', () => {
+  const h = setup({ motion: true });
+  h.ctx.setImagePreviewZoom(2); h.settle();
+  h.pointer('Down', 1, 520, 430, { pointerType: 'mouse' });
+  h.pointer('Move', 1, 1520, 430, { pointerType: 'mouse' }); h.frame();
+  const bound = (h.state.width * h.state.zoom - h.stage.clientWidth) / 2;
+  assert.ok(h.state.x > bound && h.state.x <= bound + 36);
+  const visible = h.state.x;
+  h.pointer('Up', 1, 1520, 430, { pointerType: 'mouse' });
+  near(h.state.x, visible);
+  h.frame(16); h.frame(30);
+  const interrupted = h.state.x;
+  h.pointer('Down', 2, 520, 430, { pointerType: 'mouse' });
+  near(h.state.x, interrupted);
+  assert.equal(h.ctx.StudioMotion.snapshot(h.state, 'view').active, false);
+  h.pointer('Up', 2, 520, 430, { pointerType: 'mouse' }); h.settle();
+  near(h.state.x, bound);
+});
+
+test('shared-image spring reverses in flight and old exit cannot close the reopened viewer', async () => {
+  const h = setup({ motion: true });
+  let closes = 0;
+  h.state.phase = 'closing';
+  const from = h.ctx.imagePreviewFrame();
+  h.ctx.animateImagePreview(from, { ...from, transform: 'translate(80px, -40px) scale(.4)', opacity: .2 }, 300, () => closes++);
+  h.frame(16); h.frame(60);
+  const before = h.ctx.StudioMotion.snapshot(h.image, 'flight');
+  h.state.phase = 'opening';
+  h.ctx.animateImagePreview(h.ctx.liveImagePreviewFrame(), from, 300, () => { h.state.phase = 'open'; });
+  const after = h.ctx.StudioMotion.snapshot(h.image, 'flight');
+  near(before.value.width, after.value.width); near(before.velocity.width, after.velocity.width);
+  h.settle(); await flush();
+  assert.equal(closes, 0); assert.equal(h.state.phase, 'open');
+  near(parseFloat(h.image.style.width), 920);
+  assert.doesNotMatch(h.image.style.transform, /scale\(/);
+});
+
+for (const earlyClose of [false, true]) {
+  test(`fullscreen freezes its entering source and ${earlyClose ? 'resumes it after an early return' : 'settles it only behind the completed veil'}`, async () => {
+    const h = setup(), calls = [];
+    h.state.phase = 'closed'; h.state.context = null;
+    h.ui.detailDialog.style.transform = 'translate3d(0px, 7px, 0px) scale(.99)';
+    h.ui.detailDialog.style.opacity = '.6';
+    h.ctx.StudioMotion = {
+      snapshot: () => ({ active: true }), target: () => true,
+      freeze: (element, channel) => calls.push(['freeze', element, channel]),
+      dialog: (element, open, options) => { calls.push(['resume', element, open, options]); element.style.opacity = '1'; element.style.transform = ''; },
+    };
+    await h.ctx.openImagePreview(null, { kind: 'random' });
+    assert.equal(calls.length, 1); assert.equal(calls[0][0], 'freeze');
+    assert.equal(h.ui.detailDialog.style.opacity, '.6');
+    assert.equal(h.ui.detailDialog.style.transform, 'translate3d(0px, 7px, 0px) scale(.99)');
+    if (earlyClose) {
+      h.ctx.closeImagePreview();
+      assert.equal(calls.length, 1, 'return flight still targets the frozen source');
+      h.image.animations.at(-1).finish(); await flush();
+      assert.equal(h.state.phase, 'closed');
+    } else {
+      h.image.animations.at(-1).finish(); await flush();
+      assert.equal(h.state.phase, 'open'); assert.equal(calls.length, 1, 'a finished image alone cannot move a partly exposed parent');
+      h.ui.imagePreviewVeil.animations.at(-1).finish(); await flush();
+    }
+    assert.equal(calls.length, 2); assert.equal(calls[1][0], 'resume');
+    assert.equal(calls[1][3].immediate, !earlyClose);
+    assert.equal(h.state.sourcePresence, null);
+    assert.equal(h.ui.detailDialog.style.opacity, '1');
+  });
+}

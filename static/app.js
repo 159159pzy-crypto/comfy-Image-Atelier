@@ -17,6 +17,14 @@ const LEGACY_DRAFT_KEYS = ["anima-random-studio:draft:v3", "anima-random-studio:
 const DRAFT_BACKUP_KEY_PREFIX = "anima-random-studio:draft:backup:v";
 const VIEW_KEY = "anima-random-studio:pool-view:v1";
 const THEME_KEY = "anima-random-studio:theme:v1";
+// Keep native dialog semantics while sharing one reversible visual lifecycle.
+function motionDialog(element, open, options = {}) {
+  if (typeof StudioMotion !== "undefined") return StudioMotion.dialog(element, open, {
+    ...(element.id === "detailDialog" ? { restoreFocus: false } : {}), ...options,
+  });
+  if (open) { if (!element.open) element.showModal(); }
+  else element.close(options.returnValue);
+}
 const GROUP_TREE_KEY = "anima-random-studio:favorite-tree:v1";
 const CUSTOM_GROUP_TREE_KEY = "anima-random-studio:custom-group-tree:v1";
 const INTERNAL_HIRES_PERCENT = 45;
@@ -34,7 +42,6 @@ const ui = Object.fromEntries(
     "progressCount",
     "progressFill",
     "batchError",
-    "livePreview",
     "sampleProgress",
     "sampleFill",
     "queueBadge",
@@ -342,6 +349,14 @@ const ui = Object.fromEntries(
     "refreshResourceClassification",
     "base_mode",
     "sampler_name",
+    "base_denoise",
+    "krea_variance_enabled",
+    "latent_model_format",
+    "nvidia_dlss_style",
+    "nvidia_dlss_intensity",
+    "nvidia_dlss_local_tone",
+    "nvidia_dlss_local_struct",
+    "nvidia_dlss_output_mix",
     "scheduler",
     "latent_upscale_enabled",
     "latent_upscale_scale",
@@ -417,7 +432,6 @@ const ui = Object.fromEntries(
 
 // 0.2.0 新增控件按可选处理:旧版 index.html 缺少它们时只隐藏对应功能,不阻断整个界面。
 const OPTIONAL_CONTROLS = new Set([
-  "livePreview",
   "sampleProgress",
   "sampleFill",
   "queueBadge",
@@ -460,7 +474,9 @@ const imagePreview = {
   phase: "closed", token: 0, zoom: 1, fit: 1, x: 0, y: 0, width: 0, height: 0,
   renderFrame: null, zoomFrame: null,
   animation: null, pointers: new Map(), gesture: null, tap: null, backdropPointer: null,
-  navigationRequest: 0, preloaded: new Map(), swipe: null,
+  navigationRequest: 0, navigationCursor: null, preloaded: new Map(), swipe: null,
+  panSpring: null, revealAnimation: null, unclamped: false, committedSrc: "",
+  sourcePresence: null, veilAnimation: null, veilCovered: false,
   context: null,
 };
 let regenerationOptions = null;
@@ -531,7 +547,6 @@ let loraInventoryRequest = 0;
 let loraInventoryProfile = "";
 let kreaPromptPoolRequest = 0;
 let customGroupsRequest = 0;
-let kreaPoolBackdropTimer = null;
 let importPreview = null;
 let editingGroup = null;
 let childGroupParent = null;
@@ -854,10 +869,10 @@ function normalizeProfileId(value) {
 }
 function defaultUpscalers() {
   return {
-    latent: { enabled: false, scale_by: 1.5, upscale_method: "bilinear", model_format: "Wan 2.1", half_precision: true, second_sampler: { enabled: true, steps: 20, cfg: 4, sampler_name: "er_sde", scheduler: "simple", denoise: 1 } },
+    latent: { enabled: false, scale_by: 1.5, upscale_method: "sesqui", model_format: "Wan 2.1", half_precision: true, second_sampler: { enabled: true, steps: 20, cfg: 8, sampler_name: "euler", scheduler: "simple", denoise: 1 } },
     seedvr2: { enabled: false, model_name: "", vae_name: "", scale_by: 2, weight_dtype: "default", color_correction_method: "lab", sampler: { steps: 1, cfg: 1, sampler_name: "euler", scheduler: "simple", denoise: 1 }, encode: { tile_size: 512, overlap: 64, temporal_size: 64, temporal_overlap: 8 }, decode: { tile_size: 512, overlap: 128, temporal_size: 4096, temporal_overlap: 8 } },
-    nvidia: { enabled: false, resize_type: "scale by multiplier", scale: 2, quality: "ULTRA" },
-    face_refine: { enabled: false, steps: 8, cfg_scale: 1, sampler: "er_sde", scheduler: "simple", denoise_strength: 0.3, face_selection: 0, detection_confidence: 0.75, manual_rotation: "None", processing_resolution: 1024, enable_pre_upscale: true, upscaler_model: "Fast 4x (Lanczos)", crop_padding: 1.6, face_positive_prompt: "", replace_positive_prompt: false, face_negative_prompt: "", replace_negative_prompt: false, exclusions: "", blend_softness: 8, mask_expansion: 2, sampling_mask_blur_size: 21, sampling_mask_blur_strength: 1, enable_color_correction: true, enable_segmentation: true, enable_differential_diffusion: true, enable_lightness_rescue: true, enable_final_refinement: true, offload_models_to_cpu: true },
+    nvidia: { enabled: false, resize_type: "scale by multiplier", scale: 2, quality: "ULTRA", dlss: { style: "电影", intensity: 1, local_tone: 1, local_struct: 1, output_mix: 1, output_view: "处理", gpu_gen: "Auto" } },
+    face_refine: { enabled: false, steps: 8, cfg_scale: 1, sampler: "res_2m_ode", scheduler: "beta57", denoise_strength: 0.3, face_selection: 0, detection_confidence: 0.75, manual_rotation: "None", processing_resolution: 1024, enable_pre_upscale: true, upscaler_model: "Fast 4x (Lanczos)", crop_padding: 1.6, face_positive_prompt: "", replace_positive_prompt: false, face_negative_prompt: "", replace_negative_prompt: false, exclusions: "", blend_softness: 8, mask_expansion: 2, sampling_mask_blur_size: 21, sampling_mask_blur_strength: 1, enable_color_correction: true, enable_segmentation: true, enable_differential_diffusion: true, enable_lightness_rescue: true, enable_final_refinement: true, offload_models_to_cpu: true },
   };
 }
 function normalizeUpscalers(value, fallback = null) {
@@ -866,7 +881,7 @@ function normalizeUpscalers(value, fallback = null) {
   for (const key of Object.keys(base)) {
     if (raw[key] && typeof raw[key] === "object") {
       base[key] = { ...base[key], ...raw[key] };
-      for (const nested of ["second_sampler", "sampler", "encode", "decode"]) {
+      for (const nested of ["second_sampler", "sampler", "encode", "decode", "dlss"]) {
         if (base[key][nested] && typeof base[key][nested] === "object" && raw[key][nested] && typeof raw[key][nested] === "object")
           base[key][nested] = { ...base[key][nested], ...raw[key][nested] };
       }
@@ -1069,6 +1084,12 @@ function normalizeSettings(raw) {
   const profile = profileConfig(merged.model_profile);
   if (!merged.upscalers.seedvr2.model_name) merged.upscalers.seedvr2.model_name = profile.seedvr2_model || "";
   if (!merged.upscalers.seedvr2.vae_name) merged.upscalers.seedvr2.vae_name = profile.seedvr2_vae || "";
+  merged.base_denoise = raw?.base_denoise ?? 1;
+  merged.krea_variance = clone(raw?.krea_variance || (raw?.workbench === "single" ? raw?.single?.krea_variance : null) || { ...(typeof sharedKreaDefaults === "function" ? sharedKreaDefaults() : {}), enabled: raw?.workbench !== "single" && merged.model_profile === "krea2" });
+  if (raw?.single?.dlss && !raw?.upscalers?.nvidia?.dlss) {
+    merged.upscalers.nvidia.dlss = { ...merged.upscalers.nvidia.dlss, ...raw.single.dlss };
+    delete merged.upscalers.nvidia.dlss.enabled;
+  }
   merged.manual_artist = canonicalArtists(merged.manual_artist);
   return merged;
 }
@@ -1116,6 +1137,8 @@ function setUpscalerControls(upscalers) {
   setControl("latent_second_sampler_enabled", upscalers?.latent?.second_sampler?.enabled);
   setSamplerValues(SEED_SAMPLER_IDS, upscalers?.seedvr2?.sampler);
   setTileValues(upscalers?.seedvr2);
+  if (ui.latent_model_format) ensureSelectValue(ui.latent_model_format, upscalers?.latent?.model_format || "Wan 2.1");
+  if (typeof NVIDIA_DLSS_KEYS !== "undefined") for (const key of NVIDIA_DLSS_KEYS) setControl(`nvidia_dlss_${key}`, upscalers?.nvidia?.dlss?.[key]);
   applyNodeResourceControls();
 }
 function readUpscalerControls() {
@@ -1125,6 +1148,8 @@ function readUpscalerControls() {
   if (typeof sharedParameterState !== "undefined") Object.assign(result.latent, sharedParameterState.latent);
   result.seedvr2.sampler = readSamplerValues(SEED_SAMPLER_IDS);
   Object.assign(result.seedvr2, readTileValues());
+  if (ui.latent_model_format) result.latent.model_format = typeof sharedLatentFormat === "function" ? sharedLatentFormat(ui.latent_model_format.value, sharedParameterState.latent.model_format) : ui.latent_model_format.value;
+  if (typeof NVIDIA_DLSS_KEYS !== "undefined") result.nvidia.dlss = { ...defaultUpscalers().nvidia.dlss, ...sharedParameterState.dlss, ...Object.fromEntries(NVIDIA_DLSS_KEYS.map(key => [key, controlValue(`nvidia_dlss_${key}`)])) };
   return result;
 }
 
@@ -1173,6 +1198,7 @@ function applySettings(raw, { useProfileDraft = false } = {}) {
   const upscalers = normalizeUpscalers(settings.upscalers);
   setUpscalerControls(upscalers);
   if (typeof setRandomDualControls === "function") setRandomDualControls(settings);
+  if (typeof sharedParametersApply === "function") sharedParametersApply(settings, raw);
   restoreProfileDraft(settings.model_profile, useProfileDraft ? (profileDrafts[settings.model_profile] || settings) : settings, { preferStored: useProfileDraft });
   const storedProfileState = profileDrafts[settings.model_profile];
   if (useProfileDraft && storedProfileState) {
@@ -1202,6 +1228,8 @@ function readSettings() {
     character_detail: ui.character_detail.value, manual_artist: normalizedArtist, quality_prompt: ui.quality_prompt.value,
     extra_prompt: ui.extra_prompt.value, negative_prompt: ui.negative_prompt.value, width: Number(ui.width.value), height: Number(ui.height.value),
     steps: Number(ui.steps.value), cfg: Number(ui.cfg.value), sampler_name: ui.sampler_name.value, scheduler: ui.scheduler.value,
+    base_denoise: Number(ui.base_denoise?.value ?? 1),
+    krea_variance: typeof sharedParameterState !== "undefined" ? { ...sharedParameterState.krea_variance, enabled: Boolean(ui.krea_variance_enabled?.checked) } : { enabled: false },
     model_profile: currentProfile(), model_name: ui.model_name.value,
     krea_prompt_pool: {
       enabled: currentProfile() === "krea2" && ui.krea_prompt_pool_enabled.checked,
@@ -1497,6 +1525,7 @@ function generationClassificationIssues(settings = null) {
     const reason = loraSelectionIssue(item.filename);
     if (reason) issues.push(`${item.filename}：${reason}`);
   }
+  if (typeof sharedParameterResourceIssues === "function") issues.push(...sharedParameterResourceIssues(settings || { model_profile: currentProfile(), krea_variance: { enabled: ui.krea_variance_enabled?.checked }, upscalers: { face_refine: { enabled: ui.face_refine_enabled?.checked, sampler: ui.face_sampler?.value, scheduler: ui.face_scheduler?.value } } }));
   return [...new Set(issues)];
 }
 function updateGenerationAvailability() {
@@ -1662,7 +1691,7 @@ function renderLoraCatalog() {
 }
 async function openLoraDialog() {
   ui.loraSearch.value = "";
-  ui.loraDialog.showModal();
+  motionDialog(ui.loraDialog, true);
   await loadLoraInventory();
   renderLoraCatalog();
 }
@@ -1709,7 +1738,7 @@ function openLoraTriggerDialog(configuredItem) {
   const source = normalizeTriggerWords(inventoryItem.source_trigger_words || []);
   ui.loraSourceTriggerWords.textContent = source.length ? source.join(", ") : "无";
   ui.resetLoraTriggers.disabled = !inventoryItem.trigger_override;
-  ui.loraTriggerDialog.showModal();
+  motionDialog(ui.loraTriggerDialog, true);
 }
 function queueLoraTriggerWrite(profile, filename, send) {
   const queues = queueLoraTriggerWrite.queues ||= new Map();
@@ -1744,7 +1773,7 @@ async function saveLoraTriggers(event) {
     renderLoras();
     renderLoraCatalog();
     schedulePersist();
-    ui.loraTriggerDialog.close();
+    motionDialog(ui.loraTriggerDialog, false);
     toast(value.trigger_words?.length ? "LoRA 触发词已保存" : "已禁用该 LoRA 的自动触发词");
   } catch (error) {
     if (!currentEditor()) return;
@@ -1768,7 +1797,7 @@ async function resetLoraTriggers() {
     renderLoras();
     renderLoraCatalog();
     schedulePersist();
-    ui.loraTriggerDialog.close();
+    motionDialog(ui.loraTriggerDialog, false);
     toast("已恢复 LoRA Manager 原始触发词");
   } catch (error) {
     if (!currentEditor()) return;
@@ -1781,87 +1810,23 @@ async function resetLoraTriggers() {
 }
 
 let currentQueue = [];
-const randomPreviewState = { identity: "", epoch: 0, request: 0, pending: false, requested: "", live: null };
-function invalidateRandomPreview(clearImage = false) {
-  const state = randomPreviewState;
-  ++state.request; state.pending = false; state.requested = "";
-  if (clearImage) {
-    if (state.live?.src) URL.revokeObjectURL(state.live.src);
-    state.live = null;
-    ui.livePreview.removeAttribute("src");
-    ui.livePreview.hidden = true;
-  }
-}
-function renderRandomPreview(batch) {
-  if (!ui.livePreview) return;
-  const state = randomPreviewState;
-  const active = batch && ["running", "stopping"].includes(batch.status) && batch.kind !== "prompt_preview";
-  const identity = active ? `${batch.id}:${batch.prompt_id || ""}` : "";
-  const epoch = Number(batch?.preview_epoch || 0);
-  if (identity !== state.identity || !active) {
-    invalidateRandomPreview(true); state.identity = identity;
-  } else if (epoch !== state.epoch) invalidateRandomPreview();
-  state.epoch = epoch;
-  if (active) void fetchRandomPreview(batch);
-}
-async function fetchRandomPreview(batch) {
-  const state = randomPreviewState, identity = `${batch.id}:${batch.prompt_id || ""}`, epoch = Number(batch.preview_epoch || 0);
-  const key = `${identity}:${epoch}:${batch.preview_id}`;
-  if (!batch.prompt_id || !batch.preview_id || state.pending || state.requested === key) return;
-  if (state.live?.epoch === epoch && Number(batch.preview_id) <= state.live.previewId) return;
-  state.pending = true; state.requested = key;
-  const requestId = ++state.request;
-  const valid = () => requestId === state.request && identity === state.identity && epoch === state.epoch;
-  let source = "", committed = false;
-  try {
-    const query = new URLSearchParams({ batch_id: batch.id, prompt_id: batch.prompt_id, v: String(batch.preview_id) });
-    if (batch.preview_node) query.set("node_id", batch.preview_node);
-    if (batch.preview_epoch != null) query.set("epoch", String(epoch));
-    const response = await fetch(`/api/batches/current/preview?${query}`, { cache: "no-store" });
-    if (!response.ok || response.status === 204 || !valid()) return;
-    for (const [header, expected] of [["X-Preview-Batch-Id", batch.id], ["X-Preview-Prompt-Id", batch.prompt_id], ["X-Preview-Node-Id", batch.preview_node]]) {
-      const returned = response.headers.get(header);
-      if (returned && expected != null && returned !== String(expected)) return;
-    }
-    if (batch.preview_epoch != null && response.headers.get("X-Preview-Epoch") !== String(epoch)) return;
-    const previewId = Number(response.headers.get("X-Preview-Id")) || batch.preview_id;
-    if (previewId < Number(batch.preview_id) || (state.live?.epoch === epoch && previewId <= state.live.previewId)) return;
-    const body = await response.blob();
-    if (!body.type.startsWith("image/") || !valid()) return;
-    source = URL.createObjectURL(body);
-    const image = new Image(); image.src = source;
-    await image.decode();
-    if (!valid()) return;
-    const previous = state.live?.src;
-    state.live = { src: source, epoch, previewId }; source = ""; committed = true;
-    state.requested = `${identity}:${epoch}:${previewId}`;
-    ui.livePreview.src = state.live.src; ui.livePreview.hidden = false;
-    if (previous) URL.revokeObjectURL(previous);
-  } catch {
-    // Keep the last decoded frame while an intermediate frame is unavailable.
-  } finally {
-    if (source) URL.revokeObjectURL(source);
-    if (!committed && valid()) state.requested = "";
-    if (requestId === state.request) state.pending = false;
-  }
-}
 let submitInFlight = false;
 function renderBatchPayload(payload) {
   renderBatch(payload.batch, payload.queue || []);
 }
-let queuePanelCloseTimer = null;
 function setQueuePanelOpen(open) {
   if (!ui.queuePanel) return;
-  clearTimeout(queuePanelCloseTimer);
-  if (open) {
-    ui.queuePanel.hidden = false;
-    // Force a frame so the transition plays from the collapsed style.
-    ui.queuePanel.getBoundingClientRect();
-    ui.queuePanel.classList.add("open");
-  } else {
-    ui.queuePanel.classList.remove("open");
-    queuePanelCloseTimer = setTimeout(() => { ui.queuePanel.hidden = true; }, 320);
-  }
+  ui.queuePanel.classList.toggle("open", open);
+  ui.queueBadge?.setAttribute("aria-expanded", String(open));
+  if (typeof StudioMotion === "undefined") { ui.queuePanel.hidden = !open; return; }
+  StudioMotion.presence(ui.queuePanel, open, {
+    from: { opacity: 0, y: 8, scale: .985 },
+    render: value => {
+      const inline = Boolean(ui.queuePanel.closest("#singlePreviewRail"));
+      ui.queuePanel.style.opacity = value.opacity;
+      ui.queuePanel.style.transform = `${inline ? "" : "translateX(-50%) "}translateY(${value.y}px) scale(${value.scale})`;
+    },
+  });
 }
 
 function renderQueue(queue) {
@@ -1872,32 +1837,38 @@ function renderQueue(queue) {
   if (queue.length === 0) {
     setQueuePanelOpen(false);
   }
-  ui.queuePanel.replaceChildren(
-    ...queue.map((entry) => {
-      const row = document.createElement("div");
-      row.className = "queue-row";
-      const label = document.createElement("span");
+  const existing = new Map([...ui.queuePanel.children].map(row => [row.dataset.queueId, row]));
+  const retained = new Set();
+  queue.forEach((entry, index) => {
+      const key = String(entry.queue_id);
+      let row = existing.get(key);
+      if (!row) {
+        row = document.createElement("div");
+        row.className = "queue-row";
+        row.dataset.queueId = key;
+        const label = document.createElement("span");
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "icon-button dark";
+        remove.title = "移出队列";
+        remove.setAttribute("aria-label", "移出队列");
+        remove.textContent = "×";
+        remove.addEventListener("click", async () => {
+          try {
+            const payload = await request(`/api/batches/queue/${row.dataset.queueId}`, { method: "DELETE" });
+            renderQueue(payload.queue || []);
+          } catch (error) { toast(error.message); }
+        });
+        row.append(label, remove);
+      }
+      retained.add(row);
+      const label = row.firstElementChild;
       label.textContent = entry.kind === "prompt_preview"
         ? `${entry.position}. ${entry.prompt_kind === "reverse" || entry.settings?.kind === "reverse" ? "图像反推" : "提示词重写"} · ${entry.model_name}`
         : `${entry.position}. ${entry.count} 张 · ${entry.model_name}`;
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "icon-button dark";
-      remove.title = "移出队列";
-      remove.setAttribute("aria-label", "移出队列");
-      remove.textContent = "×";
-      remove.addEventListener("click", async () => {
-        try {
-          const payload = await request(`/api/batches/queue/${entry.queue_id}`, { method: "DELETE" });
-          renderQueue(payload.queue || []);
-        } catch (error) {
-          toast(error.message);
-        }
-      });
-      row.append(label, remove);
-      return row;
-    }),
-  );
+      if (ui.queuePanel.children[index] !== row) ui.queuePanel.insertBefore(row, ui.queuePanel.children[index] || null);
+  });
+  for (const row of existing.values()) if (!retained.has(row)) row.remove();
 }
 function batchProgressLabel(batch) {
   if (batch.stage === "prompt_processing") return batch.settings?.kind === "reverse" ? "正在反推图像提示词" : "正在处理提示词";
@@ -1920,6 +1891,17 @@ function batchProgressLabel(batch) {
   if (node) return "正在处理生成任务";
   if (batch.progress_node === "") return "正在收取生成结果";
   return batch.prompt_id ? "等待生成进度" : "正在提交任务";
+}
+function setProgressValue(fill, ratio, active, stage) {
+  if (!fill) return;
+  const value = Math.max(0, Math.min(1, Number(ratio) || 0));
+  // A new batch/sampler is a new measurement, not backwards progress.
+  const reset = fill.motionStage !== stage || value === 0;
+  fill.motionStage = stage;
+  fill.style.width = "100%";
+  fill.style.transition = reset ? "none" : "";
+  fill.style.transform = `scaleX(${value})`;
+  fill.parentElement?.classList?.toggle("is-active", Boolean(active));
 }
 function renderBatch(batch, queue = currentQueue) {
   currentBatch = batch;
@@ -1945,7 +1927,7 @@ function renderBatch(batch, queue = currentQueue) {
   };
   ui.batchState.textContent = batch ? labels[batch.status] || batch.status : "等待任务";
   ui.progressCount.textContent = `${completed} / ${total}`;
-  ui.progressFill.style.width = total ? `${Math.min(100, (completed / total) * 100)}%` : "0%";
+  setProgressValue(ui.progressFill, total ? completed / total : 0, active, batch?.id || "");
   // 单张采样进度(来自 ComfyUI websocket,尽力而为;旧版页面缺控件时跳过)
   if (ui.sampleFill && ui.sampleProgress) {
     const progress = active ? batch.progress : null;
@@ -1954,13 +1936,12 @@ function renderBatch(batch, queue = currentQueue) {
     ui.sampleProgress.textContent = active ? batchProgressLabel(batch) : "";
     if (progress && progress.max > 0) {
       sampleTrack.hidden = false;
-      ui.sampleFill.style.width = `${Math.min(100, (progress.value / progress.max) * 100)}%`;
+      setProgressValue(ui.sampleFill, progress.value / progress.max, active, `${batch.id}:${batch.progress_node}`);
     } else {
       sampleTrack.hidden = true;
-      ui.sampleFill.style.width = "0%";
+      setProgressValue(ui.sampleFill, 0, false, `${batch?.id}:${batch?.progress_node}`);
     }
   }
-  renderRandomPreview(batch);
   ui.stopButton.disabled = !active || batch.status === "stopping";
   // 运行中仍可加入队列，但分类有效性与连接状态共用同一守卫。
   updateGenerationAvailability();
@@ -1970,6 +1951,13 @@ function renderBatch(batch, queue = currentQueue) {
   ui.batchError.textContent = batchMessage;
   if (batch && !promptOnly && !active && lastTerminalBatch !== `${batch.id}:${batch.status}:${completed}`) {
     lastTerminalBatch = `${batch.id}:${batch.status}:${completed}`;
+    if (batch.status === "completed" && typeof StudioMotion !== "undefined") {
+      StudioMotion.spring(ui.progressCount, "complete", { opacity: 1 }, {
+        initial: { opacity: .45 }, response: .22,
+        onUpdate: value => { ui.progressCount.style.opacity = value.opacity; },
+        onComplete: () => ui.progressCount.style.removeProperty("opacity"),
+      });
+    }
     if (batch.settings?.workbench === "single") {
       historyCache.clear();
       if (typeof singleWorkbenchActive === "function" && singleWorkbenchActive()) historyDirty = true;
@@ -2040,13 +2028,14 @@ async function pollBatch() {
 function card(record, index) {
   const article = document.createElement("article");
   article.className = "image-card is-loading";
-  article.style.animationDelay = `${Math.min(index * 25, 250)}ms`;
+  article.dataset.recordId = String(record.id);
+  article.record = record;
   const button = document.createElement("button");
   button.type = "button";
   button.dataset.recordId = String(record.id);
   button.setAttribute("aria-label", `查看 ${record.filename || "生成结果"}`);
   button.innerHTML = `<img loading="lazy" decoding="async" fetchpriority="low" src="/api/images/${record.id}/thumbnail" alt="Anima 生成结果"><span class="image-failure" hidden>图片加载失败</span><div class="card-copy"><strong>${escapeHtml(record.filename)}</strong><span>#${record.sequence} · Seed ${record.sample_seed}</span></div>`;
-  button.addEventListener("click", () => openDetail(record));
+  button.addEventListener("click", () => openDetail(article.record));
   const image = button.querySelector("img");
   const markLoaded = () => {
     article.classList.remove("is-loading");
@@ -2064,6 +2053,12 @@ function card(record, index) {
     else markFailed({ target: image });
   }
   article.append(button);
+  if (typeof IntersectionObserver !== "undefined") {
+    card.visibilityObserver ||= new IntersectionObserver(entries => {
+      for (const entry of entries) entry.target.classList.toggle("is-offscreen", !entry.isIntersecting);
+    }, { rootMargin: "100px" });
+    card.visibilityObserver.observe(article);
+  }
   return article;
 }
 let historyRequest = 0;
@@ -2074,12 +2069,40 @@ function cacheHistoryPage(data) {
 
 function renderHistoryPage(data) {
   historyDirty = false;
+  const previousPage = historyPage;
   historyPage = Number(data.page) || 1;
   historyPages = Number(data.pages) || 1;
   historyItems = Array.isArray(data.items) ? data.items : [];
   cacheHistoryPage(data);
-  for (const image of ui.gallery.querySelectorAll("img")) image.removeAttribute("src");
-  ui.gallery.replaceChildren(...historyItems.map(card));
+  const existing = new Map([...ui.gallery.children].map(node => [node.dataset.recordId, node]));
+  const retained = new Set();
+  historyItems.forEach((record, index) => {
+    let node = existing.get(String(record.id));
+    const fresh = !node;
+    if (!node) node = card(record, index);
+    node.record = record;
+    const button = node.querySelector("button");
+    button.setAttribute("aria-label", `查看 ${record.filename || "生成结果"}`);
+    node.querySelector(".card-copy strong").textContent = record.filename || "生成结果";
+    node.querySelector(".card-copy span").textContent = `#${record.sequence} · Seed ${record.sample_seed}`;
+    retained.add(node);
+    if (ui.gallery.children[index] !== node) ui.gallery.insertBefore(node, ui.gallery.children[index] || null);
+    if (fresh && previousPage === historyPage && existing.size && typeof StudioMotion !== "undefined") {
+      node.hidden = true;
+      StudioMotion.presence(node, true, { from: { opacity: 0, y: 6 }, manageInert: false });
+    }
+  });
+  for (const node of existing.values()) if (!retained.has(node)) {
+    card.visibilityObserver?.unobserve(node);
+    node.remove();
+  }
+  if (previousPage !== historyPage && typeof StudioMotion !== "undefined") {
+    StudioMotion.spring(ui.gallery, "page", { opacity: 1 }, {
+      initial: { opacity: .4 }, response: .2,
+      onUpdate: value => { ui.gallery.style.opacity = value.opacity; },
+      onComplete: () => ui.gallery.style.removeProperty("opacity"),
+    });
+  }
   ui.emptyState.hidden = historyItems.length > 0;
   const historyUnavailable = config.storage_status?.history?.available === false;
   ui.emptyState.querySelector("strong").textContent = historyUnavailable ? "历史记录暂不可用" : "等待第一张作品";
@@ -2177,7 +2200,7 @@ function openDetail(record, { origin = "random", returnFocus = null } = {}) {
   detailContext = { origin, returnFocus: returnFocus || document.activeElement };
   updateDetailRecord(record);
   updatePreviewNavigation();
-  if (!ui.detailDialog.open) ui.detailDialog.showModal();
+  motionDialog(ui.detailDialog, true);
 }
 function suppressDetailReturnFocus() {
   if (detailContext) detailContext.returnFocus = null;
@@ -2193,6 +2216,7 @@ function finishDetailClose() {
   regenerationOptions = null;
   detailContext = null;
   if (context?.origin === "single" && typeof singleGalleryDetailClosed === "function") singleGalleryDetailClosed();
+  if (document.querySelector?.("dialog[open]")) return;
   if (context?.returnFocus?.isConnected && !context.returnFocus.disabled) context.returnFocus.focus({ preventScroll: true });
   else if (context?.returnFocus && context.origin === "single") document.getElementById("singlePreview")?.focus({ preventScroll: true });
   else if (context?.returnFocus && context.origin === "random") {
@@ -2246,12 +2270,13 @@ function previewNeighborAvailable(direction) {
 
 function updatePreviewNavigation() {
   const active = Boolean((currentPreviewRecord() || imagePreview.context?.kind === "single") && imagePreview.phase !== "closed");
-  const locked = ["loading", "switching", "closing"].includes(imagePreview.phase);
+  const locked = ["loading", "closing"].includes(imagePreview.phase);
+  const navigating = imagePreview.phase === "switching";
   const previousAvailable = active && previewNeighborAvailable(-1);
   const nextAvailable = active && previewNeighborAvailable(1);
-  ui.imagePreviewPrevious.disabled = locked || !previousAvailable;
-  ui.imagePreviewNext.disabled = locked || !nextAvailable;
-  ui.imagePreviewDialog.classList.toggle("has-navigation", active && (previousAvailable || nextAvailable));
+  ui.imagePreviewPrevious.disabled = locked || (!navigating && !previousAvailable);
+  ui.imagePreviewNext.disabled = locked || (!navigating && !nextAvailable);
+  ui.imagePreviewDialog.classList.toggle("has-navigation", active && (navigating || previousAvailable || nextAvailable));
 }
 
 function announcePreview(message) {
@@ -2368,6 +2393,13 @@ function previewNeighbor(direction, location = selectedHistoryLocation()) {
 }
 
 function playPreviewAnimation(from, to, duration) {
+  if (typeof StudioMotion !== "undefined" && StudioMotion.spring) {
+    const animation = springPreviewFrames(from, to, duration);
+    return animation.finished.then(result => {
+      if (imagePreview.animation === animation) imagePreview.animation = null;
+      return !result.cancelled;
+    });
+  }
   cancelImagePreviewAnimation();
   const reduce = imagePreviewReducedMotion();
   const animation = ui.imagePreviewImage.animate(
@@ -2389,13 +2421,12 @@ async function switchPreviewImage(record, requestId, { src = null, label = null 
   const context = imagePreview.context;
   const current = () => requestId === imagePreview.navigationRequest && imagePreview.context === context;
   const previousRecord = currentPreviewRecord();
-  const previousSrc = ui.imagePreviewImage.currentSrc || ui.imagePreviewImage.src;
+  const previousSrc = imagePreview.committedSrc || ui.imagePreviewImage.currentSrc || ui.imagePreviewImage.src;
   const image = src ? await new Promise(resolve => { const value = new Image(); value.src = src; value.decode().then(() => resolve(value)).catch(() => resolve(null)); }) : await preloadRecord(record);
   if (!image || !current() || imagePreview.phase !== "switching") return false;
   const fadeOut = await playPreviewAnimation(liveImagePreviewFrame(), { ...liveImagePreviewFrame(), opacity: 0 }, previewMotion("--motion-fast", 150));
   if (!fadeOut || !current() || imagePreview.phase !== "switching") return false;
 
-  setCurrentPreviewRecord(record);
   ui.imagePreviewImage.src = src || `/api/images/${record.id}`;
   ui.imagePreviewImage.alt = `生成结果全尺寸预览：${label || record?.filename || "当前图片"}`;
   ui.imagePreviewImage.hidden = false;
@@ -2423,7 +2454,11 @@ async function switchPreviewImage(record, requestId, { src = null, label = null 
   if (!current() || imagePreview.phase !== "switching") return false;
   // Commit the detail at the same time the decoded new bitmap is displayed.
   // Esc during its entry animation must return to this image's details.
-  if (decoded) imagePreview.context?.onRecordCommit?.(record);
+  if (decoded) {
+    setCurrentPreviewRecord(record);
+    imagePreview.committedSrc = src || `/api/images/${record.id}`;
+    imagePreview.context?.onRecordCommit?.(record);
+  }
   layoutImagePreview();
   const target = imagePreviewFrame();
   const enter = imagePreviewReducedMotion() ? { ...target, opacity: 0 } : { ...target, opacity: 0, transform: `${target.transform} scale(.985)` };
@@ -2431,6 +2466,7 @@ async function switchPreviewImage(record, requestId, { src = null, label = null 
   const entered = await playPreviewAnimation(enter, target, previewMotion("--motion-medium", 240));
   if (!entered || !current() || imagePreview.phase !== "opening") return false;
   imagePreview.phase = "open";
+  if (imagePreview.sourcePresence) completeImagePreviewSourcePresence();
   ui.imagePreviewTitle.textContent = decoded ? (label || record?.filename || "全尺寸图片预览") : previousRecord?.filename || "全尺寸图片预览";
   ui.imagePreviewStatus.hidden = true;
   announcePreview(previewPositionLabel(record));
@@ -2442,65 +2478,77 @@ async function switchPreviewImage(record, requestId, { src = null, label = null 
 
 async function navigatePreview(direction, focusTarget = null) {
   if (imagePreview.context?.kind === "single") return imagePreview.context.history.navigate(direction, focusTarget);
+  if (!["open", "opening", "switching"].includes(imagePreview.phase)) return;
   const context = imagePreview.context;
   const restoreFocus = () => {
     if (!focusTarget?.isConnected) return;
     if (!focusTarget.disabled) focusTarget.focus({ preventScroll: true });
     else ui.imagePreviewImage.focus({ preventScroll: true });
   };
-  if (imagePreview.phase !== "open") return;
   const requestId = ++imagePreview.navigationRequest;
+  const current = () => requestId === imagePreview.navigationRequest && imagePreview.context === context && imagePreview.phase !== "closing" && imagePreview.phase !== "closed";
+  // Resolve navigation against the preceding intent, not the last decoded image.
+  // Page reads serialize cursor discovery; only the newest intent paints a bitmap.
+  const previous = imagePreview.navigationCursor?.context === context
+    ? imagePreview.navigationCursor.promise : Promise.resolve(selectedHistoryLocation());
+  const cursor = { context, promise: previous.then(async location => {
+    const target = previewNeighbor(direction, location);
+    if (!target) return { ...location, boundary: true };
+    if (target.record) return { page: location.page, items: location.items, index: location.index + direction, data: location.data };
+    const data = await loadHistoryPageForPreview(target.page);
+    const items = Array.isArray(data.items) ? data.items : [];
+    return items.length ? { page: target.page, items, index: direction > 0 ? 0 : items.length - 1, data } : { ...location, boundary: true };
+  }) };
+  imagePreview.navigationCursor = cursor;
   ui.imagePreviewDialog.classList.add("is-navigating");
-  const location = selectedHistoryLocation();
-  let target = previewNeighbor(direction, location);
-  if (!target) {
-    announcePreview(direction < 0 ? "已经是第一张图片" : "已经是最后一张图片");
-    ui.imagePreviewDialog.classList.remove("is-navigating");
-    updatePreviewNavigation();
-    restoreFocus();
-    return;
-  }
-  if (!target.record) {
-    imagePreview.phase = "switching";
-    announcePreview("正在加载相邻图片…");
-    try {
-      target.data = await loadHistoryPageForPreview(target.page);
-      const items = Array.isArray(target.data.items) ? target.data.items : [];
-      target.record = items[direction > 0 ? 0 : items.length - 1];
-    } catch (error) {
-      if (requestId !== imagePreview.navigationRequest || imagePreview.context !== context) return;
+  imagePreview.phase = "switching";
+  updatePreviewNavigation();
+  try {
+    const target = await cursor.promise;
+    if (!current()) return;
+    const record = target.items[target.index];
+    if (!record) throw new Error(direction < 0 ? "已经是第一张图片" : "已经是最后一张图片");
+    if (target.boundary && String(record.id) === String(currentPreviewRecord().id)) {
       imagePreview.phase = "open";
       ui.imagePreviewDialog.classList.remove("is-navigating");
-      updatePreviewNavigation();
-      announcePreview(error.message || "相邻图片加载失败");
-      restoreFocus();
-      return;
+      announcePreview(direction < 0 ? "已经是第一张图片" : "已经是最后一张图片");
+      updatePreviewNavigation(); restoreFocus(); return;
     }
-    if (!target.record || requestId !== imagePreview.navigationRequest || imagePreview.context !== context) {
-      if (requestId === imagePreview.navigationRequest && imagePreview.context === context) {
-        imagePreview.phase = "open";
-        ui.imagePreviewDialog.classList.remove("is-navigating");
-        updatePreviewNavigation();
-        restoreFocus();
-      }
-      return;
-    }
-    cacheHistoryPage(target.data);
-  } else {
-    imagePreview.phase = "switching";
-  }
-  updatePreviewNavigation();
-  const switched = await switchPreviewImage(target.record, requestId);
-  if (requestId !== imagePreview.navigationRequest || imagePreview.context !== context) return;
-  if (switched && target.data) renderHistoryPage(target.data);
-  if (switched) restoreFocus();
-  if (!switched && requestId === imagePreview.navigationRequest && imagePreview.phase === "switching") {
+    const switched = await switchPreviewImage(record, requestId);
+    if (!current()) return;
+    if (!switched) throw new Error("图片加载失败，请重试");
+    if (target.data) renderHistoryPage(target.data);
+    if (target.boundary) announcePreview(direction < 0 ? "已经是第一张图片" : "已经是最后一张图片");
+    restoreFocus();
+  } catch (error) {
+    if (!current()) return;
+    imagePreview.navigationCursor = null;
+    if (typeof restorePreviewCommittedImage === "function") await restorePreviewCommittedImage(requestId, context);
+    if (!current()) return;
     imagePreview.phase = "open";
     ui.imagePreviewDialog.classList.remove("is-navigating");
-    announcePreview("图片加载失败，请重试");
+    announcePreview(error.message || "相邻图片加载失败");
     updatePreviewNavigation();
     restoreFocus();
   }
+}
+
+async function restorePreviewCommittedImage(requestId, context) {
+  const record = currentPreviewRecord();
+  if (!record) return;
+  const source = imagePreview.committedSrc || `/api/images/${record.id}`;
+  cancelImagePreviewAnimation();
+  if (ui.imagePreviewImage.getAttribute("src") !== source) {
+    ui.imagePreviewImage.src = source;
+    await ui.imagePreviewImage.decode().catch(() => null);
+  }
+  if (requestId !== imagePreview.navigationRequest || context !== imagePreview.context || imagePreview.phase === "closing" || imagePreview.phase === "closed") return;
+  ui.imagePreviewImage.hidden = false;
+  ui.imagePreviewImage.style.opacity = "1";
+  ui.imagePreviewImage.style.clipPath = "inset(0px round 18px)";
+  ui.imagePreviewImage.alt = `生成结果全尺寸预览：${record.filename || "当前图片"}`;
+  ui.imagePreviewTitle.textContent = record.filename || "全尺寸图片预览";
+  layoutImagePreview();
 }
 
 function imagePreviewFrame() {
@@ -2508,9 +2556,14 @@ function imagePreviewFrame() {
   return { width: style.width, height: style.height, transform: style.transform || "none", clipPath: "inset(0px round 18px)", opacity: 1 };
 }
 
-function cancelImagePreviewAnimation() {
-  imagePreview.animation?.cancel();
-  imagePreview.animation = null;
+function cancelImagePreviewAnimation({ keepReveal = false, keepFlight = false } = {}) {
+  if (!keepFlight) { imagePreview.animation?.cancel(); imagePreview.animation = null; }
+  imagePreview.panSpring?.cancel();
+  imagePreview.panSpring = null;
+  if (!keepReveal) {
+    imagePreview.revealAnimation?.cancel();
+    imagePreview.revealAnimation = null;
+  }
   if (imagePreview.zoomFrame != null) cancelAnimationFrame(imagePreview.zoomFrame);
   imagePreview.zoomFrame = null;
   if (imagePreview.renderFrame != null) {
@@ -2521,6 +2574,14 @@ function cancelImagePreviewAnimation() {
 }
 
 function animateImagePreview(from, to, duration, onFinish = () => {}) {
+  if (typeof StudioMotion !== "undefined" && StudioMotion.spring) {
+    const animation = springPreviewFrames(from, to, duration);
+    animation.finished.then(result => {
+      if (result.cancelled || imagePreview.animation !== animation) return;
+      imagePreview.animation = null; onFinish();
+    });
+    return;
+  }
   cancelImagePreviewAnimation();
   const reduce = imagePreviewReducedMotion();
   const animation = ui.imagePreviewImage.animate(
@@ -2538,18 +2599,156 @@ function animateImagePreview(from, to, duration, onFinish = () => {}) {
 // Fade the veil from its live opacity so interrupting a fade never jumps.
 function animateImagePreviewVeil(toOpacity, duration, onFinish = () => {}) {
   const veil = ui.imagePreviewVeil;
+  if (toOpacity === 0) imagePreview.veilCovered = false;
   const from = getComputedStyle(veil).opacity;
   veil.getAnimations().forEach(animation => animation.cancel());
   const animation = veil.animate([{ opacity: from }, { opacity: toOpacity }], {
     duration: imagePreviewReducedMotion() ? 120 : duration, fill: "both",
   });
-  animation.finished.then(onFinish).catch(() => {});
+  imagePreview.veilAnimation = animation;
+  animation.finished.then(() => {
+    if (imagePreview.veilAnimation !== animation) return;
+    imagePreview.veilCovered = toOpacity === 1;
+    completeImagePreviewSourcePresence();
+    onFinish();
+  }).catch(() => {});
   return animation;
+}
+
+function freezeImagePreviewSourcePresence() {
+  imagePreview.sourcePresence = null;
+  if (typeof StudioMotion === "undefined" || !StudioMotion.snapshot?.(ui.detailDialog, "presence")?.active) return;
+  StudioMotion.freeze(ui.detailDialog, "presence");
+  imagePreview.sourcePresence = { element: ui.detailDialog, context: imagePreview.context };
+}
+
+function completeImagePreviewSourcePresence(force = false) {
+  const source = imagePreview.sourcePresence;
+  if (!source || source.context !== imagePreview.context) return;
+  const covered = imagePreview.veilCovered && ["open", "error"].includes(imagePreview.phase);
+  if (!force && !covered) return;
+  imagePreview.sourcePresence = null;
+  if (!source.element.open || StudioMotion.target?.(source.element) === false) return;
+  // Under the full veil the parent can settle immediately. An early dismissal
+  // returns to the same frozen source, then lets its presence resume naturally.
+  StudioMotion.dialog(source.element, true, { immediate: covered, restoreFocus: false });
 }
 
 function liveImagePreviewFrame() {
   const style = getComputedStyle(ui.imagePreviewImage);
   return { width: style.width, height: style.height, transform: style.transform, clipPath: style.clipPath, opacity: style.opacity };
+}
+
+function numericPreviewFrame(frame) {
+  let sx = 1, sy = 1, x = 0, y = 0;
+  const transform = frame.transform || "none";
+  if (typeof DOMMatrixReadOnly === "function") {
+    const matrix = new DOMMatrixReadOnly(transform === "none" ? undefined : transform);
+    sx = Math.hypot(matrix.a, matrix.b) || 1; sy = Math.hypot(matrix.c, matrix.d) || 1;
+    x = matrix.e; y = matrix.f;
+  } else {
+    const matrix = transform.match(/^matrix\(([^)]+)\)/)?.[1].split(",").map(Number);
+    if (matrix) { sx = Math.hypot(matrix[0], matrix[1]) || 1; sy = Math.hypot(matrix[2], matrix[3]) || 1; x = matrix[4]; y = matrix[5]; }
+    else {
+      const translate = transform.match(/translate(?:3d)?\(([-\d.]+)px,\s*([-\d.]+)px/);
+      if (translate) { x = Number(translate[1]); y = Number(translate[2]); }
+      sx = sy = Number(transform.match(/scale\(([-\d.]+)\)/)?.[1] || 1);
+    }
+  }
+  const clip = (frame.clipPath || "").match(/inset\(([^)]*)\)/)?.[1] || "0px round 18px";
+  const [insets, rounded] = clip.split(/\s+round\s+/), values = insets.trim().split(/\s+/).map(value => parseFloat(value) || 0);
+  const [top = 0, right = top, bottom = top, left = right] = values;
+  return { width: (parseFloat(frame.width) || imagePreview.width) * sx, height: (parseFloat(frame.height) || imagePreview.height) * sy,
+    x, y, top: top * sy, right: right * sx, bottom: bottom * sy, left: left * sx,
+    radius: (parseFloat(rounded) || 0) * sx, opacity: Number(frame.opacity ?? 1) };
+}
+
+function springPreviewFrames(from, to, duration) {
+  const reduced = imagePreviewReducedMotion(), target = numericPreviewFrame(to);
+  const initial = reduced ? { ...target, opacity: Number(from.opacity ?? 0) } : numericPreviewFrame(from);
+  cancelImagePreviewAnimation({ keepFlight: Boolean(imagePreview.animation?.studioFlight) });
+  const animation = StudioMotion.spring(ui.imagePreviewImage, "flight", target, {
+    initial, response: Math.max(.16, Math.min(.36, duration / 1000)), damping: .92, immediate: reduced,
+    onUpdate: value => {
+      const style = ui.imagePreviewImage.style;
+      // Actual dimensions are retained throughout the flight; no magnified
+      // low-resolution transform layer survives into zoom/pan interaction.
+      style.width = `${Math.max(1, value.width)}px`; style.height = `${Math.max(1, value.height)}px`;
+      style.transform = `translate(${value.x}px, ${value.y}px)`;
+      style.opacity = String(clampPreview(value.opacity, 0, 1));
+      style.clipPath = `inset(${Math.max(0, value.top)}px ${Math.max(0, value.right)}px ${Math.max(0, value.bottom)}px ${Math.max(0, value.left)}px round ${Math.max(0, value.radius)}px)`;
+    },
+  });
+  animation.studioFlight = true;
+  imagePreview.animation = animation;
+  return animation;
+}
+
+// Adopt the rendered geometry before cancelling a shared-image flight. The
+// bitmap keeps its visible size while pointer input takes ownership immediately.
+function beginImagePreviewInteraction() {
+  if (!["opening", "closing"].includes(imagePreview.phase) || ui.imagePreviewImage.hidden) return imagePreview.phase === "open";
+  const frame = liveImagePreviewFrame();
+  let scale = 1, x = imagePreview.x, y = imagePreview.y;
+  if (typeof DOMMatrixReadOnly === "function") {
+    const matrix = new DOMMatrixReadOnly(frame.transform === "none" ? undefined : frame.transform);
+    scale = Math.hypot(matrix.a, matrix.b) || 1; x = matrix.e; y = matrix.f;
+  } else {
+    const matrix = frame.transform.match(/^matrix\(([^)]+)\)/)?.[1].split(",").map(Number);
+    if (matrix) { scale = Math.hypot(matrix[0], matrix[1]) || 1; x = matrix[4]; y = matrix[5]; }
+    else {
+      const translate = frame.transform.match(/translate(?:3d)?\(([-\d.]+)px,\s*([-\d.]+)px/);
+      if (translate) { x = Number(translate[1]); y = Number(translate[2]); }
+      scale = Number(frame.transform.match(/scale\(([-\d.]+)\)/)?.[1] || 1);
+    }
+  }
+  ++imagePreview.token;
+  cancelImagePreviewAnimation();
+  imagePreview.phase = "open";
+  imagePreview.zoom = Math.max(.01, (parseFloat(frame.width) || imagePreview.width) * scale / imagePreview.width);
+  imagePreview.x = x; imagePreview.y = y; imagePreview.unclamped = true;
+  applyImagePreviewTransform();
+  const clipPath = frame.clipPath.replace(/([-\d.]+)px/g, (_, number) => `${Number(number) * scale}px`);
+  ui.imagePreviewImage.style.clipPath = clipPath;
+  ui.imagePreviewImage.style.opacity = frame.opacity;
+  // Only clipping/opacity finish their reveal; the hand owns size and position.
+  const reveal = ui.imagePreviewImage.animate([
+    { clipPath, opacity: frame.opacity }, { clipPath: "inset(0px round 18px)", opacity: 1 },
+  ], { duration: imagePreviewReducedMotion() ? 0 : 140, easing: "ease-out", fill: "both" });
+  imagePreview.revealAnimation = reveal;
+  reveal.finished.then(() => {
+    if (imagePreview.revealAnimation !== reveal) return;
+    ui.imagePreviewImage.style.opacity = "1";
+    ui.imagePreviewImage.style.clipPath = "inset(0px round 18px)";
+    imagePreview.revealAnimation = null; reveal.cancel();
+  }).catch(() => {});
+  animateImagePreviewVeil(1, 140);
+  updatePreviewNavigation();
+  imagePreview.context?.onReady?.();
+  completeImagePreviewSourcePresence();
+  return true;
+}
+
+function settleImagePreviewBounds() {
+  const from = { zoom: imagePreview.zoom, x: imagePreview.x, y: imagePreview.y };
+  imagePreview.zoom = clampPreview(imagePreview.zoom, 1, imagePreviewMaxZoom());
+  clampImagePreviewOffset();
+  const target = { zoom: imagePreview.zoom, x: imagePreview.x, y: imagePreview.y };
+  imagePreview.unclamped = false;
+  if (imagePreviewReducedMotion() || typeof StudioMotion === "undefined" || !StudioMotion.spring) {
+    applyImagePreviewTransform(); return;
+  }
+  if (Object.keys(target).every(key => Math.abs(target[key] - from[key]) < .001)) { applyImagePreviewTransform(); return; }
+  Object.assign(imagePreview, from); imagePreview.unclamped = true;
+  const spring = StudioMotion.spring(imagePreview, "view", target, {
+    initial: from, response: .32, damping: .85,
+    onUpdate: value => {
+      if (imagePreview.phase !== "open") return;
+      Object.assign(imagePreview, value); applyImagePreviewTransform();
+    },
+    onComplete: () => { imagePreview.panSpring = null; imagePreview.unclamped = false; applyImagePreviewTransform(); },
+  });
+  imagePreview.panSpring = spring.active ? spring : null;
 }
 
 function clampImagePreviewOffset() {
@@ -2560,7 +2759,7 @@ function clampImagePreviewOffset() {
 }
 
 function applyImagePreviewTransform() {
-  clampImagePreviewOffset();
+  if (!imagePreview.unclamped) clampImagePreviewOffset();
   // Resize the original bitmap's layout box at every zoom level. A permanent
   // scale() layer can keep magnifying the raster created at the initial fit size.
   ui.imagePreviewImage.style.width = imagePreview.width * imagePreview.zoom + "px";
@@ -2644,6 +2843,9 @@ async function openImagePreview(event, context = null) {
   const record = currentPreviewRecord();
   const source = imagePreview.context?.src || (record ? `/api/images/${record.id}` : "");
   if (!record || !source || !ui.detailDialog.open) return;
+  // Keep the clicked bitmap exactly where it is while its parent is entering.
+  // The source is released only behind the veil or after an early return flight.
+  if (imagePreview.phase === "closed") freezeImagePreviewSourcePresence();
 
   // Reverse-reopen: if the exit animation is still in flight, bounce back from
   // the live frame instead of ignoring the click (previously felt like a hang).
@@ -2665,6 +2867,7 @@ async function openImagePreview(event, context = null) {
         imagePreview.phase = "open";
         updatePreviewNavigation();
         imagePreview.context?.onReady?.();
+        completeImagePreviewSourcePresence();
       }
     });
     return;
@@ -2672,6 +2875,10 @@ async function openImagePreview(event, context = null) {
   if (imagePreview.phase !== "closed") return;
 
   const token = ++imagePreview.token;
+  imagePreview.navigationCursor = null;
+  imagePreview.committedSrc = "";
+  imagePreview.unclamped = false;
+  imagePreview.veilCovered = false;
   imagePreview.phase = "loading";
   imagePreview.zoom = 1;
   imagePreview.x = imagePreview.y = 0;
@@ -2701,6 +2908,9 @@ async function openImagePreview(event, context = null) {
     if (imagePreview.phase === "closing") return;
     ui.imagePreviewStatus.hidden = true;
     ui.imagePreviewImage.hidden = false;
+    imagePreview.committedSrc = source;
+    ui.imagePreviewImage.style.opacity = "1";
+    ui.imagePreviewImage.style.clipPath = "inset(0px round 18px)";
     layoutImagePreview();
     imagePreview.phase = "opening";
     animateImagePreview(imagePreviewSourceFrame(), imagePreviewFrame(), previewMotion("--motion-slow", 360), () => {
@@ -2710,11 +2920,13 @@ async function openImagePreview(event, context = null) {
         announcePreview(previewPositionLabel(record));
         preloadPreviewNeighbors();
         imagePreview.context?.onReady?.();
+        completeImagePreviewSourcePresence();
       }
     });
   } catch {
     if (token !== imagePreview.token) return;
     imagePreview.phase = "error";
+    completeImagePreviewSourcePresence();
     ui.imagePreviewStatus.textContent = "图片加载失败，请关闭后重试。";
     imagePreview.context?.onError?.(record);
   }
@@ -2722,6 +2934,7 @@ async function openImagePreview(event, context = null) {
 
 function finishImagePreviewClose(restoreFocus = true) {
   const context = imagePreview.context;
+  if (imagePreview.sourcePresence) completeImagePreviewSourcePresence(true);
   clearPreviewCache();
   imagePreview.pendingReturnFocus = restoreFocus ? context : null;
   ++imagePreview.token;
@@ -2730,6 +2943,11 @@ function finishImagePreviewClose(restoreFocus = true) {
   imagePreview.pointers.clear();
   imagePreview.gesture = imagePreview.tap = imagePreview.backdropPointer = imagePreview.swipe = null;
   imagePreview.navigationRequest++;
+  imagePreview.navigationCursor = null;
+  imagePreview.unclamped = false;
+  imagePreview.committedSrc = "";
+  imagePreview.veilAnimation = null;
+  imagePreview.veilCovered = false;
   ui.imagePreviewVeil.getAnimations().forEach(animation => animation.cancel());
   ui.imagePreviewImage.classList.remove("is-interacting", "is-zoomed");
   ui.imagePreviewImage.hidden = true;
@@ -2762,14 +2980,19 @@ function closeImagePreview({ immediate = false, restoreFocus = true } = {}) {
   if (imagePreview.phase === "closed") return;
   if (immediate) return finishImagePreviewClose(restoreFocus);
   if (imagePreview.phase === "closing") return;
+  const live = typeof liveImagePreviewFrame === "function" ? liveImagePreviewFrame() : null;
   if (imagePreview.phase === "open") cancelImagePreviewAnimation();
   ++imagePreview.token; // Invalidate an in-flight decode before starting the exit.
   ++imagePreview.navigationRequest;
+  imagePreview.navigationCursor = null;
+  imagePreview.pointers?.clear();
+  imagePreview.gesture = imagePreview.tap = imagePreview.swipe = null;
+  ui.imagePreviewImage.classList?.remove("is-interacting");
   const hasImage = !ui.imagePreviewImage.hidden;
   imagePreview.phase = "closing";
   if (hasImage) {
     animateImagePreviewVeil(0, previewMotion("--motion-medium", 240));
-    animateImagePreview(liveImagePreviewFrame(), imagePreviewSourceFrame(), previewMotion("--motion-medium", 240), () => finishImagePreviewClose(restoreFocus));
+    animateImagePreview(live || liveImagePreviewFrame(), imagePreviewSourceFrame(), previewMotion("--motion-medium", 240), () => finishImagePreviewClose(restoreFocus));
   } else {
     animateImagePreviewVeil(0, previewMotion("--motion-medium", 240), () => finishImagePreviewClose(restoreFocus));
   }
@@ -2778,9 +3001,11 @@ function closeImagePreview({ immediate = false, restoreFocus = true } = {}) {
 // Zoom uses real layout dimensions, including every frame of a double-click.
 // State is the currently displayed tween position so an interruption never jumps.
 function setImagePreviewZoom(nextZoom, focalPoint = null, smooth = false) {
+  if (["opening", "closing"].includes(imagePreview.phase)) beginImagePreviewInteraction();
   if (imagePreview.phase !== "open" || !Number.isFinite(nextZoom)) return;
-  if (smooth || imagePreview.zoomFrame != null || imagePreview.animation) cancelImagePreviewAnimation();
+  if (imagePreview.zoomFrame != null || imagePreview.animation || (!smooth && imagePreview.panSpring)) cancelImagePreviewAnimation({ keepReveal: true });
   const from = { zoom: imagePreview.zoom, x: imagePreview.x, y: imagePreview.y };
+  imagePreview.unclamped = false;
   const previousZoom = imagePreview.zoom;
   imagePreview.zoom = clampPreview(nextZoom, 1, imagePreviewMaxZoom());
   if (imagePreview.zoom === 1) {
@@ -2798,6 +3023,18 @@ function setImagePreviewZoom(nextZoom, focalPoint = null, smooth = false) {
   }
   const to = { zoom: imagePreview.zoom, x: imagePreview.x, y: imagePreview.y };
   Object.assign(imagePreview, from);
+  if (typeof StudioMotion !== "undefined" && StudioMotion.spring) {
+    const spring = StudioMotion.spring(imagePreview, "view", to, {
+      initial: from, response: .3, damping: 1,
+      onUpdate: value => {
+        if (imagePreview.phase !== "open") return;
+        Object.assign(imagePreview, value); applyImagePreviewTransform();
+      },
+      onComplete: () => { imagePreview.panSpring = null; },
+    });
+    imagePreview.panSpring = spring.active ? spring : null;
+    return;
+  }
   const start = performance.now();
   const step = now => {
     imagePreview.zoomFrame = null;
@@ -2828,15 +3065,11 @@ function beginImagePreviewGesture() {
 }
 
 function imagePreviewPointerDown(event) {
-  if (imagePreview.phase === "closing" && (event.pointerType !== "mouse" || event.button === 0)) {
-    openImagePreview(); // reverse-reopen from the live frame
-    return;
-  }
-  // During the entry animation, let it settle: grabbing mid-entry would snap
-  // the pan offset through clamp logic and look like a jump.
+  if (event.pointerType === "mouse" && event.button !== 0) return;
+  const adopted = ["opening", "closing"].includes(imagePreview.phase) && beginImagePreviewInteraction();
   if (imagePreview.phase !== "open" || (event.pointerType === "mouse" && event.button !== 0)) return;
   // The tween already stores its displayed dimensions and pan position.
-  cancelImagePreviewAnimation();
+  if (!adopted) cancelImagePreviewAnimation({ keepReveal: true });
   applyImagePreviewTransform();
   ui.imagePreviewImage.setPointerCapture(event.pointerId);
   imagePreview.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, time: performance.now(), moved: false });
@@ -2861,7 +3094,7 @@ function imagePreviewPointerMove(event) {
     const [a, b] = points;
     const [startA, startB] = gesture.points;
     const startDistance = Math.max(1, Math.hypot(startA.x - startB.x, startA.y - startB.y));
-    imagePreview.zoom = clampPreview(gesture.zoom * Math.hypot(a.x - b.x, a.y - b.y) / startDistance, 1, imagePreviewMaxZoom());
+    imagePreview.zoom = clampPreview(gesture.zoom * Math.hypot(a.x - b.x, a.y - b.y) / startDistance, Math.min(1, gesture.zoom), imagePreviewMaxZoom());
     const stage = ui.imagePreviewStage.getBoundingClientRect();
     const ratio = imagePreview.zoom / gesture.zoom;
     imagePreview.x = (a.x + b.x) / 2 - stage.left - stage.width / 2 - ((startA.x + startB.x) / 2 - stage.left - stage.width / 2 - gesture.x) * ratio;
@@ -2870,7 +3103,15 @@ function imagePreviewPointerMove(event) {
     imagePreview.x = gesture.x + point.x - gesture.points[0].x;
     imagePreview.y = gesture.y + point.y - gesture.points[0].y;
   }
-  clampImagePreviewOffset();
+  const maxX = Math.max(0, (imagePreview.width * imagePreview.zoom - ui.imagePreviewStage.clientWidth) / 2);
+  const maxY = Math.max(0, (imagePreview.height * imagePreview.zoom - ui.imagePreviewStage.clientHeight) / 2);
+  const resist = (value, bound) => {
+    const constrained = clampPreview(value, -bound, bound), excess = value - constrained;
+    return constrained + Math.sign(excess) * Math.min(36, Math.abs(excess) * .18);
+  };
+  imagePreview.x = resist(imagePreview.x, Math.max(maxX, Math.abs(gesture.x)));
+  imagePreview.y = resist(imagePreview.y, Math.max(maxY, Math.abs(gesture.y)));
+  imagePreview.unclamped = true;
   scheduleImagePreviewRender();
   event.preventDefault();
 }
@@ -2891,6 +3132,7 @@ function imagePreviewPointerUp(event) {
     imagePreview.gesture = null;
     imagePreview.swipe = null;
     ui.imagePreviewImage.classList.remove("is-interacting");
+    settleImagePreviewBounds();
     navigatePreview(deltaX < 0 ? 1 : -1);
     return;
   }
@@ -2906,33 +3148,28 @@ function imagePreviewPointerUp(event) {
     imagePreview.gesture = null;
     imagePreview.swipe = null;
     ui.imagePreviewImage.classList.remove("is-interacting");
+    settleImagePreviewBounds();
   }
 }
 
 function imagePreviewWheel(event) {
   event.preventDefault();
+  if (["opening", "closing"].includes(imagePreview.phase)) beginImagePreviewInteraction();
   const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? ui.imagePreviewStage.clientHeight : 1);
-  setImagePreviewZoom(imagePreview.zoom * Math.exp(-clampPreview(delta, -500, 500) * .0015), { x: event.clientX, y: event.clientY });
+  setImagePreviewZoom(imagePreview.zoom * Math.exp(-clampPreview(delta, -500, 500) * .0015), { x: event.clientX, y: event.clientY }, imagePreview.zoom < 1);
 }
 
 function collapseRegenerationDrawer(drawer, immediately = false) {
-  if (drawer.hidden) return;
-  if (immediately || ui.detailDialog.classList.contains("is-single-detail")) {
+  if (typeof StudioMotion === "undefined") {
     drawer.hidden = true;
     drawer.classList.remove("closing");
-    drawer.regenerationCloseToken = null;
     return;
   }
-  if (drawer.classList.contains("closing")) return;
-  const closeToken = {};
-  drawer.regenerationCloseToken = closeToken;
   drawer.classList.add("closing");
-  setTimeout(() => {
-    if (drawer.regenerationCloseToken !== closeToken || !drawer.classList.contains("closing")) return;
-    drawer.hidden = true;
-    drawer.classList.remove("closing");
-    drawer.regenerationCloseToken = null;
-  }, 200);
+  StudioMotion.presence(drawer, false, {
+    from: { opacity: 0, y: -5, scale: .985 }, immediate: immediately,
+    onComplete: () => drawer.classList.remove("closing"),
+  });
 }
 
 function closeRegenerationDrawers(restoreFocus = true, immediately = false) {
@@ -3008,7 +3245,8 @@ async function openRegenerationDrawer(kind, trigger) {
   regenerationTrigger = trigger;
   drawer.regenerationCloseToken = null;
   drawer.classList.remove("closing");
-  drawer.hidden = false;
+  if (typeof StudioMotion !== "undefined") StudioMotion.presence(drawer, true, { from: { opacity: 0, y: -5, scale: .985 } });
+  else drawer.hidden = false;
   if (ui.detailDialog.classList.contains("is-single-detail")) {
     ui.detailDialog.classList.add("is-regenerating");
     ui.detailScroll.scrollTop = 0;
@@ -3029,27 +3267,10 @@ function selectedRedrawSections() {
   return [...ui.redrawSections.querySelectorAll("input:checked")].map((input) => input.value);
 }
 
-let redrawSectionsAnim = null;
 function setRedrawSectionsVisible(visible) {
   const el = ui.redrawSections;
-  // No-op when the requested state already matches; importantly this avoids
-  // cancelling an in-flight entry/exit animation on repeated redraws.
-  if (visible === !el.hidden) return;
-  redrawSectionsAnim?.cancel();
-  redrawSectionsAnim = null;
-  if (visible) {
-    el.hidden = false;
-    redrawSectionsAnim = el.animate(
-      [{ opacity: 0, transform: "translateY(-6px)" }, { opacity: 1, transform: "none" }],
-      { duration: imagePreviewReducedMotion() ? 60 : 200, easing: "cubic-bezier(.2,.8,.2,1)", fill: "both" },
-    );
-  } else {
-    redrawSectionsAnim = el.animate(
-      [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(-6px)" }],
-      { duration: imagePreviewReducedMotion() ? 60 : 160, easing: "cubic-bezier(.4,0,1,1)", fill: "both" },
-    );
-    redrawSectionsAnim.finished.then(() => { el.hidden = true; }).catch(() => {});
-  }
+  if (typeof StudioMotion === "undefined") { el.hidden = !visible; return; }
+  StudioMotion.presence(el, visible, { from: { opacity: 0, y: -6 } });
 }
 
 function updateVariantDrawer() {
@@ -3095,7 +3316,7 @@ async function submitRegeneration(mode, count = 1, sections = []) {
     toast(state.status === "queued" ? `已加入队列,第 ${state.position} 位` : "批次已开始");
     closeRegenerationDrawers(false);
     suppressDetailReturnFocus();
-    ui.detailDialog.close();
+    motionDialog(ui.detailDialog, false);
     return true;
   } catch (error) {
     toast(error.message);
@@ -3208,9 +3429,8 @@ async function openPool(section) {
   ui.poolDrawer.removeAttribute("inert");
   ui.poolDrawer.classList.add("open");
   ui.poolDrawer.setAttribute("aria-hidden", "false");
-  clearTimeout(backdropCloseTimer);
   ui.drawerBackdrop.classList.remove("closing");
-  ui.drawerBackdrop.hidden = false;
+  animatePoolSurface(ui.poolDrawer, ui.drawerBackdrop, true);
   ui.poolTitle.textContent = `${SECTION_META[section].label}池`;
   ui.poolKicker.textContent = "PROMPT POOL";
   ui.poolSearch.value = view.query;
@@ -3222,14 +3442,20 @@ async function openPool(section) {
   await loadPool();
   schedulePersist();
 }
-let backdropCloseTimer = null;
+function animatePoolSurface(drawer, backdrop, open) {
+  if (typeof StudioMotion === "undefined") { backdrop.hidden = !open; return; }
+  // Drawer CSS starts offscreen without [hidden]; seed its first presence once.
+  if (!drawer.dataset.motionState) drawer.hidden = true;
+  StudioMotion.presence(drawer, open, {
+    from: { opacity: 1, x: 1 },
+    render: value => {
+      drawer.style.transform = `translateX(${value.x * 104}%)`;
+    },
+  });
+  StudioMotion.presence(backdrop, open, { from: { opacity: 0 }, manageInert: false });
+}
 function hideDrawerBackdrop() {
-  clearTimeout(backdropCloseTimer);
-  ui.drawerBackdrop.classList.add("closing");
-  backdropCloseTimer = setTimeout(() => {
-    ui.drawerBackdrop.hidden = true;
-    ui.drawerBackdrop.classList.remove("closing");
-  }, 300);
+  animatePoolSurface(ui.poolDrawer, ui.drawerBackdrop, false);
 }
 
 function closePool() {
@@ -3243,11 +3469,34 @@ function closePool() {
   drawerTrigger = null;
   schedulePersist();
 }
-function setPoolSidebarOpen(open) {
+function setPoolSidebarOpen(open, { immediate = false } = {}) {
+  const wasOpen = ui.poolSidebar.classList.contains("mobile-open");
   ui.poolSidebar.classList.toggle("mobile-open", open);
   ui.togglePoolSidebar.setAttribute("aria-expanded", String(open));
   ui.togglePoolSidebar.title = open ? "关闭分类导航" : "打开分类导航";
   ui.togglePoolSidebar.setAttribute("aria-label", ui.togglePoolSidebar.title);
+  const mobile = matchMedia("(max-width: 620px)").matches;
+  ui.poolSidebar.inert = mobile && !open;
+  if (typeof StudioMotion === "undefined") return;
+  if (!mobile) {
+    StudioMotion.freeze(ui.poolSidebar, "sidebar");
+    ui.poolSidebar.style.removeProperty("transform");
+    ui.poolSidebar.style.removeProperty("will-change");
+    delete ui.poolSidebar.dataset.motionSidebar;
+    return;
+  }
+  const previous = StudioMotion.snapshot(ui.poolSidebar, "sidebar");
+  ui.poolSidebar.dataset.motionSidebar = "true";
+  ui.poolSidebar.style.willChange = "transform";
+  StudioMotion.spring(ui.poolSidebar, "sidebar", { x: open ? 0 : -102 }, {
+    initial: previous ? undefined : { x: wasOpen ? 0 : -102 },
+    immediate,
+    onUpdate: value => { ui.poolSidebar.style.transform = `translateX(${value.x}%)`; },
+    onComplete: () => {
+      ui.poolSidebar.style.removeProperty("transform");
+      ui.poolSidebar.style.removeProperty("will-change");
+    },
+  });
 }
 
 function readKreaPoolSelection() {
@@ -3255,13 +3504,11 @@ function readKreaPoolSelection() {
 }
 function openKreaPromptPool() {
   if (currentProfile() !== "krea2") return;
-  clearTimeout(kreaPoolBackdropTimer);
-  kreaPoolBackdropTimer = null;
   ui.kreaPoolDrawer.removeAttribute("inert");
   ui.kreaPoolDrawer.classList.add("open");
   ui.kreaPoolDrawer.setAttribute("aria-hidden", "false");
   ui.kreaPoolBackdrop.classList.remove("closing");
-  ui.kreaPoolBackdrop.hidden = false;
+  animatePoolSurface(ui.kreaPoolDrawer, ui.kreaPoolBackdrop, true);
   ui.kreaPoolSearch.focus({ preventScroll: true });
   void loadKreaPromptPool();
 }
@@ -3269,14 +3516,7 @@ function closeKreaPromptPool() {
   ui.kreaPoolDrawer.classList.remove("open");
   ui.kreaPoolDrawer.setAttribute("aria-hidden", "true");
   ui.kreaPoolDrawer.setAttribute("inert", "");
-  clearTimeout(kreaPoolBackdropTimer);
-  ui.kreaPoolBackdrop.classList.add("closing");
-  kreaPoolBackdropTimer = setTimeout(() => {
-    kreaPoolBackdropTimer = null;
-    if (ui.kreaPoolDrawer.classList.contains("open")) return;
-    ui.kreaPoolBackdrop.hidden = true;
-    ui.kreaPoolBackdrop.classList.remove("closing");
-  }, 220);
+  animatePoolSurface(ui.kreaPoolDrawer, ui.kreaPoolBackdrop, false);
   ui.openKreaPromptPool.focus({ preventScroll: true });
 }
 function renderKreaPromptPool() {
@@ -3448,7 +3688,7 @@ function openKreaPromptItemDialog(item = null) {
   ui.kreaPromptItemTitle.textContent = editingKreaPromptItem ? "编辑自然语言提示词" : "新增自然语言提示词";
   ui.kreaPromptItemText.value = editingKreaPromptItem?.text || "";
   ui.kreaPromptItemDelete.hidden = !editingKreaPromptItem;
-  ui.kreaPromptItemDialog.showModal();
+  motionDialog(ui.kreaPromptItemDialog, true);
   ui.kreaPromptItemText.focus({ preventScroll: true });
 }
 async function saveKreaPromptItem(event) {
@@ -3467,7 +3707,7 @@ async function saveKreaPromptItem(event) {
     if (previousId) kreaPromptPoolSelection = kreaPromptPoolSelection.filter((value) => value !== previousId);
     if (id) kreaPromptPoolSelection = [...new Set([...kreaPromptPoolSelection, id])];
     if (kreaPromptPoolSelection.length) ui.krea_prompt_pool_enabled.checked = true;
-    ui.kreaPromptItemDialog.close();
+    motionDialog(ui.kreaPromptItemDialog, false);
     editingKreaPromptItem = null;
     kreaSelectedViewItems = null;
     await loadKreaPromptPool();
@@ -3495,7 +3735,7 @@ async function deleteKreaPromptPoolSelection(ids = kreaPromptPoolSelection) {
     if (Number.isFinite(Number(payload?.count))) kreaPoolTotalCount = Number(payload.count);
     kreaPromptPoolSelection = kreaPromptPoolSelection.filter((id) => !targets.includes(id));
     if (!kreaPromptPoolSelection.length) ui.krea_prompt_pool_enabled.checked = false;
-    if (editingKreaPromptItem && targets.includes(editingKreaPromptItem.id)) ui.kreaPromptItemDialog.close();
+    if (editingKreaPromptItem && targets.includes(editingKreaPromptItem.id)) motionDialog(ui.kreaPromptItemDialog, false);
     kreaSelectedViewItems = null;
     await loadKreaPromptPool();
     schedulePersist();
@@ -3516,7 +3756,7 @@ function openKreaPromptImportDialog() {
   ui.kreaPromptImportRows.replaceChildren();
   ui.kreaPromptImportCommit.disabled = true;
   ui.kreaPromptImportCommit.textContent = "确认追加";
-  ui.kreaPromptImportDialog.showModal();
+  motionDialog(ui.kreaPromptImportDialog, true);
   ui.kreaPromptPoolText.focus({ preventScroll: true });
 }
 function resolveKreaImportFormat(content) {
@@ -3646,7 +3886,7 @@ async function commitKreaPromptImport() {
       ? importedIds
       : [...new Set([...kreaPromptPoolSelection, ...importedIds])];
     ui.krea_prompt_pool_enabled.checked = kreaPromptPoolSelection.length > 0;
-    ui.kreaPromptImportDialog.close();
+    motionDialog(ui.kreaPromptImportDialog, false);
     kreaImportPreview = null;
     kreaSelectedViewItems = null;
     await loadKreaPromptPool({ force: true });
@@ -3840,59 +4080,120 @@ function focusFavoriteTreeRow(groupId) {
   });
 }
 // Rows belonging to a group's descendant set, looked up pre-render.
-function treeRowsForGroups(ids) {
-  return [...ui.poolSidebar.querySelectorAll(".favorite-tree-row[data-group-id]")]
+function treeRowsForGroups(ids, kind = null) {
+  const tree = kind === "custom" ? ui.poolSidebar.querySelector(".custom-group-tree")
+    : kind === "favorite" ? ui.poolSidebar.querySelector(".collections .favorite-tree") : ui.poolSidebar;
+  return [...(tree?.querySelectorAll(".favorite-tree-row[data-group-id]") || [])]
     .filter((row) => ids.has(row.dataset.groupId));
 }
+const poolTreeRowMotion = new WeakMap();
+function animateTreeRow(row, visible) {
+  let state = poolTreeRowMotion.get(row);
+  if (!state) {
+    const names = ["height", "minHeight", "overflow", "marginBottom", "opacity", "transform", "transitionProperty", "willChange"];
+    state = { target: null, height: row.getBoundingClientRect().height || row.offsetHeight || 32,
+      saved: Object.fromEntries(names.map(name => [name, row.style[name] || ""])),
+      inert: row.inert, role: row.getAttribute("role"), ariaHidden: row.getAttribute("aria-hidden") };
+    poolTreeRowMotion.set(row, state);
+  }
+  state.target = visible;
+  const token = state.token = {};
+  row.inert = visible ? state.inert : true;
+  if (visible) {
+    if (state.role !== null) row.setAttribute("role", state.role);
+    if (state.ariaHidden === null) row.removeAttribute("aria-hidden"); else row.setAttribute("aria-hidden", state.ariaHidden);
+  } else { row.removeAttribute("role"); row.setAttribute("aria-hidden", "true"); }
+  row.style.minHeight = "0"; row.style.overflow = "hidden";
+  row.style.transitionProperty = "background-color"; row.style.willChange = "transform, opacity";
+  const finish = () => {
+    if (state.token !== token) return;
+    for (const [name, value] of Object.entries(state.saved)) row.style[name] = value;
+    row.inert = state.inert;
+    if (!visible) row.remove();
+    poolTreeRowMotion.delete(row);
+  };
+  if (typeof StudioMotion === "undefined" || !StudioMotion.spring) {
+    finish(); return { finished: Promise.resolve({ cancelled: false }) };
+  }
+  const active = StudioMotion.snapshot(row, "tree-row");
+  const initial = active?.active ? active.value : { progress: visible ? 0 : 1 };
+  return StudioMotion.spring(row, "tree-row", { progress: visible ? 1 : 0 }, {
+    initial, response: visible ? .28 : .24, damping: 1,
+    onUpdate: ({ progress }) => {
+      if (state.token !== token) return;
+      const value = Math.max(0, Math.min(1, progress));
+      row.style.height = `${state.height * value}px`;
+      row.style.marginBottom = `${-2 * (1 - value)}px`;
+      row.style.opacity = String(value);
+      row.style.transform = `translateX(${-6 * (1 - value)}px)`;
+    },
+    onComplete: finish,
+  });
+}
 function animateTreeRowsIn(rows) {
-  if (imagePreviewReducedMotion()) return;
-  rows.forEach((row, index) => {
-    row.animate(
-      [{ opacity: 0, transform: "translateX(-8px)" }, { opacity: 1, transform: "none" }],
-      { duration: 240, delay: Math.min(index * 30, 150), easing: "cubic-bezier(.32,.72,0,1)", fill: "both" },
-    );
-  });
+  rows.forEach(row => animateTreeRow(row, true));
 }
-function animateTreeRowsOut(rows, done) {
-  if (!rows.length || imagePreviewReducedMotion()) return done();
-  let remaining = rows.length;
-  const finish = () => { if (--remaining <= 0) done(); };
-  rows.forEach((row) => {
-    row.animate(
-      [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateX(-8px)" }],
-      { duration: 160, easing: "cubic-bezier(.4,0,1,1)", fill: "both" },
-    ).finished.then(finish).catch(finish);
-  });
+function animateTreeRowsOut(rows, done = () => {}) {
+  if (!rows.length) { done(); return Promise.resolve(); }
+  return Promise.all(rows.map(row => animateTreeRow(row, false).finished))
+    .then(results => { if (results.every(result => !result.cancelled)) done(); });
 }
-// Re-render the sidebar and play an entry animation on rows that did not exist
-// before the render (i.e. freshly expanded children).
-function renderPoolSidebarAnimated(enteredIds = new Set()) {
-  const before = new Set(
-    [...ui.poolSidebar.querySelectorAll(".favorite-tree-row[data-group-id]")].map((row) => row.dataset.groupId),
-  );
-  renderPoolSidebar();
-  const fresh = enteredIds.size
-    ? treeRowsForGroups(enteredIds).filter((row) => !before.has(row.dataset.groupId))
-    : [];
-  animateTreeRowsIn(fresh);
+// Reconcile only the two tree bodies. Keeping their rows alive preserves focus
+// and lets a new click retarget the same spring, including during an exit.
+function renderPoolSidebarAnimated(enteredIds = new Set(), kind = null) {
+  const view = currentView(), focused = document.activeElement;
+  for (const type of kind ? [kind] : ["favorite", "custom"]) {
+    const tree = ui.poolSidebar.querySelector(type === "custom" ? ".custom-group-tree" : ".collections .favorite-tree");
+    if (!tree) continue;
+    const template = document.createElement("div");
+    (type === "custom" ? renderCustomTree : renderFavoriteTree)(template, view);
+    const oldRows = [...tree.children], key = row => row.dataset.groupId ?? "__all";
+    const existing = new Map(oldRows.map(row => [key(row), row]));
+    const desired = [], entering = [];
+    for (const fresh of [...template.children]) {
+      const row = existing.get(key(fresh)) || fresh;
+      if (row !== fresh) {
+        row.className = fresh.className; row.title = fresh.title;
+        for (const name of ["aria-expanded", "aria-selected", "aria-level"]) {
+          const value = fresh.getAttribute(name);
+          if (value === null) row.removeAttribute(name); else row.setAttribute(name, value);
+        }
+        const disclosure = row.querySelector(".tree-disclosure"), nextDisclosure = fresh.querySelector(".tree-disclosure");
+        if (disclosure && nextDisclosure) {
+          disclosure.title = nextDisclosure.title;
+          disclosure.setAttribute("aria-label", nextDisclosure.getAttribute("aria-label"));
+        }
+        if (poolTreeRowMotion.get(row)?.target === false) entering.push(row);
+      } else entering.push(row);
+      desired.push(row);
+    }
+    const retained = new Set(desired), leaving = oldRows.filter(row => !retained.has(row));
+    const order = [...desired];
+    // Exiting descendants keep their original slot until their height reaches
+    // zero, so a sibling expansion cannot move them to the top of the tree.
+    oldRows.forEach((row, index) => {
+      if (retained.has(row)) return;
+      const previous = oldRows.slice(0, index).reverse().find(item => order.includes(item));
+      order.splice(previous ? order.indexOf(previous) + 1 : 0, 0, row);
+    });
+    let cursor = tree.firstElementChild;
+    for (const row of order) {
+      if (row === cursor) cursor = cursor.nextElementSibling;
+      else tree.insertBefore(row, cursor);
+    }
+    animateTreeRowsIn(entering);
+    animateTreeRowsOut(leaving.filter(row => poolTreeRowMotion.get(row)?.target !== false));
+  }
+  if (focused?.isConnected && document.activeElement !== focused) focused.focus({ preventScroll: true });
 }
 
 function toggleFavoriteTreeGroup(groupId, restoreFocus = false) {
   const collapsed = collapsedFavoriteGroups[activeSection];
   const collapsing = !collapsed.has(groupId);
   const descendants = favoriteDescendantIds(groupId);
-  if (collapsing) {
-    collapsed.add(groupId);
-    persistFavoriteTree();
-    animateTreeRowsOut(treeRowsForGroups(descendants), () => {
-      renderPoolSidebar();
-      if (restoreFocus) focusFavoriteTreeRow(groupId);
-    });
-    return;
-  }
-  collapsed.delete(groupId);
+  if (collapsing) collapsed.add(groupId); else collapsed.delete(groupId);
   persistFavoriteTree();
-  renderPoolSidebarAnimated(descendants);
+  renderPoolSidebarAnimated(descendants, "favorite");
   if (restoreFocus) focusFavoriteTreeRow(groupId);
 }
 function focusCustomTreeRow(groupId) {
@@ -3910,18 +4211,9 @@ function toggleCustomTreeGroup(groupId, restoreFocus = false) {
   const collapsed = collapsedCustomGroups[activeSection];
   const collapsing = !collapsed.has(groupId);
   const descendants = customDescendantIds(groupId);
-  if (collapsing) {
-    collapsed.add(groupId);
-    persistCustomTree();
-    animateTreeRowsOut(treeRowsForGroups(descendants), () => {
-      renderPoolSidebar();
-      if (restoreFocus) focusCustomTreeRow(groupId);
-    });
-    return;
-  }
-  collapsed.delete(groupId);
+  if (collapsing) collapsed.add(groupId); else collapsed.delete(groupId);
   persistCustomTree();
-  renderPoolSidebarAnimated(descendants);
+  renderPoolSidebarAnimated(descendants, "custom");
   if (restoreFocus) focusCustomTreeRow(groupId);
 }
 function renderFavoriteTree(container, view) {
@@ -4311,7 +4603,7 @@ function openFavoriteDialog(item) {
       return label;
     }),
   );
-  ui.favoriteDialog.showModal();
+  motionDialog(ui.favoriteDialog, true);
 }
 function favoriteSelectionDefaultGroups() {
   const currentCollection = currentView().filters.collection;
@@ -4341,7 +4633,7 @@ function openFavoriteSelectionDialog() {
   ui.confirmFavoriteSelection.disabled = false;
   ui.confirmFavoriteSelection.textContent = "收藏";
   renderFavoriteSelectionGroups();
-  ui.favoriteSelectionDialog.showModal();
+  motionDialog(ui.favoriteSelectionDialog, true);
 }
 async function createFavoriteSelectionGroup() {
   const name = ui.favoriteSelectionGroupName.value.trim();
@@ -4388,7 +4680,7 @@ async function saveFavoriteSelection(event) {
     });
     if (section !== activeSection || profile !== currentProfile()) return;
     favoritesData = payload;
-    ui.favoriteSelectionDialog.close();
+    motionDialog(ui.favoriteSelectionDialog, false);
     renderPoolItems();
     renderPoolSidebar();
     toast(`已收藏 ${payload.selectedCount || 0} 项：新增 ${payload.createdCount || 0} 项，更新 ${payload.updatedCount || 0} 项`);
@@ -4414,7 +4706,7 @@ async function saveFavorite(event) {
         nickname: ui.favoriteNickname.value,
       }),
     });
-    ui.favoriteDialog.close();
+    motionDialog(ui.favoriteDialog, false);
     if (reconcileFavoriteCollection()) await loadPool();
     else {
       renderPoolItems();
@@ -4432,7 +4724,7 @@ async function removeFavorite() {
       method: "PUT",
       body: JSON.stringify({ id: editingFavoriteItem.id, favorite: false }),
     });
-    ui.favoriteDialog.close();
+    motionDialog(ui.favoriteDialog, false);
     reconcileFavoriteCollection();
     await loadPool();
     toast("已取消收藏");
@@ -4451,7 +4743,7 @@ function openGroupDialog(group = null) {
   ui.deleteGroup.hidden = !group || group.isSystem;
   ui.importChildGroup.hidden = !group;
   ui.saveGroupButton.hidden = Boolean(group?.isSystem);
-  ui.groupDialog.showModal();
+  motionDialog(ui.groupDialog, true);
 }
 async function saveGroup(event) {
   event.preventDefault();
@@ -4463,7 +4755,7 @@ async function saveGroup(event) {
         : `/api/favorites/${activeSection}/groups`,
       { method: id ? "PUT" : "POST", body: JSON.stringify({ name: ui.groupName.value }) },
     );
-    ui.groupDialog.close();
+    motionDialog(ui.groupDialog, false);
     renderPoolSidebar();
     toast(id ? "收藏分组已更新" : "收藏分组已创建");
   } catch (error) {
@@ -4505,14 +4797,14 @@ function openChildGroupDialog(group = editingGroup) {
   if (!group) return;
   childGroupParent = group;
   selectedChildSource = "";
-  ui.groupDialog.close();
+  motionDialog(ui.groupDialog, false);
   ui.childGroupTitle.textContent = `导入到“${group.id === "default" ? "我的收藏" : group.name}”`;
   ui.childGroupHint.textContent = "从当前提示词池的自定义分组创建一次性收藏快照，后续两边独立修改。";
   ui.childGroupSearch.value = "";
   ui.confirmChildGroup.disabled = true;
   setChildGroupError();
   renderChildGroupSources();
-  ui.childGroupDialog.showModal();
+  motionDialog(ui.childGroupDialog, true);
 }
 async function importFavoriteChild(event) {
   event.preventDefault();
@@ -4527,7 +4819,7 @@ async function importFavoriteChild(event) {
     );
     collapsedFavoriteGroups[activeSection].delete(childGroupParent.id);
     persistFavoriteTree();
-    ui.childGroupDialog.close();
+    motionDialog(ui.childGroupDialog, false);
     renderPoolSidebar();
     if (currentView().filters.collection === childGroupParent.id) await loadPool();
     toast("收藏子分组已导入");
@@ -4557,8 +4849,8 @@ function openDeleteGroupDialog(kind, group) {
   const sharedCount = Math.max(0, totalCount - exclusiveCount);
   const childCount = Number(group.childCount || 0);
   const canDeleteItems = favorite ? Boolean(group.parentId && !childCount && directCount) : totalCount > 0;
-  ui.groupDialog.close();
-  ui.customGroupDialog.close();
+  motionDialog(ui.groupDialog, false);
+  motionDialog(ui.customGroupDialog, false);
   ui.deleteGroupTitle.textContent = `删除“${group.id === "default" ? "我的收藏" : group.name}”`;
   ui.deleteGroupSummary.textContent =
     subtree.size > 1
@@ -4587,7 +4879,7 @@ function openDeleteGroupDialog(kind, group) {
   ui.confirmDeleteGroup.disabled = false;
   ui.confirmDeleteGroup.dataset.storageWrite = favorite ? "" : "custom_prompts";
   ui.confirmDeleteGroup.textContent = "删除";
-  ui.deleteGroupDialog.showModal();
+  motionDialog(ui.deleteGroupDialog, true);
 }
 async function confirmGroupDelete(event) {
   event.preventDefault();
@@ -4642,7 +4934,7 @@ async function confirmGroupDelete(event) {
             : "自定义分组已删除，条目已保留",
       );
     }
-    ui.deleteGroupDialog.close();
+    motionDialog(ui.deleteGroupDialog, false);
     pendingGroupDelete = null;
     await loadPool();
     renderPoolSidebar();
@@ -4709,7 +5001,7 @@ function openCustom(item = null) {
   if (!leafGroups.length)
     ui.customGroupChecks.innerHTML = `<div class="inline-empty">尚未创建自定义分组，可在随机池侧栏新建。</div>`;
   ui.deleteCustom.hidden = !item;
-  ui.customDialog.showModal();
+  motionDialog(ui.customDialog, true);
 }
 async function saveCustom(event) {
   event.preventDefault();
@@ -4736,7 +5028,7 @@ async function saveCustom(event) {
       ? await request(`/api/custom-prompts/${editingCustom.id}?model_profile=${encodeURIComponent(currentProfile())}`, { method: "PUT", body: JSON.stringify(payload) })
       : await request("/api/custom-prompts", { method: "POST", body: JSON.stringify(payload) });
     if (!selectionHas(activeSection, item.id)) toggleSelection(activeSection, item.id, true);
-    ui.customDialog.close();
+    motionDialog(ui.customDialog, false);
     await loadCustomGroups();
     await loadPool();
     toast(editingCustom ? "自定义项已更新" : "自定义项已加入随机池");
@@ -4751,7 +5043,7 @@ async function deleteCustomItem() {
     const selection = draft.pools[activeSection];
     selection.ids = selection.ids.filter((id) => id !== editingCustom.id);
     selection.excluded_ids = selection.excluded_ids.filter((id) => id !== editingCustom.id);
-    ui.customDialog.close();
+    motionDialog(ui.customDialog, false);
     await loadPool();
     renderDimensions();
     updatePoolOverview();
@@ -4772,7 +5064,7 @@ function openCustomGroupDialog(group = null) {
       : "编辑导入大项"
     : "新建自定义分组";
   ui.deleteCustomGroup.hidden = !group;
-  ui.customGroupDialog.showModal();
+  motionDialog(ui.customGroupDialog, true);
 }
 async function saveCustomGroup(event) {
   event.preventDefault();
@@ -4783,7 +5075,7 @@ async function saveCustomGroup(event) {
       { method: id ? "PUT" : "POST", body: JSON.stringify({ name: ui.customGroupName.value, model_profile: currentProfile() }) },
     );
     customGroups = payload.groups || [];
-    ui.customGroupDialog.close();
+    motionDialog(ui.customGroupDialog, false);
     renderPoolSidebar();
     toast(id ? "自定义分组已更新" : "自定义分组已创建");
   } catch (error) {
@@ -4835,7 +5127,7 @@ function openImportDialog() {
   ui.importRows.replaceChildren();
   ui.commitImport.disabled = true;
   renderImportTargetGroups();
-  ui.importDialog.showModal();
+  motionDialog(ui.importDialog, true);
 }
 async function previewImportFile() {
   const file = ui.importFile.files?.[0];
@@ -4916,7 +5208,7 @@ async function commitCustomImport() {
         bundleName: ui.importBundleName.value,
       }),
     });
-    ui.importDialog.close();
+    motionDialog(ui.importDialog, false);
     await loadCustomGroups();
     await loadPool();
     renderDimensions();
@@ -5140,6 +5432,7 @@ async function loadResources({ refresh = false } = {}) {
     for (const id of ["latent_second_sampler_name", "seedvr2_sampler_name", "face_sampler"]) ui[id].disabled = resources.samplers.length === 0;
     for (const id of ["latent_second_scheduler", "seedvr2_scheduler", "face_scheduler"]) ui[id].disabled = resources.schedulers.length === 0;
     applyNodeResourceControls();
+    if (typeof sharedParameterResources === "function") sharedParameterResources();
   } catch (error) {
     if (generation !== cache.generation || requestId !== resourceRequest || selectedProfile !== currentProfile()) return;
     resources = { models: [], model_items: [], profile_models: {}, model_assignments: {}, seedvr2_models: [], seedvr2_vaes: [], upscale_models: [], samplers: [], schedulers: [], model_profiles: {}, profiles: {}, nodes: {}, plugins: {} };
@@ -5179,7 +5472,7 @@ function updateRepairControls() {
   ui.seedvr2_model_name.disabled = !upscalers.seedvr2 || !resourcesLoaded;
   ui.seedvr2_vae_name.disabled = !upscalers.seedvr2 || !resourcesLoaded;
   for (const id of ["seedvr2_weight_dtype", "seedvr2_scale_by", "seedvr2_color_correction_method", ...Object.values(SEED_SAMPLER_IDS), ...Object.values(SEED_TILE_IDS.encode), ...Object.values(SEED_TILE_IDS.decode)]) ui[id].disabled = !upscalers.seedvr2;
-  for (const id of ["nvidia_resize_type", "nvidia_scale", "nvidia_quality"]) ui[id].disabled = !upscalers.nvidia;
+  for (const id of ["nvidia_resize_type", "nvidia_scale", "nvidia_quality", "nvidia_dlss_style", "nvidia_dlss_intensity", "nvidia_dlss_local_tone", "nvidia_dlss_local_struct", "nvidia_dlss_output_mix"]) ui[id].disabled = !upscalers.nvidia;
   for (const id of Object.values(UPSCALER_CONTROL_IDS.face_refine).filter((id) => id !== "face_refine_enabled")) ui[id].disabled = !upscalers.face;
   if (typeof sharedParameterVisibility === "function") sharedParameterVisibility();
   if (typeof singleWorkbenchLayout === "function" && typeof singleWorkbenchState !== "undefined" && singleWorkbenchState.ready) singleWorkbenchLayout();
@@ -5310,6 +5603,8 @@ const PRESET_SETTING_KEYS = [
   "model_name",
   "krea_prompt_pool",
   "base_mode",
+  "base_denoise",
+  "krea_variance",
   "dual",
   "upscalers",
   "loras",
@@ -5537,7 +5832,7 @@ async function openPromptRuleDialog() {
   const profile = currentProfile();
   clearPromptRuleEditor();
   promptRules = []; promptRulesProfile = currentProfile(); renderPromptRules();
-  ui.promptRuleDialog.showModal();
+  motionDialog(ui.promptRuleDialog, true);
   try {
     await loadPromptRules();
   } catch (error) {
@@ -5718,7 +6013,7 @@ async function openArtistDialog() {
   if (profile !== "anima") return;
   await loadArtistFavorites();
   if (profile !== currentProfile() || (typeof sharedFavoritesState !== "undefined" && epoch !== sharedFavoritesState.epoch)) return;
-  ui.artistDialog.showModal();
+  motionDialog(ui.artistDialog, true);
 }
 async function saveCurrentArtistFavorites() {
   const values = artistTokens();
@@ -5794,7 +6089,7 @@ ui.settingsForm.addEventListener("submit", async (event) => {
     // Capture the workbench, profile and seeds before the first await. The
     // The backend owns normalization; the submit lock covers the whole request.
     const settings = readSettings();
-    const seeds = single ? singleWorkbenchSeeds() : null;
+    const seeds = typeof singleWorkbenchSeeds === "function" ? singleWorkbenchSeeds() : null;
     persistNow();
     await submitBatch(settings, seeds);
   } catch (error) {
@@ -5817,31 +6112,6 @@ ui.stopButton.addEventListener("click", async () => {
     toast(error.message);
   }
 });
-// Animated collapse for <details> sections: intercept the toggle, play the
-// reverse of the `disclose` entry animation, then flip `open` off.
-for (const details of document.querySelectorAll("details.advanced-section, details.artist-favorites-section")) {
-  const summary = details.querySelector("summary");
-  const content = details.querySelector(".details-content, .artist-favorites-content, summary + *");
-  if (!summary || !content) continue;
-  summary.addEventListener("click", (event) => {
-    if (details.classList.contains("single-fixed-open") || !details.open || details.dataset.collapsing) return;
-    event.preventDefault();
-    details.dataset.collapsing = "1";
-    const animation = content.animate(
-      [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(-6px)" }],
-      { duration: imagePreviewReducedMotion() ? 60 : 180, easing: "cubic-bezier(.4,0,1,1)", fill: "both" },
-    );
-    animation.finished.then(() => {
-      details.open = false;
-      delete details.dataset.collapsing;
-      animation.cancel(); // release the fill so CSS takes over cleanly
-    }).catch(() => {
-      details.open = false;
-      delete details.dataset.collapsing;
-    });
-  });
-}
-
 ui.queueBadge?.addEventListener("click", () => {
   const open = !ui.queuePanel.classList.contains("open") && currentQueue.length > 0;
   setQueuePanelOpen(open);
@@ -5949,13 +6219,13 @@ new ResizeObserver(() => {
 ui.closeDialog.addEventListener("click", () => {
   closeImagePreview({ immediate: true, restoreFocus: false });
   closeRegenerationDrawers(false);
-  ui.detailDialog.close();
+  motionDialog(ui.detailDialog, false);
 });
 ui.detailDialog.addEventListener("click", (event) => {
   if (event.target === ui.detailDialog) {
     closeImagePreview({ immediate: true, restoreFocus: false });
     closeRegenerationDrawers(false);
-    ui.detailDialog.close();
+    motionDialog(ui.detailDialog, false);
     return;
   }
   if (
@@ -5976,7 +6246,7 @@ ui.restoreSettings.addEventListener("click", () => {
   closeImagePreview({ immediate: true, restoreFocus: false });
   if (typeof singleWorkbenchRestoreHistory === "function") singleWorkbenchRestoreHistory(selectedRecord);
   else applySettings(selectedRecord.settings);
-  ui.detailDialog.close();
+  motionDialog(ui.detailDialog, false);
   schedulePersist();
   toast("已载入历史设置");
 });
@@ -5994,7 +6264,7 @@ async function deleteSelectedHistoryRecord() {
       if (fromSingleViewer && neighbor && ui.detailDialog.open) {
         updateDetailRecord(neighbor);
         ui.detailImage.focus({ preventScroll: true });
-      } else { ui.detailDialog.close(); selectedRecord = null; }
+      } else { motionDialog(ui.detailDialog, false); selectedRecord = null; }
     }
     historyCache.clear();
     if (fromSingleViewer) historyDirty = true;
@@ -6012,6 +6282,10 @@ ui.drawerBackdrop.addEventListener("click", closePool);
 ui.togglePoolSidebar.addEventListener("click", () =>
   setPoolSidebarOpen(!ui.poolSidebar.classList.contains("mobile-open")),
 );
+matchMedia("(max-width: 620px)").addEventListener("change", () =>
+  setPoolSidebarOpen(ui.poolSidebar.classList.contains("mobile-open"), { immediate: true }),
+);
+setPoolSidebarOpen(false, { immediate: true });
 ui.poolSidebar.addEventListener("click", (event) => {
   if (
     window.innerWidth <= 620 &&
@@ -6086,29 +6360,29 @@ ui.clearPool.addEventListener("click", () => {
 ui.favoriteSelection.addEventListener("click", openFavoriteSelectionDialog);
 ui.favoriteSelectionForm.addEventListener("submit", saveFavoriteSelection);
 ui.createFavoriteSelectionGroup.addEventListener("click", createFavoriteSelectionGroup);
-ui.closeFavoriteSelection.addEventListener("click", () => ui.favoriteSelectionDialog.close());
-ui.cancelFavoriteSelection.addEventListener("click", () => ui.favoriteSelectionDialog.close());
+ui.closeFavoriteSelection.addEventListener("click", () => motionDialog(ui.favoriteSelectionDialog, false));
+ui.cancelFavoriteSelection.addEventListener("click", () => motionDialog(ui.favoriteSelectionDialog, false));
 ui.addCustom.addEventListener("click", () => openCustom());
 ui.importCustom.addEventListener("click", openImportDialog);
 ui.customForm.addEventListener("submit", saveCustom);
-ui.cancelCustom.addEventListener("click", () => ui.customDialog.close());
-ui.closeCustom.addEventListener("click", () => ui.customDialog.close());
+ui.cancelCustom.addEventListener("click", () => motionDialog(ui.customDialog, false));
+ui.closeCustom.addEventListener("click", () => motionDialog(ui.customDialog, false));
 ui.deleteCustom.addEventListener("click", deleteCustomItem);
 ui.customGroupForm.addEventListener("submit", saveCustomGroup);
 ui.deleteCustomGroup.addEventListener("click", removeCustomGroup);
-ui.closeCustomGroup.addEventListener("click", () => ui.customGroupDialog.close());
-ui.cancelCustomGroup.addEventListener("click", () => ui.customGroupDialog.close());
+ui.closeCustomGroup.addEventListener("click", () => motionDialog(ui.customGroupDialog, false));
+ui.cancelCustomGroup.addEventListener("click", () => motionDialog(ui.customGroupDialog, false));
 ui.importFile.addEventListener("change", previewImportFile);
 ui.importBundleName.addEventListener("input", () => {
   if (importPreview) renderImportPreview();
 });
 ui.commitImport.addEventListener("click", commitCustomImport);
-ui.closeImport.addEventListener("click", () => ui.importDialog.close());
-ui.cancelImport.addEventListener("click", () => ui.importDialog.close());
+ui.closeImport.addEventListener("click", () => motionDialog(ui.importDialog, false));
+ui.cancelImport.addEventListener("click", () => motionDialog(ui.importDialog, false));
 ui.manageArtists.addEventListener("click", openArtistDialog);
 ui.saveCurrentArtists.addEventListener("click", saveCurrentArtistFavorites);
-ui.closeArtists.addEventListener("click", () => ui.artistDialog.close());
-ui.cancelArtists.addEventListener("click", () => ui.artistDialog.close());
+ui.closeArtists.addEventListener("click", () => motionDialog(ui.artistDialog, false));
+ui.cancelArtists.addEventListener("click", () => motionDialog(ui.artistDialog, false));
 ui.savePreset.addEventListener("click", createStylePreset);
 ui.presetName.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
@@ -6147,8 +6421,8 @@ ui.promptRuleForm.addEventListener("submit", savePromptRule);
 ui.promptRuleForm.addEventListener("input", () => { promptRuleEditorRevision++; });
 ui.clearPromptRule.addEventListener("click", clearPromptRuleEditor);
 ui.deletePromptRule.addEventListener("click", deletePromptRule);
-ui.closePromptRules.addEventListener("click", () => ui.promptRuleDialog.close());
-ui.cancelPromptRules.addEventListener("click", () => ui.promptRuleDialog.close());
+ui.closePromptRules.addEventListener("click", () => motionDialog(ui.promptRuleDialog, false));
+ui.cancelPromptRules.addEventListener("click", () => motionDialog(ui.promptRuleDialog, false));
 ui.model_profile.addEventListener("change", () => {
   const next = normalizeProfileId(ui.model_profile.value);
   if (typeof singleWorkbenchState !== "undefined" && singleWorkbenchState.ready) { singleWorkbenchSwitch(singleWorkbenchState.mode, next); return; }
@@ -6164,11 +6438,11 @@ ui.model_name.addEventListener("change", () => {
   schedulePersist();
 });
 ui.manageResourceOwnership.addEventListener("click", async () => {
-  ui.resourceOwnershipDialog.showModal();
+  motionDialog(ui.resourceOwnershipDialog, true);
   await loadResourceOwnership();
 });
-ui.closeResourceOwnership.addEventListener("click", () => ui.resourceOwnershipDialog.close());
-ui.closeResourceOwnershipFooter.addEventListener("click", () => ui.resourceOwnershipDialog.close());
+ui.closeResourceOwnership.addEventListener("click", () => motionDialog(ui.resourceOwnershipDialog, false));
+ui.closeResourceOwnershipFooter.addEventListener("click", () => motionDialog(ui.resourceOwnershipDialog, false));
 ui.ownershipKind.addEventListener("change", loadResourceOwnership);
 ui.ownershipSearch.addEventListener("input", renderResourceOwnership);
 ui.refreshResourceClassification.addEventListener("click", refreshResourceClassification);
@@ -6258,13 +6532,13 @@ ui.kreaPoolDeleteSelection.addEventListener("click", () => deleteKreaPromptPoolS
 ui.kreaPoolAddItem.addEventListener("click", () => openKreaPromptItemDialog());
 ui.kreaPoolOpenImport.addEventListener("click", openKreaPromptImportDialog);
 ui.kreaPromptItemForm.addEventListener("submit", saveKreaPromptItem);
-ui.kreaPromptItemClose.addEventListener("click", () => ui.kreaPromptItemDialog.close());
-ui.kreaPromptItemCancel.addEventListener("click", () => ui.kreaPromptItemDialog.close());
+ui.kreaPromptItemClose.addEventListener("click", () => motionDialog(ui.kreaPromptItemDialog, false));
+ui.kreaPromptItemCancel.addEventListener("click", () => motionDialog(ui.kreaPromptItemDialog, false));
 ui.kreaPromptItemDelete.addEventListener("click", () => {
   if (editingKreaPromptItem) void deleteKreaPromptPoolSelection([editingKreaPromptItem.id]);
 });
-ui.kreaPromptImportClose.addEventListener("click", () => ui.kreaPromptImportDialog.close());
-ui.kreaPromptImportCancel.addEventListener("click", () => ui.kreaPromptImportDialog.close());
+ui.kreaPromptImportClose.addEventListener("click", () => motionDialog(ui.kreaPromptImportDialog, false));
+ui.kreaPromptImportCancel.addEventListener("click", () => motionDialog(ui.kreaPromptImportDialog, false));
 ui.kreaPromptImportPreviewButton.addEventListener("click", previewKreaPromptImport);
 ui.kreaPromptImportCommit.addEventListener("click", commitKreaPromptImport);
 ui.kreaPromptPoolText.addEventListener("input", () => {
@@ -6282,6 +6556,7 @@ for (const control of [
   ui.latent_upscale_enabled,
   ui.latent_upscale_scale,
   ui.latent_upscale_method,
+  ui.latent_model_format,
   ...Object.values(POST_SAMPLER_IDS).map((id) => ui[id]),
   ui.seedvr2_enabled,
   ui.seedvr2_model_name,
@@ -6296,6 +6571,7 @@ for (const control of [
   ui.nvidia_resize_type,
   ui.nvidia_scale,
   ui.nvidia_quality,
+  ui.nvidia_dlss_style, ui.nvidia_dlss_intensity, ui.nvidia_dlss_local_tone, ui.nvidia_dlss_local_struct, ui.nvidia_dlss_output_mix,
   ui.face_refine_enabled,
   ...Object.values(UPSCALER_CONTROL_IDS.face_refine).map((id) => ui[id]),
 ]) {
@@ -6309,12 +6585,12 @@ ui.themeToggle.addEventListener("click", () =>
 );
 ui.favoriteForm.addEventListener("submit", saveFavorite);
 ui.removeFavorite.addEventListener("click", removeFavorite);
-ui.closeFavorite.addEventListener("click", () => ui.favoriteDialog.close());
-ui.cancelFavorite.addEventListener("click", () => ui.favoriteDialog.close());
+ui.closeFavorite.addEventListener("click", () => motionDialog(ui.favoriteDialog, false));
+ui.cancelFavorite.addEventListener("click", () => motionDialog(ui.favoriteDialog, false));
 ui.groupForm.addEventListener("submit", saveGroup);
 ui.deleteGroup.addEventListener("click", deleteFavoriteGroup);
-ui.closeGroup.addEventListener("click", () => ui.groupDialog.close());
-ui.cancelGroup.addEventListener("click", () => ui.groupDialog.close());
+ui.closeGroup.addEventListener("click", () => motionDialog(ui.groupDialog, false));
+ui.cancelGroup.addEventListener("click", () => motionDialog(ui.groupDialog, false));
 ui.importChildGroup.addEventListener("click", () => openChildGroupDialog());
 ui.childGroupForm.addEventListener("submit", importFavoriteChild);
 ui.childGroupSearch.addEventListener("input", () => {
@@ -6322,11 +6598,11 @@ ui.childGroupSearch.addEventListener("input", () => {
   clearTimeout(ui.childGroupSearch._timer);
   ui.childGroupSearch._timer = setTimeout(renderChildGroupSources, 220);
 });
-ui.closeChildGroup.addEventListener("click", () => ui.childGroupDialog.close());
-ui.cancelChildGroup.addEventListener("click", () => ui.childGroupDialog.close());
+ui.closeChildGroup.addEventListener("click", () => motionDialog(ui.childGroupDialog, false));
+ui.cancelChildGroup.addEventListener("click", () => motionDialog(ui.childGroupDialog, false));
 ui.deleteGroupForm.addEventListener("submit", confirmGroupDelete);
-ui.closeDeleteGroup.addEventListener("click", () => ui.deleteGroupDialog.close());
-ui.cancelDeleteGroup.addEventListener("click", () => ui.deleteGroupDialog.close());
+ui.closeDeleteGroup.addEventListener("click", () => motionDialog(ui.deleteGroupDialog, false));
+ui.cancelDeleteGroup.addEventListener("click", () => motionDialog(ui.deleteGroupDialog, false));
 ui.addLora.addEventListener("click", openLoraDialog);
 ui.resetLoras.addEventListener("click", () => {
   draft.loras = defaultLorasForProfile(currentProfile());
@@ -6335,12 +6611,12 @@ ui.resetLoras.addEventListener("click", () => {
   schedulePersist();
   toast("已恢复模板默认 LoRA");
 });
-ui.closeLora.addEventListener("click", () => ui.loraDialog.close());
-ui.cancelLora.addEventListener("click", () => ui.loraDialog.close());
+ui.closeLora.addEventListener("click", () => motionDialog(ui.loraDialog, false));
+ui.cancelLora.addEventListener("click", () => motionDialog(ui.loraDialog, false));
 ui.loraTriggerForm.addEventListener("submit", saveLoraTriggers);
 ui.resetLoraTriggers.addEventListener("click", resetLoraTriggers);
-ui.closeLoraTriggers.addEventListener("click", () => ui.loraTriggerDialog.close());
-ui.cancelLoraTriggers.addEventListener("click", () => ui.loraTriggerDialog.close());
+ui.closeLoraTriggers.addEventListener("click", () => motionDialog(ui.loraTriggerDialog, false));
+ui.cancelLoraTriggers.addEventListener("click", () => motionDialog(ui.loraTriggerDialog, false));
 ui.loraSearch.addEventListener("input", () => {
   clearTimeout(ui.loraSearch._timer);
   ui.loraSearch._timer = setTimeout(renderLoraCatalog, 220);
@@ -6398,7 +6674,11 @@ async function initialize() {
       applySettings(typeof randomWorkbenchDefaultSettings === "function" ? randomWorkbenchDefaultSettings(defaults.model_profile) : defaults);
       ui.draftStatus.textContent = "使用模板默认设置";
     }
-    if (typeof initializeSingleWorkbench === "function") initializeSingleWorkbench();
+    if (typeof initializeSingleWorkbench === "function") initializeSingleWorkbench({ legacyRestored: Boolean(restored) });
+    if (typeof StudioMotion !== "undefined") {
+      StudioMotion.bindDisclosures(document);
+      StudioMotion.bindDialogs(document);
+    }
     initialized = true;
   } catch (error) {
     const message = `界面初始化失败：${error.message}`;

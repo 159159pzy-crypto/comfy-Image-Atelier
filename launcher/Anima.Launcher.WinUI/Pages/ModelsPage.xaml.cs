@@ -22,6 +22,8 @@ public sealed partial class ModelsPage : LauncherPage
         active = true;
         State.Scanned += OnScanned;
         State.BusyChanged += OnBusy;
+        State.BatchProgressChanged += OnBatchProgress;
+        OnBatchProgress();
         OnBusy(State.Busy);
         UpdateDetails();
     }
@@ -31,6 +33,7 @@ public sealed partial class ModelsPage : LauncherPage
         active = false;
         State.Scanned -= OnScanned;
         State.BusyChanged -= OnBusy;
+        State.BatchProgressChanged -= OnBatchProgress;
         base.OnNavigatedFrom(e);
     }
 
@@ -46,6 +49,18 @@ public sealed partial class ModelsPage : LauncherPage
         ModelActions.IsEnabled = !busy;
         ModelList.IsEnabled = !busy;
         OpenLocationButton.IsEnabled = !busy && ModelList.SelectedItem is ModelRow;
+    });
+
+    private void OnBatchProgress() => DispatcherQueue.TryEnqueue(() =>
+    {
+        if (!active) return;
+        DownloadProgressPanel.Visibility = State.BatchProgress is null ? Visibility.Collapsed : Visibility.Visible;
+        if (State.BatchProgress is not { } batch) return;
+        ModelsBatchBar.Value = batch.Percent;
+        ModelsFileBar.Value = 100d * batch.FileReceived / Math.Max(1, batch.FileTotal);
+        BatchText.Text = $"整批模型 {batch.CompletedItems}/{batch.TotalItems} 项 · {batch.Percent:N1}% · {batch.Received / 1048576d:N1} / {batch.Total / 1048576d:N1} MiB"
+            + (batch.BytesPerSecond > 0 ? $" · {batch.BytesPerSecond / 1048576d:N1} MiB/s" : "");
+        CurrentResourceText.Text = batch.Name + " · " + batch.Stage;
     });
 
     private void UpdateDetails()

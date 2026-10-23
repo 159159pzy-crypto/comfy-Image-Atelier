@@ -6,4 +6,8 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup><ProjectReference Include="../Anima.Launcher.Core/Anima.Launcher.Core.csproj" /></ItemGroup>
+  <ItemGroup>
+    <Compile Include="../Anima.Launcher.WinUI/Shared/ModelRow.cs" Link="Shared/ModelRow.cs" />
+    <Compile Include="../Anima.Launcher.WinUI/Shared/ModelListProjection.cs" Link="Shared/ModelListProjection.cs" />
+  </ItemGroup>
 </Project>

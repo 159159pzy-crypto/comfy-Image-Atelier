@@ -13,6 +13,7 @@ from typing import Any
 from .sampling import (
     enabled_postprocess_parameter_issues, latent_upscale_node, node_input_issues,
     validate_resize_options, validate_resize_scale,
+    KREA_VARIANCE_DEFAULTS, DLSS_DEFAULTS, validate_dlss,
 )
 
 
@@ -39,16 +40,11 @@ SINGLE_DEFAULTS: dict[str, Any] = {
         "switch_step": 15, "scale": 1.0, "upscale_method": "sesqui",
         "model_format": "Wan 2.1", "half_precision": True,
         "first_pipeline": "primary", "second_pipeline": "primary",
-        "second_cfg": 4.0, "second_sampler_name": "er_sde", "second_scheduler": "simple",
+        "second_cfg": 8.0, "second_sampler_name": "euler", "second_scheduler": "simple",
         "first_add_noise": True, "second_add_noise": True,
         "first_leftover_noise": True, "second_leftover_noise": False,
     },
-    "krea_variance": {
-        "enabled": False, "randomize_percent": 50.0, "auto_strength_factor": 1.0,
-        "strength": 20.0, "noise_insert": "noise on beginning steps",
-        "steps_switchover_percent": 25.0, "mask_starts_at": "beginning", "mask_percent": 0.0,
-        "noise_distribution": "uniform", "granularity": "values",
-    },
+    "krea_variance": copy.deepcopy(KREA_VARIANCE_DEFAULTS),
     "prompt_processing": {
         "expand": copy.deepcopy(_PROCESSOR),
         "oc": {**copy.deepcopy(_PROCESSOR), "custom_rule": True,
@@ -57,10 +53,7 @@ SINGLE_DEFAULTS: dict[str, Any] = {
     "prompt_job_id": "", "processed_prompt_override": None,
     "latent": {"upscale_method": "sesqui", "model_format": "Wan 2.1", "half_precision": True, "pipeline": "secondary"},
     "face_pipeline": "secondary",
-    "dlss": {
-        "enabled": False, "style": "电影", "intensity": 1.0, "local_tone": 1.0,
-        "local_struct": 1.0, "output_view": "处理", "output_mix": 1.0, "gpu_gen": "Auto",
-    },
+    "dlss": {"enabled": False, **copy.deepcopy(DLSS_DEFAULTS)},
 }
 
 
@@ -138,16 +131,9 @@ def validate_single_settings(value: Any, settings: dict[str, Any]) -> dict[str, 
             and s["latent"]["upscale_method"] == "sesqui"
             and not 1 <= settings["upscalers"]["latent"]["scale_by"] <= 2):
         raise WorkflowError("SesquiLSR 潜空间缩放必须在 1-2 之间")
-    var = s["krea_variance"]
-    var["enabled"] = _boolean("single.krea_variance.enabled", var["enabled"])
-    for key, low, high in (("randomize_percent", 1, 100), ("auto_strength_factor", 0, 100), ("strength", -4294967295, 4294967295), ("steps_switchover_percent", 1, 99), ("mask_percent", 0, 99)):
-        num(var, key, low, high, "single.krea_variance")
-    enum(var, "noise_insert", {"noise on beginning steps", "noise on ending steps", "noise on all steps", "disabled"}, "single.krea_variance")
-    enum(var, "mask_starts_at", {"beginning", "end"}, "single.krea_variance")
-    enum(var, "noise_distribution", {"uniform", "gaussian"}, "single.krea_variance")
-    enum(var, "granularity", {"values", "tokens"}, "single.krea_variance")
-    if var["enabled"] and settings.get("model_profile") != "krea2":
-        raise WorkflowError("多样性增强仅适用于 Krea 2")
+    # Retain the legacy namespace for old integrations; the shared setting
+    # controls rendering and has already been validated.
+    s["krea_variance"] = copy.deepcopy(settings["krea_variance"])
     for name, proc in s["prompt_processing"].items():
         for key in ("enabled", "custom_rule", "ollama_auto_unload"):
             proc[key] = _boolean(f"single.prompt_processing.{name}.{key}", proc[key])
@@ -161,13 +147,8 @@ def validate_single_settings(value: Any, settings: dict[str, Any]) -> dict[str, 
                 raise WorkflowError(f"{name} 自定义规则不能为空")
             if name == "oc" and not proc["character"]:
                 raise WorkflowError("OC 角色设定不能为空")
-    dlss = s["dlss"]
-    dlss["enabled"] = _boolean("single.dlss.enabled", dlss["enabled"])
-    enum(dlss, "style", {"默认", "自然", "电影", "风格3"}, "single.dlss")
-    enum(dlss, "output_view", {"处理", "差异×10", "左右对比"}, "single.dlss")
-    enum(dlss, "gpu_gen", {"Auto", "RTX 30", "RTX 40", "RTX 50"}, "single.dlss")
-    for key in ("intensity", "local_tone", "local_struct", "output_mix"):
-        num(dlss, key, 0, 1, "single.dlss")
+    legacy_enabled = _boolean("single.dlss.enabled", s["dlss"]["enabled"])
+    s["dlss"] = {"enabled": legacy_enabled, **validate_dlss(s["dlss"], "single.dlss")}
     if settings.get("generation_mode") == "img2img" and settings.get("base_mode") != "normal":
         raise WorkflowError("图生图仅支持普通采样模式")
     return s
@@ -239,9 +220,7 @@ def single_resource_issues(settings: dict[str, Any], resources: dict[str, Any]) 
     if settings["upscalers"]["latent"]["enabled"]:
         required.update({"SesquiLatentUpscale" if s["latent"]["upscale_method"] == "sesqui" else "LatentUpscaleBy",
                          "VAEEncodeTiled" if s["vae_encode"]["tiled"] else "VAEEncode"})
-    if s["dlss"]["enabled"]:
-        required.add("DLSS5NeuralRender")
-    if s["krea_variance"]["enabled"]:
+    if settings["krea_variance"]["enabled"]:
         required.add("KreaSeedVarianceEnhancer")
     if node_types is not None:
         for name in sorted(required - node_types):
@@ -278,7 +257,7 @@ def single_resource_issues(settings: dict[str, Any], resources: dict[str, Any]) 
 
     sampler = {key: settings[key] for key in ("steps", "cfg", "sampler_name", "scheduler")}
     if settings["base_mode"] == "normal":
-        check_inputs("KSampler", {**sampler, "denoise": s["denoise"] if settings["generation_mode"] == "img2img" else 1.0}, "普通采样")
+        check_inputs("KSampler", {**sampler, "denoise": s["denoise"] if settings["generation_mode"] == "img2img" else settings["base_denoise"]}, "普通采样")
     else:
         check_inputs("KSamplerAdvanced", sampler, "第一阶段采样")
         check_inputs("KSamplerAdvanced", {**sampler, "cfg": s["dual"]["second_cfg"],
@@ -292,10 +271,8 @@ def single_resource_issues(settings: dict[str, Any], resources: dict[str, Any]) 
     if stages["latent"]["enabled"]:
         resize(s["latent"], stages["latent"]["scale_by"], "潜空间放大")
     issues.extend(enabled_postprocess_parameter_issues(settings, resources))
-    if s["dlss"]["enabled"]:
-        check_inputs("DLSS5NeuralRender", s["dlss"], "DLSS")
-    if s["krea_variance"]["enabled"]:
-        check_inputs("KreaSeedVarianceEnhancer", s["krea_variance"], "Krea 变化控制")
+    if settings["krea_variance"]["enabled"]:
+        check_inputs("KreaSeedVarianceEnhancer", settings["krea_variance"], "Krea 变化控制")
     return issues
 
 
@@ -385,7 +362,7 @@ def render_single_workflows(api_template: dict[str, Any], ui_template: dict[str,
 
     def with_variance(pipe: dict[str, Any], node_id: str) -> dict[str, Any]:
         pipe = copy.deepcopy(pipe)
-        variance = s["krea_variance"]
+        variance = settings["krea_variance"]
         if variance["enabled"]:
             pipe["positive"] = node(node_id, "KreaSeedVarianceEnhancer", conditioning=pipe["positive"],
                                     seed=prompt_seed, log_to_console=False, **{k: v for k, v in variance.items() if k != "enabled"})
@@ -394,7 +371,7 @@ def render_single_workflows(api_template: dict[str, Any], ui_template: dict[str,
     if settings["base_mode"] == "normal":
         sampler = api["691:1240"]["inputs"]
         sampler.update(with_variance(pipelines[s["normal_pipeline"]], "single:variance"))
-        sampler["denoise"] = s["denoise"] if settings["generation_mode"] == "img2img" else 1.0
+        sampler["denoise"] = s["denoise"] if settings["generation_mode"] == "img2img" else settings["base_denoise"]
         sampler["latent_image"] = ["691:53", 0]
         if settings["generation_mode"] == "img2img":
             image = runtime.get("input_image")
@@ -436,18 +413,6 @@ def render_single_workflows(api_template: dict[str, Any], ui_template: dict[str,
     if settings["upscalers"]["face_refine"]["enabled"]:
         name = s["face_pipeline"]
         api["1253:1215"]["inputs"].update(pipelines[name], clip=["72" if name == "primary" else "243", 1])
-    if s["dlss"]["enabled"]:
-        config = {k: v for k, v in s["dlss"].items() if k != "enabled"}
-        if settings["upscalers"]["nvidia"]["enabled"]:
-            node("1432:1492", "DLSS5NeuralRender", images=["1432:1418", 0], **config)
-        else:
-            # DLSS is also useful without VSR. Insert it before face refinement.
-            if settings["upscalers"]["face_refine"]["enabled"]:
-                face_input = api["1253:1215"]["inputs"]["image"]
-                api["1253:1215"]["inputs"]["image"] = node("single:dlss", "DLSS5NeuralRender", images=face_input, **config)
-            else:
-                source = api[V2_OUTPUT_ID]["inputs"]["images"]
-                api[V2_OUTPUT_ID]["inputs"]["images"] = node("single:dlss", "DLSS5NeuralRender", images=source, **config)
     api[V2_OUTPUT_ID]["_meta"] = {"title": "进阶单图工作台 输出"}
     api = _prune_graph(api, V2_OUTPUT_ID)
     # The API graph is authoritative; keep it with the attached UI workflow so

@@ -10,6 +10,7 @@ from typing import Any
 from .single_workbench import SINGLE_DEFAULTS, validate_single_settings
 from .sampling import (
     latent_upscale_node, validate_random_dual, validate_resize_options, validate_resize_scale,
+    DUAL_DEFAULTS, KREA_VARIANCE_DEFAULTS, DLSS_DEFAULTS, validate_krea_variance, validate_dlss,
 )
 
 from .model_profiles import (
@@ -28,7 +29,7 @@ DEFAULT_NEGATIVE = (
 )
 DEFAULT_LORAS: list[dict[str, Any]] = []
 DEFAULT_MODEL = MODEL_PROFILES[DEFAULT_MODEL_PROFILE]["model_name"]
-DEFAULT_SAMPLER = "er_sde"
+DEFAULT_SAMPLER = "euler"
 DEFAULT_SCHEDULER = "simple"
 DEFAULT_SECOND_SAMPLER = {
     "enabled": False,
@@ -65,9 +66,9 @@ DEFAULT_SETTINGS = {
     "workbench": "random",
     "generation_mode": "txt2img",
     "single": copy.deepcopy(SINGLE_DEFAULTS),
-    # Missing/null preserves historical random graphs, including their fixed
-    # template step bounds and the old coupling to the latent repair stage.
-    "dual": None,
+    "dual": copy.deepcopy(DUAL_DEFAULTS),
+    "base_denoise": 1.0,
+    "krea_variance": copy.deepcopy(KREA_VARIANCE_DEFAULTS),
     "count": 10,
     "random_character": False,
     "random_clothing": False,
@@ -130,7 +131,7 @@ DEFAULT_SETTINGS = {
         "latent": {
             "enabled": False,
             "scale_by": 1.5,
-            "upscale_method": "bilinear",
+            "upscale_method": "sesqui",
             "model_format": "Wan 2.1",
             "half_precision": True,
             # The attached v2 workflow has always sampled after the latent
@@ -139,7 +140,7 @@ DEFAULT_SETTINGS = {
             "second_sampler": {
                 "enabled": True,
                 "steps": 20,
-                "cfg": 4.0,
+                "cfg": 8.0,
                 "sampler_name": DEFAULT_SAMPLER,
                 "scheduler": DEFAULT_SCHEDULER,
                 "denoise": 1.0,
@@ -177,13 +178,14 @@ DEFAULT_SETTINGS = {
             "resize_type": "scale by multiplier",
             "scale": 2.0,
             "quality": "ULTRA",
+            "dlss": copy.deepcopy(DLSS_DEFAULTS),
         },
         "face_refine": {
             "enabled": False,
             "steps": 8,
             "cfg_scale": 1.0,
-            "sampler": DEFAULT_SAMPLER,
-            "scheduler": DEFAULT_SCHEDULER,
+            "sampler": "res_2m_ode",
+            "scheduler": "beta57",
             "denoise_strength": 0.3,
             "face_selection": 0,
             "detection_confidence": 0.75,
@@ -552,7 +554,7 @@ def _validate_post_sampler(value: Any, field_prefix: str) -> dict[str, Any]:
     defaults = {
         "enabled": True,
         "steps": 20,
-        "cfg": 4.0,
+        "cfg": 8.0,
         "sampler_name": DEFAULT_SAMPLER,
         "scheduler": DEFAULT_SCHEDULER,
         "denoise": 1.0,
@@ -688,7 +690,7 @@ def _validate_upscalers(value: Any, profile_id: str = DEFAULT_MODEL_PROFILE) -> 
     }
 
     nvidia = merged["nvidia"]
-    if set(nvidia) - {"enabled", "resize_type", "scale", "quality", "model_name"}:
+    if set(nvidia) - {"enabled", "resize_type", "scale", "quality", "model_name", "dlss"}:
         raise WorkflowError("未知 upscalers.nvidia 参数")
     scale = nvidia["scale"]
     if isinstance(scale, bool) or not isinstance(scale, (int, float)):
@@ -705,6 +707,7 @@ def _validate_upscalers(value: Any, profile_id: str = DEFAULT_MODEL_PROFILE) -> 
         "resize_type": resize_type,
         "scale": scale,
         "quality": quality,
+        "dlss": validate_dlss(nvidia["dlss"]),
     }
 
     face = merged["face_refine"]
@@ -881,6 +884,18 @@ def migrate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     if not isinstance(raw_base, str) or raw_base not in {"normal", "dual_sampler"}:
         raise WorkflowError("base_mode 必须是 normal 或 dual_sampler")
     result["base_mode"] = raw_base
+    if "steps" not in source:
+        result["steps"] = 30 if raw_base == "dual_sampler" else 20
+    # New clients send explicit shared defaults. Older snapshots keep their
+    # effective variance behavior and all hidden controls during migration.
+    if "krea_variance" not in source:
+        result["krea_variance"] = copy.deepcopy(raw_single.get("krea_variance", {})) if workbench == "single" else {"enabled": profile_id == "krea2"}
+    elif workbench == "single" and isinstance(raw_single.get("krea_variance"), dict) and isinstance(source["krea_variance"], dict):
+        result["krea_variance"] = {**copy.deepcopy(raw_single["krea_variance"]), **source["krea_variance"]}
+    if "base_denoise" not in source:
+        result["base_denoise"] = 1.0
+    if "dual" not in source:
+        result["dual"] = None
     if workbench == "single":
         result["count"] = 1
 
@@ -904,6 +919,7 @@ def migrate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
             # v1 applied the percentage to a 4x pixel upscaler.  Preserve the
             # resulting geometry when moving to the direct latent scale.
             upscalers["latent"]["scale_by"] = float(legacy_hires["percent"]) / 100 * 4
+            upscalers["latent"]["upscale_method"] = "bilinear"
     # Keep old v1 second-sampler settings executable by moving them into the
     # new latent-stage contract. A unit latent scale avoids adding a resize to
     # old settings which had no latent-upscale stage.
@@ -951,6 +967,12 @@ def migrate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     )
     seed_defaults.update(upscalers.get("seedvr2", {}))
     upscalers["seedvr2"] = seed_defaults
+    raw_nvidia = source.get("upscalers", {}).get("nvidia", {}) if isinstance(source.get("upscalers"), dict) else {}
+    if isinstance(raw_nvidia, dict) and "dlss" in raw_single:
+        if "dlss" not in raw_nvidia:
+            upscalers["nvidia"]["dlss"] = copy.deepcopy(raw_single["dlss"])
+        elif isinstance(raw_single["dlss"], dict) and isinstance(raw_nvidia["dlss"], dict):
+            upscalers["nvidia"]["dlss"] = {**copy.deepcopy(raw_single["dlss"]), **raw_nvidia["dlss"]}
     result["upscalers"] = upscalers
     for key in _LEGACY_SETTING_KEYS:
         result.pop(key, None)
@@ -1121,6 +1143,11 @@ def validate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         raise WorkflowError("sampler_name 不能为空")
     if not settings["scheduler"]:
         raise WorkflowError("scheduler 不能为空")
+    denoise = settings["base_denoise"]
+    if isinstance(denoise, bool) or not isinstance(denoise, (int, float)) or not math.isfinite(denoise) or not 0 <= denoise <= 1:
+        raise WorkflowError("base_denoise 必须在 0-1 之间")
+    settings["base_denoise"] = float(denoise)
+    settings["krea_variance"] = validate_krea_variance(settings["krea_variance"], profile_id)
     settings["dual"] = validate_random_dual(settings.get("dual"), settings)
     latent = settings["upscalers"]["latent"]
     # Single keeps its existing independent single.latent namespace. Random
@@ -1491,9 +1518,9 @@ V2_BASE_ENDPOINTS = {
 }
 V2_STAGE_GROUPS = {
     "latent": "704:",
+    "face_refine": "1253:",
     "seedvr2": "712:",
     "nvidia": "1432:",
-    "face_refine": "1253:",
 }
 V2_STAGE_ENDPOINTS = {
     "latent": ("704:1415", 1),
@@ -1697,7 +1724,7 @@ def _v2_set_sampler(api: dict[str, Any], node_id: str, settings: dict[str, Any],
         if name in inputs:
             inputs[name] = value
     if "denoise" in inputs:
-        inputs["denoise"] = 1.0
+        inputs["denoise"] = settings["base_denoise"]
 
 
 def _render_v2_workflows(
@@ -1887,12 +1914,12 @@ def _render_v2_workflows(
         if name != "enabled":
             _v2_set_input(api, "1253:1215", name, value)
 
-    # Krea's variance enhancer is a model-specific path, never an Anima path.
-    # Krea's variance enhancer exists in the dual-sampler branch, while the
-    # normal branch exposes the same switch as 691:213.  Configure both
-    # before pruning the inactive base graph.
-    _v2_set_input(api, "701:538", "switch", settings["model_profile"] == "krea2")
-    _v2_set_input(api, "691:213", "switch", settings["model_profile"] == "krea2")
+    variance = settings["krea_variance"]
+    for switch_id, enhancer_id in (("701:538", "701:537"), ("691:213", "691:158")):
+        _v2_set_input(api, switch_id, "switch", variance["enabled"])
+        for name, value in variance.items():
+            if name != "enabled":
+                _v2_set_input(api, enhancer_id, name, value)
     # The attached workflow includes an interactive image-picker branch for
     # manual reference selection.  Random Studio submissions must remain
     # unattended: route both base modes through their generated-image branch
@@ -2044,6 +2071,10 @@ def _render_v2_workflows(
     _v2_set_input(api, "1432:1418", "resize_type", nvidia["resize_type"])
     _v2_set_input(api, "1432:1418", "resize_type.scale", nvidia["scale"])
     _v2_set_input(api, "1432:1418", "quality", nvidia["quality"])
+    if "1432:1492" in api:
+        api["1432:1492"] = {"class_type": "DLSS5NeuralRender",
+                            "inputs": {"images": ["1432:1418", 0], **copy.deepcopy(nvidia["dlss"])},
+                            "_meta": {"title": "N卡 DLSS 色彩处理"}}
 
     # Every surviving save node receives the same prefix.  Intermediate saves
     # are part of the attached graph and are harmless when a stage is absent.

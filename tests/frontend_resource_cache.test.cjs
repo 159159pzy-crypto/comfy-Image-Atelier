@@ -1,3 +1,4 @@
+const createFrontendContext = require('./helpers/frontend-context.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -16,7 +17,7 @@ function context() {
   const element = () => ({ value: '', disabled: false, checked: false, hidden: false,
     replaceChildren() {}, querySelector() { return this; }, close() { this.closed = true; } });
   const ui = new Proxy({}, { get(target, key) { return target[key] ||= element(); } });
-  const ctx = vm.createContext({
+  const ctx = createFrontendContext({
     console, Map, Promise, JSON, ui, document: { hidden: false },
     Option: function(label, value) { return { label, value }; },
     activeProfileId: 'anima', resourceRequest: 0, resourceInventoryProfile: '', resourceError: '', resourcesLoaded: false,

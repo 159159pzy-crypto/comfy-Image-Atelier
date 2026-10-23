@@ -159,7 +159,7 @@ def test_all_postprocess_stages_connect_and_dlss_is_real(templates, base, nvidia
     assert_connected(api)
     assert api["704:1064"]["class_type"] == "SesquiLatentUpscale"
     assert api["704:359"]["class_type"] == "VAEDecode"
-    assert any(node["class_type"] == "DLSS5NeuralRender" for node in api.values())
+    assert any(node["class_type"] == "DLSS5NeuralRender" for node in api.values()) == nvidia
     assert api["1253:1215"]["inputs"]["model"] == ["243", 0]
 
 
@@ -173,10 +173,10 @@ def test_no_runtime_or_template_mutation(templates):
 
 
 def test_resource_checks_are_specific_to_enabled_single_features():
-    settings = validate_settings({"workbench": "single", "base_mode": "dual_sampler", "single": {"dlss": {"enabled": True}}})
-    issues = single_resource_issues(settings, {"node_types": [], "samplers": ["euler"], "schedulers": ["simple"]})
+    settings = validate_settings({"workbench": "single", "base_mode": "dual_sampler", "upscalers": {"nvidia": {"enabled": True}}})
+    issues = single_resource_issues(settings, {"node_types": [], "samplers": ["heun"], "schedulers": ["simple"]})
     names = {item["name"] for item in issues}
-    assert {"DLSS5NeuralRender", "SesquiLatentUpscale", "er_sde"} <= names
+    assert {"DLSS5NeuralRender", "SesquiLatentUpscale", "euler"} <= names
     assert "PromptExpand" not in names
     assert single_resource_issues(validate_settings({}), {"node_types": []}) == []
 
@@ -252,10 +252,10 @@ def test_seedvr_tiles_use_the_same_live_vae_limits_as_base_tiles():
 
 
 def test_live_single_optional_enums_can_change_without_invalidating_disabled_drafts():
-    settings = validate_settings({"workbench": "single", "single": {"dlss": {"enabled": True}}})
+    settings = validate_settings({"workbench": "single", "upscalers": {"nvidia": {"enabled": True}}})
     resources = {"node_inputs": {"DLSS5NeuralRender": {"style": [["自然"]]}}}
     assert {item["name"] for item in single_resource_issues(settings, resources)} == {"style=电影"}
-    settings["single"]["dlss"]["enabled"] = False
+    settings["upscalers"]["nvidia"]["enabled"] = False
     assert single_resource_issues(settings, resources) == []
 
 

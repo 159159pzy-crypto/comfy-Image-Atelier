@@ -41,7 +41,7 @@ PROMPT_SECTIONS = ("character", "clothing", "pose", "background", "expression")
 
 
 def validate_seeds(value: Any) -> dict[str, int] | None:
-    """校验复现用的固定种子。None 表示每张图随机(默认行为)。"""
+    """固定图像种子；提示词种子可省略以保持每张随机，双种子用于复现。"""
     if value is None:
         return None
     if not isinstance(value, dict):
@@ -51,6 +51,8 @@ def validate_seeds(value: Any) -> dict[str, int] | None:
         raise WorkflowError(f"seeds 包含未知参数: {', '.join(sorted(unknown))}")
     result: dict[str, int] = {}
     for name, maximum in (("sample_seed", MAX_SAMPLE_SEED), ("prompt_seed", 2**31 - 1)):
+        if name == "prompt_seed" and name not in value:
+            continue
         raw = value.get(name)
         if isinstance(raw, bool) or not isinstance(raw, int):
             raise WorkflowError(f"seeds.{name} 必须是整数")
@@ -956,11 +958,11 @@ class BatchManager:
             for sequence in range(1, settings["count"] + 1):
                 if self.stop_requested:
                     break
-                # 固定种子用于复现历史图片;未指定时每张随机。
+                # 图像种子可单独固定；仅显式的提示词种子才冻结每张的抽取。
                 sample_seed = seeds["sample_seed"] if seeds else secrets.randbelow(MAX_SAMPLE_SEED + 1)
                 prompt_seed = (
                     seeds["prompt_seed"]
-                    if seeds
+                    if seeds and "prompt_seed" in seeds
                     else regeneration.get("prompt_seed")
                     if regeneration and regeneration.get("mode") == "prompt_variant"
                     else secrets.randbelow(2**31)

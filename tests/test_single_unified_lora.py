@@ -109,7 +109,7 @@ def test_one_lora_list_drives_every_sampler_and_face_clip(templates, profile, ba
 @pytest.mark.parametrize("base", ["normal", "dual_sampler"])
 def test_krea_variance_preserves_primary_conditioning(templates, base):
     settings = single_settings(profile="krea2", base=base)
-    settings["single"]["krea_variance"]["enabled"] = True
+    settings["krea_variance"]["enabled"] = True
     api = templates.submission(settings, 123, 456, "Unified/variance", "client", 1)["prompt"]
     assert_connected(api)
     assert_pipeline(api, "691:1240" if base == "normal" else "701:1245", variance=True)

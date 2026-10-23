@@ -1,3 +1,4 @@
+const createFrontendContext = require('./helpers/frontend-context.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -11,7 +12,7 @@ function functionSource(name) {
   return source.slice(start, end);
 }
 function context() {
-  const ctx = vm.createContext({
+  const ctx = createFrontendContext({
     SECTIONS: ['character', 'clothing', 'pose', 'background', 'expression'],
     defaults: { profile_settings: { anima: {}, krea2: {} } },
     draft: {}, profileDrafts: {}, ui: {}, activeProfileId: 'anima',
@@ -295,7 +296,7 @@ test('LoRA refresh preserves profile drafts and rejects a stale response after s
 const singleSource = fs.readFileSync(require('node:path').join(__dirname, '../static/single-workbench.js'), 'utf8');
 function singleContext(extra = {}) {
   const elements = {};
-  const ctx = vm.createContext({
+  const ctx = createFrontendContext({
     JSON, Number, Set, Date, clearTimeout, setTimeout, console,
     document: { getElementById: id => elements[id] ||= { value: '', hidden: false }, querySelectorAll: () => [] },
     SECTIONS: ['character', 'clothing', 'pose', 'background', 'expression'],
@@ -386,7 +387,7 @@ test('single namespace merging preserves independent encoder, decoder and LoRA a
 });
 test('single fixed seeds reject unsafe numeric precision and invalid prompt seeds', () => {
   const { elements, run } = singleContext();
-  elements.singleSeedMode = { value: 'fixed' }; elements.singleSampleSeed = { value: '123456' }; run('singleWorkbenchState.promptSeed = 99');
+  elements.singleSeedMode = { value: 'fixed' }; elements.singleSampleSeed = { value: '123456' }; run('singleWorkbenchState.ready=true;singleWorkbenchState.mode="single";singleWorkbenchState.promptSeed = 99');
   assert.deepEqual(plain(run('singleWorkbenchSeeds()')), { sample_seed: 123456, prompt_seed: 99 });
   elements.singleSampleSeed.value = '9007199254740992';
   assert.throws(() => run('singleWorkbenchSeeds()'), /有效/);
@@ -417,7 +418,7 @@ test('explicit history loading returns mobile navigation to settings and focuses
 
 test('legacy v4 drafts migrate inactive model profiles into the random workbench', () => {
   const { ctx, run } = singleContext();
-  ctx.settings = { model_profile: 'anima', count: 13, width: 896, extra_prompt: 'anima', workbench: 'random' };
+  ctx.settings = { model_profile: 'anima', count: 13, width: 896, extra_prompt: 'anima', workbench: 'random', krea_variance: { enabled: false } };
   ctx.profiles = { anima: { extra_prompt: 'anima', modes: { pose: 'pool' }, fixed: { pose: 'inactive' }, pools: { pose: { ids: ['one'] } } }, krea2: { model_name: 'krea.safetensors', extra_prompt: 'old Krea prose', loras: [], managedTriggers: ['hint'], modes: {}, kreaPromptPoolEnabled: true, kreaPromptPoolSelection: ['saved'] } };
   const migrated = plain(run('singleWorkbenchLegacyDrafts(settings, profiles)'));
   assert.equal(migrated.krea2.settings.model_profile, 'krea2');
@@ -428,6 +429,12 @@ test('legacy v4 drafts migrate inactive model profiles into the random workbench
   assert.equal(migrated.anima.settings.random_pose, true);
   assert.equal(migrated.anima.settings.fixed_pose, '');
   assert.equal(migrated.anima.profileDrafts.anima.fixed.pose, 'inactive');
+  assert.equal(migrated.krea2.settings.krea_variance.enabled, true);
+  assert.equal(migrated.anima.settings.krea_variance.enabled, false);
+  ctx.settings = { ...ctx.settings, model_profile: 'krea2', krea_variance: { enabled: true } };
+  const reverse = plain(run('singleWorkbenchLegacyDrafts(settings, profiles)'));
+  assert.equal(reverse.anima.settings.krea_variance.enabled, false);
+  assert.equal(reverse.krea2.settings.krea_variance.enabled, true);
 });
 test('applying a single preset preserves input image and active workbench while invalidating old preview', () => {
   let applied;
@@ -451,13 +458,13 @@ test('random workbench does not accept single-only settings when applying a shar
   assert.equal(applied.single, undefined); assert.equal(applied.clip_name, undefined);
 });
 test('single source text is not modified by the random LoRA trigger reconciler', () => {
-  const ctx = vm.createContext({ singleWorkbenchActive: () => true });
+  const ctx = createFrontendContext({ singleWorkbenchActive: () => true });
   vm.runInContext(functionSource('reconcileLoraTriggers'), ctx);
   assert.doesNotThrow(() => ctx.reconcileLoraTriggers([{ filename: 'first' }]));
 });
 test('favorite reads cannot replace the active section with a stale response', async () => {
   const pending = [];
-  const ctx = vm.createContext({ favoritesRequest: 0, activeSection: 'pose', favoritesData: {}, favoritesAvailable: false, currentProfile: () => 'anima',
+  const ctx = createFrontendContext({ favoritesRequest: 0, activeSection: 'pose', favoritesData: {}, favoritesAvailable: false, currentProfile: () => 'anima',
     request: path => new Promise(resolve => pending.push({ path, resolve })), updateFavoriteSelectionButton() {}, toast() {}, currentView: () => ({ filters: {} }) });
   vm.runInContext(functionSource('loadFavorites'), ctx);
   const first = ctx.loadFavorites('pose'); ctx.activeSection = 'character'; const second = ctx.loadFavorites('character');
@@ -475,21 +482,11 @@ test('prompt cancellation keeps polling while stopping and drops failed job refe
   await run('singleWorkbenchPollPrompt("job")');
   assert.equal(run('singleWorkbenchState.single.prompt_job_id'), '');
 });
-test('single Sesqui controls enforce model limits and random mode restores its original range', () => {
-  const ui = { latent_upscale_scale: {} };
-  const { elements, run } = singleContext({ ui });
-  run('singleWorkbenchState.ready=true;singleWorkbenchState.mode="single"');
-  elements.single_dual_upscale_method = { value: 'sesqui' };
-  elements.single_latent_upscale_method = { value: 'sesqui' };
+test('single limit refresh uses the shared parameter controls', () => {
+  let refreshes = 0;
+  const { run } = singleContext({ sharedParameterVisibility: () => { refreshes++; } });
   run('singleWorkbenchRefreshLimits()');
-  assert.equal(elements.single_dual_scale.max, '2');
-  assert.equal(ui.latent_upscale_scale.max, '2');
-  elements.single_dual_upscale_method.value = 'bilinear';
-  run('singleWorkbenchRefreshLimits()');
-  assert.equal(elements.single_dual_scale.max, '8');
-  run('singleWorkbenchState.mode="random";singleWorkbenchRefreshLimits()');
-  assert.equal(ui.latent_upscale_scale.min, '0.01');
-  assert.equal(ui.latent_upscale_scale.max, '64');
+  assert.equal(refreshes, 1);
 });
 
 test('node resource controls retain unavailable selections and apply live numeric ranges', () => {
@@ -526,7 +523,7 @@ function galleryContext() {
     });
     return elements.get(id);
   };
-  const ctx = vm.createContext({
+  const ctx = createFrontendContext({
     console, URL, Map, Set, queueMicrotask,
     document: { getElementById: element }, elements,
     imagePreview: { phase: 'open', context: { kind: 'single', record: null }, navigationRequest: 0, token: 0, preloaded: new Map() },
@@ -764,7 +761,7 @@ test('terminal refresh waits for an in-flight older page and resolves only after
 });
 
 test('staging a fullscreen bitmap does not commit single detail before decode succeeds', () => {
-  const ctx = vm.createContext({ imagePreview: { context: { kind: 'single', record: singleRecord(20) } }, selectedRecord: { id: 99 }, renderDetail() { throw new Error('Single browsing rendered random detail'); } });
+  const ctx = createFrontendContext({ imagePreview: { context: { kind: 'single', record: singleRecord(20) } }, selectedRecord: { id: 99 }, renderDetail() { throw new Error('Single browsing rendered random detail'); } });
   for (const name of ['currentPreviewRecord', 'setCurrentPreviewRecord']) vm.runInContext(functionSource(name), ctx);
   ctx.setCurrentPreviewRecord(singleRecord(10));
   assert.equal(ctx.currentPreviewRecord().id, 10); assert.equal(ctx.selectedRecord.id, 99);

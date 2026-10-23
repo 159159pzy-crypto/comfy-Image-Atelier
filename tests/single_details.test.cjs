@@ -25,7 +25,7 @@ test('details use historical resource and prompt snapshots, keeping zero seeds a
   assert.equal(data.positive, 'effective main'); assert.equal(data.negative, 'actual negative');
   assert.equal(data.loras[0].filename, 'actual/lora'); assert.equal(data.loras[0].strength, .75);
   assert.equal(data.stages.length, 1);
-  assert.equal(data.repairs[0].rows.find(row => row[0] === '算法')[1], 'sesqui');
+  assert.equal(data.repairs[0].rows.find(row => row[0] === '缩放方法')[1], undefined);
 });
 test('dual snapshots show independent second parameters, LoRA stages and different effective prompts', () => {
   const saved = record(); saved.settings.base_mode = 'dual_sampler';
@@ -47,7 +47,7 @@ test('img2img details use the recorded asset, denoise and fit and sparse old rec
   const ctx = context(), data = ctx.singleDetailData(saved);
   assert.equal(new Map(data.basic).get('参考图'), 'actual');
   assert.equal(new Map(data.basic).get('尺寸适配'), '适应并留边');
-  assert.equal(new Map(data.stages[0].rows).get('重绘强度'), .65);
+  assert.equal(new Map(data.stages[0].rows).get('降噪幅度'), .65);
   const old = ctx.singleDetailData({ settings: { workbench: 'single' }, positive_prompt: '' });
   assert.equal(old.positive, ''); assert.equal(new Map(old.basic).get('主模型'), undefined);
   assert.equal(old.repairs[0].enabled, undefined);
@@ -98,16 +98,16 @@ test('enabled repair snapshots expose saved low-frequency parameters in executio
     enable_pre_upscale: true, upscaler_model: 'saved-model', blend_softness: 6, mask_expansion: 3, sampling_mask_blur_size: 13,
     sampling_mask_blur_strength: 0, enable_segmentation: false, offload_models_to_cpu: true };
   const data = context().singleDetailData(saved);
-  assert.deepEqual(Array.from(data.repairs, stage => stage.title), ['潜空间放大', 'SeedVR2', 'NVIDIA VSR', 'DLSS 色彩处理', '脸部细化']);
+  assert.deepEqual(Array.from(data.repairs, stage => stage.title), ['潜空间放大', '脸部细化', 'SeedVR2', 'N 卡放大']);
   const latent = data.repairs[0].otherGroups.find(group => group.title === '潜空间 VAE 编码');
   assert.equal(latent.rows.length, 1, 'disabled tiling must not present unused saved tile sizes as effective');
   assert.equal(latent.rows[0][1], false);
-  const seed = data.repairs[1];
+  const seed = data.repairs[2];
   assert.equal(new Map(seed.otherGroups.find(group => group.title === 'SeedVR2 VAE 编码').rows).get('空间分块大小'), 640);
   assert.equal(new Map(seed.otherGroups.find(group => group.title === 'SeedVR2 VAE 解码').rows).get('空间分块大小'), 896);
-  const dlss = new Map(data.repairs[3].otherGroups[0].rows);
+  const dlss = new Map([...data.repairs[3].rows, ...data.repairs[3].otherGroups[0].rows]);
   assert.equal(dlss.get('局部光影'), 0); assert.equal(dlss.get('输出视图'), '左右对比');
-  const faceGroups = data.repairs[4].otherGroups;
+  const faceGroups = data.repairs[1].otherGroups;
   assert.equal(new Map(faceGroups.find(group => group.title === '检测与裁切').rows).get('脸部选择'), 0);
   assert.equal(new Map(faceGroups.find(group => group.title === '预放大').rows).get('预放大模型'), 'saved-model');
   assert.equal(new Map(faceGroups.find(group => group.title === '蒙版与融合').rows).get('采样蒙版模糊强度'), 0);

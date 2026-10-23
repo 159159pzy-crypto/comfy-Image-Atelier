@@ -15,13 +15,14 @@
             <Grid ColumnSpacing="12" AutomationProperties.AutomationId="SetupSteps">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
                 <TextBlock x:Name="StepWelcome" Text="1  选择方式" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource StudioTextBrush}" />
                 <TextBlock x:Name="StepLocation" Grid.Column="1" Text="2  安装位置" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource StudioTextBrush}" />
                 <TextBlock x:Name="StepReview" Grid.Column="2" Text="3  检查确认" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource StudioTextBrush}" />
                 <TextBlock x:Name="StepInstalling" Grid.Column="3" Text="4  安装环境" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource StudioTextBrush}" />
-                <TextBlock x:Name="StepComplete" Grid.Column="4" Text="5  开始创作" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource StudioTextBrush}" />
+                <TextBlock x:Name="StepAssistant" Grid.Column="4" Text="5  提示词助手" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource StudioTextBrush}" />
+                <TextBlock x:Name="StepComplete" Grid.Column="5" Text="6  开始创作" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource StudioTextBrush}" />
             </Grid>
         </Border>
 
@@ -151,6 +152,15 @@
                             </Border>
                         </StackPanel>
                     </Border>
+                    <Border Style="{StaticResource StudioPanelStyle}">
+                        <StackPanel Spacing="12">
+                            <TextBlock Text="本次准备的模型" FontSize="18" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
+                            <TextBlock Text="基础模型固定包含。可选模型默认不选，勾选后会重新计算下载量与磁盘空间。" Style="{StaticResource StudioBodyStyle}" />
+                            <ContentControl x:Name="SetupModelChoicesHost" HorizontalContentAlignment="Stretch" IsTabStop="False">
+                                <StackPanel x:Name="SetupModelChoices" Spacing="14" AutomationProperties.AutomationId="SetupModelChoices" />
+                            </ContentControl>
+                        </StackPanel>
+                    </Border>
                     <StackPanel Spacing="8">
                         <TextBlock Text="磁盘空间" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
                         <TextBlock x:Name="VolumeSummary" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="SetupVolumeSummary" />
@@ -168,9 +178,14 @@
                     <Border Style="{StaticResource StudioPanelStyle}">
                         <StackPanel Spacing="13">
                             <TextBlock x:Name="CurrentOperation" FontSize="17" FontWeight="SemiBold" TextWrapping="Wrap" Foreground="{ThemeResource StudioTextBrush}" AutomationProperties.AutomationId="SetupCurrentOperation" />
+                            <StackPanel x:Name="BatchPanel" Spacing="8" Visibility="Collapsed">
+                                <TextBlock x:Name="BatchDetails" Style="{StaticResource StudioBodyStyle}" AutomationProperties.AutomationId="SetupBatchDetails" />
+                                <ProgressBar x:Name="BatchBar" Minimum="0" Maximum="100" AutomationProperties.AutomationId="SetupBatchProgress" />
+                                <TextBlock Text="当前资源" Style="{StaticResource StudioBodyStyle}" FontSize="12" />
+                            </StackPanel>
                             <ProgressBar x:Name="FileProgress" Minimum="0" Maximum="100" IsIndeterminate="True" AutomationProperties.AutomationId="SetupFileProgress" />
                             <TextBlock x:Name="TransferDetails" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="SetupTransferDetails" />
-                            <TextBlock Text="进度条显示当前下载文件；安装依赖等步骤不计算整体百分比。" Style="{StaticResource StudioBodyStyle}" FontSize="12" />
+                            <TextBlock Text="模型下载显示整批与当前资源进度；安装依赖等步骤不计算整体百分比。" Style="{StaticResource StudioBodyStyle}" FontSize="12" />
                         </StackPanel>
                     </Border>
                     <ItemsControl x:Name="StageList" AutomationProperties.AutomationId="SetupStageList">
@@ -190,6 +205,12 @@
                     </ItemsControl>
                 </StackPanel>
 
+                <StackPanel x:Name="AssistantPanel" Visibility="Collapsed" Spacing="18">
+                    <TextBlock Text="连接你的提示词助手。" Style="{StaticResource StudioHeadingStyle}" />
+                    <TextBlock Text="配置供应商和默认文本模型，用于提示词重写。可以稍后配置；跳过不会启动后台服务。" Style="{StaticResource StudioBodyStyle}" />
+                    <ContentControl x:Name="AssistantHost" HorizontalContentAlignment="Stretch" />
+                </StackPanel>
+
                 <StackPanel x:Name="CompletePanel" Visibility="Collapsed" Spacing="22">
                     <StackPanel Spacing="8">
                         <FontIcon x:Name="CompletionIcon" Glyph="&#xE946;" FontSize="32" Foreground="{ThemeResource StudioAccentBrush}" HorizontalAlignment="Left" />
@@ -201,6 +222,10 @@
                     </Border>
                     <StackPanel x:Name="CompletionProgressPanel" Visibility="Collapsed" Spacing="10">
                         <TextBlock x:Name="CompletionOperationText" Style="{StaticResource StudioBodyStyle}" AutomationProperties.AutomationId="SetupCompletionOperation" />
+                        <StackPanel x:Name="CompletionBatchPanel" Spacing="8" Visibility="Collapsed">
+                            <TextBlock x:Name="CompletionBatchDetails" Style="{StaticResource StudioBodyStyle}" />
+                            <ProgressBar x:Name="CompletionBatchBar" Minimum="0" Maximum="100" AutomationProperties.AutomationId="SetupCompletionBatchProgress" />
+                        </StackPanel>
                         <ProgressBar x:Name="CompletionProgress" Minimum="0" Maximum="100" IsIndeterminate="True" AutomationProperties.AutomationId="SetupCompletionProgress" />
                         <TextBlock x:Name="CompletionTransfer" Style="{StaticResource StudioBodyStyle}" />
                     </StackPanel>

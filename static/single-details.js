@@ -16,7 +16,9 @@ function singleDetailReferenceMarkup(id) {
 }
 function singleDetailData(record) {
   const settings = record.settings || {}, single = settings.single || {}, runtime = record.single_runtime || {}, bound = record.bound_resources || {};
-  const mode = settings.generation_mode, dual = single.dual || {}, post = settings.upscalers || {};
+  const mode = settings.generation_mode, dual = (settings.workbench === "single" ? single.dual : settings.dual) || {}, post = settings.upscalers || {};
+  const variance = settings.krea_variance || single.krea_variance;
+  const dlss = post.nvidia?.dlss || single.dlss;
   const primaryNegative = runtime.negative ?? record.negative_prompt ?? settings.negative_prompt;
   const pipelinePrompt = name => runtime.effective_positive?.[name];
   const zeroFor = name => name === "primary" ? single.zero_negative : name === "secondary" ? single.secondary_zero_negative : undefined;
@@ -30,7 +32,7 @@ function singleDetailData(record) {
   ] });
   const sesqui = value => value?.upscale_method === "sesqui" ? [{ title: "Sesqui 潜空间模型", rows: fields(value, [["model_format", "模型格式"], ["half_precision", "半精度"]]) }] : [];
   const baseGroups = [{ title: "模型与文本编码", rows: [["模型权重精度", single.weight_dtype], ["CLIP 类型", settings.clip_type]] }];
-  if (single.krea_variance?.enabled) baseGroups.push({ title: "Krea 变化控制", rows: fields(single.krea_variance, [
+  if (variance?.enabled) baseGroups.push({ title: "Krea 变化控制", rows: fields(variance, [
     ["auto_strength_factor", "自动强度系数"], ["noise_insert", "噪声注入阶段"], ["steps_switchover_percent", "步数切换比例"],
     ["mask_starts_at", "遮罩起点"], ["mask_percent", "遮罩比例"], ["noise_distribution", "噪声分布"], ["granularity", "变化粒度"],
   ]) });
@@ -43,7 +45,7 @@ function singleDetailData(record) {
     stages.push({ title: "第一段采样", pipeline: dual.first_pipeline, rows: [...samplerRows(settings), ["起始步", 0], ["结束步", settings.steps]], otherGroups: [...baseGroups, { title: "噪声处理", rows: [["添加噪声", dual.first_add_noise], ["保留残余噪声", dual.first_leftover_noise]] }] });
     stages.push({ title: "第二段采样", pipeline: dual.second_pipeline, rows: [...samplerRows(dual, true), ["起始步", dual.switch_step], ["结束步", settings.steps], ["中间放大", dual.scale == null ? undefined : `${dual.scale} ×`], ["放大算法", dual.upscale_method]], otherGroups: [{ title: "噪声处理", rows: [["添加噪声", dual.second_add_noise], ["保留残余噪声", dual.second_leftover_noise]] }, ...sesqui(dual), tiles("底图 VAE 解码", single.vae_decode)] });
   } else {
-    stages.push({ title: "底图采样", pipeline: single.normal_pipeline, rows: [...samplerRows(settings), ...(mode === "img2img" ? [["重绘强度", single.denoise]] : [])], otherGroups: [...baseGroups, ...(mode === "img2img" ? [tiles("参考图 VAE 编码", single.vae_encode)] : []), tiles("底图 VAE 解码", single.vae_decode)] });
+    stages.push({ title: "底图采样", pipeline: single.normal_pipeline, rows: [...samplerRows(settings), ["降噪幅度", mode === "img2img" ? single.denoise : settings.base_denoise]], otherGroups: [...baseGroups, ...(mode === "img2img" ? [tiles("参考图 VAE 编码", single.vae_encode)] : []), tiles("底图 VAE 解码", single.vae_decode)] });
   }
   const basePipeline = settings.base_mode === "dual_sampler" ? dual.second_pipeline : single.normal_pipeline;
   const positive = pipelinePrompt(basePipeline) ?? record.positive_prompt ?? record.resolved_prompt ?? runtime.positive;
@@ -64,17 +66,18 @@ function singleDetailData(record) {
   });
   const sampler = value => [["步数", value?.steps], ["CFG", value?.cfg], ["采样器", value?.sampler_name], ["调度器", value?.scheduler], ["降噪", value?.denoise]];
   const repairs = [
-    { title: "潜空间放大", enabled: post.latent?.enabled, rows: [["倍率", post.latent?.scale_by], ["算法", single.latent?.upscale_method], ["二次采样", post.latent?.second_sampler?.enabled], ...(post.latent?.second_sampler?.enabled ? sampler(post.latent.second_sampler) : [])], otherGroups: [...sesqui(single.latent), tiles("潜空间 VAE 编码", single.vae_encode), tiles("潜空间 VAE 解码", single.vae_decode)] },
-    { title: "SeedVR2", enabled: post.seedvr2?.enabled, rows: [["模型", bound.seedvr2_model ?? post.seedvr2?.model_name], ["VAE", bound.seedvr2_vae ?? post.seedvr2?.vae_name], ["倍率", post.seedvr2?.scale_by], ["色彩校正", post.seedvr2?.color_correction_method], ...sampler(post.seedvr2?.sampler)], otherGroups: [{ title: "模型", rows: [["模型权重精度", post.seedvr2?.weight_dtype]] }, tiles("SeedVR2 VAE 编码", post.seedvr2?.encode, false), tiles("SeedVR2 VAE 解码", post.seedvr2?.decode, false)] },
-    { title: "NVIDIA VSR", enabled: post.nvidia?.enabled, rows: [["倍率", post.nvidia?.scale], ["质量", post.nvidia?.quality], ["缩放方式", post.nvidia?.resize_type]] },
-    { title: "DLSS 色彩处理", enabled: single.dlss?.enabled, rows: [["风格", single.dlss?.style], ["强度", single.dlss?.intensity], ["输出混合", single.dlss?.output_mix]], otherGroups: [{ title: "光影与输出", rows: fields(single.dlss, [["local_tone", "局部光影"], ["local_struct", "局部细节"], ["output_view", "输出视图"], ["gpu_gen", "显卡代际"]]) }] },
-    { title: "脸部细化", enabled: face.enabled, rows: [["步数", face.steps], ["CFG", face.cfg_scale], ["采样器", face.sampler], ["调度器", face.scheduler], ["降噪", face.denoise_strength], ["处理分辨率", face.processing_resolution], ["提示词处理", faceReencodes ? "节点内重新编码，见下方提示词明细" : "使用传入条件"], ...(faceReencodes ? [["替换正向", face.replace_positive_prompt], ["替换负向", face.replace_negative_prompt], ["排除词", face.exclusions]] : [])], otherGroups: [
-      { title: "检测与裁切", rows: fields(face, [["face_selection", "脸部选择"], ["detection_confidence", "检测置信度"], ["manual_rotation", "手动旋转"], ["crop_padding", "裁切边距"]]) },
+    { title: "潜空间放大", enabled: post.latent?.enabled, rows: [["倍率", post.latent?.scale_by], ["缩放方法", single.latent?.model_format ?? post.latent?.model_format], ["二次采样", post.latent?.second_sampler?.enabled], ...(post.latent?.second_sampler?.enabled ? sampler(post.latent.second_sampler) : [])], otherGroups: [...sesqui(single.latent), tiles("潜空间 VAE 编码", single.vae_encode), tiles("潜空间 VAE 解码", single.vae_decode)] },
+    { title: "SeedVR2", enabled: post.seedvr2?.enabled, rows: [["模型", bound.seedvr2_model ?? post.seedvr2?.model_name], ["VAE", bound.seedvr2_vae ?? post.seedvr2?.vae_name], ["颜色匹配方法", post.seedvr2?.color_correction_method], ["倍率", post.seedvr2?.scale_by]], otherGroups: [{ title: "采样", rows: sampler(post.seedvr2?.sampler) }, { title: "模型", rows: [["模型权重精度", post.seedvr2?.weight_dtype]] }, tiles("SeedVR2 VAE 编码", post.seedvr2?.encode, false), tiles("SeedVR2 VAE 解码", post.seedvr2?.decode, false)] },
+    { title: "N 卡放大", enabled: post.nvidia?.enabled, rows: [["倍率", post.nvidia?.scale], ...fields(dlss, [["style", "风格"], ["intensity", "强度"], ["local_tone", "局部光影"], ["local_struct", "局部细节"], ["output_mix", "输出混合"]])], otherGroups: [{ title: "放大与输出", rows: [["质量", post.nvidia?.quality], ["缩放方式", post.nvidia?.resize_type], ...fields(dlss, [["output_view", "输出视图"], ["gpu_gen", "显卡代际"]])] }] },
+    { title: "脸部细化", enabled: face.enabled, rows: [["步数", face.steps], ["CFG", face.cfg_scale], ["采样器", face.sampler], ["调度器", face.scheduler], ["降噪", face.denoise_strength], ["提示词处理", faceReencodes ? "节点内重新编码，见下方提示词明细" : "使用传入条件"], ...(faceReencodes ? [["替换正向", face.replace_positive_prompt], ["替换负向", face.replace_negative_prompt], ["排除词", face.exclusions]] : [])], otherGroups: [
+      { title: "检测与裁切", rows: fields(face, [["processing_resolution", "处理分辨率"], ["face_selection", "脸部选择"], ["detection_confidence", "检测置信度"], ["manual_rotation", "手动旋转"], ["crop_padding", "裁切边距"]]) },
       { title: "预放大", rows: [["启用预放大", face.enable_pre_upscale], ...(face.enable_pre_upscale ? [["预放大模型", face.upscaler_model]] : [])] },
       { title: "蒙版与融合", rows: fields(face, [["blend_softness", "融合柔和度"], ["mask_expansion", "蒙版扩张"], ["sampling_mask_blur_size", "采样蒙版模糊大小"], ["sampling_mask_blur_strength", "采样蒙版模糊强度"]]) },
       { title: "修复选项", rows: fields(face, [["enable_color_correction", "色彩校正"], ["enable_segmentation", "图像分割"], ["enable_differential_diffusion", "差分扩散"], ["enable_lightness_rescue", "亮度修复"], ["enable_final_refinement", "最终细化"], ["offload_models_to_cpu", "模型卸载到处理器"]]) },
     ] },
   ];
+  const repairOrder = ["潜空间放大", "脸部细化", "SeedVR2", "N 卡放大"];
+  repairs.sort((a, b) => repairOrder.indexOf(a.title) - repairOrder.indexOf(b.title));
   const profile = bound.model_profile ?? settings.model_profile;
   const basic = [["模型档案", profile === "anima" ? "Anima" : profile === "krea2" ? "Krea 2" : profile], ["主模型", bound.unet ?? settings.model_name],
     ["生成方式", mode === "img2img" ? "图生图" : mode === "txt2img" ? "文生图" : undefined],
@@ -82,7 +85,7 @@ function singleDetailData(record) {
     ["图像种子", record.sample_seed], ["底图尺寸", settings.width != null && settings.height != null ? `${settings.width} × ${settings.height}` : undefined],
     ["最终图片尺寸", "读取中…", "output-size"], ["CLIP", bound.clip ?? settings.clip_name], ["VAE", bound.vae ?? settings.vae_name]];
   if (mode === "img2img") basic.push(["参考图", runtime.input_image_id ?? single.input_image_id], ["尺寸适配", ({ crop: "填满并裁切", pad: "适应并留边", stretch: "拉伸" })[single.resize_mode] ?? single.resize_mode]);
-  if (single.krea_variance?.enabled) basic.push(["Krea 变化控制", "开启"], ["变化种子", record.prompt_seed], ["随机比例", single.krea_variance.randomize_percent], ["变化强度", single.krea_variance.strength]);
+  if (variance?.enabled) basic.push(["Krea 变化控制", "开启"], ["变化种子", record.prompt_seed], ["随机比例", variance.randomize_percent], ["变化强度", variance.strength]);
   const promptSources = [];
   for (const [key, label] of [["prefix", "原始前缀"], ["positive_prompt", "原始画面描述"], ["suffix", "原始后缀"]]) {
     if (Object.hasOwn(single, key)) promptSources.push([label, single[key]]);
@@ -131,6 +134,10 @@ function singleDetailGroups(data) {
     + group("reference", "参考图", referenceRow ? referenceRow[1] ? "已保存" : "未记录" : new Map(data.basic).get("生成方式") === "文生图" ? "不适用" : "未记录", referenceRow ? singleDetailReferenceMarkup(referenceRow[1]) + `<dl>${singleDetailRows(data.basic.filter(([label]) => label === "尺寸适配"))}</dl>` : `<p>${new Map(data.basic).get("生成方式") === "文生图" ? "文生图未使用参考图" : "参考图未记录"}</p>`);
 }
 function bindSingleDetailGroups(container) {
+  if (typeof StudioMotion !== "undefined") {
+    StudioMotion.bindDisclosures(container);
+    return;
+  }
   const groups = [...container.querySelectorAll("[data-single-detail-group]")];
   for (const group of groups) group.addEventListener("toggle", () => {
     if (group.open) for (const other of groups) if (other !== group) other.open = false;

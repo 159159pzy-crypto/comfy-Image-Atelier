@@ -116,7 +116,8 @@ public sealed class PromptAssistantClient : IDisposable
         return body;
     }
 
-    public async Task<string> SaveService(string? id, string type, string name, string baseUrl, string? key, bool clearKey, bool advanced, CancellationToken ct)
+    public async Task<string> SaveService(string? id, string type, string name, string baseUrl, string? key, bool clearKey, bool advanced, CancellationToken ct,
+        Action<string>? serviceIdentified = null)
     {
         var body = ServicePayload(name, baseUrl, key, clearKey, advanced);
         var services = await Services(ct);
@@ -131,6 +132,9 @@ public sealed class PromptAssistantClient : IDisposable
             var created = await Api(HttpMethod.Post, "/services", body, ct);
             id = Text(created, "service_id");
             if (id.Length == 0) throw new InvalidDataException("插件未返回新增服务 ID；请刷新列表确认。");
+            // Retain the identity even if a later parameter write/readback fails.
+            // Retrying a wizard save must edit this service rather than create another.
+            serviceIdentified?.Invoke(id);
             // The plugin create endpoint does not accept advanced parameters.
             await Api(HttpMethod.Put, "/services/" + Segment(id), new JsonObject { ["enable_advanced_params"] = advanced }, ct);
         }
@@ -178,6 +182,21 @@ public sealed class PromptAssistantClient : IDisposable
         await Api(HttpMethod.Delete, "/services/" + Segment(id) + "/models/" + ModelType(mode) + "/" + Segment(name), null, ct);
         if ((await Services(ct, mode)).SingleOrDefault(item => item.Id == id)?.Models.Any(item => item.Name == name) == true)
             throw new IOException("模型删除后仍存在，请刷新列表。");
+    }
+
+    public async Task SetDefaultModel(string id, string name, CancellationToken ct, AssistantMode mode = AssistantMode.Rewrite)
+    {
+        var modelType = ModelType(mode);
+        name = name.Trim();
+        if (name.Length == 0) throw new InvalidDataException("请选择要设为默认的模型。");
+        var service = (await Services(ct, mode)).SingleOrDefault(item => item.Id == id);
+        if (service is null || !service.Models.Any(model => model.Name == name))
+            throw new InvalidDataException("服务或模型已被删除，请刷新后重试。");
+        await Api(HttpMethod.Put, "/services/" + Segment(id) + "/models/default",
+            new JsonObject { ["model_type"] = modelType, ["model_name"] = name }, ct);
+        var defaults = (await Services(ct, mode)).SingleOrDefault(item => item.Id == id)?.Models.Where(model => model.IsDefault).ToArray();
+        if (defaults is null || defaults.Length != 1 || defaults[0].Name != name)
+            throw new IOException("默认模型已提交但回读不一致，请刷新后重试。");
     }
 
     public async Task<IReadOnlyList<AssistantTemplate>> Templates(CancellationToken ct, AssistantMode mode = AssistantMode.Rewrite) => ProjectTemplates(await TemplateDocument(ct), mode);

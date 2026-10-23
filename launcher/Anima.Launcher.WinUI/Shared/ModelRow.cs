@@ -1,6 +1,5 @@
 using Anima.Launcher.Core;
 using System.ComponentModel;
-using System.Runtime.CompilerServices;
 
 namespace Anima.Launcher;
 
@@ -20,7 +19,7 @@ internal sealed class ModelRow(ModelStatus status) : INotifyPropertyChanged
     public bool Selected
     {
         get => selected;
-        set { if (CanSelect && selected != value) { selected = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Selected))); } }
+        set { if ((!value || CanSelect) && selected != value) { selected = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Selected))); } }
     }
     public event PropertyChangedEventHandler? PropertyChanged;
     public void Refresh() => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));

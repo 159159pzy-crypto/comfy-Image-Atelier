@@ -23,16 +23,28 @@ public sealed partial class SetupPage : LauncherPage
     private string stageSignature = "";
     private object? renderedModelReview;
     private object? renderedPreflight;
+    private object? renderedChoicesPlan;
+    private string renderedChoiceSelection = "";
+    private readonly SetupAssistantPanel assistant = new();
 
     public SetupPage()
     {
         InitializeComponent();
+        AssistantHost.Content = assistant;
+        assistant.WorkingChanged += _ => { if (active) Refresh(); };
+        assistant.Saved += async () =>
+        {
+            try { await State.FinishSetupAssistantAsync(configured: true); }
+            catch (Exception ex) { ShowLocalError(ex); }
+        };
         SourceBox.ItemsSource = Program.Sources.Profiles;
         SourceBox.DisplayMemberPath = nameof(SourceProfile.Name);
         ActualThemeChanged += (_, _) =>
         {
             stageSignature = "";
             renderedModelReview = null;
+            renderedChoicesPlan = null;
+            renderedChoiceSelection = "";
             if (active) Refresh();
         };
     }
@@ -45,6 +57,7 @@ public sealed partial class SetupPage : LauncherPage
         State.BusyChanged += OnBusy;
         State.TaskProgressChanged += OnProgress;
         State.ProgressChanged += OnPercent;
+        State.BatchProgressChanged += OnChanged;
         LoadFields();
         Refresh();
     }
@@ -56,6 +69,8 @@ public sealed partial class SetupPage : LauncherPage
         State.BusyChanged -= OnBusy;
         State.TaskProgressChanged -= OnProgress;
         State.ProgressChanged -= OnPercent;
+        State.BatchProgressChanged -= OnChanged;
+        assistant.ClearSession();
         base.OnNavigatedFrom(e);
     }
 
@@ -132,6 +147,7 @@ public sealed partial class SetupPage : LauncherPage
         ReviewPanel.Visibility = Visible(step == SetupStep.Review);
         InstallingPanel.Visibility = Visible(step == SetupStep.Installing);
         CompletePanel.Visibility = Visible(step == SetupStep.Complete);
+        AssistantPanel.Visibility = Visible(step == SetupStep.Assistant);
         UpdateStepLabels(step);
         ErrorBar.Message = string.IsNullOrEmpty(localError) ? State.SetupError : localError;
         if (localError.Length == 0 && step == SetupStep.Review && State.SetupPreflight is { CanInstall: false })
@@ -185,10 +201,10 @@ public sealed partial class SetupPage : LauncherPage
             case SetupStep.Review:
                 UpdateReview();
                 PrimaryButton.Content = State.Busy ? "正在检查…" : State.SetupCanInstall
-                    ? (!State.Setup.Fresh && !State.SetupImportNeedsRepair ? "完成导入"
+                    ? (!State.Setup.Fresh && !State.SetupImportNeedsRepair ? "连接并准备模型"
                         : State.Setup.InstallStarted ? "继续安装" : "开始安装") : "重新检查";
                 FooterHint.Text = State.SetupCanInstall
-                    ? State.Setup.Fresh ? "确认后再开始下载与安装。" : "确认后连接现有环境，补齐缺少的节点。"
+                    ? State.Setup.Fresh ? "确认后再开始下载与安装。" : "确认后连接现有环境，按清单补齐节点和模型。"
                     : "处理上方问题后重新检查。";
                 break;
             case SetupStep.Installing:
@@ -196,25 +212,40 @@ public sealed partial class SetupPage : LauncherPage
                 PrimaryButton.Content = State.Busy ? (pauseRequested ? "正在暂停…" : "暂停")
                     : State.SetupCanResume ? (string.IsNullOrEmpty(State.SetupError) ? "继续" : "重试") : "检查并继续";
                 PrimaryButton.IsEnabled = !pauseRequested;
-                SecondaryButton.Content = "更改目录或来源";
+                SecondaryButton.Content = State.SetupCanSkipOptional ? "跳过剩余可选项" : "更改目录或来源";
                 SecondaryButton.Visibility = Visible(!State.Busy);
                 FooterHint.Text = State.Busy ? "可暂停安装；已完成的文件和步骤会保留。"
                     : State.SetupCanResume ? "继续使用本次任务的安装选项。" : "重新检查后继续，已完成内容会复用。";
+                break;
+            case SetupStep.Assistant:
+                BackButton.Visibility = Visibility.Collapsed;
+                PrimaryButton.Content = State.Busy ? "正在启动…" : assistant.IsConnected ? "保存并继续" : "启动并配置";
+                PrimaryButton.IsEnabled = !State.Busy && !assistant.IsWorking;
+                SecondaryButton.Content = "稍后配置";
+                SecondaryButton.Visibility = Visibility.Visible;
+                AssistantHost.Visibility = Visible(State.SetupAssistantReady);
+                FooterHint.Text = "配置可跳过。仅主动获取模型列表时访问供应商。";
                 break;
             case SetupStep.Complete:
                 UpdateCompletion();
                 break;
         }
+        if (assistant.IsWorking)
+        {
+            PrimaryButton.IsEnabled = false;
+            SecondaryButton.IsEnabled = false;
+            BackButton.IsEnabled = false;
+        }
     }
 
     private void UpdateStepLabels(SetupStep step)
     {
-        var labels = new[] { StepWelcome, StepLocation, StepReview, StepInstalling, StepComplete };
-        var titles = new[] { "选择方式", "安装位置", "检查确认", "安装环境", "开始创作" };
+        var labels = new[] { StepWelcome, StepLocation, StepReview, StepInstalling, StepAssistant, StepComplete };
+        var titles = new[] { "选择方式", "安装位置", "检查确认", "安装环境", "提示词助手", "开始创作" };
         var current = step switch
         {
             SetupStep.Welcome => 0, SetupStep.Location => 1, SetupStep.Review => 2,
-            SetupStep.Installing => 3, _ => 4
+            SetupStep.Installing => 3, SetupStep.Assistant => 4, _ => 5
         };
         for (var i = 0; i < labels.Length; i++)
         {
@@ -286,6 +317,7 @@ public sealed partial class SetupPage : LauncherPage
 
     private void UpdateReview()
     {
+        UpdateModelChoices();
         var plan = State.SetupPlan;
         var preflight = State.SetupPreflight;
         ReviewSummary.Text = State.Busy ? "正在检查环境、可复用文件和各磁盘空间…"
@@ -311,6 +343,94 @@ public sealed partial class SetupPage : LauncherPage
         UpdateIssueActions();
     }
 
+    private void UpdateModelChoices()
+    {
+        SetupModelChoicesHost.IsEnabled = !State.Busy;
+        var selection = string.Join("|", State.Setup.OptionalModelIds ?? []);
+        if (ReferenceEquals(renderedChoicesPlan, State.SetupPlan) && renderedChoiceSelection == selection
+            && SetupModelChoices.Children.Count > 0) return;
+        renderedChoicesPlan = State.SetupPlan;
+        renderedChoiceSelection = selection;
+        SetupModelChoices.Children.Clear();
+        var profile = State.Setup.Fresh ? "anima" : State.Setup.Draft.SelectedProfile;
+        var required = Program.ModelProfiles.RequiredModels(Program.Models, profile);
+        SetupModelChoices.Children.Add(new TextBlock
+        {
+            Text = "基础生成模型 · 必需", FontWeight = FontWeights.SemiBold,
+            Foreground = PageBrush("StudioTextBrush")
+        });
+        foreach (var model in required) SetupModelChoices.Children.Add(ModelChoiceDetails(model));
+        var taggers = new StackPanel { Spacing = 14 };
+        foreach (var choice in SetupModelSelection.Choices(Program.Models, Program.ModelProfiles, profile))
+        {
+            var selected = choice.ModelIds.All(id => (State.Setup.OptionalModelIds ?? []).Contains(id));
+            var box = new CheckBox
+            {
+                Content = new TextBlock
+                {
+                    Text = choice.Label + (choice.Recommended ? " · 推荐" : "") + " · " + Bytes(choice.Size),
+                    TextWrapping = TextWrapping.Wrap
+                },
+                IsChecked = selected,
+                HorizontalAlignment = HorizontalAlignment.Stretch
+            };
+            AutomationProperties.SetAutomationId(box, "SetupChoice-" + choice.Id);
+            AutomationProperties.SetName(box, choice.Label);
+            async void Changed(object sender, RoutedEventArgs e)
+            {
+                if (State.Busy) return;
+                try { await State.SelectSetupModelsAsync(choice, box.IsChecked == true); }
+                catch (Exception ex) { ShowLocalError(ex); }
+            }
+            box.Checked += Changed;
+            box.Unchecked += Changed;
+            var row = new StackPanel { Spacing = 6 };
+            row.Children.Add(box);
+            row.Children.Add(BodyText(choice.Description));
+            foreach (var id in choice.ModelIds)
+                row.Children.Add(ModelChoiceDetails(Program.Models.Models.Single(model => model.Id == id)));
+            if (choice.ModelIds.Any(id => Program.Models.Models.Single(model => model.Id == id).Category == "wd_taggers"))
+                taggers.Children.Add(row);
+            else SetupModelChoices.Children.Add(row);
+        }
+        if (taggers.Children.Count > 0)
+            SetupModelChoices.Children.Add(new Expander
+            {
+                Header = "本地反推模型（可选，可分别选择）", Content = taggers,
+                HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch
+            });
+    }
+
+    private UIElement ModelChoiceDetails(ModelItem model)
+    {
+        var status = State.SetupPlan?.ModelInventory.FirstOrDefault(item => item.Model.Id == model.Id);
+        var details = new StackPanel { Spacing = 6 };
+        var location = status?.FoundPath ?? status?.Destination;
+        details.Children.Add(BodyText("位置：" + (string.IsNullOrWhiteSpace(location) ? "选择后检查实际模型目录" : location)));
+        var source = model.SourceUrl.Length > 0 ? model.SourceUrl
+            : (model.IsPackage ? model.Files.SelectMany(file => file.Urls) : model.Urls).FirstOrDefault() ?? "";
+        details.Children.Add(BodyText("来源：" + source));
+        if (Uri.TryCreate(source, UriKind.Absolute, out var sourceUri) && sourceUri.Scheme == "https")
+            details.Children.Add(new HyperlinkButton { Content = "查看来源", NavigateUri = sourceUri, HorizontalAlignment = HorizontalAlignment.Left });
+        details.Children.Add(BodyText("许可：" + model.License));
+        if (Uri.TryCreate(model.LicenseUrl, UriKind.Absolute, out var licenseUri) && licenseUri.Scheme == "https")
+            details.Children.Add(new HyperlinkButton { Content = "查看许可", NavigateUri = licenseUri, HorizontalAlignment = HorizontalAlignment.Left });
+        return new Expander
+        {
+            Header = model.Name + " · " + Bytes(model.Size) + " · " + (status?.State ?? "待检查"), Content = details,
+            HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch
+        };
+    }
+
+    private void UpdateBatch(StackPanel panel, ProgressBar bar, TextBlock details)
+    {
+        panel.Visibility = Visible(State.BatchProgress is not null);
+        if (State.BatchProgress is not { } batch) return;
+        bar.Value = batch.Percent;
+        details.Text = $"整批模型 {batch.CompletedItems}/{batch.TotalItems} 项 · {batch.Percent:N1}%\n{Bytes(batch.Received)} / {Bytes(batch.Total)}"
+            + (batch.BytesPerSecond > 0 ? $" · {batch.BytesPerSecond / 1048576d:N1} MiB/s" : "");
+    }
+
     private void UpdateInstallation()
     {
         InstallingTitle.Text = State.Busy ? "正在准备创作环境。" : string.IsNullOrEmpty(State.SetupError) ? "准备好后，继续安装。" : "安装遇到了问题。";
@@ -320,6 +440,7 @@ public sealed partial class SetupPage : LauncherPage
         TransferDetails.Text = State.ProgressText;
         FileProgress.IsIndeterminate = State.Busy && State.SetupDownloadPercent < 0;
         FileProgress.Value = Math.Max(0, State.SetupDownloadPercent);
+        UpdateBatch(BatchPanel, BatchBar, BatchDetails);
         var signature = string.Join("\n", State.SetupStages.Select(stage => $"{stage.StageId}|{stage.Status}|{stage.Detail}"));
         if (signature == stageSignature) return;
         stageSignature = signature;
@@ -393,6 +514,7 @@ public sealed partial class SetupPage : LauncherPage
         CompletionProgressPanel.Visibility = Visible(State.Busy);
         CompletionProgress.IsIndeterminate = !downloading || State.SetupDownloadPercent < 0;
         CompletionProgress.Value = Math.Max(0, State.SetupDownloadPercent);
+        UpdateBatch(CompletionBatchPanel, CompletionBatchBar, CompletionBatchDetails);
         CompletionOperationText.Text = State.SetupStatusText;
         CompletionTransfer.Text = downloading ? State.ProgressText : "";
         PrimaryButton.Content = State.Busy
@@ -491,7 +613,7 @@ public sealed partial class SetupPage : LauncherPage
     {
         "tools" => "准备安装工具", "comfy" => "准备 ComfyUI", "python" => "准备独立运行环境",
         "torch" => "准备显卡运行环境", "dependencies" => "安装运行所需组件", "nodes" => "准备必要节点",
-        "validation" => "检查运行组件", "models" => "准备基础模型", "verify" => "最终检查", _ => id
+        "validation" => "检查运行组件", "models" => "准备所选模型", "verify" => "最终检查", _ => id
     };
     private static string StageState(SetupStageStatus status) => status switch
     {
@@ -571,6 +693,7 @@ public sealed partial class SetupPage : LauncherPage
 
     private async void Primary_Click(object sender, RoutedEventArgs e)
     {
+        if (assistant.IsWorking) return;
         localError = "";
         if (State.Busy)
         {
@@ -613,6 +736,14 @@ public sealed partial class SetupPage : LauncherPage
                         case SetupCompletionAction.StartWorkbench: await State.StartSetupWorkbenchAsync(); break;
                     }
                     break;
+                case SetupStep.Assistant:
+                    if (assistant.IsConnected) await assistant.SaveAsync();
+                    else
+                    {
+                        await State.StartSetupAssistantAsync();
+                        if (State.SetupAssistantReady) await assistant.ActivateAsync();
+                    }
+                    break;
             }
         }
         catch (Exception ex) { ShowLocalError(ex); }
@@ -621,7 +752,7 @@ public sealed partial class SetupPage : LauncherPage
 
     private void Back_Click(object sender, RoutedEventArgs e)
     {
-        if (State.Busy) return;
+        if (State.Busy || assistant.IsWorking) return;
         RunUi(() =>
         {
             switch (State.Setup.Step)
@@ -637,7 +768,19 @@ public sealed partial class SetupPage : LauncherPage
 
     private async void Secondary_Click(object sender, RoutedEventArgs e)
     {
-        if (State.Busy) return;
+        if (State.Busy || assistant.IsWorking) return;
+        if (State.Setup.Step == SetupStep.Assistant)
+        {
+            assistant.ClearSession();
+            try { await State.FinishSetupAssistantAsync(configured: false); }
+            catch (Exception ex) { ShowLocalError(ex); }
+            return;
+        }
+        if (State.Setup.Step == SetupStep.Installing && State.SetupCanSkipOptional)
+        {
+            RunUi(State.SkipSetupOptionalModels);
+            return;
+        }
         if (State.Setup.Step == SetupStep.Complete)
         {
             localError = "";
@@ -657,7 +800,10 @@ public sealed partial class SetupPage : LauncherPage
         });
     }
 
-    private void Logs_Click(object sender, RoutedEventArgs e) => RunUi(Shell.ShowSetupLogs);
+    private void Logs_Click(object sender, RoutedEventArgs e)
+    {
+        if (!assistant.IsWorking) RunUi(Shell.ShowSetupLogs);
+    }
     private void RunUi(Action action)
     {
         localError = "";

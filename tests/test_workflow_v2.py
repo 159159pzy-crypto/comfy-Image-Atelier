@@ -176,7 +176,7 @@ class V2WorkflowRendererTests(unittest.TestCase):
                 "face_refine": {"enabled": True},
             },
         )
-        self.assertEqual(api["704:1064"]["inputs"]["scale_by"], 1.75)
+        self.assertEqual(api["704:1064"]["inputs"]["scale"], 1.75)
         # User-selected SeedVR2 assets are kept and checked against the live
         # inventory by BatchManager before submission.
         self.assertEqual(api["712:716"]["inputs"]["unet_name"], "stale-model.safetensors")
@@ -188,11 +188,11 @@ class V2WorkflowRendererTests(unittest.TestCase):
         self.assertEqual(api["1253:1215"]["inputs"]["seed"], 12345)
 
         # The four selectors should point to the previous surviving endpoint,
-        # yielding base -> latent -> SeedVR2 -> N-card -> face order.
+        # yielding base -> latent -> face -> SeedVR2 -> N-card order.
         self.assertEqual(api["702:353"]["inputs"]["any_01"], ["691:1413", 1])
-        self.assertEqual(api["710:388"]["inputs"]["any_01"], ["704:1415", 1])
+        self.assertEqual(api["710:388"]["inputs"]["any_01"], ["1253:1416", 1])
         self.assertEqual(api["1425:1419"]["inputs"]["any_01"], ["712:1417", 1])
-        self.assertEqual(api["1214:1209"]["inputs"]["any_01"], ["1432:1447", 1])
+        self.assertEqual(api["1214:1209"]["inputs"]["any_01"], ["704:1415", 1])
         self.assert_no_dangling_refs(self, api)
         modes = {
             int(node["id"]): node.get("mode")
@@ -390,7 +390,7 @@ class V2WorkflowRendererTests(unittest.TestCase):
                     ):
                         for input_name, source_id in expected.items():
                             self.assert_link(self, api, node_id, input_name, source_id)
-                    self.assert_link(self, api, "701:1450", "samples", "701:1245")
+                    self.assert_link(self, api, "701:1450", "latent", "701:1245")
                     self.assert_link(self, api, "701:539", "samples", "701:1246")
                     self.assert_link(self, api, "701:539", "vae", "167:58")
 
@@ -399,7 +399,7 @@ class V2WorkflowRendererTests(unittest.TestCase):
                 self.assert_link(self, api, "704:1181", "images", "702:353")
                 self.assert_link(self, api, "704:1182", "pixels", "704:1181")
                 self.assert_link(self, api, "704:1182", "vae", "167:58")
-                self.assert_link(self, api, "704:1064", "samples", "704:1182")
+                self.assert_link(self, api, "704:1064", "latent", "704:1182")
                 for input_name, source_id in (
                     ("model", "1026:1021"),
                     ("positive", "1026:1011"),
@@ -425,7 +425,7 @@ class V2WorkflowRendererTests(unittest.TestCase):
 
                 self.assert_link(self, api, "1432:1448", "images", "1425:1419")
                 self.assert_link(self, api, "1432:1418", "images", "1432:1448")
-                self.assert_link(self, api, "1432:1492", "image", "1432:1418")
+                self.assert_link(self, api, "1432:1492", "images", "1432:1418")
                 self.assert_link(self, api, "1253:1259", "images", "1214:1209")
                 self.assert_link(self, api, "1253:1215", "image", "1253:1259")
                 for input_name, source_id in (
@@ -448,7 +448,7 @@ class V2WorkflowRendererTests(unittest.TestCase):
                 self.assertEqual(set(save_nodes), {"v2:output"})
                 self.assertEqual(
                     save_nodes["v2:output"]["inputs"],
-                    {"filename_prefix": "AnimaRandom/v2-test", "images": ["1253:1416", 1]},
+                    {"filename_prefix": "AnimaRandom/v2-test", "images": ["1432:1447", 1]},
                 )
                 self.assertFalse(
                     any(
@@ -464,9 +464,9 @@ class V2WorkflowRendererTests(unittest.TestCase):
                     )
                 )
                 self.assertNotIn("691:1578", api)
-                self.assert_link(self, api, "1214:1209", "any_01", "1432:1447", 1)
+                self.assert_link(self, api, "1214:1209", "any_01", "704:1415", 1)
                 self.assert_link(self, api, "1425:1419", "any_01", "712:1417", 1)
-                self.assert_link(self, api, "710:388", "any_01", "704:1415", 1)
+                self.assert_link(self, api, "710:388", "any_01", "1253:1416", 1)
                 self.assert_no_dangling_refs(self, api)
 
     def test_frozen_prompts_and_seeds_are_written_to_v2_nodes(self):

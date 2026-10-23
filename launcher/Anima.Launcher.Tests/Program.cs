@@ -115,6 +115,10 @@ if (args.Contains("--tagger-only"))
 }
 count += await OnboardingTests.Run(work, manifest);
 count += await SetupCompletionTests.Run(work);
+count += await SetupModelSelectionTests.Run(work, manifest, models,
+    JsonFile.Read<ModelProfilesManifest>(Path.Combine(manifestDir, "model-profiles.json")));
+count += await ModelBatchProgressTests.Run();
+await ModelLibraryTests.RunAsync(models, work, Check);
 if (args.Contains("--onboarding-only"))
 {
     Console.WriteLine($"{count} onboarding checks passed; artifacts: {work}");

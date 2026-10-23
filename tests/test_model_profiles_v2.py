@@ -126,7 +126,7 @@ class ModelProfileContractTests(unittest.TestCase):
 
         defaults = model_profile_defaults("krea2")
         defaults["steps"] = -1
-        self.assertEqual(model_profile_defaults("krea2")["steps"], 30)
+        self.assertEqual(model_profile_defaults("krea2")["steps"], 20)
 
     def test_resource_summary_reports_missing_files_and_checks_names_case_insensitively(self):
         krea = get_model_profile("krea2")

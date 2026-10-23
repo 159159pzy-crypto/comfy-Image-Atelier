@@ -1,3 +1,4 @@
+const createFrontendContext = require('./helpers/frontend-context.cjs');
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -9,7 +10,7 @@ const plain = value => JSON.parse(JSON.stringify(value));
 function context(extra = {}) {
   let profile = "anima", persists = 0;
   const elements = {}, messages = [];
-  const sandbox = vm.createContext({
+  const sandbox = createFrontendContext({
     console, URLSearchParams, setTimeout, clearTimeout, structuredClone,
     SECTIONS: ["character", "clothing", "pose", "background", "expression"],
     SECTION_META: { character: { label: "角色" }, pose: { label: "姿势" } },

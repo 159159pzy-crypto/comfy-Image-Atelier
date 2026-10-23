@@ -70,6 +70,8 @@ PRESET_SETTING_KEYS = (
     "cfg_zero_star",
     "second_sampler",
     "base_mode",
+    "base_denoise",
+    "krea_variance",
     "dual",
     "upscalers",
     "krea_prompt_pool",
@@ -119,6 +121,8 @@ def preset_settings(
                 "clip_type": profile["clip_type"],
             }
         )
+        if forced_profile != "krea2" and isinstance(migrated.get("krea_variance"), dict):
+            migrated["krea_variance"]["enabled"] = False
     candidate.update(migrated)
     if force_model_profile is None and "model_profile" in value:
         candidate["model_profile"] = value["model_profile"]

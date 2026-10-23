@@ -10,9 +10,66 @@ LATENT_METHODS = {"sesqui", "nearest-exact", "bilinear", "area", "bicubic", "bis
 LATENT_FORMATS = {"SDXL", "Flux", "Flux2", "Ideogram 4", "Wan 2.1"}
 LATENT_OPTIONS = {"upscale_method": "sesqui", "model_format": "Wan 2.1", "half_precision": True}
 DUAL_DEFAULTS = {
-    "switch_step": 15, "scale": 1.0, "second_cfg": 4.0,
-    "second_sampler_name": "er_sde", "second_scheduler": "simple", "upscale_method": "sesqui",
+    "switch_step": 15, "scale": 1.0, "second_cfg": 8.0,
+    "second_sampler_name": "euler", "second_scheduler": "simple", "upscale_method": "sesqui",
+    "model_format": "Wan 2.1", "half_precision": True,
 }
+
+
+KREA_VARIANCE_DEFAULTS = {
+    "enabled": False, "randomize_percent": 50.0, "auto_strength_factor": 1.0,
+    "strength": 20.0, "noise_insert": "noise on beginning steps",
+    "steps_switchover_percent": 25.0, "mask_starts_at": "beginning", "mask_percent": 0.0,
+    "noise_distribution": "uniform", "granularity": "values",
+}
+DLSS_DEFAULTS = {
+    "style": "电影", "intensity": 1.0, "local_tone": 1.0, "local_struct": 1.0,
+    "output_view": "处理", "output_mix": 1.0, "gpu_gen": "Auto",
+}
+
+
+def validate_krea_variance(value: Any, profile: str, path: str = "krea_variance") -> dict[str, Any]:
+    from .workflow import WorkflowError, _boolean
+    if not isinstance(value, dict) or set(value) - set(KREA_VARIANCE_DEFAULTS):
+        raise WorkflowError(f"{path} 包含未知参数或不是对象")
+    result = {**KREA_VARIANCE_DEFAULTS, **copy.deepcopy(value)}
+    result["enabled"] = _boolean(f"{path}.enabled", result["enabled"])
+    for key, low, high in (("randomize_percent", 1, 100), ("auto_strength_factor", 0, 100),
+                           ("strength", -4294967295, 4294967295), ("steps_switchover_percent", 1, 99), ("mask_percent", 0, 99)):
+        number = result[key]
+        if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number) or not low <= number <= high:
+            raise WorkflowError(f"{path}.{key} 必须在 {low:g}-{high:g} 之间")
+        result[key] = float(number)
+    choices = {"noise_insert": {"noise on beginning steps", "noise on ending steps", "noise on all steps", "disabled"},
+               "mask_starts_at": {"beginning", "end"}, "noise_distribution": {"uniform", "gaussian"},
+               "granularity": {"values", "tokens"}}
+    for key, allowed in choices.items():
+        if not isinstance(result[key], str) or result[key] not in allowed:
+            raise WorkflowError(f"{path}.{key} 无效")
+    if result["enabled"] and profile != "krea2":
+        raise WorkflowError("多样性增强仅适用于 Krea 2")
+    return result
+
+
+def validate_dlss(value: Any, path: str = "upscalers.nvidia.dlss") -> dict[str, Any]:
+    from .workflow import WorkflowError, _boolean
+    if not isinstance(value, dict) or set(value) - (set(DLSS_DEFAULTS) | {"enabled"}):
+        raise WorkflowError(f"{path} 包含未知参数或不是对象")
+    result = {**DLSS_DEFAULTS, **copy.deepcopy(value)}
+    # Old standalone toggles are accepted at import only. N-card owns execution.
+    if "enabled" in result:
+        _boolean(f"{path}.enabled", result.pop("enabled"))
+    for key, allowed in (("style", {"默认", "自然", "电影", "风格3"}),
+                         ("output_view", {"处理", "差异×10", "左右对比"}),
+                         ("gpu_gen", {"Auto", "RTX 30", "RTX 40", "RTX 50"})):
+        if not isinstance(result[key], str) or result[key] not in allowed:
+            raise WorkflowError(f"{path}.{key} 无效")
+    for key in ("intensity", "local_tone", "local_struct", "output_mix"):
+        value = result[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+            raise WorkflowError(f"{path}.{key} 必须在 0-1 之间")
+        result[key] = float(value)
+    return result
 
 
 def validate_resize_options(value: dict[str, Any], path: str) -> dict[str, Any]:
@@ -52,7 +109,7 @@ def validate_random_dual(value: Any, settings: dict[str, Any]) -> dict[str, Any]
     result["switch_step"] = _integer("dual.switch_step", result["switch_step"], 0, 149)
     if active and result["switch_step"] >= settings["steps"]:
         raise WorkflowError("第二采样起始步必须小于总步数")
-    result["upscale_method"] = validate_resize_options(result, "dual")["upscale_method"]
+    result.update(validate_resize_options(result, "dual"))
     result["scale"] = validate_resize_scale(result["scale"], result["upscale_method"], "dual.scale",
                                             minimum=1, maximum=8, active=active)
     cfg = result["second_cfg"]
@@ -125,12 +182,15 @@ def enabled_postprocess_parameter_issues(settings: dict[str, Any], resources: di
     """Both workbenches submit the same public repair-stage node inputs."""
     # Older clients advertise only node/plugin availability and may pass
     # partial stage dictionaries; without schemas there is nothing to check.
-    schemas = resources.get("node_inputs")
-    if not isinstance(schemas, dict) or not schemas:
-        return []
     stages = settings["upscalers"]
     issues: list[dict[str, str]] = []
     issue_type = "single_parameter" if settings.get("workbench") == "single" else "sampling_parameter"
+    advertised = resources.get("node_types")
+    if stages.get("nvidia", {}).get("enabled") and isinstance(advertised, list) and "DLSS5NeuralRender" not in advertised:
+        issues.append({"type": "nvidia_node", "name": "DLSS5NeuralRender", "label": "N 卡 DLSS 色彩处理节点"})
+    # Older callers expose plugin availability and partial settings only.
+    if not isinstance(resources.get("node_inputs"), dict) or not resources["node_inputs"]:
+        return issues
 
     def check(node_type: str, values: dict[str, Any], label: str) -> None:
         issues.extend(node_input_issues(resources, node_type, values, label, issue_type=issue_type))
@@ -146,6 +206,7 @@ def enabled_postprocess_parameter_issues(settings: dict[str, Any], resources: di
         check("SeedVR2PostProcessing", {"color_correction_method": seed["color_correction_method"]}, "SeedVR2 色彩校正")
     if stages["nvidia"]["enabled"]:
         nvidia = stages["nvidia"]
+        check("DLSS5NeuralRender", nvidia.get("dlss", DLSS_DEFAULTS), "NVIDIA DLSS 色彩处理")
         check("RTXVideoSuperResolution", {"resize_type": nvidia["resize_type"],
               "resize_type.scale": nvidia["scale"], "quality": nvidia["quality"]}, "NVIDIA 放大")
     if stages["face_refine"]["enabled"]:
@@ -165,6 +226,10 @@ def random_sampling_resource_issues(settings: dict[str, Any], resources: dict[st
             issues.append({"type": "sampling_node", "name": node_type, "label": f"{label} 节点"})
         issues.extend(node_input_issues(resources, node_type, values, label))
 
+    if settings.get("krea_variance", {}).get("enabled"):
+        node_inputs("KreaSeedVarianceEnhancer", settings["krea_variance"], "Krea 多样性增强")
+    if settings["base_mode"] == "normal":
+        issues.extend(node_input_issues(resources, "KSampler", {"denoise": settings.get("base_denoise", 1.0)}, "底图采样"))
     latent = settings["upscalers"]["latent"]
     dual = settings.get("dual")
     if settings["base_mode"] == "dual_sampler" and dual is not None:

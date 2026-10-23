@@ -2,8 +2,8 @@
 const SINGLE_VISIBLE_PATHS = new Set([
   "positive_prompt", "prefix", "suffix", "input_image_id", "denoise", "resize_mode",
   "prompt_job_id", "processed_prompt_override", "dual.switch_step", "dual.scale",
-  "dual.second_cfg", "dual.second_sampler_name", "dual.second_scheduler", "dual.upscale_method",
-  "latent.upscale_method", "dlss.enabled", "dlss.style", "dlss.intensity", "dlss.output_mix",
+  "dual.second_cfg", "dual.second_sampler_name", "dual.second_scheduler", "dual.upscale_method", "dual.model_format",
+  "latent.upscale_method", "latent.model_format", "krea_variance.enabled", "dlss.enabled", "dlss.style", "dlss.intensity", "dlss.local_tone", "dlss.local_struct", "dlss.output_mix",
   ...["expand", "oc"].flatMap(stage => ["enabled", "rule", "llm_service", "custom_rule", "custom_rule_content", "user_prompt", "character", "features"].map(key => `prompt_processing.${stage}.${key}`)),
 ]);
 const SINGLE_COMPATIBILITY_LABELS = {
@@ -57,8 +57,11 @@ function postprocessCompatibilityEntries(settings, baseline) {
   for (const group of ["encode", "decode"]) for (const key of ["tile_size", "overlap", "temporal_size", "temporal_overlap"]) {
     add(`upscalers.seedvr2.${group}.${key}`, `SeedVR2 · ${group === "encode" ? "编码" : "解码"} · ${SINGLE_COMPATIBILITY_LABELS[key]}`);
   }
-  add("upscalers.nvidia.resize_type", "NVIDIA VSR · 缩放方式");
-  const faceVisible = new Set(["enabled", "steps", "cfg_scale", "sampler", "scheduler", "denoise_strength", "processing_resolution"]);
+  add("upscalers.nvidia.resize_type", "N 卡放大 · 缩放方式");
+  add("upscalers.nvidia.quality", "N 卡放大 · 质量");
+  add("upscalers.latent.second_sampler.enabled", "潜空间放大 · 二次采样");
+  for (const key of ["steps", "cfg", "sampler_name", "scheduler", "denoise"]) add(`upscalers.seedvr2.sampler.${key}`, `SeedVR2 · 采样 · ${key}`);
+  const faceVisible = new Set(["enabled", "steps", "cfg_scale", "sampler", "scheduler", "denoise_strength"]);
   if (typeof UPSCALER_CONTROL_IDS !== "undefined") for (const [key, id] of Object.entries(UPSCALER_CONTROL_IDS.face_refine)) {
     if (faceVisible.has(key)) continue;
     const label = document.getElementById(id)?.closest("label")?.querySelector("span")?.textContent || key;
@@ -75,7 +78,7 @@ function singleCompatibilityDisplay(value) {
 }
 function singleWorkbenchRenderCompatibility() {
   const container = document.getElementById("singleCompatibilityValues");
-  if (!container || !singleWorkbenchActive()) return;
+  if (!container || !singleWorkbenchActive()) return false;
   const entries = singleWorkbenchCompatibilityEntries(readSettings());
   if (singleWorkbenchState.promptSeed) entries.push({ label: "提示词种子", value: singleWorkbenchState.promptSeed });
   container.replaceChildren(...entries.flatMap(entry => {
@@ -85,6 +88,7 @@ function singleWorkbenchRenderCompatibility() {
   }));
   document.getElementById("singleCompatibilityCount").textContent = entries.length ? `${entries.length} 项保留值` : "使用默认值";
   document.getElementById("singleResetCompatibility").disabled = entries.length === 0;
+  return entries.length > 0;
 }
 function singleWorkbenchResetCompatibility() {
   const settings = readSettings();
@@ -93,6 +97,6 @@ function singleWorkbenchResetCompatibility() {
   applySettings(settings);
   singleWorkbenchInvalidatePrompt();
   singleWorkbenchPersist();
-  singleWorkbenchRenderCompatibility();
-  document.getElementById("singleCompatibilityStatus").textContent = "已恢复精简参数默认值，所有采样与修复阶段共用当前 LoRA 列表。";
+  singleWorkbenchLayout();
+  toast("已恢复精简参数默认值，所有采样与修复阶段共用当前 LoRA 列表。");
 }
