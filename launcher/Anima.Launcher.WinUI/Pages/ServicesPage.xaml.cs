@@ -56,6 +56,11 @@ public sealed partial class ServicesPage : LauncherPage
             await Task.WhenAll(comfyTask, studioTask);
             comfy = await comfyTask;
             studio = await studioTask;
+            if (studio.Running && comfy.Status == "needs_restart")
+            {
+                studio.Status = "needs_restart";
+                studio.Detail = comfy.Detail;
+            }
             if (active) Apply();
         }
         catch (Exception ex) { State.AppendLog("服务状态检测：" + ex.Message); }
@@ -73,7 +78,7 @@ public sealed partial class ServicesPage : LauncherPage
         ComfyCard.Update(comfy, busy || fresh || State.Config.InstallPending);
         StudioCard.Update(studio, busy || fresh || State.Config.InstallPending);
         var configured = !string.IsNullOrWhiteSpace(selectedRoot) && !fresh;
-        var ready = !fresh && draft is null && State.PendingSettingsFields is null && studio.Running && (studio.Ours || studio.Managed);
+        var ready = !fresh && draft is null && State.PendingSettingsFields is null && comfy.ArgumentsMatch && studio.Running && (studio.Ours || studio.Managed);
         WelcomeTitle.Text = ready ? "工作台已就绪。" : configured ? "准备好下一次创作。" : "创作，从这里开始。";
         WelcomeDescription.Text = ready
             ? "服务运行正常，打开工作台继续创作。"
@@ -141,7 +146,7 @@ public sealed partial class ServicesPage : LauncherPage
         if (State.Busy) return;
         var draft = State.PendingEnvironmentFields;
         if (string.IsNullOrWhiteSpace(draft?.ComfyRoot ?? State.Config.ComfyRoot) || (draft?.Fresh ?? (State.FreshInstallRequested || State.Config.InstallPending))) { Shell.GoToPage(1); return; }
-        if (draft is null && State.PendingSettingsFields is null && studio.Running && (studio.Ours || studio.Managed)) { Program.Open(studio.Url); return; }
+        // Always recheck live parameters on an explicit start: the periodic snapshot may be stale.
         await RunService(State.StartServicesAsync);
     }
     private void Configure_Click(object sender, RoutedEventArgs e)

@@ -29,6 +29,48 @@
 
             <launch:PromptAssistantPanel />
 
+            <Expander HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" IsExpanded="True">
+                <Expander.Header>
+                    <TextBlock Text="ComfyUI 启动参数" Style="{StaticResource BodyStrongTextBlockStyle}" TextWrapping="Wrap" />
+                </Expander.Header>
+                <StackPanel Spacing="10" Margin="0,8,0,0">
+                    <TextBlock Text="保存后在下次启动 ComfyUI 时生效。正在运行的服务需要先停止再启动；外部进程不会被自动停止。" Style="{StaticResource StudioBodyStyle}" TextWrapping="Wrap" />
+                    <TextBlock x:Name="ArgumentsSupportText" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" />
+                    <launch:Card Header="显存模式" Description="默认由 ComfyUI 自动选择。新版启用动态显存时，低显存参数可能不生效。">
+                        <launch:Card.ActionContent>
+                            <ComboBox x:Name="VramModeBox" MinWidth="190" SelectionChanged="Arguments_SelectionChanged">
+                                <ComboBoxItem Content="自动（推荐）" /><ComboBoxItem Content="低显存" /><ComboBoxItem Content="极低显存" /><ComboBoxItem Content="高显存" /><ComboBoxItem Content="全部使用 GPU" /><ComboBoxItem Content="仅 CPU（较慢）" />
+                            </ComboBox>
+                        </launch:Card.ActionContent>
+                    </launch:Card>
+                    <launch:Card Header="预留显存（GB）" Description="留空使用 ComfyUI 默认值，可填写 0 或小数。">
+                        <launch:Card.ActionContent><TextBox x:Name="ReserveVramBox" Width="190" PlaceholderText="自动" TextChanged="Arguments_TextChanged" /></launch:Card.ActionContent>
+                    </launch:Card>
+                    <launch:Card Header="关闭智能显存管理" Description="更积极地将模型卸载到系统内存，可能降低速度。">
+                        <launch:Card.ActionContent><ToggleSwitch x:Name="DisableSmartMemoryBox" OnContent="已关闭智能管理" OffContent="保留智能管理" Toggled="Arguments_Toggled" /></launch:Card.ActionContent>
+                    </launch:Card>
+                    <launch:Card Header="全局精度" Description="自动通常兼容性最好；FP32 更占显存，FP16 依赖模型与设备支持。">
+                        <launch:Card.ActionContent><ComboBox x:Name="PrecisionBox" MinWidth="190" SelectionChanged="Arguments_SelectionChanged"><ComboBoxItem Content="自动（推荐）" /><ComboBoxItem Content="强制 FP32" /><ComboBoxItem Content="强制 FP16" /></ComboBox></launch:Card.ActionContent>
+                    </launch:Card>
+                    <launch:Card Header="注意力算法" Description="Sage、Flash 和 Comfy Kitchen 需要当前环境已安装对应依赖；选择选项不会自动安装。">
+                        <launch:Card.ActionContent>
+                            <ComboBox x:Name="AttentionBox" MinWidth="190" SelectionChanged="Arguments_SelectionChanged">
+                                <ComboBoxItem Content="自动（推荐）" /><ComboBoxItem Content="PyTorch" /><ComboBoxItem Content="Split" /><ComboBoxItem Content="Sub-quadratic" /><ComboBoxItem Content="Sage Attention" /><ComboBoxItem Content="Flash Attention" /><ComboBoxItem Content="Comfy Kitchen" />
+                            </ComboBox>
+                        </launch:Card.ActionContent>
+                    </launch:Card>
+                    <launch:Card Header="ComfyUI Manager" Description="在已支持 Manager 的环境中启用；缺失依赖可通过安装环境页修复。">
+                        <launch:Card.ActionContent><ComboBox x:Name="ManagerBox" MinWidth="190" SelectionChanged="Arguments_SelectionChanged"><ComboBoxItem Content="关闭" /><ComboBoxItem Content="启用" /><ComboBoxItem Content="启用旧版界面" /></ComboBox></launch:Card.ActionContent>
+                    </launch:Card>
+                    <TextBlock Text="其他高级参数" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                    <TextBlock Text="例如 --disable-dynamic-vram。包含空格的值请用双引号；端口、监听地址和目录由启动器管理。已选的常用参数无需重复填写。" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" />
+                    <TextBox x:Name="AdvancedArgumentsBox" AcceptsReturn="True" MinHeight="76" TextWrapping="Wrap" PlaceholderText="--参数名 值" TextChanged="Arguments_TextChanged" />
+                    <TextBlock x:Name="ArgumentsErrorText" TextWrapping="Wrap" Foreground="{ThemeResource SystemFillColorCriticalBrush}" Visibility="Collapsed" />
+                    <TextBlock Text="启动命令预览" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                    <TextBox x:Name="ArgumentsPreviewBox" IsReadOnly="True" AcceptsReturn="True" MinHeight="76" TextWrapping="Wrap" FontFamily="Consolas" />
+                </StackPanel>
+            </Expander>
+
             <Expander HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
                 <Expander.Header>
                     <TextBlock Text="服务端口" Style="{StaticResource BodyStrongTextBlockStyle}" TextWrapping="Wrap" />

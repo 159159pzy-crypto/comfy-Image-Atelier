@@ -38,8 +38,8 @@ internal sealed partial class LauncherState
             : Downloads.RemainingBytes(status.Destination, status.Model.Size, status.Model.Sha256),
         status =>
         {
-            var urls = (status.Model.IsPackage ? status.Model.Files.SelectMany(file => file.Urls) : status.Model.Urls)
-                .Select(url => Safety.MapSource(url, Config)).Distinct().ToArray();
+            var urls = (status.Model.IsPackage ? status.Model.Files.SelectMany(file => DownloadSources.ModelCandidates(file, Config))
+                : DownloadSources.ModelCandidates(status.Model, Config)).Distinct().ToArray();
             return urls.Length > 0 ? string.Join("\n", urls) : status.Model.SourceUrl;
         });
 

@@ -3,6 +3,11 @@
   "models": [
     {
       "id": "qwen-text",
+      "modelScope": {
+        "repository": "circlestone-labs/Anima",
+        "revision": "ed04460b568d64b84b28c067441b240039923a16",
+        "path": "split_files/text_encoders/qwen_3_06b_base.safetensors"
+      },
       "name": "Qwen 文本编码器",
       "group": "Anima 基础生成",
       "category": "text_encoders",
@@ -19,6 +24,11 @@
     },
     {
       "id": "qwen-vae",
+      "modelScope": {
+        "repository": "circlestone-labs/Anima",
+        "revision": "ed04460b568d64b84b28c067441b240039923a16",
+        "path": "split_files/vae/qwen_image_vae.safetensors"
+      },
       "name": "Qwen VAE",
       "group": "共享 VAE",
       "category": "vae",
@@ -43,6 +53,11 @@
       "license": "Anima 仓库 LICENSE.md",
       "licenseUrl": "https://huggingface.co/circlestone-labs/Anima/blob/f973fc41ec7545364ac9776c2440285f43ff2a30/LICENSE.md",
       "id": "anima-base-v1",
+      "modelScope": {
+        "repository": "circlestone-labs/Anima",
+        "revision": "79d627c66e8a669625c60f48d2633e61f8982eab",
+        "path": "split_files/diffusion_models/anima-base-v1.0.safetensors"
+      },
       "name": "Anima v1 基础模型",
       "group": "Anima 基础生成",
       "category": "diffusion_models",
@@ -59,6 +74,11 @@
       "license": "Krea 2 Community License",
       "licenseUrl": "https://cdn.jsdelivr.net/gh/krea-ai/krea-2@db3984fbc6e13b34c0064990fc2d95ac64d00058/assets/hf_samples/LICENSE.pdf",
       "id": "krea2-turbo",
+      "modelScope": {
+        "repository": "Comfy-Org/Krea-2",
+        "revision": "9663e58b14ae60b8c78746dfbb6914d7048d3f60",
+        "path": "diffusion_models/krea2_turbo_int8_convrot.safetensors"
+      },
       "sourceUrl": "https://huggingface.co/Comfy-Org/Krea-2/blob/1171f4dc7e325bf3734586942e737872506c73e1/diffusion_models/krea2_turbo_int8_convrot.safetensors",
       "name": "Krea 2 Turbo INT8",
       "group": "Krea 2（可选）",
@@ -76,6 +96,11 @@
       "license": "Krea 2 Community License",
       "licenseUrl": "https://cdn.jsdelivr.net/gh/krea-ai/krea-2@db3984fbc6e13b34c0064990fc2d95ac64d00058/assets/hf_samples/LICENSE.pdf",
       "id": "qwen3vl-krea2",
+      "modelScope": {
+        "repository": "Comfy-Org/Krea-2",
+        "revision": "f9403a00a7a782b2d41208d11024ce9c7bfda32d",
+        "path": "text_encoders/qwen3vl_4b_fp8_scaled.safetensors"
+      },
       "sourceUrl": "https://huggingface.co/Comfy-Org/Krea-2/blob/1171f4dc7e325bf3734586942e737872506c73e1/text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
       "name": "Qwen3 VL 4B FP8（Krea 2）",
       "group": "Krea 2（可选）",
@@ -93,6 +118,11 @@
       "license": "Apache-2.0",
       "licenseUrl": "https://huggingface.co/ByteDance-Seed/SeedVR2-3B/blob/37255ff8cccfb01071b87f635a5948ca8d53117c/README.md",
       "id": "seedvr2-model",
+      "modelScope": {
+        "repository": "Comfy-Org/SeedVR2",
+        "revision": "79d6653a8868382f3b68f2ec277687c84aeb64a8",
+        "path": "diffusion_models/seedvr2_3b_int8_convrot.safetensors"
+      },
       "sourceUrl": "https://huggingface.co/Comfy-Org/SeedVR2/blob/df48879708206a403d2a61acd55578c2e80fd233/diffusion_models/seedvr2_3b_int8_convrot.safetensors",
       "name": "SeedVR2 3B INT8",
       "group": "SeedVR2 修复放大（可选）",
@@ -110,6 +140,11 @@
       "license": "Apache-2.0",
       "licenseUrl": "https://huggingface.co/ByteDance-Seed/SeedVR2-3B/blob/37255ff8cccfb01071b87f635a5948ca8d53117c/README.md",
       "id": "seedvr2-vae",
+      "modelScope": {
+        "repository": "Comfy-Org/SeedVR2",
+        "revision": "5360e873f15685f17acdb077b5e46d16eb6d05d7",
+        "path": "vae/ema_vae_fp16.safetensors"
+      },
       "sourceUrl": "https://huggingface.co/Comfy-Org/SeedVR2/blob/df48879708206a403d2a61acd55578c2e80fd233/vae/ema_vae_fp16.safetensors",
       "name": "SeedVR2 EMA VAE FP16",
       "group": "SeedVR2 修复放大（可选）",

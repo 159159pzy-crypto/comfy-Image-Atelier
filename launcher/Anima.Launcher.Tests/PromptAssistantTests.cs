@@ -230,7 +230,10 @@ internal static class PromptAssistantTests
         var python = Commands.Find(OperatingSystem.IsWindows() ? "python.exe" : "python3");
         if (python is not null)
         {
-            var fixture = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../launcher/tests/fixtures/prompt-assistant/pinned"));
+            var fixtureRelative = "launcher/tests/fixtures/prompt-assistant/pinned";
+            var fixture = Directory.Exists(Path.Combine(Environment.CurrentDirectory, fixtureRelative))
+                ? Path.Combine(Environment.CurrentDirectory, fixtureRelative)
+                : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../..", fixtureRelative));
             foreach (var relative in new[] { "node/expand_node.py", "services/llm.py" })
                 File.Copy(Path.Combine(fixture, relative), Path.Combine(plugin, relative), true);
             var config = new LauncherConfig { ComfyRoot = comfy, Python = python };

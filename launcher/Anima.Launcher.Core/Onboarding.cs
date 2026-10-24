@@ -16,6 +16,7 @@ public sealed class SetupRecord
     public bool InstallFinished { get; set; }
     public bool ModelsPending { get; set; }
     public string[] OptionalModelIds { get; set; } = [];
+    public InstallationPlan? ReviewedPlan { get; set; }
     public AssistantSetupStatus AssistantStatus { get; set; }
     // Old installations selected the ComfyUI folder itself. Keep that identity
     // when the user temporarily clears the path while editing a recovery draft.
@@ -24,6 +25,8 @@ public sealed class SetupRecord
 
 public static class SetupRouting
 {
+    public static bool OpenWizardFromEnvironmentPage(LauncherConfig current, bool setupActive) =>
+        setupActive || string.IsNullOrWhiteSpace(current.ComfyRoot) || current.InstallPending;
     /// <summary>
     /// Null means the regular overview. SetupComplete deliberately does not participate:
     /// it records a successful workbench launch, not whether an environment is installed.

@@ -35,17 +35,23 @@ public sealed partial class EnvironmentPage : LauncherPage
         State.FieldsReloaded += OnReloaded;
         State.BusyChanged += OnBusy;
         State.InstallSummaryChanged += OnSummary;
+        State.ComfyUpdateChanged += OnComfyUpdate;
+        State.NodeUpdateChanged += OnNodeUpdate;
+        UpdateComfyMaintenance();
+        UpdateNodeMaintenance();
     }
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
-        if (!State.Busy) SyncConfig();
+        if (!State.Busy && !State.SetupActive) SyncConfig();
         active = false;
         previewConfirmed = false;
         previewVersion++;
         State.FieldsReloaded -= OnReloaded;
         State.BusyChanged -= OnBusy;
         State.InstallSummaryChanged -= OnSummary;
+        State.ComfyUpdateChanged -= OnComfyUpdate;
+        State.NodeUpdateChanged -= OnNodeUpdate;
         base.OnNavigatedFrom(e);
     }
 
@@ -53,6 +59,9 @@ public sealed partial class EnvironmentPage : LauncherPage
     private void OnBusy(bool busy) => DispatcherQueue.TryEnqueue(() =>
     {
         ConfigurationPanel.IsEnabled = !busy;
+        OpenSetupButton.IsEnabled = !busy;
+        UpdateComfyMaintenance();
+        UpdateNodeMaintenance();
         ApplyInstallEligibility();
     });
     private void OnSummary(string text)
@@ -66,6 +75,43 @@ public sealed partial class EnvironmentPage : LauncherPage
             previewConfirmed = reviewedHere && previewVersion == requestVersion;
             ApplyInstallEligibility();
         });
+    }
+
+    private void OnComfyUpdate() => DispatcherQueue.TryEnqueue(() => { if (active) UpdateComfyMaintenance(); });
+    private void UpdateComfyMaintenance()
+    {
+        State.RestoreComfyUpdatePlan();
+        ComfyVersionStatus.Text = State.ComfyUpdateStatus;
+        CurrentEnvironmentText.Text = "ComfyUI：" + State.Config.ComfyRoot + "\nPython：" + State.Config.Python;
+        OptionalDependencyStatusText.Text = State.ComfyOptionalDependencyStatus;
+        ComfyMaintenancePanel.IsEnabled = !State.Busy && !State.Config.InstallPending && State.Config.ComfyRoot.Length > 0;
+        UpdateComfyButton.IsEnabled = State.ComfyHasUpdatePlan;
+        UpdateComfyButton.Content = State.ComfyUpdateReady ? "备份并更新 ComfyUI" : "固定更新依赖";
+        RollbackComfyButton.IsEnabled = State.ComfyCanRollback;
+    }
+    private async void CheckComfy_Click(object sender, RoutedEventArgs e) { SyncConfig(); await State.CheckComfyUpdateAsync(); }
+    private async void UpdateComfy_Click(object sender, RoutedEventArgs e) { SyncConfig(); if (State.ComfyUpdateReady) await State.ApplyComfyUpdateAsync(); else await State.PrepareComfyUpdateAsync(); }
+    private async void RollbackComfy_Click(object sender, RoutedEventArgs e) { SyncConfig(); await State.RollbackComfyUpdateAsync(); }
+    private async void RepairComfy_Click(object sender, RoutedEventArgs e) { SyncConfig(); await State.RepairComfyDependenciesAsync(); }
+    private void OnNodeUpdate() => DispatcherQueue.TryEnqueue(() => { if (active) UpdateNodeMaintenance(); });
+    private void UpdateNodeMaintenance()
+    {
+        State.RestoreNodeUpdatePlan();
+        NodeVersionStatus.Text = State.NodeUpdateStatus;
+        NodeUpdateList.ItemsSource = State.NodeUpdateRows;
+        NodeMaintenancePanel.IsEnabled = !State.Busy && !State.Config.InstallPending && State.Config.ComfyRoot.Length > 0;
+        UpdateNodesButton.IsEnabled = State.NodesHaveUpdatePlan;
+        UpdateNodesButton.Content = State.NodesUpdateReady ? "备份并更新节点" : "固定节点依赖";
+        RollbackNodesButton.IsEnabled = State.NodesCanRollback;
+    }
+    private async void CheckNodes_Click(object sender, RoutedEventArgs e) { SyncConfig(); await State.CheckNodeUpdatesAsync(); }
+    private async void UpdateNodes_Click(object sender, RoutedEventArgs e) { SyncConfig(); await State.ApplyNodeUpdatesAsync(); }
+    private async void RollbackNodes_Click(object sender, RoutedEventArgs e) { SyncConfig(); await State.RollbackNodeUpdatesAsync(); }
+    private void OpenSetup_Click(object sender, RoutedEventArgs e) => Shell.OpenSetup();
+    private async void SaveSources_Click(object sender, RoutedEventArgs e)
+    {
+        SyncConfig();
+        await State.Run(_ => { State.Save(); State.SetStatus("下载设置已保存，下次下载和更新时使用。"); return Task.CompletedTask; });
     }
 
     private void LoadFields()
@@ -89,8 +135,11 @@ public sealed partial class EnvironmentPage : LauncherPage
             FreshMode.IsChecked = fresh;
             InstallSummary.Text = State.InstallSummaryText;
             ConfigurationPanel.IsEnabled = !State.Busy;
+            OpenSetupButton.IsEnabled = !State.Busy;
             ApplyMode();
             ApplyInstallEligibility();
+            UpdateComfyMaintenance();
+            UpdateNodeMaintenance();
         }
         finally { loading = false; }
     }

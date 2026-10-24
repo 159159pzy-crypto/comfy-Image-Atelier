@@ -1,8 +1,5 @@
 using System.Diagnostics;
 using System.IO.Compression;
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace Anima.Launcher.Core;
@@ -17,9 +14,10 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         var directories = Inventory.ResolveNodeDirectories(root, runtime);
         return runtime.Nodes.Select(repo => new NodeInstallPlan(repo, directories[repo.Id], Directory.Exists(directories[repo.Id]) && !File.Exists(Path.Combine(directories[repo.Id], ".anima-revision.json")))).ToArray();
     }
-    private static readonly Regex Sam2Line = new(@"^(?:sam2(?:\[[^\]]*\])?\s*@\s*)?git\+https://github\.com/facebookresearch/sam2(?:\.git)?(?:@[\w./\-]+)?\s*$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex Sam2Line = new(@"^(?:sam[-_.]?2(?:\[[^\]]*\])?\s*@\s*)?git\+https://github\.com/facebookresearch/sam2(?:\.git)?(?:@[\w./\-]+)?\s*$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private string? git;
     private string? uv;
+    private ComfyDependencySnapshot? activeDependencies;
     private Dictionary<string, string> Env(LauncherConfig config) => new()
     {
         ["PATH"] = (git is null ? "" : Path.GetDirectoryName(git) + Path.PathSeparator) + Environment.GetEnvironmentVariable("PATH"),
@@ -29,14 +27,33 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         ["TEMP"] = Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "temp"),
         ["TMP"] = Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "temp"),
         ["PIP_CACHE_DIR"] = Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "cache", "pip"),
-        ["PIP_INDEX_URL"] = config.PipIndex,
+        ["PIP_INDEX_URL"] = DownloadSources.PipIndexes(config)[0],
+        ["PIP_EXTRA_INDEX_URL"] = "",
+        ["PIP_CONFIG_FILE"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null",
+        ["UV_DEFAULT_INDEX"] = DownloadSources.PipIndexes(config)[0],
+        ["UV_EXTRA_INDEX_URL"] = "",
+        ["UV_INDEX"] = "",
+        ["UV_HTTP_TIMEOUT"] = "30",
+        ["UV_HTTP_RETRIES"] = "1",
+        ["GIT_HTTP_LOW_SPEED_LIMIT"] = "1024",
+        ["GIT_HTTP_LOW_SPEED_TIME"] = "30",
         ["PIP_CONSTRAINT"] = Path.Combine(config.ComfyRoot, ".anima-constraints.txt"),
         ["COMFYUI_PATH"] = config.ComfyRoot,
         ["COMFYUI_MODEL_PATH"] = Path.Combine(config.ComfyRoot, "models"),
-        ["GIT_CONFIG_COUNT"] = config.GitMirror.Length > 0 ? "1" : "0",
-        ["GIT_CONFIG_KEY_0"] = "url." + Safety.MapSource("https://github.com/", config) + ".insteadOf",
-        ["GIT_CONFIG_VALUE_0"] = "https://github.com/"
+        ["GIT_CONFIG_COUNT"] = DownloadSources.GitCandidates("https://github.com/", config)[0] != "https://github.com/" ? "2" : "1",
+        ["GIT_CONFIG_KEY_0"] = "core.longpaths",
+        ["GIT_CONFIG_VALUE_0"] = "true",
+        ["GIT_CONFIG_KEY_1"] = "url." + DownloadSources.GitCandidates("https://github.com/", config)[0] + ".insteadOf",
+        ["GIT_CONFIG_VALUE_1"] = "https://github.com/"
     };
+    public static void ConfigureGitEnvironment(IDictionary<string, string> environment, string source)
+    {
+        environment["GIT_CONFIG_COUNT"] = source == "https://github.com/" ? "1" : "2";
+        environment["GIT_CONFIG_KEY_0"] = "core.longpaths";
+        environment["GIT_CONFIG_VALUE_0"] = "true";
+        environment["GIT_CONFIG_KEY_1"] = "url." + source + ".insteadOf";
+        environment["GIT_CONFIG_VALUE_1"] = "https://github.com/";
+    }
     public static void ExtractZip(string zip, string destination, CancellationToken ct = default)
     {
         Directory.CreateDirectory(destination);
@@ -59,7 +76,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         var exe = Safety.Under(target, tool.Executable);
         if (await Task.Run(() => ToolInstallation.IsReady(runtime, tool, ct), ct)) return exe;
         var zip = Path.Combine(runtime, "cache", name + ".zip");
-        await downloads.Fetch(name, Safety.MapSource(tool.Url, config), zip, tool.Size, tool.Sha256, progress, ct);
+        await downloads.Fetch(name, DownloadSources.Candidates(tool.Url, config), zip, tool.Size, tool.Sha256, progress, ct);
         return await ToolInstallation.InstallVerifiedArchive(runtime, tool, zip, ct);
     }
     private async Task Stage(LauncherConfig config, string stageId, string name, Func<Task> action)
@@ -106,11 +123,21 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             if (File.Exists(stageMarker)) ValidateRepositoryIdentity(JsonFile.Read<Repository>(stageMarker), repo, staging);
             JsonFile.Write(stageMarker, repo);
             await Commands.Run(git!, ["init"], staging, log, ct);
-            await Commands.Run(git!, ["fetch", "--depth", "1", repo.Url, repo.Commit], staging, log, ct, Env(config));
-            await Commands.Run(git!, ["checkout", "--detach", "FETCH_HEAD"], staging, log, ct);
+            await WithSources("Git " + repo.Id, DownloadSources.GitCandidates(repo.Url, config), async source =>
+            {
+                var env = Env(config);
+                ConfigureGitEnvironment(env, "https://github.com/");
+                await GitFetchRecovery.Run(git!, ["fetch", "--depth", "1", source, repo.Commit], staging, log, ct, env);
+            }, ct);
+            await Commands.Run(git!, ["checkout", "--detach", "FETCH_HEAD"], staging, log, ct, Env(config));
             var actual = (await Commands.Run(git!, ["rev-parse", "HEAD"], staging, null, ct)).Trim();
             if (actual != repo.Commit) throw new InvalidDataException("Git 来源提交与锁定版本不同。");
-            await Commands.Run(git!, ["submodule", "update", "--init", "--recursive"], staging, log, ct, Env(config));
+            await WithSources("Git 子模块", DownloadSources.GitCandidates("https://github.com/", config), async source =>
+            {
+                var env = Env(config);
+                ConfigureGitEnvironment(env, source);
+                await Commands.Run(git!, ["submodule", "update", "--init", "--recursive"], staging, log, ct, env);
+            }, ct);
             JsonFile.Write(Path.Combine(staging, ".anima-revision.json"), repo);
             await ValidateClone(repo, staging, config, ct);
             File.Delete(stageMarker);
@@ -156,7 +183,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         {
             if (!Sam2Line.IsMatch(line.Trim())) return line;
             found = true;
-            return "git+https://github.com/facebookresearch/sam2@" + commit;
+            return "SAM-2 @ git+https://github.com/facebookresearch/sam2@" + commit;
         }).ToArray();
         return found ? string.Join("\n", lines) : null;
     }
@@ -166,7 +193,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
     private void EnsureConstraints(LauncherConfig config, string importedPins)
     {
         var file = Path.Combine(config.ComfyRoot, ".anima-constraints.txt");
-        File.WriteAllLines(file, ConstraintsFor(ManagedRoot(config), manifest, importedPins));
+        File.WriteAllLines(file, activeDependencies?.Constraints ?? ConstraintsFor(ManagedRoot(config), manifest, importedPins));
     }
     private async Task Pip(LauncherConfig config, IEnumerable<string> args, CancellationToken ct)
     {
@@ -176,19 +203,225 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         {
             if (arguments[i] != "-r") continue;
             var requirements = arguments[i + 1];
-            var pinned = PinSam2(File.Exists(requirements) ? File.ReadAllText(requirements) : throw new FileNotFoundException($"依赖清单不存在：{requirements}"), manifest.Sam2Commit);
-            if (pinned is not null)
+            var rewritten = ComfyDependencyResolver.PrepareNodeRequirements(requirements,
+                Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "cache", "requirements"), manifest.Sam2Commit);
+            if (rewritten != requirements)
             {
-                // The rewritten file lives in launcher state, not inside the managed repo.
-                var rewritten = Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "cache", "requirements", Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(requirements)))[..12] + ".txt");
-                Directory.CreateDirectory(Path.GetDirectoryName(rewritten)!);
-                File.WriteAllText(rewritten, pinned);
                 arguments[i + 1] = rewritten;
-                baseArgs.Add("--no-build-isolation"); // SAM2 builds against the installed, verified CUDA runtime.
-                if (!ManagedRoot(config)) await Pip(config, ["setuptools", "wheel"], ct);
+                if (!baseArgs.Contains("--no-build-isolation")) baseArgs.Add("--no-build-isolation");
             }
         }
-        await Commands.Run(config.Python, baseArgs.Concat(arguments), config.ComfyRoot, log, ct, Env(config));
+        await WithSources("Python 包", DownloadSources.PipIndexes(config), async source =>
+        {
+            var env = Env(config);
+            env["PIP_INDEX_URL"] = source;
+            env["UV_DEFAULT_INDEX"] = source;
+            var requirementsFiles = arguments.Where((arg, i) => i > 0 && arguments[i - 1] == "-r");
+            var needsGit = arguments.Any(arg => arg.StartsWith("git+https://github.com/", StringComparison.OrdinalIgnoreCase))
+                || ComfyDependencyResolver.RequirementFiles(requirementsFiles).Any(path => File.ReadAllText(path).Contains("git+https://github.com/", StringComparison.OrdinalIgnoreCase));
+            if (needsGit)
+                await WithSources("Git Python 依赖", DownloadSources.GitCandidates("https://github.com/", config), async gitSource =>
+                {
+                    ConfigureGitEnvironment(env, gitSource);
+                    await Commands.Run(config.Python, baseArgs.Concat(["--timeout", "20", "--retries", "1"]).Concat(arguments), config.ComfyRoot, log, ct, env);
+                }, ct);
+            else await Commands.Run(config.Python, baseArgs.Concat(["--timeout", "20", "--retries", "1"]).Concat(arguments), config.ComfyRoot, log, ct, env);
+        }, ct);
+    }
+
+    public static bool IsSourceFailure(Exception error)
+    {
+        if (error is TimeoutException or HttpRequestException) return true;
+        if (error is not InvalidOperationException) return false;
+        var message = error.Message.ToLowerInvariant();
+        if (new[] { "no space left", "not enough space", "disk full", "permission denied", "access is denied", "being used by another process",
+            "filename too long", "file name too long", "winerror 206", "checkout failed", "resolutionimpossible", "conflicting dependencies", "dependency conflict" }.Any(message.Contains)) return false;
+        // A requirement's https URL is not an HTTP error. pip often repeats that URL in
+        // local build failures; only transport evidence permits trying another mirror.
+        return new[] { "timed out", "timeout", "connection", "resolve host", "name resolution", "network is unreachable", "ssl", "tls",
+            "could not find a version", "no matching distribution", "remote end hung", "early eof", "fetch failed", "failed to download", "not our ref" }.Any(message.Contains)
+            || Regex.IsMatch(message, @"(?:http(?: error)?(?: status(?: code)?)?\s*[:=]?\s*|returned error:\s*|status code:?\s*)[45]\d\d\b|\b[45]\d\d\s+(?:client|server)\s+error\b");
+    }
+
+    private async Task WithSources(string name, IEnumerable<string> sources, Func<string, Task> action, CancellationToken ct)
+    {
+        var candidates = sources.Distinct().ToArray();
+        for (var i = 0; i < candidates.Length; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            log($"{name} · 来源：{candidates[i]}");
+            try { await action(candidates[i]); return; }
+            catch (Exception ex) when (!ct.IsCancellationRequested && i + 1 < candidates.Length && IsSourceFailure(ex))
+            { log($"{name} 当前来源不可用，切换下一来源：{ex.Message}"); }
+        }
+    }
+
+    private async Task InstallPython(LauncherConfig config, CancellationToken ct)
+    {
+        await WithSources("Python 运行时", DownloadSources.PythonMirrors(config), async source =>
+        {
+            var env = Env(config);
+            env["UV_PYTHON_INSTALL_MIRROR"] = source;
+            await Commands.Run(uv!, ["python", "install", manifest.PythonVersion], stateDir, log, ct, env);
+        }, ct);
+        config.Python = Path.Combine(config.ComfyRoot, ".venv", "Scripts", "python.exe");
+        config.PythonExplicit = false;
+        // A failed --seed can leave python.exe but no pip behind; rerun seeding on retry.
+        await WithSources("Python 基础包", DownloadSources.PipIndexes(config), async source =>
+        {
+            var env = Env(config);
+            env["UV_DEFAULT_INDEX"] = source;
+            env["PIP_INDEX_URL"] = source;
+            if (!File.Exists(config.Python))
+                await Commands.Run(uv!, ["venv", "--seed", "--python", manifest.PythonVersion, Path.Combine(config.ComfyRoot, ".venv")], stateDir, log, ct, env);
+            else
+            {
+                try { await Commands.Run(config.Python, ["-m", "pip", "--version"], config.ComfyRoot, null, ct, env); }
+                catch (InvalidOperationException) { await Commands.Run(uv!, ["pip", "install", "--python", config.Python, "pip"], stateDir, log, ct, env); }
+            }
+        }, ct);
+    }
+
+    public async Task RepairDependencies(LauncherConfig config, ComfyDependencySnapshot? dependencies, CancellationToken ct)
+    {
+        config.Validate();
+        _ = ComfyUpdateCoordinator.IndependentPythonDirectory(config);
+        manifest = InstallationPlanner.PreserveExistingNodeVersions(config.ComfyRoot, manifest);
+        await new ComfyUpdateCoordinator(stateDir, git ?? "git.exe").EnsureStoppedAsync(config, ct);
+        if (await ServiceManager.PortOpen(config.ComfyPort, ct) || OwnedComfyRunning())
+            throw new IOException("修复依赖前请先停止此环境的 ComfyUI，避免运行中改动 Python 包。");
+        Directory.CreateDirectory(stateDir);
+        var runtime = InstallationPlanner.ResolveRuntimeRoot(config, stateDir);
+        Directory.CreateDirectory(Path.Combine(runtime, "temp"));
+        git = await ResolveGit(config, ct);
+        var gpuPins = await Commands.Run(config.Python, ["-B", "-c", "import importlib.metadata as m; print(chr(10).join(n+'=='+m.version(n) for n in ['torch','torchvision','torchaudio'] if m.packages_distributions().get(n)))"], config.ComfyRoot, null, ct);
+        activeDependencies = dependencies;
+        await InstallCombinedDependencies(config, gpuPins, requiredManager: true, ct);
+        await CompleteNodeInstallers(config, PlanNodes(config.ComfyRoot, manifest).Where(node => Directory.Exists(node.Directory)), ct);
+        await RepairOptionalDependencies(config, ct);
+        await Commands.Run(config.Python, ["-m", "pip", "check"], config.ComfyRoot, log, ct);
+    }
+
+    private async Task InstallCombinedDependencies(LauncherConfig config, string gpuPins, bool requiredManager, CancellationToken ct)
+    {
+        var requirements = Path.Combine(config.ComfyRoot, "requirements.txt");
+        var manager = Path.Combine(config.ComfyRoot, "manager_requirements.txt");
+        if (!File.Exists(manager))
+        {
+            const string message = "此版本未提供 Manager 依赖清单，请先更新 ComfyUI 稳定版。";
+            if (requiredManager) throw new InvalidOperationException(message);
+            log(message + " 已保留原环境，继续补齐其他依赖。");
+        }
+        var nodes = ComfyDependencyResolver.ExistingNodeRequirements(config);
+        if (activeDependencies is null && RuntimeDependencies.NodeCommit(config.ComfyRoot) is { } commit)
+            activeDependencies = new(commit, File.ReadAllText(requirements), File.Exists(manager) ? File.ReadAllText(manager) : "", []);
+        // Resolve the complete graph with only the GPU ABI frozen. An old full core-only
+        // lock must not prevent a compatible node from selecting a different numpy, etc.
+        File.WriteAllLines(Path.Combine(config.ComfyRoot, ".anima-constraints.txt"), ConstraintsFor(false, manifest, gpuPins));
+        if (ComfyDependencyResolver.RequirementFiles(nodes).Any(file => PinSam2(File.ReadAllText(file), manifest.Sam2Commit) is not null))
+            await Pip(config, ["setuptools", "wheel"], ct);
+        await Stage(config, "dependencies", "安装 ComfyUI 依赖", async () =>
+        {
+            if (activeDependencies is not null)
+            {
+                activeDependencies = await ComfyDependencyResolver.ResolveAsync(config, activeDependencies,
+                    Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "cache"), ct, log, nodes, Env(config), manifest.Sam2Commit);
+                EnsureConstraints(config, gpuPins);
+            }
+            else log("此环境没有可验证的 Git 提交；使用现有源码依赖联合安装并保留 GPU 版本，不复用依赖快照。");
+            var args = new List<string> { "-r", requirements };
+            if (File.Exists(manager)) { args.Add("-r"); args.Add(manager); }
+            foreach (var node in nodes) { args.Add("-r"); args.Add(node); }
+            await Pip(config, args, ct);
+        });
+        if (File.Exists(manager))
+            await Stage(config, "dependencies", "安装并验证 Manager 依赖", () => RuntimeDependencies.ValidateManager(config, ct));
+    }
+
+    private async Task CompleteNodeInstallers(LauncherConfig config, IEnumerable<NodeInstallPlan> nodes, CancellationToken ct)
+    {
+        var probe = await RuntimeDependencies.Probe(config, ct);
+        var commit = activeDependencies?.ComfyCommit ?? RuntimeDependencies.NodeCommit(config.ComfyRoot) ?? manifest.Comfy.Commit;
+        foreach (var node in nodes)
+        {
+            await Stage(config, "nodes", "验证节点 " + node.Repository.Id, async () =>
+            {
+                var complete = Path.Combine(node.Directory, ".anima-dependencies-complete");
+                var install = Path.Combine(node.Directory, "install.py");
+                if (!node.PreserveExisting && File.Exists(install) && !RuntimeDependencies.NodeReceiptMatches(complete, config, node.Directory, commit))
+                {
+                    await ValidateClone(node.Repository, node.Directory, config, ct);
+                    await Commands.Run(config.Python, [install], node.Directory, log, ct, Env(config));
+                }
+                JsonFile.Write(complete, RuntimeDependencies.CreateNodeReceipt(config, node.Directory, probe, commit));
+            });
+        }
+    }
+
+    public async Task RepairOptionalDependencies(LauncherConfig config, CancellationToken ct)
+    {
+        _ = ComfyUpdateCoordinator.IndependentPythonDirectory(config);
+        await new ComfyUpdateCoordinator(stateDir, git ?? "git.exe").EnsureStoppedAsync(config, ct);
+        if (await ServiceManager.PortOpen(config.ComfyPort, ct) || OwnedComfyRunning())
+            throw new IOException("修复可选依赖前请先停止 ComfyUI。");
+        var runtime = InstallationPlanner.ResolveRuntimeRoot(config, stateDir);
+        var statusPath = Path.Combine(runtime, "optional-dependencies.json");
+        try
+        {
+            var probe = await RuntimeDependencies.Probe(config, ct);
+            if (probe.TritonImportable)
+            {
+                try
+                {
+                    await RuntimeDependencies.ValidateTriton(config, runtime, ct, log);
+                    var detail = $"现有 Triton {probe.Triton} GPU kernel 验证通过，已保留原版本。";
+                    log(detail);
+                    JsonFile.Write(statusPath, new OptionalDependencyStatus("PatchTritonVAE", true, detail));
+                    return;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException && ex is not InsufficientSpaceException)
+                { log("现有 Triton 验证失败，检查可用的锁定修复包：" + ex.Message); }
+            }
+            var wheel = RuntimeDependencies.SelectTriton(probe, out var reason);
+            if (wheel is null)
+            {
+                log(reason);
+                JsonFile.Write(statusPath, new OptionalDependencyStatus("PatchTritonVAE", false, reason));
+                return;
+            }
+            // The existing package was absent or failed a real GPU kernel. Reinstall even
+            // when its metadata already matches, so missing files are actually repaired.
+            {
+                var cache = Path.Combine(runtime, "cache", "wheels");
+                Directory.CreateDirectory(cache);
+                var destination = Path.Combine(cache, wheel.Filename);
+                if (!await Downloads.Verify(destination, wheel.Size, wheel.Sha256, ct))
+                {
+                    if (File.Exists(destination)) File.Move(destination, destination + ".invalid-" + Guid.NewGuid().ToString("N"));
+                    var requirement = Path.Combine(cache, "triton-" + wheel.Python + ".txt");
+                    await File.WriteAllTextAsync(requirement, $"triton-windows=={wheel.Version} --hash=sha256:{wheel.Sha256}\n", ct);
+                    await WithSources("Triton Windows", DownloadSources.PipIndexes(config), async source =>
+                    {
+                        var env = Env(config);
+                        env["PIP_INDEX_URL"] = source;
+                        env["PIP_CONSTRAINT"] = "";
+                        await Commands.Run(config.Python, ["-m", "pip", "download", "--no-deps", "--only-binary=:all:", "--require-hashes", "--timeout", "20", "--retries", "1", "-r", requirement, "--dest", cache], config.ComfyRoot, log, ct, env);
+                    }, ct);
+                    if (!await Downloads.Verify(destination, wheel.Size, wheel.Sha256, ct)) throw new InvalidDataException("Triton wheel 大小或 SHA-256 不符。");
+                }
+                var installEnv = Env(config);
+                installEnv["PIP_CONSTRAINT"] = "";
+                await Commands.Run(config.Python, ["-m", "pip", "install", "--force-reinstall", "--no-deps", destination], config.ComfyRoot, log, ct, installEnv);
+            }
+            await RuntimeDependencies.ValidateTriton(config, runtime, ct, log);
+            JsonFile.Write(statusPath, new OptionalDependencyStatus("PatchTritonVAE", true, "Triton GPU kernel 已验证；重启后检查节点加载。"));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException && ex is not InsufficientSpaceException)
+        {
+            var message = "可选节点 PatchTritonVAE 未就绪：" + ex.Message + "；基础生图不受影响，可在环境页重试修复。";
+            log(message);
+            JsonFile.Write(statusPath, new OptionalDependencyStatus("PatchTritonVAE", false, message));
+        }
     }
     /// <summary>True when a ComfyUI owned by this launcher is still running; its venv must not be modified underneath it.</summary>
     private bool OwnedComfyRunning()
@@ -230,9 +463,13 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         config.Python = installed.Python;
         config.PythonExplicit = installed.PythonExplicit;
         config.ManagedComfy = installed.ManagedComfy;
+        config.ComfyArguments = installed.ComfyArguments;
     }
     public async Task<LauncherConfig> Install(InstallationPlan plan, CancellationToken ct)
     {
+        plan = await InstallationPlanner.ResolveStableAsync(plan, manifest, stateDir, ct);
+        manifest = plan.ResolvedRuntime ?? manifest;
+        activeDependencies = plan.Dependencies;
         var config = plan.CreateConfig();
         var fresh = plan.Fresh;
         config.Validate();
@@ -242,6 +479,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         // Resolve aliases before any external command or install mutation. An existing
         // ZIP install must never trigger a second clone into the canonical folder.
         var nodePlans = PlanNodes(config.ComfyRoot, manifest);
+        await new ComfyUpdateCoordinator(stateDir, git ?? "git.exe").EnsureStoppedAsync(config, ct);
         if (await ServiceManager.PortOpen(config.ComfyPort, ct) || OwnedComfyRunning()) throw new IOException("安装依赖前请先停止此环境的 ComfyUI，避免运行过程中改动 Python 包。");
         var preflight = await InstallationPlanner.PreflightAsync(plan, ct);
         if (!preflight.CanInstall) throw new InvalidOperationException(string.Join(Environment.NewLine, preflight.Issues.Where(i => i.Blocking).Select(i => i.Message)));
@@ -258,6 +496,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         if (!fresh)
         {
             if (string.IsNullOrWhiteSpace(config.Python)) throw new InvalidDataException("未找到 Python，请先选择该环境的 python.exe。");
+            _ = ComfyUpdateCoordinator.IndependentPythonDirectory(config);
             // Fail fast on a bad interpreter instead of at the first pip call.
             await Commands.Run(config.Python, ["--version"], config.ComfyRoot, log, ct, timeout: TimeSpan.FromSeconds(30));
         }
@@ -266,14 +505,14 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         if (fresh)
         {
             await Stage(config, "comfy", "拉取锁定版本的 ComfyUI", () => Clone(manifest.Comfy with { Url = config.CustomRepository.Length > 0 ? config.CustomRepository : manifest.Comfy.Url }, config.ComfyRoot, config, ct));
-            await Stage(config, "python", "安装 Python 并创建独立虚拟环境", async () =>
+            if (activeDependencies is not null)
             {
-                var env = Env(config);
-                await Commands.Run(uv!, ["python", "install", manifest.PythonVersion], stateDir, log, ct, env);
-                config.Python = Path.Combine(config.ComfyRoot, ".venv", "Scripts", "python.exe");
-                config.PythonExplicit = false;
-                if (!File.Exists(config.Python)) await Commands.Run(uv!, ["venv", "--seed", "--python", manifest.PythonVersion, Path.Combine(config.ComfyRoot, ".venv")], stateDir, log, ct, env);
-            });
+                static string Normalize(string text) => text.Replace("\r\n", "\n").Trim();
+                if (Normalize(File.ReadAllText(Path.Combine(config.ComfyRoot, "requirements.txt"))) != Normalize(activeDependencies.RequirementsText)
+                    || Normalize(File.ReadAllText(Path.Combine(config.ComfyRoot, "manager_requirements.txt"))) != Normalize(activeDependencies.ManagerRequirementsText))
+                    throw new InvalidDataException("检出的 ComfyUI 依赖文件与已检查的稳定版快照不同，已停止安装。");
+            }
+            await Stage(config, "python", "安装 Python 并创建独立虚拟环境", () => InstallPython(config, ct));
             config.ManagedComfy = true;
             EnsureConstraints(config, importedPins); // PIP_CONSTRAINT is injected into every pip call; the file must exist first.
             await Stage(config, "torch", "安装锁定 CUDA / PyTorch", async () =>
@@ -283,18 +522,19 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
                 foreach (var wheel in manifest.TorchWheels)
                 {
                     var destination = Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "cache", "wheels", wheel.Executable);
-                    await downloads.Fetch(wheel.Id, wheel.Url, destination, wheel.Size, wheel.Sha256, progress, ct);
+                    await downloads.Fetch(wheel.Id, DownloadSources.Candidates(wheel.Url, config), destination, wheel.Size, wheel.Sha256, progress, ct);
                     wheels.Add(destination);
                 }
                 await Pip(config, wheels, ct);
             });
-            await Stage(config, "dependencies", "安装 ComfyUI 依赖", () => Pip(config, ["-r", Path.Combine(config.ComfyRoot, "requirements.txt")], ct));
+            importedPins = await Commands.Run(config.Python, ["-B", "-c", "import importlib.metadata as m; print(chr(10).join(n+'=='+m.version(n) for n in ['torch','torchvision','torchaudio'] if m.packages_distributions().get(n)))"], config.ComfyRoot, null, ct);
+            if (!config.LaunchArgumentsConfigured && !ComfyLaunchArguments.ManagerEnabled(config.ComfyArguments)) config.ComfyArguments.Add("--enable-manager");
         }
         else
         {
             // Adding a missing node must not silently replace an imported GPU runtime.
             importedPins = await Commands.Run(config.Python, ["-c", "import importlib.metadata as m; print(chr(10).join(n+'=='+m.version(n) for n in ['torch','torchvision','torchaudio'] if m.packages_distributions().get(n)))"], config.ComfyRoot, null, ct);
-            EnsureConstraints(config, importedPins);
+            File.WriteAllLines(Path.Combine(config.ComfyRoot, ".anima-constraints.txt"), ConstraintsFor(false, manifest, importedPins));
         }
         var custom = Path.Combine(config.ComfyRoot, "custom_nodes");
         Directory.CreateDirectory(custom);
@@ -306,19 +546,15 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         {
             var repo = node.Repository;
             var target = node.Directory;
-            if (node.PreserveExisting) { log($"保留已有节点 {repo.Id}：{target}；不升级、不改依赖。"); continue; }
             await Stage(config, "nodes", "安装节点 " + repo.Id, async () =>
             {
-                await Clone(repo, target, config, ct);
-                var complete = Path.Combine(target, ".anima-dependencies-complete");
-                if (File.Exists(complete) && File.ReadAllText(complete).Trim() == manifest.Version) return;
-                var requirements = Path.Combine(target, "requirements.txt");
-                if (File.Exists(requirements)) await Pip(config, ["-r", requirements], ct);
-                var install = Path.Combine(target, "install.py");
-                if (File.Exists(install)) await Commands.Run(config.Python, [install], target, log, ct, Env(config));
-                File.WriteAllText(complete, manifest.Version);
+                if (node.PreserveExisting) log($"保留已有节点源码 {repo.Id}：{target}；检查并补齐声明的依赖。");
+                else await Clone(repo, target, config, ct);
             });
         }
+        await InstallCombinedDependencies(config, importedPins, fresh || ComfyLaunchArguments.ManagerEnabled(config.ComfyArguments), ct);
+        await CompleteNodeInstallers(config, nodePlans, ct);
+        await Stage(config, "nodes", "检查可选 Triton 加速依赖", () => RepairOptionalDependencies(config, ct));
         var assistantDirectory = PromptAssistantCompatibility.ResolveDirectory(config.ComfyRoot);
         if (assistantDirectory is not null)
             await Stage(config, "nodes", "验证提示词助手纯模板兼容", () => PromptAssistantCompatibility.CheckOrApply(config, stateDir, assistantDirectory, true, ct));
@@ -328,6 +564,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             await Commands.Run(config.Python, ["-c", "import aiohttp,yaml,torch; print('PyTorch:',torch.__version__); print('GPU:',torch.cuda.is_available())" + (fresh ? "; assert torch.cuda.is_available()" : "")], config.ComfyRoot, log, ct);
             if (fresh) await Commands.Run(config.Python, ["-m", "pip", "check"], config.ComfyRoot, log, ct);
         });
+        InstallationPlanner.MarkStableInstallComplete(config, stateDir);
         return config;
     }
 }

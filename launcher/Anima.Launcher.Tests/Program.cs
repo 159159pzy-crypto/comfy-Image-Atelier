@@ -38,12 +38,35 @@ if (args.FirstOrDefault() == "--assistant-crud-probe")
     return;
 }
 
-var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
+var root = File.Exists(Path.Combine(Environment.CurrentDirectory, "launcher", "manifests", "launcher-manifest.json"))
+    ? Environment.CurrentDirectory : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
 var manifestDir = Path.Combine(root, "launcher", "manifests");
 var manifest = JsonFile.Read<RuntimeManifest>(Path.Combine(manifestDir, "launcher-manifest.json"));
 var models = JsonFile.Read<ModelManifest>(Path.Combine(manifestDir, "model-manifest.json"));
 var taggerModels = JsonFile.Read<ModelManifest>(Path.Combine(root, "anima_webui", "tagger-models.json"));
 models = models with { Models = models.Models.Concat(taggerModels.Models).ToArray() };
+if (args.FirstOrDefault() == "--preview-latest")
+{
+    try
+    {
+        var previewTarget = Path.GetFullPath(args.ElementAtOrDefault(1) ?? throw new ArgumentException("Supply an empty preview target."));
+        var state = previewTarget + ".launcher-state";
+        if (Directory.Exists(previewTarget) && Directory.EnumerateFileSystemEntries(previewTarget).Any()
+            || Directory.Exists(state) && Directory.EnumerateFileSystemEntries(state).Any())
+            throw new IOException("Latest preview requires a new empty target and state directory; existing reviewed snapshots are preserved.");
+        Directory.CreateDirectory(state);
+        var configuration = new LauncherConfig { ComfyRoot = previewTarget, RuntimeRoot = state, AppRoot = root, DataDir = Path.Combine(state, "data") };
+        var planned = InstallationPlanner.Create(configuration, manifest, state, true);
+        var reviewed = await InstallationPlanner.ResolveStableAsync(planned, manifest, state, default);
+        JsonFile.Write(Path.Combine(state, "preview-plan.json"), reviewed);
+        JsonFile.Write(Path.Combine(state, "frozen-node-versions.json"), reviewed.NodeVersions);
+        Console.WriteLine($"ComfyUI {reviewed.Release!.Tag}: {reviewed.Release.Commit}");
+        foreach (var node in reviewed.NodeVersions) Console.WriteLine($"{node.Id} [{node.Branch}]: {node.Commit} {node.Url}");
+        Console.WriteLine("LATEST PREVIEW FROZEN " + state);
+    }
+    catch (Exception error) { Console.WriteLine(error); Environment.ExitCode = 1; }
+    return;
+}
 if (args.FirstOrDefault() == "--tagger-download")
 {
     var config = new LauncherConfig { ComfyRoot = Path.GetFullPath(args[1]), Python = Path.GetFullPath(args[2]) };
@@ -72,12 +95,21 @@ if (args.Contains("--install-new"))
     var configuration = new LauncherConfig { ComfyRoot = targetRoot, ComfyPort = 18888, WebPort = 18990, AppRoot = root, DataDir = Path.Combine(state, "data") };
     using var dl = new Downloads();
     var logLock = new object();
-    var installer = new Installer(state, manifest, dl, line => { lock (logLock) File.AppendAllText(Path.Combine(state, "install.log"), line + Environment.NewLine); }, null);
+    void InstallLog(string line) { lock (logLock) File.AppendAllText(Path.Combine(state, "install.log"), line + Environment.NewLine); }
+    var lastProgress = DateTime.MinValue;
+    var progress = new Progress<DownloadProgress>(value =>
+    {
+        if (DateTime.UtcNow - lastProgress < TimeSpan.FromSeconds(5) && value.Received != value.Total) return;
+        lastProgress = DateTime.UtcNow;
+        InstallLog($"{value.Name}: {value.Received}/{value.Total} · {value.Stage}");
+    });
+    var installer = new Installer(state, manifest, dl, InstallLog, progress);
     try { await installer.Install(configuration, true, default); JsonFile.Write(Path.Combine(state, "launcher.json"), configuration); Console.WriteLine("CLEAN INSTALL OK " + state); }
     catch (Exception ex) { Console.WriteLine(ex); Environment.ExitCode = 1; }
     return;
 }
-var work = Path.Combine(root, "output", "launcher-tests", Guid.NewGuid().ToString("N"));
+var testArtifacts = Environment.GetEnvironmentVariable("ANIMA_LAUNCHER_TEST_ROOT");
+var work = Path.Combine(string.IsNullOrWhiteSpace(testArtifacts) ? Path.Combine(root, "output", "launcher-tests") : Path.GetFullPath(testArtifacts), Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(work);
 var count = 0;
 void Check(bool condition, string label) { if (!condition) throw new Exception("FAIL: " + label); count++; Console.WriteLine("PASS: " + label); }
@@ -87,6 +119,36 @@ async Task ThrowsType<T>(Func<Task> operation, string label) where T : Exception
     try { await operation(); }
     catch (T) { Check(true, label); return; }
     throw new Exception("Expected " + typeof(T).Name + ": " + label);
+}
+if (args.Contains("--download-sources-only"))
+{
+    count += await DownloadSourceTests.Run(work, models);
+    Console.WriteLine($"{count} download source checks passed."); return;
+}
+if (args.Contains("--comfy-release-only"))
+{
+    count += await ComfyReleaseUpdateTests.Run(work, manifest);
+    Console.WriteLine($"{count} ComfyUI release and recovery checks passed."); return;
+}
+if (args.Contains("--node-releases-only"))
+{
+    count += await NodeReleaseTests.Run(work, manifest);
+    Console.WriteLine($"{count} node release and install snapshot checks passed."); return;
+}
+if (args.Contains("--node-updates-only"))
+{
+    count += await NodeUpdateTests.Run(work, manifest);
+    Console.WriteLine($"{count} node update and rollback checks passed."); return;
+}
+if (args.Contains("--launch-arguments-only"))
+{
+    count += await ComfyLaunchArgumentsTests.Run(work, manifest);
+    Console.WriteLine($"{count} launch argument checks passed."); return;
+}
+if (args.Contains("--runtime-dependencies-only"))
+{
+    count += await RuntimeDependencyTests.Run(work);
+    Console.WriteLine($"{count} runtime dependency checks passed."); return;
 }
 if (args.Contains("--updates-only"))
 {
@@ -107,6 +169,16 @@ if (args.Contains("--assistant-only"))
     Console.WriteLine($"{count} Prompt Assistant checks passed; artifacts: {work}");
     return;
 }
+if (!args.Contains("--resume-node-updates"))
+{
+    count += await DownloadSourceTests.Run(work, models);
+    count += await ComfyLaunchArgumentsTests.Run(work, manifest);
+    count += await RuntimeDependencyTests.Run(work);
+    count += await ComfyReleaseUpdateTests.Run(work, manifest);
+    count += await NodeReleaseTests.Run(work, manifest);
+}
+else Console.WriteLine("Resuming after the previously verified download, launch argument, runtime dependency, ComfyUI update and node release groups.");
+count += await NodeUpdateTests.Run(work, manifest);
 count += await ModelPackageTests.Run(work, manifest, taggerModels);
 if (args.Contains("--tagger-only"))
 {
@@ -354,7 +426,7 @@ Check(Installer.ConstraintsFor(false, manifest, "torch==9.9.9\n").SequenceEqual(
 
 var sam2 = "numpy\n git+https://github.com/facebookresearch/sam2 \nsam2 @ git+https://github.com/facebookresearch/sam2@aaaaaaaa\ngit+https://github.com/facebookresearch/sam2.git@v1.0\nfoo==1";
 var pinned = Installer.PinSam2(sam2, manifest.Sam2Commit);
-Check(pinned is not null && pinned.Split('\n').Count(line => line == "git+https://github.com/facebookresearch/sam2@" + manifest.Sam2Commit) == 3, "sam2 variants all pinned to locked commit");
+Check(pinned is not null && pinned.Split('\n').Count(line => line == "SAM-2 @ git+https://github.com/facebookresearch/sam2@" + manifest.Sam2Commit) == 3, "sam2 variants all pinned to a named locked requirement for wheel cache reuse");
 Check(Installer.PinSam2("numpy==1\nfoo==2", manifest.Sam2Commit) is null, "requirements without sam2 untouched");
 
 var fakeConfig = new LauncherConfig { AppRoot = Path.Combine(work, "app"), DataDir = Path.Combine(work, "data"), ComfyPort = 18188 };

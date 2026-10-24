@@ -132,17 +132,10 @@ public sealed partial class MainWindow : Window
 
     internal void GoToPage(int index)
     {
-        if (index == 1)
+        if (index == 1 && Anima.Launcher.Core.SetupRouting.OpenWizardFromEnvironmentPage(State.Config, State.SetupActive))
         {
-            if (State.Busy && !State.SetupActive)
-            {
-                State.SetStatus("请等待当前任务完成，再打开安装向导。");
-                return;
-            }
-            try { State.BeginSetup(); }
-            catch (Exception ex) { State.AppendLog(ex.Message); State.SetStatus(ex.Message); return; }
-            if (!State.SetupActive) return;
-            index = 5;
+            OpenSetup();
+            return;
         }
         // Tray and background service actions cannot abandon a running wizard.
         if (State.SetupActive && index != 3) index = 5;
@@ -169,6 +162,21 @@ public sealed partial class MainWindow : Window
     }
 
     internal void ShowSetupLogs() => GoToPage(3);
+    internal void OpenSetup()
+    {
+        if (State.Busy && !State.SetupActive) { State.SetStatus("请等待当前任务完成，再打开安装向导。"); return; }
+        try
+        {
+            if (!State.SetupActive)
+            {
+                ReadPagesIntoConfig();
+                State.ApplyPendingFields();
+                State.BeginSetup();
+            }
+            if (State.SetupActive) GoToPage(5);
+        }
+        catch (Exception ex) { State.AppendLog(ex.Message); State.SetStatus(ex.Message); }
+    }
     private void SetupReturn_Click(object sender, RoutedEventArgs e) => GoToPage(5);
 
     internal void CancelSetup()

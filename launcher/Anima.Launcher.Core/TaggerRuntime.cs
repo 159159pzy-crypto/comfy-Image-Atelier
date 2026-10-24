@@ -29,7 +29,7 @@ public static class TaggerRuntime
         // A reused ComfyUI may have been started with different arguments. Its runtime is authoritative.
         try
         {
-            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+            using var client = new HttpClient(new HttpClientHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(10) };
             using var stats = JsonDocument.Parse(await client.GetStringAsync(config.ComfyUrl + "/system_stats", ct));
             using var folders = JsonDocument.Parse(await client.GetStringAsync(config.ComfyUrl + "/internal/folder_paths", ct));
             var target = ResolveDirectory(folders.RootElement, stats.RootElement);

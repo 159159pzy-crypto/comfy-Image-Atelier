@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "source": "https://github.com/triton-lang/triton-windows",
+  "wheels": [
+    {
+      "version": "3.6.0.post26",
+      "python": "cp310",
+      "filename": "triton_windows-3.6.0.post26-cp310-cp310-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/c1/56/1028998fbad2eaff607ad682cedbcd006ddd326bb0f19ddf18461155b900/triton_windows-3.6.0.post26-cp310-cp310-win_amd64.whl",
+      "size": 47399782,
+      "sha256": "7a2ad7e8414a581c9d3c58991f86fa49af70d9f7ef464d9349e6c0e8e23af9f5"
+    },
+    {
+      "version": "3.6.0.post26",
+      "python": "cp311",
+      "filename": "triton_windows-3.6.0.post26-cp311-cp311-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/5e/20/acab7b4f50abe68d93f632b2e29cfb9e76284eaf9b4041a6eabbbd4afdc7/triton_windows-3.6.0.post26-cp311-cp311-win_amd64.whl",
+      "size": 47401354,
+      "sha256": "369a47ed3ca25f6d405387a058b8fbc62e6ff4592bbf87b0c5f6de372ab68931"
+    },
+    {
+      "version": "3.6.0.post26",
+      "python": "cp312",
+      "filename": "triton_windows-3.6.0.post26-cp312-cp312-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/62/1e/8d9814e67ba3f20094cf3c69e7815a491f20beb86469a647550ba86728b0/triton_windows-3.6.0.post26-cp312-cp312-win_amd64.whl",
+      "size": 47402104,
+      "sha256": "189d8c57911aa9d2ff983a715e5c967b325f576307db60924cab22b501a36515"
+    },
+    {
+      "version": "3.6.0.post26",
+      "python": "cp313",
+      "filename": "triton_windows-3.6.0.post26-cp313-cp313-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/2e/69/7579a5da5d8c5372711bb4b99a185ad35eae6c7549d85b9f75171e06832b/triton_windows-3.6.0.post26-cp313-cp313-win_amd64.whl",
+      "size": 47402101,
+      "sha256": "033f3d50c6a0e4539a3ccfa042304dbf76bf79155f382f9c09d010323d5a9a32"
+    },
+    {
+      "version": "3.7.1.post27",
+      "python": "cp310",
+      "filename": "triton_windows-3.7.1.post27-cp310-cp310-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/4d/b4/c50a22dd2d493a3e8e78744cbdcb29932f367b68999c8e08874b94aebd3a/triton_windows-3.7.1.post27-cp310-cp310-win_amd64.whl",
+      "size": 49678783,
+      "sha256": "01ede775b102c91acc89fc6946b946451f966cb64856c650d244d37ea3bbdee5"
+    },
+    {
+      "version": "3.7.1.post27",
+      "python": "cp311",
+      "filename": "triton_windows-3.7.1.post27-cp311-cp311-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/26/f5/0f5eaf48abc0c9900f600dbdfa8139e678aa7d47dc1da51b0541979e96df/triton_windows-3.7.1.post27-cp311-cp311-win_amd64.whl",
+      "size": 49679173,
+      "sha256": "b739bd7d39f919280294d8af172a90aa2f17a4377bfbca2ea30a8afae61d5eaa"
+    },
+    {
+      "version": "3.7.1.post27",
+      "python": "cp312",
+      "filename": "triton_windows-3.7.1.post27-cp312-cp312-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/76/30/325b420efd0047e119679c646a9a410db216069800ec009fae3da26c69a3/triton_windows-3.7.1.post27-cp312-cp312-win_amd64.whl",
+      "size": 49683004,
+      "sha256": "f5406230d7dbf6965bc4051fcad27b81c39ba4a4bfde06f494dd7ff4eb325a9e"
+    },
+    {
+      "version": "3.7.1.post27",
+      "python": "cp313",
+      "filename": "triton_windows-3.7.1.post27-cp313-cp313-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/ec/28/f0b2801c2cfd79be5878bf429e82b5da00fb78f046a9c21ba946681cc467/triton_windows-3.7.1.post27-cp313-cp313-win_amd64.whl",
+      "size": 49684257,
+      "sha256": "e8ed215c02afc85a81f0097196f8bebdf6f68085f1bc0fe8771b9a74783f15ab"
+    }
+  ]
+}

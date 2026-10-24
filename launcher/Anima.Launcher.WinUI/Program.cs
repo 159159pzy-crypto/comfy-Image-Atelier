@@ -131,7 +131,7 @@ internal static class Program
         LauncherConfig? config = null;
         if (File.Exists(configPath))
         {
-            try { config = JsonFile.Read<LauncherConfig>(configPath); config.Validate(); }
+            try { config = JsonFile.Read<LauncherConfig>(configPath); config.Validate(validateArguments: false); }
             catch { return null; } // Existing configuration recovery UI owns malformed config.
             var versions = Path.GetFullPath(Path.Combine(StateDir, "versions")) + Path.DirectorySeparatorChar;
             if (config.AppRoot.Length > 0 && !Path.GetFullPath(config.AppRoot).StartsWith(versions, StringComparison.OrdinalIgnoreCase)) return null;

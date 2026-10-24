@@ -1,0 +1,174 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+
+namespace Anima.Launcher.Core;
+
+public static class ComfyDependencyResolver
+{
+    private static readonly Regex IncludeLine = new(@"(?m)^(\s*(?:-r\s*|--requirement[= ]+|-c\s*|--constraint[= ]+))([^\r\n]+)$", RegexOptions.Compiled);
+    public static IReadOnlyList<string> ExistingNodeRequirements(LauncherConfig config)
+    {
+        var custom = Path.Combine(config.ComfyRoot, "custom_nodes");
+        if (!Directory.Exists(custom)) return [];
+        return Directory.EnumerateDirectories(custom).Where(path => !Path.GetFileName(path).StartsWith('.')
+            && !Path.GetFileName(path).EndsWith(".disabled", StringComparison.OrdinalIgnoreCase)
+            && (File.GetAttributes(path) & FileAttributes.Hidden) == 0)
+            .Select(path => Path.Combine(path, "requirements.txt")).Where(File.Exists).Order(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    private static string? IncludePath(string source, string value)
+    {
+        value = Regex.Replace(value, @"\s+#.*$", "").Trim().Trim('"', '\'');
+        if (Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme is "https" or "http") return null;
+        return Path.GetFullPath(Path.Combine(Path.GetDirectoryName(source)!, value));
+    }
+
+    public static IReadOnlyList<string> RequirementFiles(IEnumerable<string> requirements)
+    {
+        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void Read(string path)
+        {
+            path = Path.GetFullPath(path);
+            if (!files.Add(path)) return;
+            foreach (Match include in IncludeLine.Matches(File.ReadAllText(path)))
+                if (IncludePath(path, include.Groups[2].Value) is { } child) Read(child);
+        }
+        foreach (var file in requirements) Read(file);
+        return files.Order(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+    public static string NormalizeName(string name) => Regex.Replace(name, "[-_.]+", "-").ToLowerInvariant();
+    public static string[] MergeConstraints(IEnumerable<string> installed, JsonElement report)
+    {
+        var pins = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        foreach (var line in installed)
+        {
+            var split = line.Split("==", 2);
+            if (split.Length == 2 && Regex.IsMatch(split[0], "^[A-Za-z0-9_.-]+$") && Regex.IsMatch(split[1], "^[A-Za-z0-9.+!-]+$"))
+                pins[NormalizeName(split[0])] = split[1];
+        }
+        foreach (var item in report.GetProperty("install").EnumerateArray())
+        {
+            var metadata = item.GetProperty("metadata");
+            pins[NormalizeName(metadata.GetProperty("name").GetString()!)] = metadata.GetProperty("version").GetString()!;
+        }
+        return pins.Select(pair => pair.Key + "==" + pair.Value).ToArray();
+    }
+
+    public static string NodeRequirementsIdentity(IEnumerable<string> requirements, string? sam2Commit = null,
+        IReadOnlyDictionary<string, string>? logicalPaths = null)
+    {
+        var files = RequirementFiles(requirements);
+        if (files.Count == 0) return "";
+        string Logical(string path)
+        {
+            if (logicalPaths is null) return path;
+            foreach (var pair in logicalPaths.OrderByDescending(pair => pair.Key.Length))
+            {
+                var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(pair.Key));
+                if (path.Equals(root, StringComparison.OrdinalIgnoreCase) || path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                    return Path.GetFullPath(Path.Combine(pair.Value, Path.GetRelativePath(root, path)));
+            }
+            return path;
+        }
+        var inputs = files.Select(path => (Path: Logical(path), Text: File.ReadAllText(path))).OrderBy(item => item.Path, StringComparer.OrdinalIgnoreCase).ToArray();
+        if (inputs.Select(item => item.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count() != inputs.Length)
+            throw new InvalidDataException("节点预检路径映射发生冲突。");
+        var input = string.Join("\n", inputs.Select(item => item.Path + "\n" + item.Text)) + "\nSAM2=" + sam2Commit;
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(input))).ToLowerInvariant();
+    }
+
+    public static string PrepareNodeRequirements(string path, string directory, string? sam2Commit)
+    {
+        var files = RequirementFiles([path]);
+        if (sam2Commit is null || !files.Any(file => Installer.PinSam2(File.ReadAllText(file), sam2Commit) is not null)) return path;
+        Directory.CreateDirectory(directory);
+        // Rewrite the whole include graph only when SAM2 needs pinning. Absolute include paths
+        // preserve its original meaning, including nested files and cyclic references.
+        var destinations = files.ToDictionary(file => file, file => Path.Combine(directory,
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(file)))[..16] + ".txt"), StringComparer.OrdinalIgnoreCase);
+        foreach (var file in files)
+        {
+            var content = File.ReadAllText(file);
+            var pinned = Installer.PinSam2(content, sam2Commit) ?? content;
+            pinned = IncludeLine.Replace(pinned, match => IncludePath(file, match.Groups[2].Value) is { } child
+                ? match.Groups[1].Value + '"' + destinations[child] + '"' : match.Value);
+            File.WriteAllText(destinations[file], pinned);
+        }
+        return destinations[Path.GetFullPath(path)];
+    }
+
+    public static async Task<ComfyDependencySnapshot> ResolveAsync(LauncherConfig config, ComfyDependencySnapshot snapshot,
+        string cacheRoot, CancellationToken ct, Action<string>? log = null, IEnumerable<string>? nodeRequirements = null,
+        IDictionary<string, string>? environment = null, string? sam2Commit = null, IReadOnlyDictionary<string, string>? logicalPaths = null)
+    {
+        Safety.Commit(snapshot.ComfyCommit);
+        var inventory = await Commands.Run(config.Python, ["-B", "-c", "import sys,importlib.metadata as m; print(sys.version.split()[0]); print(chr(10).join(sorted(d.metadata['Name']+'=='+d.version for d in m.distributions() if d.metadata['Name'])))"], config.ComfyRoot, null, ct, timeout: TimeSpan.FromSeconds(30));
+        var lines = inventory.Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var gpu = lines.Skip(1).Where(line => Regex.IsMatch(line, @"^(torch|torchvision|torchaudio)==", RegexOptions.IgnoreCase)).ToArray();
+        var identity = Path.GetFullPath(config.Python).ToUpperInvariant() + "\n" + lines[0] + "\n" + string.Join("\n", gpu.Order());
+        var additional = (nodeRequirements ?? []).Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray();
+        var nodeIdentity = NodeRequirementsIdentity(additional, sam2Commit, logicalPaths);
+        if (snapshot.Resolved && snapshot.NodeRequirementsIdentity == nodeIdentity)
+        {
+            if (snapshot.PythonIdentity != identity) throw new InvalidOperationException("Python 或 GPU 版本已变化，请重新检查依赖计划。");
+            return snapshot;
+        }
+        var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity + "\n" + snapshot.ComfyCommit + "\n" + snapshot.RequirementsText + "\n" + snapshot.ManagerRequirementsText
+            + (nodeIdentity.Length == 0 ? "" : "\n" + nodeIdentity)))).ToLowerInvariant();
+        var root = Path.Combine(cacheRoot, "dependency-plans", key);
+        var saved = Path.Combine(root, "resolved.json");
+        // Older installers placed both plans and pip downloads one extra level down. Reuse
+        // their frozen plan rather than resolving the same reviewed inputs a second time.
+        var legacySaved = Path.Combine(cacheRoot, "dependencies", "dependency-plans", key, "resolved.json");
+        var existingPath = File.Exists(saved) ? saved : legacySaved;
+        if (File.Exists(existingPath))
+        {
+            var existing = JsonFile.Read<ComfyDependencySnapshot>(existingPath);
+            if (existing.Resolved && existing.PythonIdentity == identity && existing.ComfyCommit == snapshot.ComfyCommit
+                && existing.NodeRequirementsIdentity == nodeIdentity) return existing;
+            throw new InvalidDataException("已有依赖快照身份不匹配，已保留原文件。");
+        }
+        Directory.CreateDirectory(root);
+        var requirements = Path.Combine(root, "requirements.txt");
+        var manager = Path.Combine(root, "manager_requirements.txt");
+        var constraints = Path.Combine(root, "gpu-constraints.txt");
+        File.WriteAllText(requirements, snapshot.RequirementsText);
+        File.WriteAllText(manager, snapshot.ManagerRequirementsText);
+        File.WriteAllLines(constraints, gpu.Length > 0 ? gpu : snapshot.Constraints.Where(line => Regex.IsMatch(line, @"^(torch|torchvision|torchaudio)==", RegexOptions.IgnoreCase)));
+        var additionalFiles = additional.Select(path => PrepareNodeRequirements(path, Path.Combine(root, "nodes"), sam2Commit)).ToArray();
+        var needsGit = RequirementFiles(additionalFiles).Any(path => File.ReadAllText(path).Contains("git+https://github.com/", StringComparison.OrdinalIgnoreCase));
+        var reportPath = Path.Combine(root, "report.json");
+        var temporary = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(cacheRoot))!, "temp");
+        Directory.CreateDirectory(temporary);
+        Exception? last = null;
+        var indexes = DownloadSources.PipIndexes(config);
+        foreach (var index in indexes)
+        foreach (var gitSource in needsGit ? DownloadSources.GitCandidates("https://github.com/", config) : new[] { "https://github.com/" })
+        {
+            try
+            {
+                log?.Invoke("解析当前稳定版依赖（保留已安装 GPU 运行时）：" + index);
+                var env = environment is null ? new Dictionary<string, string>() : new Dictionary<string, string>(environment);
+                env["PIP_INDEX_URL"] = index; env["PIP_EXTRA_INDEX_URL"] = ""; env["PIP_CONSTRAINT"] = constraints;
+                env["PIP_CONFIG_FILE"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
+                env["PIP_CACHE_DIR"] = Path.Combine(cacheRoot, "pip"); env["TEMP"] = temporary; env["TMP"] = temporary;
+                Installer.ConfigureGitEnvironment(env, gitSource);
+                var arguments = new List<string> { "-m", "pip", "install", "--dry-run", "--disable-pip-version-check", "--timeout", "20", "--retries", "1", "--report", reportPath,
+                    "--index-url", index, "-r", requirements, "-r", manager };
+                if (additionalFiles.Where((file, i) => file != additional[i]).Any()) arguments.Add("--no-build-isolation");
+                foreach (var file in additionalFiles) { arguments.Add("-r"); arguments.Add(file); }
+                await Commands.Run(config.Python, arguments, config.ComfyRoot, log, ct, env);
+                using var report = JsonDocument.Parse(File.ReadAllText(reportPath));
+                var pins = MergeConstraints(lines.Skip(1), report.RootElement);
+                foreach (var pin in gpu) if (!pins.Contains(pin, StringComparer.OrdinalIgnoreCase)) throw new InvalidOperationException("依赖解析试图改变已有 GPU 版本，已中止。");
+                var resolved = snapshot with { Constraints = pins, Resolved = true, PythonIdentity = identity, NodeRequirementsIdentity = nodeIdentity };
+                JsonFile.Write(saved, resolved);
+                return resolved;
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested && Installer.IsSourceFailure(ex)) { last = ex; log?.Invoke("当前索引未完成解析：" + ex.Message); }
+        }
+        throw new InvalidOperationException("当前稳定版依赖无法在保留 GPU 版本的条件下解析。", last);
+    }
+}

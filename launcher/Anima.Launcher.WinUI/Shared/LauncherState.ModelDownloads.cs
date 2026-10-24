@@ -95,23 +95,8 @@ internal sealed partial class LauncherState
         if (item.Model.IsPackage)
             await ModelPackages.Fetch(Downloads, item.Model, item.Destination, Config, progress, ct);
         else
-        {
-            Exception? failure = null;
-            var done = false;
-            foreach (var source in item.Model.Urls)
-            {
-                try
-                {
-                    await Downloads.Fetch(item.Model.Name, Safety.MapSource(source, Config), item.Destination,
-                        item.Model.Size, item.Model.Sha256, progress, ct);
-                    done = true;
-                    break;
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException && item.Model.Urls.Length > 1)
-                { failure = ex; AppendLog(item.Model.Name + "：当前来源失败，尝试下一来源。"); }
-            }
-            if (!done) throw failure ?? new IOException(item.Model.Name + " 没有可用下载来源。");
-        }
+            await Downloads.Fetch(item.Model.Name, DownloadSources.ModelCandidates(item.Model, Config), item.Destination,
+                item.Model.Size, item.Model.Sha256, progress, ct);
         if (item.Model.Category == "diffusion_models")
             await ModelMetadata.EnsureDefaultAsync(Config, Program.Runtime, Program.Models, Program.ModelProfiles,
                 item.Destination, ct, AppendLog);

@@ -59,21 +59,9 @@ public static class ModelPackages
                 Directory.CreateDirectory(Path.GetDirectoryName(retained)!);
                 File.Move(target, retained);
             }
-            Exception? failure = null;
-            var done = false;
             var prefix = complete;
             var aggregate = new InlineProgress(value => progress?.Report(new(model.Name, prefix + value.Received, model.Size, value.Stage)));
-            foreach (var source in file.Urls)
-            {
-                try
-                {
-                    await downloads.Fetch(model.Name, Safety.MapSource(source, config), target, file.Size, file.Sha256, aggregate, ct);
-                    done = true;
-                    break;
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException && file.Urls.Length > 1) { failure = ex; }
-            }
-            if (!done) throw failure ?? new IOException("模型包文件下载失败。");
+            await downloads.Fetch(model.Name, DownloadSources.ModelCandidates(file, config), target, file.Size, file.Sha256, aggregate, ct);
             complete += file.Size;
         }
         if (await State(model, staging, ct) != "已校验") throw new InvalidDataException("模型包校验未通过，未发布到 ComfyUI。");

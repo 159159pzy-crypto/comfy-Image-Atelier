@@ -18,6 +18,7 @@ public static class Commands
         info.Environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1";
         info.Environment["GIT_TERMINAL_PROMPT"] = "0";
         if (env is not null) foreach (var pair in env) info.Environment[pair.Key] = pair.Value;
+        NetworkPolicy.Apply(info);
         return info;
     }
     public static async Task<string> Run(string exe, IEnumerable<string> args, string cwd, Action<string>? log, CancellationToken ct, IDictionary<string, string>? env = null, TimeSpan? timeout = null, bool terminateOnFailure = true)
@@ -99,13 +100,10 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
         try
         {
             if (stats.ValueKind != JsonValueKind.Object || !stats.TryGetProperty("system", out var sys) || sys.ValueKind != JsonValueKind.Object || !sys.TryGetProperty("argv", out var argv) || argv.ValueKind != JsonValueKind.Array) return false;
-            foreach (var arg in argv.EnumerateArray())
-            {
-                if (arg.ValueKind != JsonValueKind.String) continue;
-                var text = arg.GetString();
-                if (text is not null && Path.IsPathRooted(text) && Path.GetFileName(text).Equals("main.py", StringComparison.OrdinalIgnoreCase))
-                    return Path.GetFullPath(text).Equals(Path.Combine(Path.GetFullPath(root), "main.py"), StringComparison.OrdinalIgnoreCase);
-            }
+            if (argv.GetArrayLength() == 0 || argv[0].ValueKind != JsonValueKind.String) return false;
+            var text = argv[0].GetString();
+            if (text is not null && Path.IsPathFullyQualified(text) && Path.GetFileName(text).Equals("main.py", StringComparison.OrdinalIgnoreCase))
+                return Path.GetFullPath(text).Equals(Path.Combine(Path.GetFullPath(root), "main.py"), StringComparison.OrdinalIgnoreCase);
         }
         catch { return false; }
         return false;
@@ -127,17 +125,122 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
         }
         catch { return false; }
     }
-    /// <summary>Ensure ComfyUI is reachable: reuse a same-root external instance or start a managed one, then verify nodes and write resource bindings.</summary>
+    /// <summary>One read-only snapshot for start paths and service status; null means stopped.</summary>
+    public static async Task<ComfyArgumentComparison?> InspectComfyReuseAsync(LauncherConfig config, CancellationToken ct)
+    {
+        config.Validate();
+        ComfyLaunchArguments.ValidateForRoot(config.ComfyArguments, config.ComfyRoot);
+        if (!await PortOpen(config.ComfyPort, ct)) return null;
+        var before = await ReadComfyProcessIdentity(config, await FindPortOwner(config.ComfyPort, ct), ct);
+        JsonElement? stats;
+        try { stats = await Json(config.ComfyUrl + "/system_stats", ct); }
+        catch (TimeoutException)
+        {
+            if (!await PortOpen(config.ComfyPort, ct)) return null;
+            throw;
+        }
+        if (stats is null)
+        {
+            // An external process can finish exiting between the TCP and HTTP probes.
+            if (!await PortOpen(config.ComfyPort, ct)) return null;
+            return new(false, false, "当前端口未返回可确认的 ComfyUI 状态。");
+        }
+        var comparison = ComfyLaunchArguments.Compare(stats.Value, config);
+        if (!comparison.RootMatches || !comparison.Matches) return comparison;
+        var after = await ReadComfyProcessIdentity(config, await FindPortOwner(config.ComfyPort, ct), ct);
+        if (!ComfyProcessIdentityMatches(config, before.Process, after.Process, before.Launcher, after.Launcher))
+        {
+            if (!await PortOpen(config.ComfyPort, ct)) return null;
+            return new(true, false, "运行中的 ComfyUI 未使用所选 Python，或无法确认监听进程身份；需要停止对应服务后重试。启动器没有停止现有进程。\n期望 Python："
+                + config.Python + "\n实际 Python：" + (after.Launcher?.Executable ?? after.Process?.Executable ?? "无法确认"));
+        }
+        return comparison;
+    }
+
+    public static bool ComfyProcessIdentityMatches(LauncherConfig config, OwnedProcess? before, OwnedProcess? after,
+        OwnedProcess? beforeLauncher = null, OwnedProcess? afterLauncher = null)
+    {
+        try
+        {
+            if (before is null || after is null || !SameProcessIdentity(before, after)) return false;
+            if (SameExecutable(after.Executable, config.Python)) return true;
+            // Windows venv python.exe is a redirector: the listening child runs the base
+            // executable. Its still-live direct parent must be the selected venv launcher,
+            // and cannot have been recycled after the child started.
+            return beforeLauncher is not null && afterLauncher is not null && SameProcessIdentity(beforeLauncher, afterLauncher)
+                && afterLauncher.StartTimeUtcTicks <= after.StartTimeUtcTicks
+                && SameExecutable(afterLauncher.Executable, config.Python)
+                && VenvBasePython(config.Python) is { } basePython && SameExecutable(after.Executable, basePython);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { return false; }
+    }
+
+    private static bool SameExecutable(string left, string right) =>
+        Path.GetFullPath(left).Equals(Path.GetFullPath(right), StringComparison.OrdinalIgnoreCase);
+
+    private static string? VenvBasePython(string python)
+    {
+        try
+        {
+            var scripts = Path.GetDirectoryName(Path.GetFullPath(python))!;
+            if (!Path.GetFileName(scripts).Equals("Scripts", StringComparison.OrdinalIgnoreCase)) return null;
+            var cfg = Path.Combine(Path.GetDirectoryName(scripts)!, "pyvenv.cfg");
+            if (!File.Exists(cfg)) return null;
+            var home = File.ReadLines(cfg).Select(line => line.Split('=', 2))
+                .FirstOrDefault(parts => parts.Length == 2 && parts[0].Trim().Equals("home", StringComparison.OrdinalIgnoreCase))?[1].Trim();
+            return home is not null && Path.IsPathFullyQualified(home) ? Path.Combine(home, Path.GetFileName(python)) : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { return null; }
+    }
+
+    private static async Task<(OwnedProcess? Process, OwnedProcess? Launcher)> ReadComfyProcessIdentity(LauncherConfig config, int pid, CancellationToken ct)
+    {
+        var process = ReadProcessIdentity(pid, "ComfyUI");
+        if (process is null || SameExecutable(process.Executable, config.Python)
+            || VenvBasePython(config.Python) is not { } basePython || !SameExecutable(process.Executable, basePython)) return (process, null);
+        var powershell = Commands.Find("powershell.exe");
+        if (powershell is null) return (process, null);
+        try
+        {
+            var result = await Commands.Run(powershell, ["-NoProfile", "-NonInteractive", "-Command", $"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').ParentProcessId"],
+                Environment.CurrentDirectory, null, ct, timeout: TimeSpan.FromSeconds(5));
+            return (process, int.TryParse(result.Trim(), out var parent) ? ReadProcessIdentity(parent, "ComfyUI launcher") : null);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch { return (process, null); }
+    }
+
+    private static OwnedProcess? ReadProcessIdentity(int pid, string role)
+    {
+        if (pid <= 0) return null;
+        try
+        {
+            using var process = Process.GetProcessById(pid);
+            return process.HasExited || process.MainModule?.FileName is not { Length: > 0 } executable ? null
+                : new(pid, process.StartTime.ToUniversalTime().Ticks, executable, role);
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Read-only preflight before starting or stopping any related service.</summary>
+    public static async Task<bool> CheckComfyReuseAsync(LauncherConfig config, CancellationToken ct)
+    {
+        var comparison = await InspectComfyReuseAsync(config, ct);
+        if (comparison is null) return false;
+        if (!comparison.RootMatches) throw new PortConflictException(config.ComfyPort);
+        if (!comparison.Matches) throw new ComfyArgumentsMismatchException(comparison.Detail);
+        return true;
+    }
+
+    /// <summary>Ensure ComfyUI is reachable: reuse a matching external instance or start a managed one, then verify nodes and write resource bindings.</summary>
     public async Task StartComfy(LauncherConfig config, RuntimeManifest manifest, CancellationToken ct)
     {
         config.Validate();
         var before = owned.Count;
         try
         {
-            if (await PortOpen(config.ComfyPort, ct))
+            if (await CheckComfyReuseAsync(config, ct))
             {
-                var stats = await Json(config.ComfyUrl + "/system_stats", ct);
-                if (stats is null || !SameRoot(stats.Value, config.ComfyRoot)) throw new PortConflictException(config.ComfyPort);
                 log("复用已有 ComfyUI（外部进程不会被停止）。");
             }
             else
@@ -145,12 +248,11 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
                 var assistant = PromptAssistantCompatibility.ResolveDirectory(config.ComfyRoot);
                 if (assistant is not null)
                     await PromptAssistantCompatibility.CheckOrApply(config, stateDir, assistant, true, ct);
-                var args = new List<string> { Path.Combine(config.ComfyRoot, "main.py"), "--listen", "127.0.0.1", "--port", config.ComfyPort.ToString(), "--disable-auto-launch" };
-                if (config.Python.Contains("python_embed", StringComparison.OrdinalIgnoreCase)) args.Add("--windows-standalone-build");
-                args.AddRange(config.ComfyArguments);
+                var args = ComfyLaunchArguments.Build(config);
                 var env = PrepareRuntimeEnvironment(config);
                 var process = await StartProcess(config.Python, args, config.ComfyRoot, "ComfyUI", ct, env);
                 await Ready(config.ComfyUrl + "/system_stats", process, ct, "ComfyUI", Path.Combine(stateDir, "logs", "ComfyUI.log"));
+                if (!await CheckComfyReuseAsync(config, ct)) throw new IOException("新启动的 ComfyUI 在身份校验前已退出。");
             }
             var nodes = await Json(config.ComfyUrl + "/object_info", ct) ?? throw new IOException("ComfyUI 节点清单不可读取。");
             // The v2 graph keeps SeedVR2, RTX and face refinement in optional
@@ -696,6 +798,9 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
         var commandLine = await ProcessCommandLine(pid, ct);
         return RuntimePolicies.CommandLineMatchesSnapshot(commandLine, appDir);
     }
+
+    /// <summary>Read-only process inspection for environment update guards; never grants ownership.</summary>
+    public static Task<string?> ReadProcessCommandLineAsync(int pid, CancellationToken ct = default) => ProcessCommandLine(pid, ct);
 
     /// <summary>Process command line via WMIC (absent on some newer Windows) with a PowerShell fallback.</summary>
     private static async Task<string?> ProcessCommandLine(int pid, CancellationToken ct)

@@ -77,6 +77,8 @@ internal sealed partial class LauncherState
             SetupNotice = Setup.InstallFinished && Setup.ModelsPending
                 ? "环境已安装，所选模型尚未准备完成。点击继续可复用已下载文件。"
                 : "发现上次未完成的安装。重新检查后继续，已完成的文件和步骤会自动复用。";
+        if (Setup.InstallStarted && Setup.ReviewedPlan is { } resumed && SamePath(resumed.ComfyRoot, SetupTarget(Setup)))
+            SetupPlan = resumed;
         if (route == SetupStep.Location && saved?.InstallFinished == true)
             SetupNotice = "上次配置的环境文件发生变化，请重新检查目录。";
         SynchronizeSetupVersion();
@@ -140,6 +142,7 @@ internal sealed partial class LauncherState
             Setup.InstallFinished = false;
             Setup.ModelsPending = false;
             Setup.DirectComfyRoot = false;
+            Setup.ReviewedPlan = null;
             Setup.Draft.Python = "";
             Setup.Draft.PythonExplicit = false;
             InvalidateSetupReview();
@@ -150,6 +153,8 @@ internal sealed partial class LauncherState
     public void SaveSetupDraft(LauncherConfig draft)
     {
         if (Busy) return;
+        if (!Setup.InstallStarted || !SamePath(SetupTarget(Setup), Setup.Fresh && draft.InstallRoot.Length > 0 ? Path.Combine(draft.InstallRoot, "ComfyUI") : draft.ComfyRoot))
+            Setup.ReviewedPlan = null;
         Setup.Draft = draft.Clone();
         Setup.InstallFinished = false;
         Setup.ModelsPending = false;
@@ -257,6 +262,7 @@ internal sealed partial class LauncherState
             var fresh = Setup.Fresh;
             var plan = await Task.Run(() => InstallationPlanner.Create(draft, Program.Runtime, Program.StateDir,
                 fresh, Program.Models, Program.ModelProfiles, Setup.OptionalModelIds), ct);
+            plan = await InstallationPlanner.ResolveStableAsync(plan, Program.Runtime, Program.StateDir, ct);
             plan = await InstallationPlanner.PreparePlanAsync(plan, Program.Models, Program.ModelProfiles,
                 Path.Combine(Program.Assets, "probe_comfy.py"), ct);
             var preflight = await InstallationPlanner.PreflightAsync(plan, ct);
@@ -278,9 +284,10 @@ internal sealed partial class LauncherState
             ct.ThrowIfCancellationRequested();
             if (!setupReview.Complete(revision, preflight.CanInstall)) return;
             SetupPlan = plan;
+            Setup.ReviewedPlan = plan;
             SetupPreflight = preflight;
             Setup.Draft = plan.CreateConfig();
-            SetupNotice = fresh ? "已存在且通过校验的文件会复用，Python 依赖的实际下载量可能增加。"
+            SetupNotice = fresh ? $"ComfyUI {plan.Release?.Tag}（{plan.Release?.Commit[..12]}）与 {plan.NodeVersions.Length} 个新装节点的提交已固定。继续安装会复用这些版本与依赖计划；已有节点源码保持原样。"
                 : setupImportNeedsRepair ? "将补齐缺失节点，保留已有节点版本和 GPU 运行环境。" : "现有节点齐全，可直接完成导入。";
             SetupError = preflight.CanInstall ? "" : string.Join("\n", preflight.Issues.Where(i => i.Blocking).Select(i => i.Message));
             PersistSetup();

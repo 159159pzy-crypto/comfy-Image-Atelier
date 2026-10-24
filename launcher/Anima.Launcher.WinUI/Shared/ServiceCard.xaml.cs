@@ -43,6 +43,7 @@ public sealed partial class ServiceCard : UserControl
             "external" => ("已就绪 · 外部服务", 2),
             "starting" => ("正在启动…", 1),
             "conflict" => ("端口被占用", 3),
+            "needs_restart" => ("参数已更改 · 需重启", 1),
             "error" => ("尚未就绪", 3),
             "stopped" => ("已停止", 0),
             _ => ("未配置", 0),

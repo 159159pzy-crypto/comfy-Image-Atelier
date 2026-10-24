@@ -119,7 +119,7 @@ internal sealed partial class LauncherState
         });
         try
         {
-            downloadedSoftware = await SoftwareUpdates.DownloadAsync(release, Downloads, progress, ct);
+            downloadedSoftware = await SoftwareUpdates.DownloadAsync(release, Downloads, progress, ct, Config);
             SoftwareUpdateStatus = "下载与完整性校验完成。空闲时点击「重启并更新」。";
             SetStatus(SoftwareUpdateStatus);
         }
@@ -147,10 +147,9 @@ internal sealed partial class LauncherState
             NotifySoftwareUpdate();
             return;
         }
-        var currentSettings = new SettingsFields(Config.ComfyPort, Config.WebPort, Config.Theme, Config.StartOnLaunch);
         var currentEnvironment = new EnvironmentFields(FreshInstallRequested && Config.InstallRoot.Length > 0 ? Config.InstallRoot : Config.ComfyRoot,
             Config.Python, Config.SourceId, Config.GitMirror, Config.ModelMirror, Config.PipIndex, Config.CustomRepository, FreshInstallRequested, Config.PythonExplicit);
-        if (PendingSettingsFields is { } settings && settings != currentSettings || PendingEnvironmentFields is { } environment && environment != currentEnvironment)
+        if (PendingSettingsFields is { } settings && !settings.Matches(Config) || PendingEnvironmentFields is { } environment && environment != currentEnvironment)
         {
             SoftwareUpdateStatus = "还有未保存的设置，请先保存设置或完成环境设置，再重启更新。";
             NotifySoftwareUpdate();

@@ -76,7 +76,9 @@ internal sealed partial class LauncherState : IDisposable
 
     private LauncherConfig LoadConfig()
     {
-        try { var loaded = JsonFile.Read<LauncherConfig>(configFile); loaded.Validate(); return loaded; }
+        // A changed ComfyUI version or an invalid editable argument must not erase the
+        // selected environment. Surface it in settings/startup while preserving the configuration.
+        try { var loaded = JsonFile.Read<LauncherConfig>(configFile); loaded.Validate(validateArguments: false); return loaded; }
         catch (Exception ex)
         {
             try
@@ -176,9 +178,12 @@ internal sealed partial class LauncherState : IDisposable
         next.WebPort = s.WebPort;
         next.Theme = s.Theme;
         next.StartOnLaunch = s.StartOnLaunch;
+        next.ComfyArguments = ComfyLaunchArguments.Parse(s.ComfyArgumentsText);
+        if (!ComfyLaunchArguments.Equivalent(next.ComfyArguments, Config.ComfyArguments)) next.LaunchArgumentsConfigured = true;
         if (next.AppRoot.Length == 0) next.AppRoot = Program.AppRoot;
         if (next.DataDir.Length == 0) next.DataDir = Path.Combine(Program.StateDir, "data");
         next.Validate();
+        ComfyLaunchArguments.ValidateForRoot(next.ComfyArguments, next.ComfyRoot);
         Config = next;
         FreshInstallRequested = e.Fresh;
     }
@@ -187,7 +192,7 @@ internal sealed partial class LauncherState : IDisposable
     public void ApplyPendingFields()
     {
         var e = PendingEnvironmentFields ?? new EnvironmentFields(FreshInstallRequested && Config.InstallRoot.Length > 0 ? Config.InstallRoot : Config.ComfyRoot, Config.Python, Config.SourceId, Config.GitMirror, Config.ModelMirror, Config.PipIndex, Config.CustomRepository, FreshInstallRequested, Config.PythonExplicit);
-        var s = PendingSettingsFields ?? new SettingsFields(Config.ComfyPort, Config.WebPort, Config.Theme, Config.StartOnLaunch);
+        var s = PendingSettingsFields ?? SettingsFields.From(Config);
         SyncFromUi(e, s);
         PendingEnvironmentFields = null;
         PendingSettingsFields = null;
@@ -343,6 +348,7 @@ internal sealed partial class LauncherState : IDisposable
             Config.Python = Inventory.FindPython(Config.ComfyRoot, Config.Python);
         }
         var plan = await PlanInstallationAsync(FreshInstallRequested, ct);
+        reviewedEnvironmentPlan = plan;
         SetStatus("正在检查系统、安装目录和磁盘空间…");
         var preflight = await InstallationPlanner.PreflightAsync(plan, ct);
         InstallPreviewReady = preflight.CanInstall;
@@ -354,6 +360,7 @@ internal sealed partial class LauncherState : IDisposable
     }
 
     public bool InstallPreviewReady { get; private set; }
+    private InstallationPlan? reviewedEnvironmentPlan;
 
     private async Task<InstallationPlan> PlanInstallationAsync(bool fresh, CancellationToken ct)
     {
@@ -361,6 +368,7 @@ internal sealed partial class LauncherState : IDisposable
         // Counting an existing environment can touch thousands of package files.
         // Keep it off the UI thread, then resolve ComfyUI's configured model roots.
         var plan = await Task.Run(() => InstallationPlanner.Create(snapshot, Program.Runtime, Program.StateDir, fresh, Program.Models, Program.ModelProfiles), ct);
+        plan = await InstallationPlanner.ResolveStableAsync(plan, Program.Runtime, Program.StateDir, ct);
         return await InstallationPlanner.PreparePlanAsync(plan, Program.Models, Program.ModelProfiles,
             Path.Combine(Program.Assets, "probe_comfy.py"), ct);
     }
@@ -378,7 +386,8 @@ internal sealed partial class LauncherState : IDisposable
             Config.ComfyRoot = Inventory.NormalizeRoot(Config.ComfyRoot);
             Config.Python = Inventory.FindPython(Config.ComfyRoot, Config.Python);
         }
-        var plan = reviewedPlan ?? await PlanInstallationAsync(fresh, ct);
+        var plan = reviewedPlan ?? (reviewedEnvironmentPlan is { } reviewed && reviewed.Fresh == fresh
+            && reviewed.ConfigurationJson == JsonSerializer.Serialize(Config, JsonFile.Options) ? reviewed : await PlanInstallationAsync(fresh, ct));
         InstallSummaryText = plan.Describe();
         InstallSummaryChanged?.Invoke(InstallSummaryText);
         Config.InstallPending = fresh;
@@ -656,6 +665,9 @@ internal sealed partial class LauncherState : IDisposable
     private async Task TransitionVersionAsync(string target, string pin, CancellationToken ct)
     {
         if (!File.Exists(Path.Combine(target, "run.py"))) throw new IOException("目标工作台版本资源不存在。");
+        ResolvePaths();
+        // A pending Comfy argument change must fail before stopping the current workbench.
+        await ServiceManager.CheckComfyReuseAsync(Config, ct);
         var previous = Config.Clone();
         var wasRunning = await ServiceManager.PortOpen(Config.WebPort, ct);
         if (wasRunning)
@@ -776,12 +788,17 @@ internal sealed partial class LauncherState : IDisposable
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(4));
         try
         {
-            if (await ServiceManager.PortOpen(Config.ComfyPort, timeout.Token))
+            var comparison = await ServiceManager.InspectComfyReuseAsync(Config, timeout.Token);
+            if (comparison is not null)
             {
-                var stats = await ServiceManager.Json(Config.ComfyUrl + "/system_stats", timeout.Token);
-                info.Ours = stats is not null && ServiceManager.SameRoot(stats.Value, Config.ComfyRoot);
+                info.Ours = comparison.RootMatches;
                 info.Running = info.Ours;
                 info.Status = info.Ours ? info.Managed ? "ready" : "external" : "conflict";
+                if (info.Ours)
+                {
+                    info.ArgumentsMatch = comparison.Matches;
+                    if (!comparison.Matches) { info.Status = "needs_restart"; info.Detail = comparison.Detail; }
+                }
             }
             else info.Status = startingRole is "ComfyUI" or "WebUI" ? "starting" : info.Managed ? "error" : "stopped";
         }
@@ -987,7 +1004,22 @@ internal sealed partial class LauncherState : IDisposable
 }
 
 public sealed record EnvironmentFields(string ComfyRoot, string Python, string SourceId, string GitMirror, string HfMirror, string PipIndex, string CustomRepository, bool Fresh = false, bool PythonExplicit = false);
-public sealed record SettingsFields(int ComfyPort, int WebPort, string Theme, bool StartOnLaunch = false);
+public sealed record SettingsFields(int ComfyPort, int WebPort, string Theme, bool StartOnLaunch = false, string ComfyArgumentsText = "")
+{
+    public static SettingsFields From(LauncherConfig config) => new(config.ComfyPort, config.WebPort, config.Theme,
+        config.StartOnLaunch, ComfyLaunchArguments.Format(config.ComfyArguments));
+    public bool Matches(LauncherConfig config)
+    {
+        if (ComfyPort != config.ComfyPort || WebPort != config.WebPort || Theme != config.Theme || StartOnLaunch != config.StartOnLaunch) return false;
+        try
+        {
+            var args = ComfyLaunchArguments.Parse(ComfyArgumentsText);
+            ComfyLaunchArguments.Validate(args);
+            return ComfyLaunchArguments.Equivalent(args, config.ComfyArguments);
+        }
+        catch (InvalidDataException) { return false; }
+    }
+}
 
 /// <summary>Reachability/ownership snapshot for one managed service.</summary>
 public sealed class ServiceInfo
@@ -996,6 +1028,7 @@ public sealed class ServiceInfo
     public bool Running { get; set; }
     public bool Managed { get; set; }
     public bool Ours { get; set; }
+    public bool ArgumentsMatch { get; set; }
     public string Url { get; set; } = "";
     public string Status { get; set; } = "unconfigured";
     public string Detail { get; set; } = "";

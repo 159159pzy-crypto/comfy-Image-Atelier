@@ -103,7 +103,7 @@ internal static class OnboardingTests
         var loaded = JsonFile.Read<SetupRecord>(draftFile);
         Check(!loaded.Fresh && loaded.Step == SetupStep.Location && loaded.Draft.Python == python && loaded.Draft.SourceId == "mirror",
             "onboarding receipt persists import mode, location, source and interpreter");
-        Check(configured.SourceId == "official" && configured.GitMirror == "",
+        Check(configured.SourceId == "china" && configured.GitMirror == "",
             "editing and saving onboarding draft leaves active environment sources unchanged");
 
         var gate = new SetupReviewGate();

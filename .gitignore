@@ -63,9 +63,11 @@ tools/
 /docs/*.md
 !/docs/dependencies.md
 !/docs/launcher-model-onboarding-acceptance-2026-10-24.md
+!/docs/launcher-modelscope-acceptance-2026-10-24.md
 /docs/screenshots/*
 !/docs/screenshots/anima-studio-single-workbench.png
 !/docs/screenshots/anima-studio-common-parameters.png
 !/docs/screenshots/anima-studio-random-workbench.png
+!/docs/screenshots/anima-launcher-overview.png
 /AGENTS.md
 /CLAUDE.md

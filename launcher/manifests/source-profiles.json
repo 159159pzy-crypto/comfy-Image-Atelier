@@ -10,17 +10,17 @@
     },
     {
       "id": "china",
-      "name": "国内模型 / Python 镜像（Git 使用官方）",
-      "gitTemplate": "",
+      "name": "中国大陆优先（ModelScope / 国内镜像，失败自动回源）",
+      "gitTemplate": "https://gh-proxy.com/{url}",
       "huggingFaceBase": "https://hf-mirror.com",
-      "pipIndex": "https://pypi.tuna.tsinghua.edu.cn/simple"
+      "pipIndex": "https://mirrors.ustc.edu.cn/pypi/simple"
     },
     {
       "id": "github-mirror",
-      "name": "GitHub 镜像 + 国内模型 / Python 镜像",
-      "gitTemplate": "https://ghfast.top/{url}",
+      "name": "国内镜像（兼容旧设置，ModelScope 优先）",
+      "gitTemplate": "https://gh-proxy.com/{url}",
       "huggingFaceBase": "https://hf-mirror.com",
-      "pipIndex": "https://pypi.tuna.tsinghua.edu.cn/simple"
+      "pipIndex": "https://mirrors.ustc.edu.cn/pypi/simple"
     },
     {
       "id": "custom",

@@ -7,11 +7,12 @@
     <ScrollViewer HorizontalContentAlignment="Stretch" HorizontalAlignment="Stretch" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled">
         <StackPanel Spacing="16" Margin="4,4,4,16" HorizontalAlignment="Stretch">
             <StackPanel Spacing="5" Margin="8,0,8,4">
-                <TextBlock Text="QUICK SETUP" Style="{StaticResource StudioKickerStyle}" />
-                <TextBlock Text="一次准备，即刻创作。" Style="{StaticResource StudioHeadingStyle}" />
-                <TextBlock Text="全新安装会自动准备工具、环境和基础模型；已有 ComfyUI 可以直接导入。" Style="{StaticResource StudioBodyStyle}" />
+                <TextBlock Text="ENVIRONMENT" Style="{StaticResource StudioKickerStyle}" />
+                <TextBlock Text="管理你的创作环境。" Style="{StaticResource StudioHeadingStyle}" />
+                <TextBlock Text="检查 ComfyUI、插件和自定义节点的更新，修复依赖并调整下载来源。新建或导入其他环境请打开安装向导。" Style="{StaticResource StudioBodyStyle}" />
+                <Button x:Name="OpenSetupButton" Content="新建 / 导入环境向导" Click="OpenSetup_Click" Margin="0,8,0,0" />
             </StackPanel>
-            <Border Background="{ThemeResource StudioMutedBrush}" CornerRadius="18" Padding="18,14">
+            <Border x:Name="LegacySetupSteps" Visibility="Collapsed" Background="{ThemeResource StudioMutedBrush}" CornerRadius="18" Padding="18,14">
                 <Grid ColumnSpacing="8">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                     <TextBlock Text="01  选择方式" TextWrapping="Wrap" FontWeight="SemiBold" FontSize="12" Foreground="{ThemeResource StudioAccentBrush}" />
@@ -26,9 +27,61 @@
                     <TextBlock x:Name="SystemInfo" Text="正在检测系统…" Style="{StaticResource StudioBodyStyle}" MaxWidth="550" />
                 </launch:Card.ActionContent>
             </launch:Card>
+            <Border Style="{StaticResource StudioPanelStyle}">
+                <ContentControl x:Name="ComfyMaintenancePanel" HorizontalContentAlignment="Stretch" IsTabStop="False">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="ComfyUI 稳定版本与依赖" FontSize="18" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
+                    <TextBlock x:Name="CurrentEnvironmentText" Style="{StaticResource StudioBodyStyle}" FontSize="12" IsTextSelectionEnabled="True" />
+                    <TextBlock x:Name="ComfyVersionStatus" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" />
+                    <TextBlock x:Name="OptionalDependencyStatusText" Style="{StaticResource StudioBodyStyle}" FontSize="12" IsTextSelectionEnabled="True" />
+                    <Grid ColumnSpacing="8" RowSpacing="8" HorizontalAlignment="Left">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                        <Button Content="检查稳定版本" Click="CheckComfy_Click" Margin="0,0,8,8" />
+                        <Button Grid.Column="1" x:Name="UpdateComfyButton" Content="备份并更新 ComfyUI" Click="UpdateComfy_Click" />
+                        <Button Grid.Row="1" x:Name="RollbackComfyButton" Content="回退上次 ComfyUI 更新" Click="RollbackComfy_Click" />
+                        <Button Grid.Row="1" Grid.Column="1" Content="修复 Manager 与可选依赖" Click="RepairComfy_Click" />
+                    </Grid>
+                </StackPanel>
+                </ContentControl>
+            </Border>
+            <Border Style="{StaticResource StudioPanelStyle}">
+                <ContentControl x:Name="NodeMaintenancePanel" HorizontalContentAlignment="Stretch" IsTabStop="False">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="插件与自定义节点" FontSize="18" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
+                        <TextBlock Text="检查已启用 Git 节点的最新版本，固定目标后再更新。更新前备份节点、Python 和配置；有本地修改的节点会保留并说明原因。" Style="{StaticResource StudioBodyStyle}" />
+                        <TextBlock Text="Manager 依赖遵循当前 ComfyUI 的兼容版本要求，可使用上方的依赖修复操作。" Style="{StaticResource StudioBodyStyle}" FontSize="12" />
+                        <TextBlock x:Name="NodeVersionStatus" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" />
+                        <Grid ColumnSpacing="8" RowSpacing="8" HorizontalAlignment="Left">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                            <Button Content="检查节点更新" Click="CheckNodes_Click" />
+                            <Button Grid.Column="1" x:Name="UpdateNodesButton" Content="备份并更新节点" Click="UpdateNodes_Click" />
+                            <Button Grid.Row="1" x:Name="RollbackNodesButton" Content="回退上次节点更新" Click="RollbackNodes_Click" />
+                        </Grid>
+                        <ItemsControl x:Name="NodeUpdateList">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Background="{ThemeResource StudioMutedBrush}" CornerRadius="12" Padding="12" Margin="0,4,0,0">
+                                        <StackPanel Spacing="4">
+                                            <Grid ColumnSpacing="12">
+                                                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextWrapping="Wrap" Foreground="{ThemeResource StudioTextBrush}" />
+                                                <TextBlock Grid.Column="1" Text="{Binding Status}" Foreground="{ThemeResource StudioSecondaryBrush}" />
+                                            </Grid>
+                                            <TextBlock Text="{Binding Version}" Style="{StaticResource StudioBodyStyle}" FontSize="12" IsTextSelectionEnabled="True" />
+                                            <TextBlock Text="{Binding Detail}" Style="{StaticResource StudioBodyStyle}" FontSize="12" IsTextSelectionEnabled="True" />
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </ContentControl>
+            </Border>
             <ContentControl x:Name="ConfigurationPanel" HorizontalContentAlignment="Stretch" IsTabStop="False">
             <StackPanel Spacing="14">
-                <Border Style="{StaticResource StudioPanelStyle}">
+                <Border x:Name="LegacyLocationPanel" Visibility="Collapsed" Style="{StaticResource StudioPanelStyle}">
                     <StackPanel Spacing="18">
                         <TextBlock Text="01  选择新建或导入" FontSize="18" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
                         <Grid ColumnSpacing="12">
@@ -93,13 +146,14 @@
                                 <TextBox x:Name="GitMirrorBox" Header="Git HTTPS 镜像模板" PlaceholderText="HTTPS 前缀或包含 {url} 的模板" TextChanged="Input_Changed" />
                                 <TextBox x:Name="HfMirrorBox" Header="Hugging Face 镜像" TextChanged="Input_Changed" />
                                 <TextBox x:Name="PipBox" Header="Python 包索引" TextChanged="Input_Changed" />
-                                <TextBox x:Name="CustomRepoBox" Header="自定义 ComfyUI 仓库（须包含锁定提交）" TextChanged="Input_Changed" />
+                                <TextBox x:Name="CustomRepoBox" Header="自定义 ComfyUI 仓库（须包含选定的官方稳定提交）" TextChanged="Input_Changed" />
                                 <TextBlock Text="下载设置仅应用于本项目，不修改系统 Git / pip 配置。" Style="{StaticResource StudioBodyStyle}" FontSize="11" />
                             </StackPanel>
                         </Expander>
+                        <Button Content="保存下载设置" Click="SaveSources_Click" HorizontalAlignment="Left" />
                     </StackPanel>
                 </Border>
-                <Border Style="{StaticResource StudioPanelStyle}">
+                <Border x:Name="LegacyPreviewPanel" Visibility="Collapsed" Style="{StaticResource StudioPanelStyle}">
                     <StackPanel Spacing="14">
                         <TextBlock Text="03  查看安装内容与下载量" FontSize="18" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
                         <TextBlock x:Name="InstallSummary" Text="选择目录后，检查所需下载和磁盘空间。安装中断后可继续，已完成的下载和步骤会复用。" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" />
@@ -109,7 +163,7 @@
                         </StackPanel>
                     </StackPanel>
                 </Border>
-                <Border Background="{ThemeResource StudioAccentSoftBrush}" CornerRadius="22" Padding="24,20">
+                <Border x:Name="LegacyInstallPanel" Visibility="Collapsed" Background="{ThemeResource StudioAccentSoftBrush}" CornerRadius="22" Padding="24,20">
                     <StackPanel Spacing="12">
                         <TextBlock Text="04  安装" FontSize="18" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
                         <TextBlock x:Name="InstallHelp" Style="{StaticResource StudioBodyStyle}" FontSize="12" />

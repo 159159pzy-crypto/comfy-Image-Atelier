@@ -29,6 +29,11 @@ public sealed record InstallationPlan(
     string ConfigurationJson, string ComfyRoot, string RuntimeRoot, string SelectedProfile, bool Fresh,
     long EnvironmentBytes, long RuntimeBytes, long EstimatedDownloadBytes, ImmutableArray<string> Stages)
 {
+    public RuntimeManifest? ResolvedRuntime { get; init; }
+    public ComfyRelease? Release { get; init; }
+    public ComfyDependencySnapshot? Dependencies { get; init; }
+    public NodeRelease[] NodeVersions { get; init; } = [];
+    public bool NodeVersionsResolved { get; init; }
     public long EnvironmentReserveBytes { get; init; }
     public long RuntimeReserveBytes { get; init; }
     public ImmutableArray<InstallationDownload> Downloads { get; init; } = [];
@@ -38,13 +43,124 @@ public sealed record InstallationPlan(
     public long DeferredModelBytes { get; init; }
     public LauncherConfig CreateConfig() => JsonSerializer.Deserialize<LauncherConfig>(ConfigurationJson, JsonFile.Options)!;
     public string Describe() => $"{(Fresh ? "新建 NVIDIA 环境" : "补齐现有环境")} · {(SelectedProfile == "anima" ? "Anima" : "Krea 2")}\n" +
-        $"ComfyUI：{ComfyRoot}\n运行工具与缓存：{RuntimeRoot}\n" +
+        $"ComfyUI：{ComfyRoot}\n" + (Release is null ? "" : $"稳定版本：{Release.Tag} · {Release.Commit[..12]}（已固定，继续安装不会换版）\n") +
+        (NodeVersions.Length == 0 ? "" : "新装节点提交已固定：\n" + string.Join("\n", NodeVersions.Select(node => $"{node.Id} · {node.Branch} · {node.Commit[..12]}" + (node.Archived == true ? "（仓库已归档）" : ""))) + "\n") + $"运行工具与缓存：{RuntimeRoot}\n" +
         $"已知剩余下载至少 {EstimatedDownloadBytes / 1073741824d:N1} GiB（Python 包按需下载）\n" +
         $"还需环境与模型空间 {EnvironmentBytes / 1073741824d:N1} GiB；工具与缓存空间 {RuntimeBytes / 1073741824d:N1} GiB（已扣除可复用内容）。";
 }
 
 public static class InstallationPlanner
 {
+    private sealed record StableInstallSnapshot(string Root, ComfyRelease Release, RuntimeManifest Runtime, ComfyDependencySnapshot Dependencies)
+    {
+        public bool Completed { get; init; }
+        public NodeRelease[] NodeVersions { get; init; } = [];
+    }
+    private static string StablePlanPath(string root, string stateDir) => Path.Combine(stateDir, "install-plans",
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(root).ToUpperInvariant()))).ToLowerInvariant() + ".json");
+    private sealed record NodeInstallSnapshot(string Root, RuntimeManifest Runtime, NodeRelease[] NodeVersions, bool Completed = false);
+    private static string NodePlanPath(string root, string stateDir) => Path.ChangeExtension(StablePlanPath(root, stateDir), ".nodes.json");
+    public static void MarkStableInstallComplete(LauncherConfig config, string stateDir)
+    {
+        var path = StablePlanPath(config.ComfyRoot, stateDir);
+        if (File.Exists(path)) JsonFile.Write(path, JsonFile.Read<StableInstallSnapshot>(path) with { Completed = true });
+        var nodes = NodePlanPath(config.ComfyRoot, stateDir);
+        if (File.Exists(nodes)) JsonFile.Write(nodes, JsonFile.Read<NodeInstallSnapshot>(nodes) with { Completed = true });
+    }
+
+    public static async Task<InstallationPlan> ResolveStableAsync(InstallationPlan plan, RuntimeManifest runtime, string stateDir,
+        CancellationToken ct, ComfyReleases? releases = null, NodeReleases? nodeReleases = null)
+    {
+        if (!plan.Fresh) return await ResolveMissingNodesAsync(plan, runtime, stateDir, ct, nodeReleases);
+        if (plan.ResolvedRuntime is not null) return plan;
+        var path = StablePlanPath(plan.ComfyRoot, stateDir);
+        StableInstallSnapshot snapshot;
+        var saved = File.Exists(path) ? JsonFile.Read<StableInstallSnapshot>(path) : null;
+        if (saved is not null && (!saved.Completed || File.Exists(Path.Combine(plan.ComfyRoot, ".anima-revision.json"))))
+        {
+            snapshot = saved;
+            if (!Path.GetFullPath(snapshot.Root).Equals(Path.GetFullPath(plan.ComfyRoot), StringComparison.OrdinalIgnoreCase)
+                || snapshot.Runtime.Comfy.Commit != snapshot.Release.Commit || snapshot.Dependencies.ComfyCommit != snapshot.Release.Commit)
+                throw new InvalidDataException("已保存的稳定版本安装计划身份不匹配。");
+            Safety.ValidateRuntime(snapshot.Runtime);
+            if (snapshot.NodeVersions.Any(node => !snapshot.Runtime.Nodes.Any(repository => repository.Id == node.Id
+                && repository.Url == node.Url && repository.Commit == node.Commit)))
+                throw new InvalidDataException("已保存的节点版本与安装清单不一致。");
+        }
+        else
+        {
+            var config = plan.CreateConfig();
+            var git = Commands.Find("git.exe");
+            releases ??= new ComfyReleases(resolveTag: git is null ? null : (tag, token) => ComfyReleases.ResolveTagWithGit(git, tag, stateDir, config, token), config: config);
+            var marker = Path.Combine(plan.ComfyRoot, ".anima-revision.json");
+            var release = File.Exists(marker)
+                ? new ComfyRelease("继续已安装提交", JsonFile.Read<Repository>(marker).Commit, null, "https://github.com/Comfy-Org/ComfyUI")
+                : await releases.LatestAsync(ct);
+            var dependencies = await releases.DependenciesAsync(release, runtime, ct);
+            runtime = PreserveExistingNodeVersions(plan.ComfyRoot, runtime);
+            var missingNodes = Installer.PlanNodes(plan.ComfyRoot, runtime).Where(node => !Directory.Exists(node.Directory)).Select(node => node.Repository).ToArray();
+            nodeReleases ??= new NodeReleases(resolveHead: git is null ? null : (repository, token) =>
+                NodeReleases.ResolveHeadWithGit(git, repository, Directory.Exists(stateDir) ? stateDir : Environment.CurrentDirectory, token));
+            var versions = await nodeReleases.ResolveAsync(missingNodes, ct);
+            var byId = versions.ToDictionary(node => node.Id, StringComparer.Ordinal);
+            var resolved = runtime with
+            {
+                Comfy = runtime.Comfy with { Commit = release.Commit }, PythonConstraints = dependencies.Constraints,
+                Nodes = runtime.Nodes.Select(repository => byId.TryGetValue(repository.Id, out var node)
+                    ? repository with { Url = node.Url, Commit = node.Commit } : repository).ToArray()
+            };
+            Safety.ValidateRuntime(resolved);
+            snapshot = new(plan.ComfyRoot, release, resolved, dependencies) { NodeVersions = versions };
+            JsonFile.Write(path, snapshot);
+        }
+        return plan with { Release = snapshot.Release, ResolvedRuntime = snapshot.Runtime, Dependencies = snapshot.Dependencies, NodeVersions = snapshot.NodeVersions, NodeVersionsResolved = true };
+    }
+
+    private static async Task<InstallationPlan> ResolveMissingNodesAsync(InstallationPlan plan, RuntimeManifest runtime,
+        string stateDir, CancellationToken ct, NodeReleases? releases)
+    {
+        if (plan.NodeVersionsResolved && plan.ResolvedRuntime is not null) return plan;
+        var path = NodePlanPath(plan.ComfyRoot, stateDir);
+        var saved = File.Exists(path) ? JsonFile.Read<NodeInstallSnapshot>(path) : null;
+        if (saved is { Completed: false })
+        {
+            if (!Path.GetFullPath(saved.Root).Equals(Path.GetFullPath(plan.ComfyRoot), StringComparison.OrdinalIgnoreCase)
+                || saved.NodeVersions.Any(node => !saved.Runtime.Nodes.Any(repository => repository.Id == node.Id && repository.Url == node.Url && repository.Commit == node.Commit)))
+                throw new InvalidDataException("已保存的节点补装计划身份不匹配。");
+            Safety.ValidateRuntime(saved.Runtime);
+            return plan with { ResolvedRuntime = saved.Runtime, NodeVersions = saved.NodeVersions, NodeVersionsResolved = true };
+        }
+        runtime = PreserveExistingNodeVersions(plan.ComfyRoot, plan.ResolvedRuntime ?? runtime);
+        var missing = Installer.PlanNodes(plan.ComfyRoot, runtime).Where(node => !Directory.Exists(node.Directory)).Select(node => node.Repository).ToArray();
+        if (missing.Length == 0) return plan with { ResolvedRuntime = runtime, NodeVersionsResolved = true };
+        var git = Commands.Find("git.exe");
+        releases ??= new NodeReleases(resolveHead: git is null ? null : (repository, token) =>
+            NodeReleases.ResolveHeadWithGit(git, repository, Directory.Exists(stateDir) ? stateDir : Environment.CurrentDirectory, token));
+        var versions = await releases.ResolveAsync(missing, ct);
+        var byId = versions.ToDictionary(node => node.Id, StringComparer.Ordinal);
+        runtime = runtime with { Nodes = runtime.Nodes.Select(repository => byId.TryGetValue(repository.Id, out var node)
+            ? repository with { Url = node.Url, Commit = node.Commit } : repository).ToArray() };
+        Safety.ValidateRuntime(runtime);
+        JsonFile.Write(path, new NodeInstallSnapshot(plan.ComfyRoot, runtime, versions));
+        return plan with { ResolvedRuntime = runtime, NodeVersions = versions, NodeVersionsResolved = true };
+    }
+
+    /// <summary>Existing managed node versions belong to the environment; only an explicit update may replace them.</summary>
+    public static RuntimeManifest PreserveExistingNodeVersions(string root, RuntimeManifest runtime)
+    {
+        var nodes = Installer.PlanNodes(root, runtime).Select(node =>
+        {
+            var marker = Path.Combine(node.Directory, ".anima-revision.json");
+            if (!File.Exists(marker)) return node.Repository;
+            var installed = JsonFile.Read<Repository>(marker);
+            if (installed.Id != node.Repository.Id) throw new InvalidDataException("已有节点记录身份不匹配，已保留源码：" + node.Directory);
+            Safety.Commit(installed.Commit);
+            Safety.Https(installed.Url);
+            return node.Repository with { Url = installed.Url, Commit = installed.Commit };
+        }).ToArray();
+        return runtime with { Nodes = nodes };
+    }
+
     private const long GiB = 1024L * 1024 * 1024;
     private const long MiB = 1024L * 1024;
     private static readonly string[] CoreStages = ["准备隔离安装工具", "拉取锁定版本的 ComfyUI", "安装 Python 并创建独立虚拟环境", "安装锁定 CUDA / PyTorch", "安装 ComfyUI 依赖"];
@@ -75,6 +191,7 @@ public static class InstallationPlanner
         snapshot.ComfyRoot = fresh ? Path.GetFullPath(snapshot.ComfyRoot.Trim().Trim('"')) : Inventory.NormalizeRoot(snapshot.ComfyRoot);
         if (!fresh) snapshot.Python = Inventory.FindPython(snapshot.ComfyRoot, snapshot.Python);
         snapshot.RuntimeRoot = ResolveRuntimeRoot(snapshot, stateDir);
+        if (!fresh) manifest = PreserveExistingNodeVersions(snapshot.ComfyRoot, manifest);
         if (SameOrInside(snapshot.RuntimeRoot, snapshot.ComfyRoot) || SameOrInside(snapshot.ComfyRoot, snapshot.RuntimeRoot))
             throw new InvalidDataException("运行工具目录与 ComfyUI 目录不能相同或互相包含，请使用同一安装目录下的 ComfyUI 和 runtime。");
         // Legacy callers importing an environment repair nodes only. The wizard explicitly
@@ -102,7 +219,7 @@ public static class InstallationPlanner
             : new[] { "检查现有环境", "补齐缺失节点", "验证依赖", "检查所选模型" }).ToImmutableArray();
         return new(JsonSerializer.Serialize(snapshot, JsonFile.Options), snapshot.ComfyRoot, snapshot.RuntimeRoot,
             snapshot.SelectedProfile, fresh, environmentReserve + environmentDownloads, runtimeReserve + runtimeDownloads, environmentDownloads + runtimeDownloads, stages)
-        { EnvironmentReserveBytes = environmentReserve, RuntimeReserveBytes = runtimeReserve, Downloads = artifacts.ToImmutableArray(),
+        { ResolvedRuntime = fresh ? null : manifest, EnvironmentReserveBytes = environmentReserve, RuntimeReserveBytes = runtimeReserve, Downloads = artifacts.ToImmutableArray(),
             ModelIds = required.Select(model => model.Id).ToImmutableArray(), DeferredModelBytes = deferredBytes, ModelPathsDeferred = deferredBytes > 0 };
     }
 
@@ -110,7 +227,7 @@ public static class InstallationPlanner
     {
         var completed = ReadCompletedStages(config, manifest, stateDir);
         var nodePlans = Installer.PlanNodes(config.ComfyRoot, manifest);
-        var pendingNodes = nodePlans.Count(node => !node.PreserveExisting && !NodeComplete(node, manifest.Version));
+        var pendingNodes = nodePlans.Count(node => !node.PreserveExisting && !NodeComplete(node, config, manifest));
         var nodeReserve = nodePlans.Count == 0 ? 0 : 2 * GiB * pendingNodes / nodePlans.Count;
         if (!fresh) return (Math.Max(128 * MiB, nodeReserve), pendingNodes > 0 ? 512 * MiB : 128 * MiB);
 
@@ -138,9 +255,17 @@ public static class InstallationPlanner
             runtimePython + pipScratch + (toolsReady ? 0 : 256 * MiB));
     }
 
-    private static bool NodeComplete(NodeInstallPlan node, string version)
+    private static bool NodeComplete(NodeInstallPlan node, LauncherConfig config, RuntimeManifest manifest)
     {
-        try { return RepositoryMatches(node.Directory, node.Repository) && File.ReadAllText(Path.Combine(node.Directory, ".anima-dependencies-complete")).Trim() == version; }
+        try
+        {
+            if (!RepositoryMatches(node.Directory, node.Repository)) return false;
+            var file = Path.Combine(node.Directory, ".anima-dependencies-complete");
+            // Legacy releases recorded the manifest version. New receipts prove the interpreter,
+            // GPU package, source dependency files and ComfyUI commit independently.
+            return File.ReadAllText(file).Trim() == manifest.Version
+                || RuntimeDependencies.NodeReceiptMatches(file, config, node.Directory, manifest.Comfy.Commit);
+        }
         catch { return false; }
     }
     private static bool RepositoryMatches(string path, Repository repo)
@@ -150,7 +275,22 @@ public static class InstallationPlanner
     }
     private static bool ConstraintsMatch(LauncherConfig config, RuntimeManifest manifest)
     {
-        try { return File.ReadAllLines(Path.Combine(config.ComfyRoot, ".anima-constraints.txt")).SequenceEqual(manifest.PythonConstraints); }
+        try
+        {
+            var lines = File.ReadAllLines(Path.Combine(config.ComfyRoot, ".anima-constraints.txt"));
+            if (lines.SequenceEqual(manifest.PythonConstraints)) return true; // Existing fixed-manifest completion records.
+            static Dictionary<string, string> Pins(IEnumerable<string> input) => input.Select(line => line.Split("==", 2))
+                .ToDictionary(parts => parts.Length == 2 ? ComfyDependencyResolver.NormalizeName(parts[0]) : throw new InvalidDataException("无效依赖锁定"), parts => parts[1], StringComparer.OrdinalIgnoreCase);
+            static bool Matches(string expected, string actual) => expected.Contains('+') ? expected.Equals(actual, StringComparison.OrdinalIgnoreCase)
+                : expected.Equals(actual.Split('+')[0], StringComparison.OrdinalIgnoreCase);
+            var saved = Pins(lines);
+            var expected = Pins(manifest.PythonConstraints);
+            if (expected.Count == 0 || !expected.All(pin => saved.TryGetValue(pin.Key, out var value) && Matches(pin.Value, value))) return false;
+            // Stable-release resolution expands the GPU-only seed to a full lock. Credit it
+            // only after those exact distributions exist, never merely because a lock was written.
+            var installed = RuntimeDependencies.InstalledPackages(config.Python);
+            return saved.All(pin => installed.TryGetValue(pin.Key, out var value) && Matches(pin.Value, value));
+        }
         catch { return false; }
     }
     private static bool PackageMetadataPresent(string venv, string package, string version)

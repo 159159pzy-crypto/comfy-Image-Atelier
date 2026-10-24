@@ -148,7 +148,7 @@ public sealed class LauncherUpdates : IDisposable
     {
         Store = new(stateDir); CurrentExecutable = Path.GetFullPath(currentExe); CurrentVersion = currentVersion;
         this.log = log ?? (_ => { });
-        http = new HttpClient(handler ?? new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(25) };
+        http = new HttpClient(handler ?? NetworkPolicy.HttpHandler()) { Timeout = TimeSpan.FromSeconds(25) };
         http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("AnimaRandomStudio", currentVersion));
     }
     public static Version ParseVersion(string text)
@@ -252,7 +252,7 @@ public sealed class LauncherUpdates : IDisposable
         }
         throw new IOException("更新来源重定向次数过多。");
     }
-    public async Task<InstalledLauncher> DownloadAsync(LauncherRelease release, Downloads downloads, IProgress<DownloadProgress>? progress, CancellationToken ct)
+    public async Task<InstalledLauncher> DownloadAsync(LauncherRelease release, Downloads downloads, IProgress<DownloadProgress>? progress, CancellationToken ct, LauncherConfig? config = null)
     {
         ValidateRelease(release);
         if (ParseVersion(release.Version) <= ParseVersion(CurrentVersion)) throw new InvalidOperationException("此发行版不比当前启动器更新。");
@@ -260,7 +260,8 @@ public sealed class LauncherUpdates : IDisposable
         Store.ValidateInstalled(candidate, true);
         if (File.Exists(candidate.Executable) && !await Downloads.Verify(candidate.Executable, candidate.Size, candidate.Sha256, ct))
             QuarantineInvalidCandidate(candidate);
-        await downloads.Fetch("启动器 " + release.Version, release.ExeUrl, candidate.Executable, candidate.Size, candidate.Sha256, progress, ct);
+        await downloads.Fetch("启动器 " + release.Version, DownloadSources.Candidates(release.ExeUrl, config ?? new()),
+            candidate.Executable, candidate.Size, candidate.Sha256, progress, ct);
         var package = await InspectPackageAsync(candidate.Executable, ct);
         if (package.Version != release.Version || package.BuildInfo.GetProperty("sourceCommit").GetString() != release.BuildInfo.GetProperty("sourceCommit").GetString()
             || package.BuildInfo.GetProperty("payloadSha256").GetString() != release.BuildInfo.GetProperty("payloadSha256").GetString())
