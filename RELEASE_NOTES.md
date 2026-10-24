@@ -1,4 +1,4 @@
-# Anima Random Studio 1.3.0
+# Anima Random Studio 1.3.1
 
 本版优化中国大陆下载、新环境安装与环境手动维护，并统一提示词池、收藏和 AI 提示词处理。
 
@@ -12,6 +12,7 @@
 
 ## 下载与环境维护
 
+- 托管依赖 `filelock` 升级至 **4.2.1**，`setuptools` 升级至 **84.1.0**，修复本次远端安全审计发现的问题。1.3.0 发布流程被审计拦截，本版重新执行全部发布检查。
 - 默认中国大陆来源，模型优先 **ModelScope → hf-mirror → Hugging Face 官方**。逐文件保存平台、仓库、该平台的 revision、路径、大小和 SHA-256；没有核对一致副本的来源直接跳过。
 - Python、uv、Git、PyPI、PyTorch 与启动器更新包接入统一来源策略；超时、持续低速或校验失败时切源，保留断点，显示实际来源、速度和原因。官方、自定义来源与已有配置继续可用。
 - 新装 ComfyUI 解析官方最新正式 Release，排除草稿和预发布；检查阶段固定完整提交及依赖。暂停、重试和重启继续原计划，启动服务不会自动升级。
@@ -46,4 +47,4 @@
 
 `SHA256SUMS.txt` 覆盖 EXE、便携 ZIP 和安装包；`build-info.json` 记录版本及来源提交。EXE 内嵌文件清单和第三方许可，当前包未签署代码签名。
 
-[完整更新日志](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.3.0/CHANGELOG.md) · [启动器说明](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.3.0/launcher/README.md) · [依赖说明](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.3.0/docs/dependencies.md)
+[完整更新日志](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.3.1/CHANGELOG.md) · [启动器说明](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.3.1/launcher/README.md) · [依赖说明](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.3.1/docs/dependencies.md)

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "version": "1.3.0",
+  "version": "1.3.1",
   "validation": "Windows x64. Release packages include the launcher, self-contained runtime, application resources, third-party notices and SHA-256 checksums. ComfyUI and models are downloaded separately.",
   "comfy": {
     "id": "ComfyUI",
@@ -186,7 +186,7 @@
     "dill==0.4.1",
     "docutils==0.23",
     "einops==0.8.2",
-    "filelock==4.0.0",
+    "filelock==4.2.1",
     "flatbuffers==25.12.19",
     "fonttools==4.65.0",
     "frozenlist==1.8.0",
@@ -288,7 +288,7 @@
     "torch==2.11.0+cu128",
     "torchvision==0.26.0+cu128",
     "torchaudio==2.11.0+cu128",
-    "setuptools==84.0.0",
+    "setuptools==84.1.0",
     "wheel==0.48.0"
   ],
   "sam2Commit": "2b90b9f5ceec907a1c18123530e92e794ad901a4"

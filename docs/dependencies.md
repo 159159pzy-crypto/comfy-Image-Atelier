@@ -16,4 +16,6 @@
 
 包内 `THIRD-PARTY-NOTICES.txt` 与 `third-party-packages.json` 列出启动器、运行时和构建依赖的版本及许可，并说明并非所有列出的包都被再分发。模型、ComfyUI 和额外节点不在启动器 ZIP 中，使用时遵循各自许可。
 
+1.3.1 将托管 filelock 升级至 **4.2.1**、setuptools 升级至 **84.1.0**，处理发布审计中发现的锁文件与 Windows wheel 安装路径问题。参见 [filelock 4.2.1 发布说明](https://github.com/tox-dev/filelock/releases/tag/4.2.1) 和 [setuptools 安全公告](https://github.com/advisories/GHSA-xmj3-9gf7-h52w)。未增加审计例外；旧环境的已安装依赖不会因替换启动器 EXE 自动升级。
+
 1.2.0 将源码图片处理下限和托管 Pillow 升级至 **13.0.0**，包含 [Pillow 13.0.0 安全修复](https://pillow.readthedocs.io/en/stable/releasenotes/13.0.0.html)。同时将托管 Brotli、certifi、GitPython 分别升级至 **1.2.1**、**2026.10.19**、**3.2.1**，修复本次发布审计发现的问题。没有扩大审计例外；既有环境仍需按其依赖约束更新，不能仅凭更新启动器认定原环境依赖已升级。

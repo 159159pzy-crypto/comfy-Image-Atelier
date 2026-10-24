@@ -79,4 +79,3 @@ Python 回归 909 项及 500 个子用例通过；发布检查中的 JavaScript 
 | `AnimaRandomStudio-Setup-win-x64.exe` | `b0b5a5d469f0cf2933cd44b27b0d13935036ab9cb17a1954b119faf920dbe5e6` |
 
 同一打包流程的 r2 已完成独立 AppId 的实际安装/卸载验收，9 项全部通过：安装 EXE 字节一致、运行锁、待更新状态、降级阻止、同版修复、卸载后用户数据保留。日志为 `installer-r2-acceptance.log`。r6 另外完成包校验和实际启动；安装器流程此后未修改。
-
