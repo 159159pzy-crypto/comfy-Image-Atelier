@@ -96,6 +96,71 @@ test('retarget preserves presentation and velocity, cancels only the superseded 
   assert.deepEqual(completions, ['new']); assert.equal(b.current.x, -40);
 });
 
+test('pixel precision keeps an omitted opacity field precise at start and during frames', () => {
+  const h = harness(), owner = {};
+  const animation = h.motion.spring(owner, 'flight', { width: 240, opacity: 0 }, {
+    initial: { width: 240.25, opacity: .2 }, precision: { width: .5 },
+  });
+  assert.equal(animation.active, true, 'geometry within half a pixel must not finish a visible fade');
+  h.step(16);
+  assert.equal(animation.active, true, 'frame settling must use the opacity default instead of pixel precision');
+  assert.ok(animation.current.opacity > .001 && animation.current.opacity < .2);
+  h.drain();
+  assert.equal(animation.current.width, 240); assert.equal(animation.current.opacity, 0);
+  assert.equal(h.frames.size, 0);
+
+  const settled = h.motion.spring({}, 'flight', { width: 240, opacity: 0 }, {
+    initial: { width: 240.25, opacity: .0005 }, precision: { width: .5 },
+  });
+  assert.equal(settled.active, false, 'initial values already within each field tolerance finish immediately');
+  assert.equal(settled.current.width, 240); assert.equal(settled.current.opacity, 0);
+  assert.equal(h.frames.size, 0);
+});
+
+test('scalar and field precision settle pixel motion alike while the default remains precise', () => {
+  const h = harness();
+  const options = { initial: { width: 920 }, response: .24, damping: .92 };
+  const scalar = h.motion.spring({}, 'flight', { width: 240 }, { ...options, precision: .5 });
+  const field = h.motion.spring({}, 'flight', { width: 240 }, { ...options, precision: { width: .5 } });
+  const precise = h.motion.spring({}, 'flight', { width: 240 }, options);
+  for (let elapsed = 0; elapsed < 320; elapsed += 16) {
+    h.step(16);
+    assert.equal(scalar.current.width, field.current.width);
+    assert.equal(scalar.velocity.width, field.velocity.width);
+    assert.equal(scalar.active, field.active);
+  }
+  assert.equal(field.active, false, 'subpixel geometry should release its animation without a long tail');
+  assert.equal(precise.active, true, 'unconfigured springs retain their existing tolerance');
+  h.drain(); assert.equal(precise.current.width, 240);
+
+  const settled = h.motion.spring({}, 'move', { x: 0, y: 0 }, {
+    initial: { x: .25, y: -.4 }, velocity: { x: 4, y: -4 }, precision: .5,
+  });
+  assert.equal(settled.active, false, 'scalar precision applies to all initial values and velocities');
+  assert.equal(h.frames.size, 0);
+});
+
+test('changing field precision on retarget preserves every live value and velocity', async () => {
+  const h = harness(), owner = {}, completions = [];
+  const first = h.motion.spring(owner, 'flight', { width: 920, opacity: 1 }, {
+    initial: { width: 240, opacity: 0 }, precision: { width: .5 }, onComplete: () => completions.push('old'),
+  });
+  h.step(80);
+  const before = h.motion.snapshot(owner, 'flight');
+  const next = h.motion.spring(owner, 'flight', { width: 240, opacity: 0 }, {
+    initial: { width: 1000, opacity: 1 }, precision: { width: .25, opacity: .0005 }, onComplete: () => completions.push('new'),
+  });
+  for (const key of ['width', 'opacity']) {
+    assert.equal(next.current[key], before.value[key]); assert.equal(next.velocity[key], before.velocity[key]);
+  }
+  assert.equal((await first.finished).cancelled, true);
+  first.finish(); first.cancel(); assert.equal(next.active, true);
+  h.drain();
+  assert.equal((await next.finished).cancelled, false);
+  assert.deepEqual(completions, ['new']);
+  assert.equal(next.current.width, 240); assert.equal(next.current.opacity, 0);
+});
+
 test('analytic springs have matching positions at 60 and 120 Hz including gesture damping', () => {
   for (const damping of [1, .85, 1.2]) {
     const sample = hz => {

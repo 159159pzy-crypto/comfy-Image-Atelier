@@ -12,6 +12,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from PIL import Image, PngImagePlugin
 
 from anima_webui.comfy import ComfyError
+from anima_webui.prompt_assistant import pool_output_template
 from anima_webui.prompt_processing import OUTPUT_NODE
 from anima_webui.workflow import WorkflowError
 from anima_webui.server import HISTORY_KEY, MANAGER_KEY, create_app
@@ -147,13 +148,16 @@ class ReverseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved["result"]["source"], "ai")
         self.assertEqual(saved["result"]["parameters"], {})
         self.assertEqual(saved["result"]["negative"], "")
+        self.assertEqual(saved["result"]["text"], "expanded final prompt")
+        self.assertEqual(saved["result"]["pool_item"]["title"], "林间少女")
+        self.assertEqual(saved["result"]["candidates"][0]["pool_item"], saved["result"]["pool_item"])
         self.assertEqual(len(self.comfy.submissions), 1)
         self.assertEqual(len(self.comfy.uploads), 1)
         graph = self.comfy.submissions[0]["prompt"]
         self.assertEqual({node["class_type"] for node in graph.values()}, {"LoadImage", "ImageCaptionNode", "PreviewAny"})
         inputs = graph["studio_prompt_reverse"]["inputs"]
         self.assertEqual(inputs["vlm_service"], "My provider/vision/model")
-        self.assertEqual(inputs["custom_rule_content"], "Describe the picture.")
+        self.assertEqual(inputs["custom_rule_content"], pool_output_template("Describe the picture.", "anima"))
         self.assertTrue(inputs["custom_rule"])
         self.assertEqual(inputs["user_prompt"], "")
         self.assertEqual((await self.app[HISTORY_KEY].list_images())["total"], 0)
@@ -171,7 +175,29 @@ class ReverseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.manager.state["id"], first["id"])
         self.comfy.block.set()
         await self.manager.wait()
-        self.assertEqual(self.comfy.submissions[1]["prompt"]["studio_prompt_reverse"]["inputs"]["custom_rule_content"], "Describe the picture.")
+        self.assertEqual(self.comfy.submissions[1]["prompt"]["studio_prompt_reverse"]["inputs"]["custom_rule_content"], pool_output_template("Describe the picture.", "krea2"))
+
+    async def test_old_visual_job_remains_plain_text_and_new_bad_json_fails_once(self):
+        asset = await self.upload()
+        snapshot = await self.manager.prompt_assistant.prepare(self.request(asset["id"]))
+        snapshot.pop("pool_output_version")
+        snapshot["template_content"] = "Describe the picture."
+        job = await self.manager.prompt_jobs.create(snapshot, "old-vision-job")
+        await self.manager._begin_prompt_preview(job)
+        await self.manager.wait()
+        saved = await self.manager.prompt_jobs.get(job["id"])
+        self.assertEqual(saved["status"], "completed", saved["error"])
+        self.assertEqual(saved["result"]["text"], "expanded final prompt")
+        self.assertNotIn("pool_item", saved["result"])
+        entry = {"outputs": {OUTPUT_NODE: {"text": ["plain output without the required format"]}},
+                 "status": {"status_str": "success", "completed": True}}
+        with patch.object(self.comfy, "wait_for_history", return_value=entry):
+            new_job = await self.create(asset)
+            await self.manager.wait()
+        failed = await self.manager.prompt_jobs.get(new_job["id"])
+        self.assertEqual(failed["status"], "error")
+        self.assertIn("随机池格式无效", failed["error"])
+        self.assertEqual(len(self.comfy.submissions), 2)
 
     async def test_missing_configuration_preserves_image_and_builtin_template_works(self):
         asset = await self.upload()

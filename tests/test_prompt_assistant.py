@@ -11,6 +11,7 @@ from unittest.mock import patch
 from aiohttp.test_utils import TestClient, TestServer
 
 from anima_webui.comfy import ComfyError
+from anima_webui.prompt_assistant import pool_output_template
 from anima_webui.prompt_processing import OUTPUT_NODE
 from anima_webui.runner import PROMPT_JOB_TIMEOUT
 from anima_webui.server import HISTORY_KEY, MANAGER_KEY, create_app
@@ -35,6 +36,16 @@ class AssistantComfy(SingleComfy):
             "expand_custom": {"name": "My template", "content": "Only the user's system instructions.",
                               "category": "Personal", "role": "system"},
         }
+
+    async def wait_for_history(self, prompt_id, should_abort=None, missing_timeout=30):
+        result = await super().wait_for_history(prompt_id, should_abort, missing_timeout)
+        graph = self.submissions[int(prompt_id) - 1]["prompt"]
+        if any("Application output contract" in node.get("inputs", {}).get("custom_rule_content", "")
+               for node in graph.values()):
+            result["outputs"][OUTPUT_NODE]["text"] = [json.dumps({
+                "title": "林间少女", "subtitle": "午后的柔和光线", "prompt": "expanded final prompt",
+            }, ensure_ascii=False)]
+        return result
 
     async def _json(self, method, path, **kwargs):
         self.calls.append((method, path))
@@ -104,18 +115,20 @@ class PromptAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("GET", "/renamed-prompt-assistant/api/services"), self.comfy.calls)
         self.assertEqual(self.comfy.submissions, [])
 
-    async def test_rewrite_is_independent_pure_text_with_frozen_user_template(self):
+    async def test_rewrite_contract_keeps_ui_text_and_frozen_user_content(self):
         job = await self.create()
         await self.manager.wait()
         saved = await self.manager.prompt_jobs.get(job["id"])
         self.assertEqual(saved["kind"], "rewrite")
         self.assertEqual(saved["status"], "completed")
-        self.assertEqual(saved["result"], {"text": "expanded final prompt"})
+        self.assertEqual(saved["result"], {"text": "expanded final prompt", "pool_item": {
+            "title": "林间少女", "subtitle": "午后的柔和光线", "prompt": "expanded final prompt"}})
+        self.assertEqual(saved["settings"]["pool_output_version"], 1)
         graph = self.comfy.submissions[0]["prompt"]
         self.assertEqual({node["class_type"] for node in graph.values()}, {"PromptExpand", "PreviewAny"})
         node = graph["studio_prompt_rewrite"]["inputs"]
         self.assertEqual(node["source_text"], self.request()["source_text"])
-        self.assertEqual(node["custom_rule_content"], self.templates_content())
+        self.assertEqual(node["custom_rule_content"], pool_output_template(self.templates_content(), "krea2"))
         self.assertTrue(node["custom_rule"])
         self.assertTrue(node["template_only"])
         self.assertEqual(node["user_prompt"], "")
@@ -133,7 +146,7 @@ class PromptAssistantTests(unittest.IsolatedAsyncioTestCase):
         first = await self.create()
         await self.submitted()
         second = await self.create(model_profile="anima", source_text="Independent second source")
-        before = self.templates_content()
+        before = pool_output_template(self.templates_content(), "anima")
         current = await (await self.client.get("/api/batches/current")).json()
         self.assertTrue(self.manager.active())
         self.assertEqual(current["queue"][0]["queue_id"], second["id"])
@@ -259,7 +272,7 @@ class PromptAssistantTests(unittest.IsolatedAsyncioTestCase):
         ])
         saved = await self.manager.prompt_jobs.get(job["id"])
         self.assertEqual(saved["status"], "completed", saved["error"])
-        self.assertEqual(saved["result"], {"text": "expanded final prompt"})
+        self.assertEqual(saved["result"]["text"], "expanded final prompt")
         self.assertEqual(self.comfy.cancelled, [])
 
     async def test_prompt_cancel_without_targeted_support_never_globally_interrupts(self):
@@ -332,6 +345,29 @@ class PromptAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("非空文本", saved["error"])
         self.assertFalse(saved["result"])
         self.assertEqual((await self.app[HISTORY_KEY].list_images())["total"], 0)
+
+    async def test_invalid_structured_output_fails_without_a_second_model_request(self):
+        entry = {"outputs": {OUTPUT_NODE: {"text": ['{"title":"missing prompt"}']}},
+                 "status": {"status_str": "success", "completed": True}}
+        with patch.object(self.comfy, "wait_for_history", return_value=entry):
+            job = await self.create()
+            await self.manager.wait()
+        saved = await self.manager.prompt_jobs.get(job["id"])
+        self.assertEqual(saved["status"], "error")
+        self.assertIn("随机池格式无效", saved["error"])
+        self.assertFalse(saved["result"])
+        self.assertEqual(len(self.comfy.submissions), 1)
+
+    async def test_old_frozen_rewrite_keeps_plain_text_contract(self):
+        snapshot = await self.manager.prompt_assistant.prepare(self.request())
+        snapshot.pop("pool_output_version")
+        snapshot["template_content"] = self.templates_content()
+        job = await self.manager.prompt_jobs.create(snapshot, "legacy-text-job")
+        await self.manager._begin_prompt_preview(job)
+        await self.manager.wait()
+        saved = await self.manager.prompt_jobs.get(job["id"])
+        self.assertEqual(saved["status"], "completed", saved["error"])
+        self.assertEqual(saved["result"], {"text": "expanded final prompt"})
 
     async def test_frozen_legacy_ai_result_survives_replay_without_processing(self):
         settings = validate_settings({"workbench": "single", "count": 1, "single": {

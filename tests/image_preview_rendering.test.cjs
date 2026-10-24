@@ -287,6 +287,35 @@ test('entry and exit release temporary scaled animations while retaining an orig
   assert.equal(h.image.getAttribute('src'), null);
 });
 
+for (const [mode, scale, original, deadline] of [
+  ['fit', null, false, 336], ['4 times fit', 4, false, 480], ['400 percent original', 4, true, 544],
+]) {
+  test(`return from ${mode} releases the modal without an invisible spring tail`, async () => {
+    const h = setup({ motion: true });
+    Object.assign(h.ui.detailImage, { isConnected: true,
+      getBoundingClientRect: () => ({ left: 100, top: 100, right: 340, bottom: 280, width: 240, height: 180 }) });
+    h.ui.detailDialog.getBoundingClientRect = () => ({ left: 40, top: 50, right: 900, bottom: 750, width: 860, height: 700 });
+    h.state.context = { kind: 'random', sourceElement: h.ui.detailImage, sourceContainer: h.ui.detailDialog };
+    h.ctx.document.documentElement.classList.add('image-preview-open');
+    if (scale) { h.ctx.setImagePreviewZoom(original ? scale / h.state.fit : scale); h.settle(); }
+    const target = h.ctx.numericPreviewFrame(h.ctx.imagePreviewSourceFrame());
+    h.ctx.closeImagePreview();
+    let elapsed = 0;
+    while (h.state.phase !== 'closed' && elapsed < deadline) {
+      h.frame(16); elapsed += 16; await flush();
+    }
+    assert.equal(h.state.phase, 'closed', `return must finish by ${deadline} ms`);
+    assert.equal(h.ui.imagePreviewDialog.open, false);
+    assert.equal(h.ctx.document.documentElement.classList.contains('image-preview-open'), false);
+    assert.equal(h.ui.detailImage.getAttribute('aria-expanded'), 'false');
+    const final = h.ctx.numericPreviewFrame(h.ctx.liveImagePreviewFrame());
+    for (const key of Object.keys(target)) near(final[key], target[key], `final ${key}`);
+    assert.equal(h.image.getAttribute('src'), null);
+    assert.equal(h.frames.size, 0);
+    assert.equal(h.ui.imagePreviewVeil.getAnimations().length, 0);
+  });
+}
+
 test('a decode completing after close cannot reveal the hidden original or restart entry', async () => {
   const h = setup();
   let resolve;

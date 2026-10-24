@@ -84,7 +84,8 @@
       for (const key of Object.keys(state.target)) {
         const [value, velocity] = advance(state.value[key], state.velocity[key], state.target[key], dt, state.frequency, state.damping);
         state.value[key] = value; state.velocity[key] = velocity;
-        if (Math.abs(value - state.target[key]) > state.precision || Math.abs(velocity) > state.precision * 10) atRest = false;
+        const precision = state.precision[key];
+        if (Math.abs(value - state.target[key]) > precision || Math.abs(velocity) > precision * 10) atRest = false;
       }
       if (atRest) finishState(state);
       else {
@@ -118,7 +119,12 @@
     const gesture = options.preset === "gesture";
     state.frequency = Math.PI * 2 / Math.max(.01, options.response ?? (gesture ? .32 : .3));
     state.damping = Math.max(.01, options.damping ?? (gesture ? .85 : 1));
-    state.precision = Math.max(.000001, options.precision ?? .001);
+    // Pixel geometry and unitless opacity can share a spring without sharing
+    // a visible settling threshold. A scalar keeps the existing API behavior.
+    state.precision = Object.fromEntries(entries.map(([key]) => {
+      const precision = typeof options.precision === "number" ? options.precision : options.precision?.[key];
+      return [key, Math.max(.000001, precision ?? .001)];
+    }));
     state.update = options.onUpdate;
     state.complete = options.onComplete;
     state.time = now(); state.running = true;
@@ -134,7 +140,7 @@
       finish() { if (state.version === version) finishState(state); return copy(state.value); },
     };
     active.add(state);
-    const atTarget = entries.every(([key, value]) => Math.abs(state.value[key] - value) <= state.precision && Math.abs(state.velocity[key]) <= state.precision * 10);
+    const atTarget = entries.every(([key, value]) => Math.abs(state.value[key] - value) <= state.precision[key] && Math.abs(state.velocity[key]) <= state.precision[key] * 10);
     if (immediate(options) || atTarget) finishState(state);
     else {
       state.update?.(copy(state.value), copy(state.velocity));

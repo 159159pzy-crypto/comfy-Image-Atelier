@@ -3,9 +3,9 @@ const PROMPT_REVERSE_KEY = "anima-studio:prompt-reverse:v2";
 const PROMPT_REVERSE_LEGACY_KEY = "anima-studio:prompt-reverse:v1";
 const PROMPT_REVERSE_METHODS = ["metadata", "vision", "tagger"];
 const PROMPT_REVERSE_LABELS = { metadata: "元数据提取", vision: "视觉 AI", tagger: "本地标签" };
-const PROMPT_REVERSE_VIEW_KEYS = ["result", "negative", "parameters", "recognition", "candidates", "candidate", "source", "format", "warnings", "resultFor", "status", "viewRevision"];
+const PROMPT_REVERSE_VIEW_KEYS = ["result", "negative", "parameters", "recognition", "candidates", "candidate", "source", "format", "warnings", "resultFor", "status", "viewRevision", "poolItem"];
 function promptReverseEmptyView() {
-  return { result: "", negative: "", parameters: {}, recognition: {}, candidates: [], candidate: "", source: "", format: "", warnings: [], resultFor: "", status: "", viewRevision: 0 };
+  return { result: "", negative: "", parameters: {}, recognition: {}, candidates: [], candidate: "", source: "", format: "", warnings: [], resultFor: "", status: "", viewRevision: 0, poolItem: null };
 }
 const promptReverseState = { ready: false, mode: "rewrite", options: null, optionsRequest: 0, drafts: {}, runtime: {}, epoch: 0 };
 function promptReverseDraft(profile = currentProfile()) {
@@ -246,6 +246,10 @@ async function promptReverseLoadOptions() {
 }
 function promptReverseEdit(key, value) {
   const draft = promptReverseDraft(); draft[key] = value; draft.viewRevision++; draft.status = "";
+  if (key !== "negative") {
+    draft.poolItem = null;
+    draft.candidates = draft.candidates.map(({ pool_item, ...candidate }) => candidate);
+  }
   if (key === "service") draft.model = "";
   if (key === "result" || key === "negative") {
     draft.resultFor = promptReverseFingerprint(draft, draft.source || draft.method);
@@ -261,6 +265,8 @@ function promptReverseEditTagger(key, value) {
 }
 function promptReverseEditSeed(value, mode = false) {
   const draft = promptReverseDraft();
+  draft.poolItem = null;
+  draft.candidates = draft.candidates.map(({ pool_item, ...candidate }) => candidate);
   if (mode) draft.seed = value === "random" ? "random" : draft.fixedSeed;
   else { draft.fixedSeed = value; draft.seed = value; }
   draft.viewRevision++; draft.status = ""; promptReversePersist(); promptReverseRender();
@@ -269,6 +275,7 @@ function promptReverseSelectCandidate(id) {
   const draft = promptReverseDraft(), candidate = draft.candidates.find(item => item.id === id);
   draft.viewRevision++; draft.candidate = candidate?.id || "";
   draft.result = candidate?.text || ""; draft.negative = candidate?.negative || ""; draft.parameters = candidate?.parameters || {};
+  draft.poolItem = draft.source === "ai" ? promptPoolReadMetadata(candidate?.pool_item, draft.result) : null;
   draft.resultFor = promptReverseFingerprint(draft, draft.source || draft.method);
   draft.status = candidate ? "已选择这组提示词。检查后可手动导入。" : "请选择一组提示词后再导入。";
   promptReversePersist(); promptReverseRender();
@@ -280,6 +287,7 @@ function promptReverseApplyResult(draft, result) {
   const chosen = draft.candidates.length === 1 ? draft.candidates[0] : draft.candidates.length > 1 ? null : result;
   draft.candidate = chosen?.id || "";
   draft.result = chosen?.text || ""; draft.negative = chosen?.negative || ""; draft.parameters = chosen?.parameters || {};
+  draft.poolItem = draft.source === "ai" ? promptPoolReadMetadata(chosen?.pool_item || result.pool_item, draft.result) : null;
   draft.recognition = result.recognition && typeof result.recognition === "object" ? result.recognition : {};
   draft.resultFor = promptReverseFingerprint(draft, draft.source);
   draft.status = draft.candidates.length > 1 ? "发现多组提示词，请明确选择一组后导入。" : draft.result ? `${draft.source === "ai" ? "视觉 AI 反推" : draft.source === "tagger" ? "本地标签识别" : "元数据提取"}完成。检查结果后可手动导入。` : result.outcome === "no_metadata" || draft.source === "none" ? "图片没有可用提示词。选择「视觉 AI」或「本地标签」，再点击「开始识别」。" : "未返回可用提示词，请重新识别。";
@@ -421,6 +429,7 @@ function promptReverseAdopt(mode, negative = false) {
   }
   if (before === after) return;
   target.value = after; target.dispatchEvent(new Event("input", { bubbles: true }));
+  if (!negative) promptPoolSetBodyMetadata(mode !== "append" || !before.trim() ? draft.poolItem : null, after);
   draft[negative ? "negativeUndo" : "undo"] = { before, after };
   draft.status = negative ? "已替换负面提示词，可撤销。" : mode === "append" ? "已追加到画面描述，可撤销。" : "已替换画面描述，可撤销。";
   promptReversePersist(); promptReverseRender(); schedulePersist();
@@ -429,7 +438,7 @@ function promptReverseUndo(negative = false) {
   const draft = promptReverseDraft(), key = negative ? "negativeUndo" : "undo", undo = draft[key];
   if (!undo) return;
   const target = document.getElementById(negative ? "singleNegative" : "single_positive_prompt");
-  if (target.value === undo.after) { target.value = undo.before; target.dispatchEvent(new Event("input", { bubbles: true })); draft.status = "已撤销上次导入。"; }
+  if (target.value === undo.after) { target.value = undo.before; target.dispatchEvent(new Event("input", { bubbles: true })); if (!negative) promptPoolSetBodyMetadata(null, undo.before); draft.status = "已撤销上次导入。"; }
   else draft.status = "内容已继续编辑，已保留你的新内容。";
   draft[key] = null; promptReversePersist(); promptReverseRender(); schedulePersist();
 }
@@ -472,6 +481,7 @@ function promptReverseReadView(value) {
   view.candidates = Array.isArray(value.candidates) ? value.candidates.filter(item => item && typeof item.id === "string" && typeof item.text === "string") : [];
   view.warnings = Array.isArray(value.warnings) ? value.warnings.filter(item => typeof item === "string") : [];
   for (const key of ["parameters", "recognition"]) if (value[key] && typeof value[key] === "object" && !Array.isArray(value[key])) view[key] = value[key];
+  view.poolItem = view.source === "ai" ? promptPoolReadMetadata(value.poolItem, view.result) : null;
   return view;
 }
 function initializePromptReverse() {

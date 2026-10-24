@@ -41,7 +41,7 @@ def build_tagger_graph(snapshot: dict[str, Any], client_id: str, image: str) -> 
 
 
 def build_rewrite_graph(snapshot: dict[str, Any], client_id: str, seed: int) -> dict[str, Any]:
-    """Run one frozen user template; no hidden instructions or generation nodes."""
+    """Run the frozen content template and application output contract."""
     return {
         "client_id": client_id,
         "prompt": {

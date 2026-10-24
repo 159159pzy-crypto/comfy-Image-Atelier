@@ -14,7 +14,7 @@
       document.documentElement.dataset.theme = theme;
     })();
   </script>
-  <link rel="stylesheet" href="/static/styles.css?v=20261024-motion">
+  <link rel="stylesheet" href="/static/styles.css?v=20261024-favorite-confirm">
   <link rel="stylesheet" href="/static/single-layout.css?v=20261024-motion">
   <link rel="stylesheet" href="/static/single-details.css?v=20261024-motion">
 </head>
@@ -78,7 +78,6 @@
 
         <section id="randomPromptControls" class="control-section" data-random-only>
           <div class="section-heading"><h2>提示词池</h2><span id="poolOverview">0 项已选</span></div>
-          <div id="randomSharedFavorites"></div>
           <div id="animaPromptPoolControls">
           <div id="dimensionList" class="dimension-list"></div>
           <label class="field"><span>角色标签</span><select id="character_detail"><option value="trigger_tags">触发词 + 特征</option><option value="trigger">仅触发词</option></select></label>
@@ -150,7 +149,7 @@
               <label class="field"><span>采样器</span><select id="sampler_name"><option value="">正在读取采样器...</option></select></label>
               <label class="field"><span>调度器</span><select id="scheduler"><option value="">正在读取调度器...</option></select></label>
               <label class="field"><span>降噪幅度</span><input id="base_denoise" type="number" min="0" max="1" step="0.01" value="1"></label>
-              <label class="switch-row base-krea-toggle"><span>是否 K2 多样性增强</span><input id="krea_variance_enabled" type="checkbox"></label>
+              <label class="switch-row base-krea-toggle"><span><strong>是否 K2 多样性增强</strong></span><input id="krea_variance_enabled" type="checkbox"></label>
               <section id="randomDualSection" hidden><div class="parameter-grid compact-parameter-grid">
                 <label class="field"><span>采样器切换步数</span><input id="random_dual_switch_step" type="number" min="0" max="149" step="1" value="15"></label>
                 <label class="field"><span>潜空间放大倍数</span><input id="random_dual_scale" type="number" min="1" max="2" step="0.05" value="1"></label>
@@ -340,18 +339,22 @@
       <button id="closeKreaPool" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button>
     </header>
     <div class="pool-toolbar krea-pool-toolbar">
-      <label class="search-field"><span aria-hidden="true">⌕</span><input id="kreaPoolSearch" type="search" placeholder="搜索自然语言提示词"></label>
+      <label class="search-field"><span aria-hidden="true">⌕</span><input id="kreaPoolSearch" type="search" placeholder="搜索名称、说明或提示词"></label>
+      <select id="kreaPoolSort" aria-label="排序方式"><option value="">默认排序</option><option value="favorite-first">收藏优先 ★</option></select>
+      <button id="toggleKreaPoolSidebar" class="button ghost compact pool-sidebar-toggle" type="button" aria-controls="kreaPoolSidebar" aria-expanded="false">分类导航</button>
       <label class="compact-check"><input id="kreaPoolSelectedOnly" type="checkbox"><span>仅看已选</span></label>
+      <button id="clearKreaPoolFilters" class="button ghost compact" type="button">清除筛选</button>
     </div>
     <div class="pool-actions">
       <button id="kreaPoolSelectPage" class="button ghost" type="button">选中本页</button>
       <button id="kreaPoolSelectAll" class="button ghost" type="button">全选筛选结果</button>
       <button id="clearKreaPoolSelection" class="button ghost" type="button">清空选择</button>
+      <button id="kreaPoolFavoriteSelection" class="button ghost" type="button" disabled>收藏本次选择</button>
       <button id="kreaPoolDeleteSelection" class="button danger compact" type="button" disabled>批量删除</button>
-      <button id="kreaPoolAddItem" class="button primary compact" type="button">新增提示词</button>
       <button id="kreaPoolOpenImport" class="button ghost compact" type="button">批量导入</button>
+      <button id="kreaPoolAddItem" class="button primary compact" type="button">＋ 自定义</button>
     </div>
-    <div class="pool-browser krea-pool-browser"><section class="pool-results"><div id="kreaPromptPoolList" class="pool-grid" aria-live="polite"></div></section></div>
+    <div class="pool-browser krea-pool-browser"><nav id="kreaPoolSidebar" class="pool-sidebar" aria-label="自然语言池分类"></nav><section class="pool-results"><div id="kreaPromptPoolList" class="pool-grid" aria-live="polite"></div></section></div>
     <footer class="drawer-footer">
       <span id="kreaPoolSelectionLabel">已选择 0 项</span>
       <div class="pager"><button id="kreaPoolPrev" class="icon-button dark" type="button" title="上一页" aria-label="上一页">‹</button><span id="kreaPoolPageLabel">1 / 1</span><button id="kreaPoolNext" class="icon-button dark" type="button" title="下一页" aria-label="下一页">›</button></div>
@@ -363,7 +366,10 @@
   <dialog id="kreaPromptItemDialog" class="compact-dialog krea-prompt-item-dialog">
     <form id="kreaPromptItemForm" method="dialog">
       <div class="dialog-heading"><div><span class="kicker">KREA 2 · PROMPT</span><h2 id="kreaPromptItemTitle">新增自然语言提示词</h2></div><button id="kreaPromptItemClose" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
+      <label class="field"><span>主标题</span><input id="kreaPromptItemName" maxlength="200" required placeholder="给提示词取一个简短名称"></label>
+      <label class="field"><span>副标题 / 说明</span><input id="kreaPromptItemSubtitle" maxlength="300" placeholder="场景或内容简述"></label>
       <label class="field"><span>提示词文本</span><textarea id="kreaPromptItemText" rows="8" maxlength="20000" placeholder="输入一条自然语言提示词" required></textarea></label>
+      <fieldset class="import-group-fieldset"><legend>自定义分组（可多选）</legend><div id="kreaPromptItemGroups" class="import-target-groups"></div></fieldset>
       <div class="dialog-actions"><button id="kreaPromptItemDelete" class="button danger" type="button" hidden>删除</button><span></span><button id="kreaPromptItemCancel" class="button ghost" type="button">取消</button><button class="button primary" type="submit">保存</button></div>
     </form>
   </dialog>
@@ -371,11 +377,14 @@
   <dialog id="kreaPromptImportDialog" class="import-dialog krea-prompt-import-dialog">
     <form id="kreaPromptImportForm" method="dialog">
       <div class="dialog-heading"><div><span class="kicker">KREA 2 · BATCH IMPORT</span><h2>批量导入自然语言提示词</h2></div><button id="kreaPromptImportClose" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
+      <div class="import-tools"><label class="button primary compact file-button" for="kreaPromptPoolFile">选择 JSON / CSV</label><a class="button ghost compact" href="/api/prompt-pools/templates/json?model_profile=krea2" download>JSON 模板</a><a class="button ghost compact" href="/api/prompt-pools/templates/csv?model_profile=krea2" download>CSV 模板</a></div>
       <div class="krea-import-inputs">
-        <label class="field"><span>JSON / CSV 文件</span><input id="kreaPromptPoolFile" type="file" accept=".json,.csv,text/csv,application/json"></label>
+        <input id="kreaPromptPoolFile" class="file-input" type="file" accept=".json,.csv,text/csv,application/json">
+        <label class="field"><span>导入大项名称</span><input id="kreaPromptImportBundle" maxlength="100" placeholder="选择文件后自动使用文件名" required></label>
         <label class="field"><span>导入格式</span><select id="kreaPromptImportFormat"><option value="auto">自动识别 JSON / 文本行</option><option value="text">每行一条文本</option><option value="json">JSON</option><option value="csv">CSV</option></select></label>
       </div>
-      <label class="field krea-import-text-field"><span>提示词内容</span><textarea id="kreaPromptPoolText" rows="7" placeholder="每行一条提示词，也可粘贴 JSON 或 CSV 内容"></textarea></label>
+      <fieldset class="import-group-fieldset"><legend>加入已有分组（可多选）</legend><div id="kreaPromptImportGroups" class="import-target-groups"></div></fieldset>
+      <details id="kreaPromptImportSource" class="krea-import-source" open><summary>查看或修改导入内容</summary><label class="field krea-import-text-field"><span class="sr-only">提示词内容</span><textarea id="kreaPromptPoolText" rows="5" placeholder="每行一条提示词，也可粘贴 JSON 或 CSV 内容"></textarea></label></details>
       <div class="krea-import-options">
         <label class="field"><span>导入方式</span><select id="kreaPromptImportMode"><option value="append">追加到现有词池</option><option value="replace">替换整个词池</option></select></label>
         <button id="kreaPromptImportPreviewButton" class="button ghost compact" type="button">校验并预览</button>
@@ -384,6 +393,28 @@
       <div id="kreaPromptImportSummary" class="import-summary krea-import-summary" hidden></div>
       <div id="kreaPromptImportRows" class="import-rows krea-import-rows" aria-live="polite"></div>
       <div class="dialog-actions"><span></span><span></span><button id="kreaPromptImportCancel" class="button ghost" type="button">取消</button><button id="kreaPromptImportCommit" class="button primary" type="button" disabled>确认追加</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="kreaGroupDialog" class="compact-dialog krea-group-dialog">
+    <form id="kreaGroupForm">
+      <div class="dialog-heading"><h2 id="kreaGroupTitle">管理分组</h2><button id="kreaGroupClose" type="button" class="icon-button dark" aria-label="关闭分组设置">×</button></div>
+      <label class="field"><span>分组名称</span><input id="kreaGroupName" maxlength="100" required></label>
+      <label class="field"><span>上级分组</span><select id="kreaGroupParent"></select></label>
+      <label id="kreaGroupDeleteModeField" class="field" hidden><span>删除方式</span><select id="kreaGroupDeleteMode"><option value="keep">仅删除分组，保留词条</option><option value="exclusive">同时删除仅属于此分组的词条</option><option value="all">同时删除分组中的全部词条</option></select></label>
+      <div id="kreaGroupImportField" hidden><label class="field"><span>导入自定义分组为收藏子分组</span><select id="kreaGroupImportSource"></select></label><button id="kreaGroupImport" type="button" class="button ghost">导入子分组</button></div>
+      <p id="kreaGroupError" class="field-error" role="alert"></p>
+      <div class="dialog-actions"><button id="kreaGroupDelete" type="button" class="button danger" hidden>删除分组</button><span></span><button id="kreaGroupCancel" type="button" class="button ghost">取消</button><button id="kreaGroupSave" type="submit" class="button primary">保存</button></div>
+    </form>
+  </dialog>
+  <dialog id="kreaFavoriteSelectionDialog" class="compact-dialog">
+    <form id="kreaFavoriteSelectionForm">
+      <div class="dialog-heading"><h2>收藏本次选择</h2><button id="kreaFavoriteSelectionClose" type="button" class="icon-button dark" aria-label="关闭批量收藏">×</button></div>
+      <p id="kreaFavoriteSelectionHint" class="field-hint"></p>
+      <fieldset class="group-fieldset"><legend>收藏分组（可多选）</legend><div id="kreaFavoriteSelectionGroups" class="favorite-groups"></div></fieldset>
+      <div class="shared-favorite-create"><input id="kreaFavoriteSelectionName" maxlength="100" placeholder="新分组名称" aria-label="新收藏分组名称"><button id="kreaFavoriteSelectionCreate" type="button" class="button ghost">新建分组</button></div>
+      <p id="kreaFavoriteSelectionError" class="field-error" role="alert"></p>
+      <div class="dialog-actions"><span></span><span></span><button id="kreaFavoriteSelectionCancel" type="button" class="button ghost">取消</button><button id="kreaFavoriteSelectionSave" type="submit" class="button primary">保存收藏</button></div>
     </form>
   </dialog>
 
@@ -642,10 +673,11 @@
   <dialog id="sharedFavoriteDialog" class="compact-dialog shared-favorite-dialog">
     <form id="sharedFavoriteForm">
       <div class="dialog-heading"><h2 id="sharedFavoriteHeading">收藏提示词</h2><button type="button" class="icon-button dark" data-close-shared-favorite="sharedFavoriteDialog" aria-label="关闭收藏提示词">×</button></div>
-      <label class="field"><span>收藏分类</span><select id="sharedFavoriteSection"></select></label>
-      <label class="field"><span>收藏名称</span><input id="sharedFavoriteName" type="text" maxlength="200" required></label>
+      <label class="field"><span>目标随机池</span><select id="sharedFavoriteSection"></select></label>
+      <label class="field"><span>主标题</span><input id="sharedFavoriteName" type="text" maxlength="200" required></label>
+      <label class="field"><span>副标题 / 说明</span><input id="sharedFavoriteSubtitle" type="text" maxlength="300"></label>
       <label class="field"><span>提示词正文</span><textarea id="sharedFavoriteText" rows="6" required></textarea></label>
-      <p id="sharedFavoriteTextHint" class="field-hint" hidden>此处保留收藏正文；需要另一个版本时，可插入编辑框修改后重新收藏。</p>
+      <p id="sharedFavoriteTextHint" class="field-hint">保存后加入对应池并收藏，不自动勾选随机生成。</p>
       <fieldset class="field group-fieldset"><legend>收藏分组（可多选）</legend><div id="sharedFavoriteGroups" class="favorite-groups"></div></fieldset>
       <div class="shared-favorite-create"><input id="sharedFavoriteNewGroup" type="text" maxlength="100" aria-label="新建收藏分组名称" placeholder="新分组名称"><button id="sharedFavoriteCreateGroup" type="button" class="button ghost compact">新建分组</button></div>
       <p id="sharedFavoriteError" class="field-error" role="alert" hidden></p>
@@ -667,13 +699,14 @@
   <script src="/static/workbench-parameters.js?v=20261024-workflow-parameters" defer></script>
   <script src="/static/single-layout.js?v=20261024-motion" defer></script>
   <script src="/static/single-gallery.js?v=20261024-motion" defer></script>
-  <script src="/static/shared-favorites.js?v=20261024-motion" defer></script>
-  <script src="/static/prompt-reverse.js?v=20261024-motion" defer></script>
-  <script src="/static/prompt-assistant.js?v=20261022-reverse" defer></script>
+  <script src="/static/shared-favorites.js?v=20261024-favorite-confirm" defer></script>
+  <script src="/static/prompt-reverse.js?v=20261024-pools" defer></script>
+  <script src="/static/prompt-assistant.js?v=20261024-pools" defer></script>
   <script src="/static/single-workbench.js?v=20261024-motion" defer></script>
   <script src="/static/single-input.js?v=20261022-reverse" defer></script>
   <script src="/static/single-compatibility.js?v=20261024-single-ui" defer></script>
   <script src="/static/single-details.js?v=20261024-motion" defer></script>
-  <script src="/static/app.js?v=20261024-motion" defer></script>
+  <script src="/static/krea-pool.js?v=20261024-favorite-confirm" defer></script>
+  <script src="/static/app.js?v=20261024-pools" defer></script>
 </body>
 </html>

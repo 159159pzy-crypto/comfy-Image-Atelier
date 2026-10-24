@@ -12,7 +12,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from anima_webui.comfy import ComfyError
 from anima_webui.favorites import FavoritesExtensionStore, FavoritesService
 from anima_webui.prompt_pools import PromptPoolStore
-from anima_webui.server import CUSTOM_PROMPTS_KEY, create_app
+from anima_webui.server import CUSTOM_PROMPTS_KEY, PROMPT_POOLS_KEY, FAVORITES_KEY, create_app
 from test_server import APP_DIR, FakeComfy, _write_fake_tools
 
 
@@ -37,7 +37,7 @@ class ProfileFavoritesApiTests(unittest.IsolatedAsyncioTestCase):
         for name in ("First", "Second"):
             response = await self.client.post("/api/favorites/pose/groups", json={"name": name})
             groups.append((await response.json())["group"]["id"])
-        body = {"title": "Standing memo", "text": " Standing in rain ", "groupIds": groups[:1]}
+        body = {"title": "Standing memo", "subtitle": "Rainy pose", "text": " Standing in rain ", "groupIds": groups[:1]}
         first = await self.client.post("/api/favorites/pose/text", json=body)
         self.assertEqual(first.status, 200)
         first = await first.json()
@@ -53,6 +53,7 @@ class ProfileFavoritesApiTests(unittest.IsolatedAsyncioTestCase):
         custom = self.app[CUSTOM_PROMPTS_KEY].list("pose")
         self.assertEqual(len(custom), 1)
         self.assertEqual(custom[0]["title"], "Standing memo")
+        self.assertEqual(custom[0]["subtitle"], "Rainy pose")
         visible = await (await self.client.get(f"/api/pools/pose?collection={groups[1]}")).json()
         self.assertIn(first["item_id"], [item["id"] for item in visible["items"]])
 
@@ -112,10 +113,15 @@ class ProfileFavoritesApiTests(unittest.IsolatedAsyncioTestCase):
             group_id = (await group.json())["group"]["id"]
             response = await self.client.post(
                 path + "/text" + query,
-                json={"title": "A scene", "text": "A misty forest", "groupIds": [group_id]},
+                json={"title": "A scene", "subtitle": "Morning fog", "text": "A misty forest", "groupIds": [group_id]},
             )
             result = await response.json()
             item_id = result["item_id"]
+            source_id = result["source_item_id"]
+            self.assertNotEqual(item_id, source_id)
+            source = self.app[PROMPT_POOLS_KEY].all_items("krea2")[0]
+            self.assertEqual(source["title"], "A scene")
+            self.assertEqual(source["subtitle"], "Morning fog")
             duplicate = await self.client.post(
                 path + "/text" + query, json={"title": "Forest", "text": " a MISTY forest "}
             )
@@ -131,6 +137,9 @@ class ProfileFavoritesApiTests(unittest.IsolatedAsyncioTestCase):
         saved = await restored.get("prompt")
         self.assertEqual(saved["favorite_keys"], [item_id])
         self.assertEqual(saved["items"][0]["text"], "A misty forest")
+        self.assertEqual(saved["items"][0]["subtitle"], "Morning fog")
+        await self.app[PROMPT_POOLS_KEY].delete_item("krea2", source_id)
+        self.assertEqual((await restored.get("prompt"))["items"][0]["id"], item_id)
         self.assertEqual(saved["groups"][1]["name"], "Landscapes")
         self.assertEqual(self.comfy.favorites_data, before)
         response = await self.client.delete(path + f"/groups/{group_id}" + query)
@@ -153,6 +162,89 @@ class ProfileFavoritesApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["text"], "A scene")
         conflict = await self.client.post("/api/prompt-pools/items", json=body)
         self.assertEqual(conflict.status, 400)
+
+    async def test_krea_validates_groups_before_source_and_retries_partial_save(self):
+        path = "/api/favorites/prompt/text?model_profile=krea2"
+        body = {"title": "Sunset", "subtitle": "Evening light", "text": "A golden sunset"}
+        rejected = await self.client.post(path, json={**body, "groupIds": ["missing"]})
+        self.assertEqual(rejected.status, 400)
+        self.assertEqual(self.app[PROMPT_POOLS_KEY].all_items("krea2"), [])
+        extension = self.app[FAVORITES_KEY].expression_store
+        with patch.object(extension, "save", side_effect=OSError("temporary write failure")):
+            pending = await self.client.post(path, json=body)
+        pending_body = await pending.json()
+        self.assertEqual(pending.status, 502)
+        self.assertEqual(pending_body["code"], "favorite_save_pending")
+        self.assertTrue(pending_body["source_saved"])
+        self.assertEqual(len(self.app[PROMPT_POOLS_KEY].all_items("krea2")), 1)
+        retried = await self.client.post(path, json=body)
+        result = await retried.json()
+        self.assertEqual(retried.status, 200)
+        self.assertEqual(result["source_item_id"], pending_body["item_id"])
+        self.assertEqual(result["items"][0]["subtitle"], "Evening light")
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(len(self.app[PROMPT_POOLS_KEY].all_items("krea2")), 1)
+
+    async def test_krea_read_only_stores_never_publish_half_created_favorites(self):
+        path = "/api/favorites/prompt/text?model_profile=krea2"
+        body = {"title": "Sunset", "subtitle": "Evening", "text": "A sunset"}
+        extension = self.app[FAVORITES_KEY].expression_store
+        pool = self.app[PROMPT_POOLS_KEY]
+        extension._protect_storage("test protection")
+        response = await self.client.post(path, json=body)
+        self.assertEqual(response.status, 503)
+        self.assertEqual((await response.json())["store"], "favorite_extensions")
+        self.assertEqual(pool.all_items("krea2"), [])
+        extension.read_only_reason = None
+        pool._protect_storage("test protection")
+        response = await self.client.post(path, json=body)
+        self.assertEqual(response.status, 503)
+        self.assertEqual((await response.json())["store"], "prompt_pools")
+        self.assertEqual(extension.get("krea2", "prompt")["items"], [])
+
+    async def test_krea_bulk_favorites_are_independent_snapshots_and_atomic(self):
+        pool = self.app[PROMPT_POOLS_KEY]
+        sources = [await pool.ensure_item("krea2", f"Scene {number}", title=f"Title {number}", subtitle="Description") for number in range(2)]
+        path = "/api/favorites/prompt"
+        query = "?model_profile=krea2"
+        group = await self.client.post(path + "/groups" + query, json={"name": "Collection"})
+        group_id = (await group.json())["group"]["id"]
+        invalid = await self.client.post(path + "/selection" + query, json={"selection": {"mode": "include", "ids": [sources[0]["id"], "missing"]}, "groupIds": [group_id]})
+        self.assertEqual(invalid.status, 400)
+        self.assertEqual((await (await self.client.get(path + query)).json())["items"], [])
+        response = await self.client.post(path + "/selection" + query, json={"selection": {"mode": "all", "excluded_ids": []}, "groupIds": [group_id]})
+        result = await response.json()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(result["createdCount"], 2)
+        self.assertTrue(all(item["id"].startswith("favorite_") for item in result["items"]))
+        self.assertEqual(result["items"][0]["subtitle"], "Description")
+        repeated = await self.client.post(path + "/selection" + query, json={"selection": {"mode": "include", "ids": [sources[0]["id"]]}, "groupIds": ["default"]})
+        result = await repeated.json()
+        self.assertEqual(result["createdCount"], 0)
+        self.assertEqual(result["updatedCount"], 1)
+        await pool.delete_item("krea2", sources[0]["id"])
+        saved = await (await self.client.get(path + query)).json()
+        self.assertEqual(len(saved["items"]), 2)
+        self.assertEqual(saved["items"][0]["text"], "Scene 0")
+
+    async def test_krea_custom_group_subtree_import_uses_existing_favorite_route(self):
+        pool = self.app[PROMPT_POOLS_KEY]
+        source_group = (await pool.create_group("krea2", {"name": "Nature"}))["group"]
+        source_child = (await pool.create_group("krea2", {"name": "Forests", "parentId": source_group["id"]}))["group"]
+        source = await pool.ensure_item("krea2", "A foggy forest", title="Forest", subtitle="At dawn", group_ids=[source_child["id"]])
+        path = "/api/favorites/prompt/groups"
+        query = "?model_profile=krea2"
+        parent = (await (await self.client.post(path + query, json={"name": "Favorite scenes"})).json())["group"]
+        response = await self.client.post(f"{path}/{parent['id']}/children/import{query}", json={"customGroupId": source_group["id"]})
+        result = await response.json()
+        self.assertEqual(response.status, 201, result)
+        self.assertEqual(result["group"]["sourceCustomGroupId"], source_group["id"])
+        self.assertEqual(result["group"]["parentId"], parent["id"])
+        self.assertEqual(result["items"][0]["title"], "Forest")
+        self.assertEqual(result["items"][0]["subtitle"], "At dawn")
+        self.assertNotEqual(result["items"][0]["id"], source["id"])
+        duplicate = await self.client.post(f"{path}/{parent['id']}/children/import{query}", json={"customGroupId": source_group["id"]})
+        self.assertEqual(duplicate.status, 400)
 
     async def test_duplicate_text_preserves_renamed_favorite(self):
         for section, profile in (("pose", "anima"), ("prompt", "krea2")):
@@ -244,13 +336,40 @@ def test_concurrent_profiles_and_pool_ensure_do_not_lose_updates(tmp_path):
 
     async def run():
         await asyncio.gather(
-            *(krea.save_text("prompt", {"title": f"Name {i}", "text": f"Text {i}"}) for i in range(12)),
+            *(krea.save_text("prompt", {"title": f"Name {i}", "text": f"Text {i}"}, prompt_pools=pool) for i in range(12)),
             extension.save({"groups": [], "items": [{"id": "expression", "groupIds": ["default"]}]}),
         )
         assert len((await krea.get("prompt"))["items"]) == 12
         assert extension.value["items"][0]["id"] == "expression"
         results = await asyncio.gather(*(pool.ensure_item("krea2", "Same text") for _ in range(12)))
         assert sum(result["created"] for result in results) == 1
-        assert pool.resolve("krea2") == ["Same text"]
+        assert pool.resolve("krea2").count("Same text") == 1
+        assert len(pool.resolve("krea2")) == 13
+
+    asyncio.run(run())
+
+
+def test_krea_custom_group_import_copies_metadata_and_preserves_existing_snapshot(tmp_path):
+    extension = FavoritesExtensionStore(tmp_path / "favorites.json")
+    favorites = FavoritesService(None, None, extension, "krea2")
+    sources = [{"id": "pool-one", "title": "Forest", "subtitle": "Morning fog", "prompt": "A forest"}]
+
+    async def run():
+        parent = (await favorites.create_group("prompt", {"name": "Landscapes"}))["group"]
+        result = await favorites.import_custom_group("prompt", parent["id"], {"id": "source-one", "name": "Nature"}, sources)
+        child = result["group"]
+        item = result["items"][0]
+        assert child["parentId"] == parent["id"]
+        assert item["id"] != sources[0]["id"]
+        assert item["title"] == "Forest" and item["subtitle"] == "Morning fog"
+        assert item["groupIds"] == [child["id"]]
+        sources[0].update(title="Changed source title", subtitle="Changed source subtitle")
+        result = await favorites.import_custom_group("prompt", parent["id"], {"id": "source-two", "name": "Nature copy"}, sources)
+        assert len(result["items"]) == 1
+        assert result["items"][0]["title"] == "Forest"
+        assert result["items"][0]["subtitle"] == "Morning fog"
+        assert result["items"][0]["groupIds"] == [child["id"], result["group"]["id"]]
+        restored = FavoritesService(None, None, FavoritesExtensionStore(extension.path), "krea2")
+        assert (await restored.get("prompt"))["items"][0]["text"] == "A forest"
 
     asyncio.run(run())

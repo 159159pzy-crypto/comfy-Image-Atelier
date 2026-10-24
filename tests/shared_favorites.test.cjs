@@ -27,6 +27,29 @@ function appFunction(name) {
   if (app.slice(start - 6, start) === "async ") start -= 6;
   return app.slice(start, app.indexOf("\n}", start) + 2);
 }
+function favoriteElement() {
+  return { value: "", disabled: false, listeners: {}, children: [], dataset: {},
+    addEventListener(type, listener) { this.listeners[type] = listener; },
+    replaceChildren(...children) { this.children = children; }, append(...children) { this.children.push(...children); },
+    setAttribute() {}, toggleAttribute() {}, querySelector() { return this.tabs ||= favoriteElement(); } };
+}
+function renderedFavorite(model, section, extra) {
+  const nodes = {};
+  const fixture = context({
+    document: { getElementById: id => nodes[id] ||= favoriteElement(), createElement: favoriteElement, querySelectorAll: () => [] },
+    Option: function(label, value) { this.text = label; this.value = value; }, ...extra,
+  });
+  fixture.profile(model);
+  const item = { id: "favorite-one", name: "artist-or-character-name", title: "雨夜收藏", text: "rain at night", groupIds: ["default"] };
+  item.favorite_key = ["character", "artist"].includes(section) ? item.name : item.id;
+  fixture.ctx.favoriteItem = item;
+  fixture.ctx.promptTarget = { value: "Keep my prompt unchanged", selectionStart: 5, selectionEnd: 14,
+    setRangeText(text, start, end) { this.value = this.value.slice(0, start) + text + this.value.slice(end); },
+    closest: () => null, focus() {}, dispatchEvent() {} };
+  fixture.run(`sharedFavoritesView().section=${JSON.stringify(section)}; sharedFavoritesState.data={groups:[{id:"default",name:"Default"}],items:[favoriteItem]}; sharedFavoritesState.items=[favoriteItem]; sharedFavoritesState.targets.single=promptTarget`);
+  fixture.ctx.sharedFavoritesRender();
+  return { ...fixture, item, remove: nodes.singleFavoriteList.children[0].children[1] };
+}
 test("selected text wins over full field and whitespace-only content is rejected", () => {
   const { ctx } = context();
   assert.equal(ctx.sharedFavoriteSource({ value: "red, blue sky, green", selectionStart: 5, selectionEnd: 13 }), "blue sky");
@@ -89,11 +112,11 @@ test("group filtering includes descendants without looping on malformed cycles",
   const { ctx } = context();
   assert.deepEqual([...ctx.sharedFavoriteGroupIds({ groups: [{ id: "b", parentId: "a" }, { id: "c", parentId: "b" }, { id: "a", parentId: "c" }] }, "a")], ["a", "b", "c"]);
 });
-test("saving a favorite sends only text and groups and never selects a random candidate", async () => {
+test("saving a favorite sends title subtitle text and groups without selecting a random candidate", async () => {
   const calls = [];
   const { ctx, elements, run } = context({ request: async (url, options) => calls.push({ url, body: JSON.parse(options.body) }) });
   Object.assign(elements, {
-    sharedFavoriteText: { value: "  blue sky  " }, sharedFavoriteName: { value: "Sky" },
+    sharedFavoriteText: { value: "  blue sky  " }, sharedFavoriteName: { value: "Sky" }, sharedFavoriteSubtitle: { value: "  Clear weather  " },
     sharedFavoriteDialog: { close() {} },
   });
   ctx.document.querySelectorAll = () => [{ value: "default" }];
@@ -101,45 +124,132 @@ test("saving a favorite sends only text and groups and never selects a random ca
   await ctx.sharedFavoriteSave({ preventDefault() {} });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, "/api/favorites/background/text?model_profile=anima");
-  assert.deepEqual(calls[0].body, { title: "Sky", text: "blue sky", groupIds: ["default"] });
+  assert.deepEqual(calls[0].body, { title: "Sky", subtitle: "Clear weather", text: "blue sky", groupIds: ["default"] });
   assert.equal(run("sharedFavoritesState.editor"), null);
 });
-test("Anima join uses include/all selection contract in random live state and dormant random draft", async () => {
-  const { ctx, run } = context({
-    singleWorkbenchActive: () => false, activeSection: "pose", renderDimensions() {}, updatePoolOverview() {}, renderPoolItems() {},
-    draft: { pools: { pose: { mode: "include", ids: ["old"], excluded_ids: [] } }, modes: {} },
-  });
-  await ctx.sharedFavoriteAddToRandom({ id: "new" }, "anima", "pose");
-  assert.deepEqual(plain(ctx.draft.pools.pose), { mode: "include", ids: ["old", "new"], excluded_ids: [] });
-  assert.equal(ctx.draft.modes.pose, "pool");
-  ctx.singleWorkbenchActive = () => true; ctx.singleWorkbenchPersist = () => {};
-  ctx.singleWorkbenchState = { drafts: { random: { anima: { settings: { pools: { pose: { mode: "all", excluded_ids: ["new", "x"] } } }, profileDrafts: {} } } } };
-  await ctx.sharedFavoriteAddToRandom({ id: "new" }, "anima", "pose");
-  assert.deepEqual(plain(ctx.singleWorkbenchState.drafts.random.anima.settings.pools.pose), { mode: "all", excluded_ids: ["x"] });
-  assert.equal(ctx.singleWorkbenchState.drafts.random.anima.settings.random_pose, true);
-  assert.equal(run('sharedFavoritesState.profile'), "");
-});
-test("Krea join reuses ensured item and enables dormant random draft without altering single controls", async () => {
+test("AI metadata follows full source text but never a partial selection", () => {
   const calls = [];
-  const { ctx, profile } = context({
-    request: async (url, options) => { calls.push({ url, body: JSON.parse(options.body) }); return { id: "ensured" }; },
-    singleWorkbenchActive: () => true, singleWorkbenchPersist() {},
-    singleWorkbenchState: { drafts: { random: { krea2: { settings: { krea_prompt_pool: { enabled: false, ids: ["existing"] } }, profileDrafts: { krea2: {} } } } } },
+  const target = { id: "rewriteResult", value: "Golden sunset", selectionStart: 0, selectionEnd: 0 };
+  const { ctx, run } = context({ promptPoolMetadataForText: (...args) => { calls.push(args); return { title: "Sunset", subtitle: "Warm sky", prompt: target.value }; } });
+  ctx.target = target; run('sharedFavoritesState.saveTargets.single = target');
+  assert.equal(ctx.sharedFavoriteCapturedSource("single").metadata.title, "Sunset");
+  target.selectionEnd = 6;
+  assert.equal(ctx.sharedFavoriteCapturedSource("single").text, "Golden");
+  assert.equal(ctx.sharedFavoriteCapturedSource("single").metadata, null);
+  assert.equal(calls.length, 1);
+  target.selectionEnd = target.value.length;
+  assert.equal(ctx.sharedFavoriteCapturedSource("single").metadata.title, "Sunset");
+  assert.equal(calls[1][2], target);
+});
+
+test("Krea saving is protected by both pool and favorite storage, then releases the pool guard for Anima", () => {
+  let checks = 0;
+  const { ctx, elements, run } = context({ protectStorageControls: () => checks++ });
+  function guarded() {
+    return { attrs: {}, toggleAttribute(name, enabled) { if (enabled) this.attrs[name] = ""; else delete this.attrs[name]; },
+      setAttribute(name, value) { this.attrs[name] = value; }, removeAttribute(name) { delete this.attrs[name]; } };
+  }
+  elements.sharedFavoriteSave = guarded(); elements.sharedFavoriteCreateGroup = guarded();
+  elements.sharedFavoriteText = { value: "Scene" };
+  run('sharedFavoritesState.editor={profile:"krea2",section:"prompt",data:{groups:[]},busy:false}');
+  ctx.sharedFavoriteValidate();
+  assert.equal(elements.sharedFavoriteSave.attrs["data-storage-write"], "prompt_pools");
+  assert.ok("data-favorite-extension-write" in elements.sharedFavoriteSave.attrs);
+  run('sharedFavoritesState.editor.profile="anima"; sharedFavoritesState.editor.section="pose"');
+  ctx.sharedFavoriteValidate();
+  assert.ok(!("data-storage-write" in elements.sharedFavoriteSave.attrs));
+  assert.ok("data-favorite-custom-write" in elements.sharedFavoriteSave.attrs);
+  assert.equal(checks, 2);
+});
+
+test("single-only initialization and compact chips keep insert and unfavorite actions separate", async () => {
+  const nodes = {}, calls = [], inserted = [];
+  const { ctx, run } = context({
+    document: { getElementById(id) { assert.ok(!id.startsWith("random"), "removed random favorite nodes must never be accessed"); return nodes[id] ||= favoriteElement(); },
+      createElement: favoriteElement, querySelectorAll: () => [] },
+    window: { addEventListener() {} }, localStorage: { getItem() { return null; }, setItem() {} },
+    Option: function(label, value) { this.text = label; this.value = value; },
+    confirm: () => true,
+    request: async (url, options) => { calls.push({ url, body: JSON.parse(options.body) }); },
   });
-  profile("krea2");
-  await ctx.sharedFavoriteAddToRandom({ text: "An old snapshot", id: "favorite-id" }, "krea2", "prompt");
-  const state = ctx.singleWorkbenchState.drafts.random.krea2;
-  assert.deepEqual(plain(state.settings.krea_prompt_pool.ids), ["existing", "ensured"]);
-  assert.equal(state.settings.krea_prompt_pool.enabled, true);
-  assert.equal(state.profileDrafts.krea2.kreaPromptPoolEnabled, true);
-  assert.deepEqual(calls, [{ url: "/api/prompt-pools/items/ensure", body: { model_profile: "krea2", text: "An old snapshot" } }]);
+  ctx.inserted = inserted;
+  run('sharedFavoritesResetModel=()=>{}; sharedFavoriteInsert=(text)=>inserted.push(text)');
+  ctx.initializeSharedFavorites();
+  run('sharedFavoritesState.data={groups:[{id:"default",name:"Default"}],items:[{id:"pose1",groupIds:["default"]}]}; sharedFavoritesView().section="pose"; sharedFavoritesState.items=[{id:"pose1",favorite_key:"pose1",title:"Standing",text:"standing in rain"}]');
+  ctx.sharedFavoritesRender();
+  const chip = nodes.singleFavoriteList.children[0];
+  assert.deepEqual(chip.children.map(button => button.textContent), ["Standing", "♥"]);
+  chip.children[0].listeners.click();
+  assert.deepEqual(inserted, ["standing in rain"]);
+  await chip.children[1].listeners.click();
+  assert.deepEqual(inserted, ["standing in rain"]);
+  assert.deepEqual(calls[0].body, { id: "pose1", favorite: false });
 });
-test("a Krea ensure response after model switch cannot alter either workbench selection", async () => {
-  let resolve;
-  const { ctx, profile } = context({ request: () => new Promise(done => resolve = done), singleWorkbenchActive: () => { throw new Error("must not write draft"); } });
-  profile("krea2"); const pending = ctx.sharedFavoriteAddToRandom({ text: "snapshot" }, "krea2", "prompt");
-  profile("anima"); resolve({ id: "new" }); await pending;
-});
+
+for (const [model, section] of [
+  ...["character", "clothing", "pose", "background", "expression", "artist"].map(section => ["anima", section]),
+  ["krea2", "prompt"],
+]) {
+  test(`${model}/${section} unfavorite confirms first, prevents duplicate writes and allows retry after failure`, async () => {
+    const prompts = [], pending = [];
+    let accepted = false, remove;
+    const fixture = renderedFavorite(model, section, {
+      confirm: message => { prompts.push({ message, disabled: remove.disabled }); return accepted; },
+      request: (url, options) => new Promise((resolve, reject) => pending.push({ url, options, resolve, reject })),
+    });
+    remove = fixture.remove;
+    const unchanged = () => {
+      assert.equal(fixture.ctx.promptTarget.value, "Keep my prompt unchanged");
+      assert.equal(fixture.ctx.promptTarget.selectionStart, 5);
+      assert.equal(fixture.ctx.promptTarget.selectionEnd, 14);
+      assert.equal(fixture.persists(), 0);
+      assert.equal(fixture.run("sharedFavoritesState.items.length"), 1);
+    };
+
+    await remove.listeners.click();
+    assert.equal(prompts.length, 1);
+    assert.match(prompts[0].message, /取消收藏.*雨夜收藏/);
+    assert.equal(prompts[0].disabled, false, "confirmation must happen before disabling the chip");
+    assert.equal(remove.disabled, false);
+    assert.equal(pending.length, 0, "cancel must not make a mutation request");
+    assert.deepEqual(fixture.messages, []);
+    unchanged();
+
+    accepted = true;
+    const first = remove.listeners.click();
+    assert.equal(prompts.length, 2);
+    assert.equal(prompts[1].disabled, false);
+    assert.equal(remove.disabled, true);
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].url, `/api/favorites/${section}/item?model_profile=${model}`);
+    assert.equal(pending[0].options.method, "PUT");
+    assert.deepEqual(JSON.parse(pending[0].options.body), {
+      ...(section === "artist" ? { name: fixture.item.name } : { id: fixture.item.id }), favorite: false,
+    });
+    await remove.listeners.click();
+    assert.equal(prompts.length, 2, "a pending write must not ask again");
+    assert.equal(pending.length, 1, "a pending write must not send duplicate requests");
+    unchanged();
+
+    pending[0].reject(new Error("收藏服务暂时不可用"));
+    await first;
+    assert.deepEqual(fixture.messages, ["收藏服务暂时不可用"]);
+    assert.equal(remove.disabled, false, "failure must leave the chip available for retry");
+    unchanged();
+
+    const retry = remove.listeners.click();
+    assert.equal(prompts.length, 3);
+    assert.equal(pending.length, 2);
+    assert.equal(remove.disabled, true);
+    assert.equal(pending[1].url, pending[0].url);
+    assert.deepEqual(pending[1].options, pending[0].options);
+    pending[1].resolve({ items: [] });
+    await retry;
+    assert.equal(fixture.messages.length, 1);
+    unchanged();
+  });
+}
+
 test("request wrapper scopes legacy favorites writes and broadcasts original model/section", async () => {
   const calls = [], notices = [];
   const { ctx, profile, run } = context({
@@ -168,7 +278,7 @@ test("editor group requests reject responses from its previous category", async 
 });
 test("partial save failures leave editor and text available for idempotent retry", async () => {
   const { ctx, elements, run } = context({ request: async () => { throw new Error("提示词已保存，收藏待重试"); } });
-  elements.sharedFavoriteText = { value: "sunset" }; elements.sharedFavoriteName = { value: "Sunset" };
+  elements.sharedFavoriteText = { value: "sunset" }; elements.sharedFavoriteName = { value: "Sunset" }; elements.sharedFavoriteSubtitle = { value: "Evening" };
   ctx.document.querySelectorAll = () => [{ value: "default" }];
   run('sharedFavoritesState.editor={profile:"anima",section:"pose",data:{groups:[]},busy:false}; sharedFavoriteValidate=()=>{}');
   await ctx.sharedFavoriteSave({ preventDefault() {} });

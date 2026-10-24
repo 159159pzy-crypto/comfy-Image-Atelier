@@ -67,11 +67,13 @@ class FavoriteGenerationTests(unittest.IsolatedAsyncioTestCase):
             "/api/favorites/prompt/text?model_profile=krea2",
             {"title": "Forest", "text": text, "groupIds": ["default"]},
         )
-        empty_pool = await self.client.get("/api/prompt-pools?model_profile=krea2")
-        self.assertEqual((await empty_pool.json())["count"], 0)
+        initial_pool = await self.client.get("/api/prompt-pools?model_profile=krea2")
+        self.assertEqual((await initial_pool.json())["count"], 1)
         pool_item = await self.post(
             "/api/prompt-pools/items/ensure", {"model_profile": "krea2", "text": text},
         )
+        self.assertEqual(pool_item["id"], saved["source_item_id"])
+        self.assertFalse(pool_item["created"])
         renamed = await self.client.put(
             "/api/prompt-pools/items",
             json={"model_profile": "krea2", "id": pool_item["id"], "text": "A red bird."},

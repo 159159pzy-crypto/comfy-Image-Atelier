@@ -17,7 +17,7 @@ from .prompt_rules import PromptRuleStore
 from .prompt_pools import PromptPoolStore
 from .model_profiles import get_model_profile
 from .prompt_jobs import PromptJobStore
-from .prompt_assistant import PromptAssistant, generation_settings, request_identity, rewrite_fingerprint
+from .prompt_assistant import PromptAssistant, generation_settings, parse_pool_output, request_identity, rewrite_fingerprint
 from .prompt_tagger import PromptTagger
 from .single_workbench import active_lora_pipelines
 from .prompt_processing import (build_prompt_graph, build_reverse_graph, build_tagger_graph, build_rewrite_graph, compose_prompt, extract_prompt_result,
@@ -620,6 +620,10 @@ class BatchManager:
                 raise ComfyAborted("收到停止请求")
             if not text.strip():
                 raise WorkflowError("提示词处理结果为空")
+            pool_item = None
+            if settings.get("pool_output_version") == 1 and (rewrite or reverse and method == "vision"):
+                pool_item = parse_pool_output(text)
+                text = pool_item["prompt"]
             if reverse:
                 if len(text) > 100000:
                     raise WorkflowError("反推结果过长，请调整识别设置后重试")
@@ -634,6 +638,10 @@ class BatchManager:
                           "candidates": [{"id": source, "label": label, "text": text, "negative": "", "parameters": {}}]}
             else:
                 result = {"text": text} if rewrite else final_prompts(settings, text)
+            if pool_item is not None:
+                result["pool_item"] = pool_item
+                for candidate in result.get("candidates", []):
+                    candidate["pool_item"] = copy.deepcopy(pool_item)
             if self.state and self.state.get("kind") == "prompt_preview":
                 # Match generation's terminal transition before its final DB
                 # await; a late Stop must not overwrite the completed job.

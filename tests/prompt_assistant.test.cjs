@@ -6,6 +6,7 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../static/prompt-assistant.js'), 'utf8');
 const singleSource = fs.readFileSync(path.join(__dirname, '../static/single-workbench.js'), 'utf8');
 const plain = value => JSON.parse(JSON.stringify(value));
+const poolItem = (prompt = 'rewritten text') => ({ title: '林间少女', subtitle: '午后的柔和光线', prompt });
 function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
 function setup(saved = null) {
   const elements = {}, calls = [], timers = [], storage = new Map();
@@ -231,4 +232,50 @@ test('ordinary single settings force legacy processing off without dropping auth
   assert.equal(result.single.prompt_processing.oc.enabled, false);
   assert.equal(result.single.prompt_job_id, '');
   assert.equal(result.single.processed_prompt_override, null);
+});
+
+test('structured output stays hidden while exact live preview and complete adoption carry metadata', async () => {
+  const { ctx, configured, elements } = setup();
+  configured();
+  ctx.request = async (url, options) => options ? { id: 'structured' } : { status: 'completed', result: { text: 'rewritten text', pool_item: poolItem() } };
+  await ctx.promptAssistantStart();
+  assert.equal(elements.rewriteResult.value, 'rewritten text');
+  assert.deepEqual(plain(ctx.promptPoolMetadataForText('anima', 'rewritten text', elements.rewriteResult)), poolItem());
+  assert.equal(ctx.promptPoolMetadataForText('krea2', 'rewritten text', elements.rewriteResult), null);
+  elements.rewriteResult.selectionStart = 0; elements.rewriteResult.selectionEnd = 3;
+  assert.equal(ctx.promptPoolMetadataForText('anima', 'rewritten text', elements.rewriteResult), null);
+  elements.rewriteResult.selectionEnd = 0;
+  ctx.promptAssistantAdopt('append');
+  assert.equal(ctx.promptPoolMetadataForText('anima', elements.single_positive_prompt.value, elements.single_positive_prompt), null);
+  ctx.promptAssistantAdopt('replace');
+  assert.deepEqual(plain(ctx.promptPoolMetadataForText('anima', 'rewritten text', elements.single_positive_prompt)), poolItem());
+  elements.single_positive_prompt.value = 'manual edit'; elements.single_positive_prompt.dispatchEvent(new ctx.Event('input'));
+  elements.single_positive_prompt.value = 'rewritten text'; elements.single_positive_prompt.dispatchEvent(new ctx.Event('input'));
+  assert.equal(ctx.promptPoolMetadataForText('anima', 'rewritten text', elements.single_positive_prompt), null);
+});
+
+test('manual preview edits and changed-then-restored inputs revoke metadata permanently', async () => {
+  const { ctx, configured, elements } = setup();
+  const draft = configured();
+  ctx.request = async (url, options) => options ? { id: 'structured' } : { status: 'completed', result: { text: 'rewritten text', pool_item: poolItem() } };
+  await ctx.promptAssistantStart();
+  ctx.promptAssistantEdit('result', 'manual'); ctx.promptAssistantEdit('result', 'rewritten text');
+  assert.equal(ctx.promptPoolMetadataForText('anima', 'rewritten text', elements.rewriteResult), null);
+  await ctx.promptAssistantStart();
+  const oldSource = draft.source; ctx.promptAssistantEdit('source', 'changed'); ctx.promptAssistantEdit('source', oldSource);
+  assert.equal(ctx.promptPoolMetadataForText('anima', 'rewritten text', elements.rewriteResult), null);
+});
+
+test('metadata persists by profile and a failed model result preserves usable prior text', async () => {
+  const original = setup(); original.configured();
+  original.ctx.request = async (url, options) => options ? { id: 'structured' } : { status: 'completed', result: { text: 'rewritten text', pool_item: poolItem() } };
+  await original.ctx.promptAssistantStart(); original.ctx.promptAssistantAdopt('replace');
+  const saved = JSON.parse(original.storage.get('anima-studio:prompt-assistant:v1'));
+  const restored = setup(saved); await new Promise(setImmediate);
+  assert.deepEqual(plain(restored.ctx.promptPoolMetadataForText('anima', 'rewritten text', restored.elements.rewriteResult)), poolItem());
+  assert.equal(restored.ctx.promptPoolMetadataForText('anima', 'existing body', restored.elements.single_positive_prompt), null);
+  restored.ctx.request = async (url, options) => options ? { id: 'bad-format' } : { status: 'error', error: 'AI 返回的随机池格式无效' };
+  await restored.ctx.promptAssistantStart();
+  assert.equal(restored.elements.rewriteResult.value, 'rewritten text');
+  assert.match(restored.elements.rewriteStatus.textContent, /格式无效/);
 });

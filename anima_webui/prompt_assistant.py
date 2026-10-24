@@ -14,6 +14,42 @@ from .comfy import ComfyError
 from .model_profiles import normalize_model_profile
 from .workflow import WorkflowError
 
+POOL_OUTPUT_VERSION = 1
+
+
+def pool_output_template(template: str, profile: str) -> str:
+    language = ("comma-separated English image-generation tags for Anima" if profile == "anima"
+                else "coherent natural English image-generation prose for Krea 2")
+    return template + "\n\n" + (
+        "Application output contract (takes precedence over conflicting output-format instructions above): "
+        "Return exactly one JSON object with exactly three string fields: title, subtitle, prompt. "
+        "title is a concise Chinese name (1-200 characters); subtitle is a Chinese supplementary description "
+        "(1-300 characters), not a translation of the name. prompt is " + language + " (1-20000 characters). "
+        "Apply the selected template's content instructions to prompt. Do not put the title, subtitle, JSON, "
+        "explanations, negative prompts or generation parameters into prompt. Do not output Markdown fences, "
+        "arrays, section, groups or any additional fields. The user chooses the destination pool when saving."
+    )
+
+
+def parse_pool_output(text: str) -> dict[str, str]:
+    """Validate one AI entry before exposing only its prompt to the text UI."""
+    from .pool_entries import normalize_prompt_entry
+
+    value = text.strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*\n([\s\S]*?)\n```", value, re.IGNORECASE)
+    if fenced:
+        value = fenced.group(1).strip()
+    try:
+        entry = json.loads(value)
+        if not isinstance(entry, dict) or set(entry) != {"title", "subtitle", "prompt"}:
+            raise ValueError("expected one title/subtitle/prompt object")
+        if not all(isinstance(entry[key], str) and entry[key].strip() for key in entry):
+            raise ValueError("all fields must be nonempty strings")
+        normalized = normalize_prompt_entry(entry, require_title=True)
+    except (json.JSONDecodeError, ValueError) as error:
+        raise WorkflowError("AI 返回的随机池格式无效，需要名称、补充说明和提示词正文；请调整模板后重试") from error
+    return {key: normalized[key] for key in ("title", "subtitle", "prompt")}
+
 REVERSE_DEFAULTS = {"anima": "builtin:reverse:anima", "krea2": "builtin:reverse:krea2"}
 REVERSE_TEMPLATES = [
     {"id": REVERSE_DEFAULTS["anima"], "name": "Anima · 英文标签", "category": "内置反推",
@@ -235,7 +271,8 @@ class PromptAssistant:
             source: payload[source], "service_id": service["id"],
             "service_name": service["name"], "model_name": payload["model_name"],
             "template_id": template["id"], "template_name": template["name"],
-            "template_content": template["content"], transport_key: transport_name,
+            "template_content": pool_output_template(template["content"], profile),
+            "pool_output_version": POOL_OUTPUT_VERSION, transport_key: transport_name,
             "rule": rules[0],
         }
 

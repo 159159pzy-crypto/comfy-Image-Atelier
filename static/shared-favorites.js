@@ -1,9 +1,9 @@
-/* Model-owned favorites; both workbenches use the same records and controls. */
+/* Model-owned favorites, displayed as compact insert/remove chips in the single workbench. */
 const SHARED_FAVORITES_KEY = "anima-studio:favorites-updated";
 const SHARED_FAVORITES_VIEW_KEY = "anima-studio:favorite-views:v1";
 const sharedFavoritesState = {
   ready: false, profile: "", epoch: 0, request: 0, data: null, items: [],
-  views: {}, targets: {}, editor: null, groupEditor: null, refreshTimer: null,
+  views: {}, targets: {}, saveTargets: {}, editor: null, groupEditor: null, refreshTimer: null,
 };
 
 function sharedFavoriteUrl(section, suffix = "", profile = currentProfile()) {
@@ -23,7 +23,7 @@ function sharedFavoritesPanelMarkup(prefix) {
     <div class="single-favorite-tabs" data-favorite-tabs></div>
     <label class="field"><span>收藏分组</span><select id="${prefix}FavoriteGroup"><option value="__all__">全部收藏</option></select></label>
     <div class="single-inline-actions"><button id="${prefix}FavoriteManage" type="button" class="button ghost compact">管理分组</button><button id="${prefix}FavoriteRefresh" type="button" class="button ghost compact">刷新</button></div>
-    <p class="field-hint">点击名称插入最近编辑位置；加入随机池后可在随机工作台使用。</p>
+    <p class="field-hint">点击名称插入最近编辑位置，点击爱心确认后取消收藏。</p>
     <div id="${prefix}FavoriteList" class="single-favorite-list"></div>
     <p id="${prefix}FavoriteStatus" class="field-hint" role="status"></p></div>`;
 }
@@ -36,6 +36,15 @@ function sharedFavoriteSource(target) {
   if (!target) return "";
   const start = target.selectionStart ?? 0, end = target.selectionEnd ?? start;
   return (end > start ? target.value.slice(start, end) : target.value).trim();
+}
+function sharedFavoriteCapturedSource(workbench) {
+  const target = sharedFavoritesState.saveTargets[workbench] || sharedFavoriteTarget(workbench);
+  const text = sharedFavoriteSource(target);
+  const start = target?.selectionStart ?? 0, end = target?.selectionEnd ?? start;
+  const whole = end === start || (start === 0 && end === target.value.length);
+  const metadata = whole && typeof promptPoolMetadataForText === "function"
+    ? promptPoolMetadataForText(currentProfile(), text, target) : null;
+  return { text, metadata };
 }
 function sharedFavoriteInsert(text, workbench) {
   const target = sharedFavoriteTarget(workbench);
@@ -72,7 +81,7 @@ function sharedFavoritesCurrent(profile, section, epoch = sharedFavoritesState.e
   return currentProfile() === profile && sharedFavoritesView(profile).section === section && epoch === sharedFavoritesState.epoch;
 }
 function sharedFavoritesStatus(message) {
-  for (const prefix of ["single", "random"]) {
+  for (const prefix of ["single"]) {
     const element = document.getElementById(`${prefix}FavoriteStatus`);
     if (element) element.textContent = message;
   }
@@ -82,7 +91,8 @@ function sharedFavoritesResetModel() {
   if (!state.ready || state.profile === currentProfile()) return;
   state.profile = currentProfile();
   state.epoch++; state.request++; state.data = null; state.items = [];
-  state.targets = {}; state.editor = null; state.groupEditor = null;
+  if (typeof resetKreaPoolContext === "function") resetKreaPoolContext();
+  state.targets = {}; state.saveTargets = {}; state.editor = null; state.groupEditor = null;
   for (const id of ["sharedFavoriteDialog", "sharedFavoriteGroupDialog", "favoriteDialog", "favoriteSelectionDialog", "groupDialog", "childGroupDialog", "deleteGroupDialog", "artistDialog"]) {
     const dialog = document.getElementById(id);
     if (dialog?.open) motionDialog(dialog, false);
@@ -147,7 +157,7 @@ function sharedFavoritesRender() {
     const entry = saved.get(String(item.favorite_key));
     return group === "__all__" ? entry?.groupIds?.length : entry?.groupIds?.some(id => groupIds.has(id));
   });
-  for (const prefix of ["single", "random"]) {
+  for (const prefix of ["single"]) {
     const panel = document.getElementById(`${prefix}FavoritePanel`);
     if (!panel) continue;
     panel.querySelector("[data-favorite-tabs]").replaceChildren(...(profile === "krea2" ? ["prompt"] : [...SECTIONS, "artist"]).map(value => {
@@ -171,21 +181,18 @@ function sharedFavoritesRender() {
       const row = document.createElement("span"); row.className = "single-favorite-chip";
       const insert = sharedFavoriteButton(item.title || item.name, () => sharedFavoriteInsert(item.text, prefix));
       insert.title = item.text; insert.className = "shared-favorite-insert";
-      const edit = sharedFavoriteButton("编辑", () => sharedFavoriteOpen(prefix, { item, saved: saved.get(String(item.favorite_key)), section }));
-      edit.setAttribute("aria-label", `编辑收藏 ${item.title || item.name}`);
-      const pool = sharedFavoriteButton("加入随机池", () => void sharedFavoriteAddToRandom(item, profile, section));
-      pool.hidden = section === "artist";
       const remove = sharedFavoriteButton("♥", async () => {
+        if (remove.disabled || !confirm(`确定取消收藏“${item.title || item.name}”吗？词池中的词条会保留。`)) return;
         remove.disabled = true;
         try { await request(sharedFavoriteUrl(section, "/item", profile), { method: "PUT", body: JSON.stringify({ ...sharedFavoriteItemIdentity(item, section), favorite: false }) }); }
         catch (error) { toast(error.message); remove.disabled = false; }
       });
       remove.setAttribute("aria-label", `取消收藏 ${item.title || item.name}`);
       sharedFavoriteProtect(remove, section);
-      row.append(insert, edit, pool, remove); return row;
+      row.append(insert, remove); return row;
     }));
   }
-  sharedFavoritesStatus(data ? `${items.length} 项收藏 · ${profile === "krea2" ? "Krea 2" : "Anima"} 单图与随机工作台共享` : "暂无收藏数据。");
+  sharedFavoritesStatus(data ? `${items.length} 项收藏 · ${profile === "krea2" ? "Krea 2" : "Anima"}` : "暂无收藏数据。");
 }
 function sharedFavoriteButton(label, action) {
   const button = document.createElement("button"); button.type = "button"; button.textContent = label;
@@ -237,44 +244,49 @@ function sharedFavoriteValidate() {
   const save = document.getElementById("sharedFavoriteSave");
   save.disabled = !editor || !editor.data || editor.busy || !document.getElementById("sharedFavoriteText").value.trim();
   if (editor) {
-    sharedFavoriteProtect(save, editor.section, !editor.item);
+    sharedFavoriteProtect(save, editor.section, true);
+    if (editor.section === "prompt") save.setAttribute("data-storage-write", "prompt_pools");
+    else save.removeAttribute("data-storage-write");
     sharedFavoriteProtect(document.getElementById("sharedFavoriteCreateGroup"), editor.section);
-    document.getElementById("sharedFavoriteSection").disabled = editor.busy || Boolean(editor.item) || editor.profile === "krea2";
+    document.getElementById("sharedFavoriteSection").disabled = editor.busy || editor.profile === "krea2";
   }
+  if (typeof protectStorageControls === "function") protectStorageControls();
 }
-function sharedFavoriteOpen(workbench, { item = null, saved = null, section = null, text = null } = {}) {
+function sharedFavoriteOpen(workbench, { section = null, text = null, metadata = null } = {}) {
   const profile = currentProfile(), view = sharedFavoritesView(profile);
   section ||= profile === "krea2" ? "prompt" : view.section === "artist" ? "character" : view.section;
-  const editor = { profile, section, workbench, item, saved, request: 0, data: null, busy: false };
+  const editor = { profile, section, workbench, request: 0, data: null, busy: false };
   sharedFavoritesState.editor = editor;
-  document.getElementById("sharedFavoriteHeading").textContent = item ? "编辑收藏" : `收藏提示词 · ${profile === "krea2" ? "Krea 2" : "Anima"}`;
-  const content = text ?? (item ? item.text : sharedFavoriteSource(sharedFavoriteTarget(workbench)));
-  document.getElementById("sharedFavoriteName").value = item ? saved?.nickname || saved?.title || item.title || "" : content.slice(0, 80);
-  const textarea = document.getElementById("sharedFavoriteText"); textarea.value = content; textarea.readOnly = Boolean(item);
-  document.getElementById("sharedFavoriteTextHint").hidden = !item;
+  document.getElementById("sharedFavoriteHeading").textContent = `收藏提示词 · ${profile === "krea2" ? "Krea 2" : "Anima"}`;
+  const captured = text === null ? sharedFavoriteCapturedSource(workbench) : { text, metadata };
+  const content = captured.text;
+  document.getElementById("sharedFavoriteName").value = captured.metadata?.title || content.slice(0, 80);
+  document.getElementById("sharedFavoriteSubtitle").value = captured.metadata?.subtitle || "";
+  const textarea = document.getElementById("sharedFavoriteText"); textarea.value = content; textarea.readOnly = false;
+  document.getElementById("sharedFavoriteTextHint").hidden = false;
   const category = document.getElementById("sharedFavoriteSection");
-  category.replaceChildren(...(profile === "krea2" ? ["prompt"] : item?.text && section === "artist" ? ["artist"] : SECTIONS).map(value => new Option(value === "prompt" ? "自然语言" : SECTION_META[value]?.label || "画师", value)));
-  category.value = section; category.disabled = Boolean(item) || profile === "krea2";
+  category.replaceChildren(...(profile === "krea2" ? ["prompt"] : SECTIONS).map(value => new Option(value === "prompt" ? "自然语言" : SECTION_META[value]?.label || value, value)));
+  category.value = section; category.disabled = profile === "krea2";
   document.getElementById("sharedFavoriteNewGroup").value = "";
   sharedFavoriteEditorError(); sharedFavoriteValidate();
   motionDialog(document.getElementById("sharedFavoriteDialog"), true);
-  void sharedFavoriteEditorGroups(editor, saved?.groupIds || (view.groups[section] && view.groups[section] !== "__all__" ? [view.groups[section]] : ["default"]));
+  void sharedFavoriteEditorGroups(editor, view.groups[section] && view.groups[section] !== "__all__" ? [view.groups[section]] : ["default"]);
 }
 async function sharedFavoriteSave(event) {
   event.preventDefault();
   const editor = sharedFavoritesState.editor;
   if (!editor || editor.profile !== currentProfile() || editor.busy || !editor.data) return;
   const text = document.getElementById("sharedFavoriteText").value.trim(), title = document.getElementById("sharedFavoriteName").value.trim();
+  const subtitle = document.getElementById("sharedFavoriteSubtitle").value.trim();
   const groupIds = [...document.querySelectorAll("#sharedFavoriteGroups input:checked")].map(input => input.value);
-  if (!text || !groupIds.length) { sharedFavoriteEditorError(!text ? "提示词内容不能为空" : "请选择至少一个收藏分组"); return; }
+  if (!title || !text || !groupIds.length) { sharedFavoriteEditorError(!title ? "主标题不能为空" : !text ? "提示词内容不能为空" : "请选择至少一个收藏分组"); return; }
   editor.busy = true; sharedFavoriteValidate(); sharedFavoriteEditorError();
   try {
-    const suffix = editor.item ? "/item" : "/text";
-    const body = editor.item ? { ...sharedFavoriteItemIdentity(editor.item, editor.section), favorite: true, nickname: title, groupIds } : { title, text, groupIds };
-    await request(sharedFavoriteUrl(editor.section, suffix, editor.profile), { method: editor.item ? "PUT" : "POST", body: JSON.stringify(body) });
+    const body = { title, subtitle, text, groupIds };
+    await request(sharedFavoriteUrl(editor.section, "/text", editor.profile), { method: "POST", body: JSON.stringify(body) });
     if (sharedFavoritesState.editor !== editor || editor.profile !== currentProfile()) return;
     motionDialog(document.getElementById("sharedFavoriteDialog"), false); sharedFavoritesState.editor = null;
-    toast(editor.item ? "收藏已更新" : "提示词已收藏");
+    toast("提示词已入池并收藏");
   } catch (error) { if (sharedFavoritesState.editor === editor) sharedFavoriteEditorError(error.message); }
   finally { editor.busy = false; if (sharedFavoritesState.editor === editor) sharedFavoriteValidate(); }
 }
@@ -293,45 +305,6 @@ async function sharedFavoriteCreateGroup() {
   } catch (error) { if (sharedFavoritesState.editor === editor && editor.section === section && editor.request === token) sharedFavoriteEditorError(error.message); }
   finally { if (sharedFavoritesState.editor === editor && editor.section === section && editor.request === token) document.getElementById("sharedFavoriteCreateGroup").disabled = false; }
 }
-async function sharedFavoriteAddToRandom(item, profile, section) {
-  if (currentProfile() !== profile) return;
-  const epoch = sharedFavoritesState.epoch;
-  try {
-    let id = item.id;
-    if (profile === "krea2") {
-      const result = await request("/api/prompt-pools/items/ensure", { method: "POST", body: JSON.stringify({ model_profile: profile, text: item.text }) });
-      if (currentProfile() !== profile || epoch !== sharedFavoritesState.epoch) return;
-      id = result.id;
-    }
-    const single = typeof singleWorkbenchActive === "function" && singleWorkbenchActive();
-    if (single) {
-      const state = singleWorkbenchState;
-      const snapshot = state.drafts.random[profile] ||= { settings: randomWorkbenchDefaultSettings(profile), profileDrafts: {} };
-      const settings = snapshot.settings;
-      if (profile === "krea2") {
-        settings.krea_prompt_pool = { enabled: true, ids: [...new Set([...(settings.krea_prompt_pool?.ids || []), id])] };
-        if (snapshot.profileDrafts?.[profile]) Object.assign(snapshot.profileDrafts[profile], { kreaPromptPoolEnabled: true, kreaPromptPoolSelection: settings.krea_prompt_pool.ids });
-      } else {
-        settings.pools ||= {}; settings.pools[section] = sharedFavoritePoolSelection(settings.pools[section], id);
-        settings[`random_${section}`] = true;
-        if (snapshot.profileDrafts?.[profile]) { snapshot.profileDrafts[profile].pools = structuredClone(settings.pools); snapshot.profileDrafts[profile].modes[section] = "pool"; }
-      }
-      singleWorkbenchPersist();
-    } else if (profile === "krea2") {
-      kreaPromptPoolSelection = [...new Set([...kreaPromptPoolSelection, id])];
-      ui.krea_prompt_pool_enabled.checked = true;
-      await loadKreaPromptPool({ force: true }); schedulePersist();
-    } else {
-      draft.pools[section] = sharedFavoritePoolSelection(draft.pools[section], id); draft.modes[section] = "pool";
-      renderDimensions(); updatePoolOverview(); if (section === activeSection) renderPoolItems(); schedulePersist();
-    }
-    if (currentProfile() === profile && epoch === sharedFavoritesState.epoch) toast("已加入随机工作台的随机池");
-  } catch (error) { if (currentProfile() === profile && epoch === sharedFavoritesState.epoch) toast(error.message); }
-}
-function sharedFavoritePoolSelection(selection = {}, id) {
-  return selection.mode === "all" ? { ...selection, excluded_ids: (selection.excluded_ids || []).filter(value => value !== id) }
-    : { ...selection, mode: "include", ids: [...new Set([...(selection.ids || []), id])], excluded_ids: selection.excluded_ids || [] };
-}
 function sharedFavoritesChanged({ model_profile = currentProfile(), section = sharedFavoritesView(model_profile).section } = {}, broadcast = true) {
   if (!sharedFavoritesState.ready) return;
   if (broadcast) {
@@ -347,6 +320,8 @@ function sharedFavoritesChanged({ model_profile = currentProfile(), section = sh
       if (ui.poolDrawer.classList.contains("open")) void loadFavorites(activeSection).then(() => {
         if (currentProfile() === model_profile) { renderPoolSidebar(); void loadPool(); }
       });
+    } else if (ui.kreaPoolDrawer.classList.contains("open")) {
+      void loadKreaPromptPool({ force: true });
     }
   }, 0);
 }
@@ -393,25 +368,26 @@ function initializeSharedFavorites() {
   const state = sharedFavoritesState;
   if (state.ready) return;
   try { state.views = JSON.parse(localStorage.getItem(SHARED_FAVORITES_VIEW_KEY) || "{}") || {}; } catch { state.views = {}; }
-  const random = document.getElementById("randomSharedFavorites");
-  random.innerHTML = '<div class="single-prompt-tools"><button id="randomFavoriteOpen" type="button" class="button ghost compact">♡ 共享收藏</button><button id="randomFavoriteSave" type="button" class="button ghost compact">收藏提示词</button></div>' + sharedFavoritesPanelMarkup("random");
-  for (const prefix of ["single", "random"]) {
+  for (const prefix of ["single"]) {
     document.getElementById(`${prefix}FavoriteOpen`).addEventListener("click", () => { const panel = document.getElementById(`${prefix}FavoritePanel`); panel.hidden = !panel.hidden; if (!panel.hidden) void sharedFavoritesLoad(); });
     const save = document.getElementById(`${prefix}FavoriteSave`);
     let selectedSource = null;
-    save.addEventListener("pointerdown", () => { selectedSource = sharedFavoriteSource(sharedFavoriteTarget(prefix)); });
+    save.addEventListener("pointerdown", () => { selectedSource = sharedFavoriteCapturedSource(prefix); });
     save.addEventListener("pointercancel", () => { selectedSource = null; });
     save.addEventListener("pointerleave", () => { selectedSource = null; });
-    save.addEventListener("click", () => { sharedFavoriteOpen(prefix, { text: selectedSource }); selectedSource = null; });
+    save.addEventListener("click", () => { sharedFavoriteOpen(prefix, selectedSource || sharedFavoriteCapturedSource(prefix)); selectedSource = null; });
     document.getElementById(`${prefix}FavoriteRefresh`).addEventListener("click", sharedFavoritesLoad);
     document.getElementById(`${prefix}FavoriteManage`).addEventListener("click", sharedFavoriteManageGroups);
     document.getElementById(`${prefix}FavoriteGroup`).addEventListener("change", event => { const view = sharedFavoritesView(); view.groups[view.section] = event.target.value; sharedFavoritesRememberView(); sharedFavoritesRender(); });
   }
-  for (const target of document.querySelectorAll("[data-single-prompt], #singleProcessedPrompt, #quality_prompt, #extra_prompt, #negative_prompt, #manual_artist")) {
-    const workbench = target.id.startsWith("single") ? "single" : "random";
-    for (const type of ["focus", "input", "select"]) target.addEventListener(type, () => state.targets[workbench] = target);
+  for (const target of document.querySelectorAll("[data-single-prompt], #singleProcessedPrompt")) {
+    for (const type of ["focus", "input", "select"]) target.addEventListener(type, () => {
+      state.targets.single = target; state.saveTargets.single = target;
+    });
   }
-  document.addEventListener("focusin", event => { if (event.target.matches?.("#dimensionList [data-fixed]")) state.targets.random = event.target; });
+  for (const target of document.querySelectorAll("#rewriteResult, #reverseResult")) {
+    for (const type of ["focus", "input", "select"]) target.addEventListener(type, () => { state.saveTargets.single = target; });
+  }
   document.getElementById("sharedFavoriteForm").addEventListener("submit", sharedFavoriteSave);
   document.getElementById("sharedFavoriteText").addEventListener("input", sharedFavoriteValidate);
   document.getElementById("sharedFavoriteSection").addEventListener("change", event => {

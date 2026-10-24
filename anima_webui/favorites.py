@@ -347,20 +347,23 @@ class FavoritesService:
         return await self.get(section)
 
     @_locked
-    async def save_text(self, section: str, payload: dict[str, Any], custom_prompts: Any = None) -> dict[str, Any]:
+    async def save_text(self, section: str, payload: dict[str, Any], custom_prompts: Any = None, prompt_pools: Any = None) -> dict[str, Any]:
         """Save one text selection; repeat requests never create duplicate words."""
         section = self._section(section)
         if section == "artist":
             raise CatalogError("请将文本收藏到角色、服装、姿势、背景或表情分类")
-        if set(payload) - {"title", "text", "groupIds"}:
+        if set(payload) - {"title", "subtitle", "text", "groupIds"}:
             raise CatalogError("文本收藏包含未知字段")
         title = payload.get("title")
+        subtitle = payload.get("subtitle", "")
         text = payload.get("text")
         if not isinstance(title, str) or not title.strip() or len(title.strip()) > 200:
             raise CatalogError("收藏名称需要 1-200 个字符")
         if not isinstance(text, str) or not text.strip() or len(text.strip()) > 20000:
             raise CatalogError("收藏提示词需要 1-20000 个字符")
-        title, text = title.strip(), text.strip()
+        if not isinstance(subtitle, str) or len(subtitle.strip()) > 300:
+            raise CatalogError("收藏副标题不能超过 300 个字符")
+        title, subtitle, text = title.strip(), subtitle.strip(), text.strip()
         data = await self._read_payload(section)
         current = normalize_section(data.get(section))
         raw_groups = payload.get("groupIds", ["default"])
@@ -375,6 +378,8 @@ class FavoritesService:
 
         created = False
         if section == "prompt":
+            if prompt_pools is None:
+                raise CatalogError("自然语言提示词池不可用")
             existing = next(
                 (item for item in current["items"] if str(item.get("text", item.get("customContent", ""))).strip().casefold() == text.casefold()),
                 None,
@@ -382,14 +387,21 @@ class FavoritesService:
             if existing is None:
                 if len(current["items"]) >= MAX_ITEMS:
                     raise CatalogError("收藏条目数量已达到上限")
+            source = await prompt_pools.ensure_item(self.model_profile, text, title=title, subtitle=subtitle)
+            if existing is None:
                 item_id = f"favorite_{uuid.uuid4().hex}"
                 existing = {"id": item_id, "name": item_id, "isCustom": True, "groupIds": []}
-                existing.update(title=title, nickname=title, text=text, customContent=text)
+                existing.update(title=title, nickname=title, subtitle=subtitle, text=text, customContent=text)
                 current["items"].append(existing)
                 created = True
             item_id = existing["id"]
             existing["groupIds"] = list(dict.fromkeys([*existing["groupIds"], *groups]))
-            await self._save_section(section, current)
+            try:
+                await self._save_section(section, current)
+                result = await self.get(section)
+            except (ComfyError, StorageReadOnlyError, OSError, TimeoutError) as error:
+                raise FavoriteSavePendingError(source["id"], error) from error
+            return {**result, "item_id": item_id, "source_item_id": source["id"], "created": created}
         else:
             if custom_prompts is None:
                 raise CatalogError("自定义提示词存储不可用")
@@ -402,7 +414,7 @@ class FavoritesService:
                     raise CatalogError("收藏条目数量已达到上限")
             # The source item must be durable before its favorite references it.
             item, created = await custom_prompts.create_or_reuse(
-                {"section": section, "title": title, "prompt": text}
+                {"section": section, "title": title, "subtitle": subtitle, "prompt": text}
             )
             item_id = item["id"]
             existing = next((entry for entry in current["items"] if favorite_key(section, entry) == item_id), None)
@@ -420,7 +432,6 @@ class FavoritesService:
                 # may mean the favorite was committed but its reply was lost.
                 raise FavoriteSavePendingError(item_id, error) from error
             return {**result, "item_id": item_id, "created": created}
-        return {**(await self.get(section)), "item_id": item_id, "created": created}
 
     async def _update_prompt_item(self, payload: dict[str, Any]) -> dict[str, Any]:
         data = await self._read_payload("prompt")
@@ -448,11 +459,9 @@ class FavoritesService:
 
     @_locked
     async def update_selection(
-        self, section: str, selection: Any, group_ids: Any
+        self, section: str, selection: Any, group_ids: Any, prompt_pools: Any = None
     ) -> dict[str, Any]:
         section = self._section(section)
-        if section == "prompt":
-            raise CatalogError("自然语言提示词请逐条收藏")
         if not isinstance(selection, dict):
             raise CatalogError("selection 必须是对象")
         mode = str(selection.get("mode") or "include")
@@ -472,7 +481,9 @@ class FavoritesService:
         if invalid_groups:
             raise CatalogError(f"收藏分组不存在: {', '.join(invalid_groups)}")
 
-        catalog_items = self.catalog.all_items(section)
+        if section == "prompt" and prompt_pools is None:
+            raise CatalogError("自然语言提示词池不可用")
+        catalog_items = prompt_pools.all_items(self.model_profile) if section == "prompt" else self.catalog.all_items(section)
         by_id = {str(item.get("id")): item for item in catalog_items}
         if mode == "include":
             raw_ids = selection.get("ids")
@@ -499,6 +510,14 @@ class FavoritesService:
             raise CatalogError(f"选择中包含当前词池不存在的词条: {', '.join(invalid_ids[:5])}")
         if not selected_ids:
             raise CatalogError("本次选择没有可收藏的词条")
+
+        if section == "prompt":
+            created_count, updated_count = self._merge_prompt_snapshots(
+                current, [by_id[item_id] for item_id in selected_ids], selected_groups
+            )
+            await self._save_section(section, current)
+            return {**(await self.get(section)), "selectedCount": len(selected_ids),
+                    "createdCount": created_count, "updatedCount": updated_count, "groupIds": selected_groups}
 
         existing_by_key = {
             favorite_key(section, item): item for item in current["items"]
@@ -557,8 +576,6 @@ class FavoritesService:
         source_items: list[dict[str, Any]],
     ) -> dict[str, Any]:
         section = self._section(section)
-        if section == "prompt":
-            raise CatalogError("自然语言收藏不支持导入 Anima 自定义分组")
         data = await self._read_payload(section)
         current = normalize_section(data.get(section))
         if not any(group["id"] == parent_id for group in current["groups"]):
@@ -578,6 +595,10 @@ class FavoritesService:
             "sourceCustomGroupId": source_id,
         }
         current["groups"].append(group)
+        if section == "prompt":
+            self._merge_prompt_snapshots(current, source_items, [group["id"]])
+            await self._save_section(section, current)
+            return {"group": group, **(await self.get(section))}
         for source_item in source_items:
             catalog_item = self.catalog.get(str(source_item.get("id") or ""))
             if catalog_item is None or catalog_item.get("section") != section:
@@ -596,6 +617,34 @@ class FavoritesService:
                 )
         await self._save_section(section, current)
         return {"group": group, **(await self.get(section))}
+
+    @staticmethod
+    def _merge_prompt_snapshots(current: dict[str, Any], sources: list[dict[str, Any]], groups: list[str]) -> tuple[int, int]:
+        """Copy pool contents into independent favorites; future pool edits do not mutate them."""
+        by_text = {str(item.get("text", item.get("customContent", ""))).strip().casefold(): item for item in current["items"]}
+        created = updated = 0
+        for source in sources:
+            text = str(source.get("prompt", source.get("text", ""))).strip()
+            if not text:
+                raise CatalogError("自然语言收藏正文不能为空")
+            existing = by_text.get(text.casefold())
+            if existing is None:
+                if len(current["items"]) >= MAX_ITEMS:
+                    raise CatalogError("收藏条目数量已达到上限")
+                item_id = f"favorite_{uuid.uuid4().hex}"
+                title = str(source.get("title") or text[:80])
+                existing = {"id": item_id, "name": item_id, "isCustom": True, "title": title,
+                            "nickname": title, "subtitle": str(source.get("subtitle") or ""),
+                            "text": text, "customContent": text, "groupIds": list(groups)}
+                current["items"].append(existing)
+                by_text[text.casefold()] = existing
+                created += 1
+            else:
+                merged = list(dict.fromkeys([*(existing.get("groupIds") or []), *groups]))
+                if merged != existing.get("groupIds"):
+                    existing["groupIds"] = merged
+                    updated += 1
+        return created, updated
 
     @_locked
     async def update_group(self, section: str, group_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -683,6 +732,7 @@ class FavoritesService:
         if saved is None:
             return
         saved["nickname"] = str(item.get("title") or "")
+        saved["subtitle"] = str(item.get("subtitle") or "")
         saved["customContent"] = str(item.get("prompt") or "")
         await self._save_section(section, current)
 
@@ -822,6 +872,7 @@ class FavoritesService:
             "id": custom_name,
             "name": custom_name,
             "nickname": nickname or item.get("title") or "",
+            "subtitle": item.get("subtitle") or "",
             "customContent": item.get("prompt") or "",
             "groupIds": groups,
             "isCustom": True,

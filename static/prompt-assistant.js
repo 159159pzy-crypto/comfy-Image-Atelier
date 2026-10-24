@@ -3,10 +3,42 @@ const PROMPT_ASSISTANT_KEY = "anima-studio:prompt-assistant:v1";
 const promptAssistantState = { ready: false, options: null, optionsRequest: 0, drafts: {}, timers: {}, epoch: 0 };
 function promptAssistantDraft(profile = currentProfile()) {
   return promptAssistantState.drafts[profile] ||= {
-    source: "", service: "", model: "", template: "", result: "", resultFor: "",
+    source: "", service: "", model: "", template: "", result: "", resultFor: "", poolItem: null, bodyPoolItem: null,
     revision: 0, jobId: "", jobRevision: 0, jobFingerprint: "", cancelRequested: false,
     busy: false, status: "", legacy: false, undo: null, migrated: [],
   };
+}
+function promptPoolReadMetadata(value, text) {
+  if (!value || typeof value !== "object" || typeof text !== "string") return null;
+  if (!["title", "subtitle", "prompt"].every(key => typeof value[key] === "string")) return null;
+  const item = Object.fromEntries(["title", "subtitle", "prompt"].map(key => [key, value[key].trim()]));
+  if (!item.title || !item.subtitle || !item.prompt || item.prompt !== text.trim()
+      || Array.from(item.title).length > 200 || Array.from(item.subtitle).length > 300 || Array.from(item.prompt).length > 20000) return null;
+  return item;
+}
+// Saving needs a live source, not a historical text lookup: manual edits revoke metadata.
+function promptPoolMetadataForText(profile, text, source = null) {
+  if (profile !== currentProfile() || typeof text !== "string" || !source) return null;
+  const target = typeof source === "string" ? document.getElementById(source) : source;
+  if (!target || target.value?.trim() !== text.trim()) return null;
+  const start = target.selectionStart ?? 0, end = target.selectionEnd ?? start;
+  if (end > start && target.value.slice(start, end).trim() !== target.value.trim()) return null;
+  const draft = promptAssistantState.drafts[profile];
+  if (target.id === "single_positive_prompt") return promptPoolReadMetadata(draft?.bodyPoolItem, text);
+  if (target.id === "rewriteResult") {
+    if (!draft || draft.busy || draft.legacy || draft.resultFor !== promptAssistantFingerprint(draft)) return null;
+    return promptPoolReadMetadata(draft.poolItem, text);
+  }
+  if (target.id === "reverseResult" && typeof promptReverseState !== "undefined") {
+    const reverse = promptReverseState.drafts[profile];
+    if (!reverse || reverse.busy || reverse.source !== "ai" || promptReverseStale(reverse)) return null;
+    return promptPoolReadMetadata(reverse.poolItem, text);
+  }
+  return null;
+}
+function promptPoolSetBodyMetadata(item, text, profile = currentProfile()) {
+  promptAssistantDraft(profile).bodyPoolItem = promptPoolReadMetadata(item, text);
+  promptAssistantPersist();
 }
 function promptAssistantMarkup() {
   return `<section id="singleProcessedSection" class="control-section prompt-assistant" data-single-group="prompt">
@@ -60,6 +92,12 @@ function promptAssistantRender() {
   if (typeof promptReverseRender === "function") promptReverseRender();
   if (!promptAssistantState.ready || !document.getElementById("rewriteSource")) return;
   const draft = promptAssistantDraft(), options = promptAssistantState.options || {};
+  const body = document.getElementById("single_positive_prompt");
+  if (draft.bodyPoolItem && body && (typeof singleWorkbenchActive !== "function" || singleWorkbenchActive())
+      && (typeof singleWorkbenchState === "undefined" || !singleWorkbenchState.restoring)
+      && !promptPoolReadMetadata(draft.bodyPoolItem, body.value)) {
+    draft.bodyPoolItem = null; promptAssistantPersist();
+  }
   promptAssistantSelect("rewriteService", options.services || [], draft.service, "选择服务");
   const service = (options.services || []).find(item => item.id === draft.service);
   promptAssistantSelect("rewriteModel", (service?.models || []).map(item => ({ id: item.name, name: item.name })), draft.model, "选择模型");
@@ -89,6 +127,7 @@ async function promptAssistantLoadOptions() {
 function promptAssistantEdit(key, value) {
   const draft = promptAssistantDraft();
   draft[key] = value;
+  draft.poolItem = null;
   draft.revision++;
   if (key !== "result") {
     draft.status = "";
@@ -147,6 +186,7 @@ async function promptAssistantPoll(profile, id, revision, fingerprint, epoch = p
         if (draft.cancelRequested) draft.status = "任务已结束；你已请求取消，结果未写入预览或正文。";
         else if (revision === draft.revision && fingerprint === promptAssistantFingerprint(draft)) {
           draft.result = job.result?.text || ""; draft.resultFor = fingerprint; draft.legacy = false;
+          draft.poolItem = promptPoolReadMetadata(job.result?.pool_item, draft.result);
           draft.status = draft.result ? "重写完成。检查预览后，手动追加或替换正文。" : "服务未返回可用文本，请重试。";
         } else draft.status = "任务已完成，但输入或选项已修改；未覆盖现有预览。";
       }
@@ -197,9 +237,11 @@ function promptAssistantAdopt(mode) {
   const target = document.getElementById("single_positive_prompt"), before = target.value;
   const text = draft.result.trim();
   const after = mode === "append" && before.trim() ? `${before.replace(/\s+$/, "")}\n\n${text}` : text;
+  const metadata = mode !== "append" || !before.trim() ? promptPoolReadMetadata(draft.poolItem, text) : null;
   if (before === after) return;
   target.value = after;
   target.dispatchEvent(new Event("input", { bubbles: true }));
+  promptPoolSetBodyMetadata(metadata, after);
   draft.undo = { before, after };
   draft.status = mode === "append" ? "已追加到画面描述，可撤销。" : "已替换画面描述，可撤销。";
   promptAssistantPersist(); promptAssistantRender(); schedulePersist();
@@ -261,6 +303,8 @@ function initializePromptAssistant() {
       draft.cancelRequested = Boolean(value.cancelRequested);
       draft.busy = Boolean(draft.jobId);
       draft.legacy = Boolean(value.legacy);
+      draft.poolItem = promptPoolReadMetadata(value.poolItem, draft.result);
+      draft.bodyPoolItem = promptPoolReadMetadata(value.bodyPoolItem, value.bodyPoolItem?.prompt);
       draft.migrated = Array.isArray(value.migrated) ? value.migrated.filter(item => typeof item === "string") : [];
       if (draft.jobId) draft.status = "正在恢复上次重写任务…";
       else if (value.busy) draft.status = "页面在创建任务时刷新，未收到任务编号。请先检查当前队列；正文保持原样。";
@@ -274,6 +318,7 @@ function initializePromptAssistant() {
   for (const [id, callback] of [["rewriteRead", promptAssistantReadCurrent], ["rewriteStart", promptAssistantStart], ["rewriteCancel", promptAssistantCancel], ["rewriteRefresh", promptAssistantLoadOptions], ["rewriteAppend", () => promptAssistantAdopt("append")], ["rewriteReplace", () => promptAssistantAdopt("replace")], ["rewriteUndo", promptAssistantUndo]]) document.getElementById(id).addEventListener("click", callback);
   document.getElementById("single_positive_prompt").addEventListener("input", () => {
     const draft = promptAssistantDraft();
+    draft.bodyPoolItem = null; promptAssistantPersist();
     if (draft.undo && draft.undo.after !== document.getElementById("single_positive_prompt").value) { draft.undo = null; promptAssistantRender(); }
   });
   promptAssistantRender();

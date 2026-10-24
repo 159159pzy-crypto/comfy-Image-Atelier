@@ -381,3 +381,35 @@ test('legacy stale AI output stays stale through draft migration', async () => {
   const saved = { version: 1, drafts: { anima: { imageId: 'plain', source: 'ai', result: 'old result', model: 'new model', service: 'service', template: 'builtin:reverse:anima', resultFor: JSON.stringify(['plain', 'service', 'old model', 'builtin:reverse:anima']) } } };
   const ui = setup({ saved }); await tick(); assert.equal(ui.ctx.promptReverseStale(ui.ctx.promptReverseDraft()), true);
 });
+
+test('visual AI keeps structured metadata hidden and method switching cannot leak it into local results', async () => {
+  const ui = setup(); await tick();
+  const { ctx, elements } = ui, draft = ui.configure(asset('plain', { source: 'none' }));
+  const item = { title: '林间光线', subtitle: '宁静的绿色森林', prompt: 'a quiet forest' };
+  ctx.promptReverseApplyResult(draft, metadata({ source: 'ai', method: 'vision', pool_item: item,
+    candidates: [{ id: 'ai', label: '视觉 AI', text: item.prompt, pool_item: item }] }));
+  ctx.promptReverseRender(); ctx.promptReversePersist();
+  assert.equal(elements.reverseResult.value, item.prompt);
+  assert.deepEqual(plain(ctx.promptPoolMetadataForText('anima', item.prompt, elements.reverseResult)), item);
+  ctx.promptReverseSetMethod('tagger'); ctx.promptReverseEdit('result', item.prompt);
+  assert.equal(ctx.promptPoolMetadataForText('anima', item.prompt, elements.reverseResult), null);
+  ctx.promptReverseSetMethod('vision');
+  assert.deepEqual(plain(ctx.promptPoolMetadataForText('anima', item.prompt, elements.reverseResult)), item);
+  const saved = JSON.parse(ui.storage.get('anima-studio:prompt-reverse:v2'));
+  const restored = setup({ saved }); await tick();
+  assert.deepEqual(plain(restored.ctx.promptPoolMetadataForText('anima', item.prompt, restored.elements.reverseResult)), item);
+  ctx.promptReverseEdit('result', 'manual'); ctx.promptReverseSelectCandidate('ai');
+  assert.equal(ctx.promptPoolMetadataForText('anima', item.prompt, elements.reverseResult), null);
+});
+
+test('format failure retains previous visual prompt without adopting JSON or stale metadata', async () => {
+  const ui = setup(); await tick();
+  const { ctx, elements } = ui, draft = ui.configure(asset('plain', { source: 'none' }));
+  const item = { title: '林间光线', subtitle: '宁静的绿色森林', prompt: 'a quiet forest' };
+  ctx.promptReverseApplyResult(draft, metadata({ source: 'ai', pool_item: item })); ctx.promptReverseRender();
+  ctx.request = async (url, init) => init ? { id: 'bad-output', status: 'queued' } : { status: 'error', error: 'AI 返回的随机池格式无效' };
+  await ctx.promptReverseStart();
+  assert.equal(elements.reverseResult.value, item.prompt);
+  assert.match(elements.reverseStatus.textContent, /格式无效/);
+  assert.equal(elements.single_positive_prompt.value, 'current body');
+});

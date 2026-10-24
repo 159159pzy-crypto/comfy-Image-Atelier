@@ -38,7 +38,7 @@ from .http_security import (
 from .lora_triggers import LoraTriggerOverrideStore
 from .prompt_rules import PromptRuleStore
 from .prompt_assistant import generation_settings
-from .prompt_pools import PromptPoolStore, parse_prompt_import, parse_prompt_import_details
+from .prompt_pools import PromptPoolStore, parse_prompt_import_details, parse_prompt_records
 from .runner import BatchConflict, BatchManager
 from .style_presets import StylePresetStore
 from .thumbnails import ThumbnailStore
@@ -486,7 +486,7 @@ def create_app(
     async def save_favorite_text(request: web.Request) -> web.Response:
         service = request_favorites(request)
         return web.json_response(
-            await service.save_text(request.match_info["section"], await _json_body(request), custom_prompts)
+            await service.save_text(request.match_info["section"], await _json_body(request), custom_prompts, prompt_pools)
         )
 
     async def update_favorite_selection(request: web.Request) -> web.Response:
@@ -494,7 +494,7 @@ def create_app(
         body = await _json_body(request)
         return web.json_response(
             await service.update_selection(
-                request.match_info["section"], body.get("selection"), body.get("groupIds")
+                request.match_info["section"], body.get("selection"), body.get("groupIds"), prompt_pools
             )
         )
 
@@ -514,16 +514,16 @@ def create_app(
     async def import_favorite_child_group(request: web.Request) -> web.Response:
         service = request_favorites(request)
         section = request.match_info["section"]
-        if section == "prompt":
-            raise WorkflowError("自然语言收藏不支持导入 Anima 自定义分组")
         body = await _json_body(request)
         custom_group_id = str(body.get("customGroupId") or "").strip()
         if not custom_group_id:
             raise WorkflowError("customGroupId 不能为空")
+        source_groups = (prompt_pools.list_groups(service.model_profile)["groups"] if section == "prompt"
+                         else custom_prompts.list_groups(section)["groups"])
         source_group = next(
             (
                 group
-                for group in custom_prompts.list_groups(section)["groups"]
+                for group in source_groups
                 if group["id"] == custom_group_id
             ),
             None,
@@ -535,7 +535,8 @@ def create_app(
                 section,
                 request.match_info["parent_id"],
                 source_group,
-                custom_prompts.list(section, custom_group_id),
+                (prompt_pools.list_group_items(service.model_profile, custom_group_id) if section == "prompt"
+                 else custom_prompts.list(section, custom_group_id)),
             ),
             status=201,
         )
@@ -847,117 +848,162 @@ def create_app(
             status=410,
         )
 
+    async def _prompt_pool_response(params: dict[str, Any]) -> web.Response:
+        profile = prompt_pools._profile(params.get("model_profile", "krea2"))
+        selected = params.get("selected_ids", [])
+        if isinstance(selected, str):
+            selected = [value.strip() for value in selected.split(",") if value.strip()]
+        if not isinstance(selected, list):
+            raise WorkflowError("selected_ids 必须是数组")
+        selected_only = params.get("selected_only", False)
+        if isinstance(selected_only, str):
+            if selected_only.lower() not in {"true", "false", "1", "0"}:
+                raise WorkflowError("selected_only 必须是布尔值")
+            selected_only = selected_only.lower() in {"true", "1"}
+        if not isinstance(selected_only, bool):
+            raise WorkflowError("selected_only 必须是布尔值")
+        for key in ("q", "collection", "custom_group", "sort"):
+            if key in params and not isinstance(params[key], str):
+                raise WorkflowError(f"{key} 必须是字符串")
+        saved = await profile_favorites[profile].get("prompt") if profile == "krea2" else {}
+        return web.json_response(prompt_pools.list(
+            profile, query=params.get("q", ""), page=params.get("page", 1), limit=params.get("limit", 48),
+            selected_ids=selected, selected_only=selected_only, collection=params.get("collection", ""),
+            custom_group=params.get("custom_group", ""), sort=params.get("sort", ""), favorites=saved,
+        ))
+
     async def list_prompt_pool(request: web.Request) -> web.Response:
-        profile = request.query.get("model_profile", "krea2")
-        raw_selected = request.query.get("selected_ids", "")
-        selected_ids = [value for value in raw_selected.split(",") if value.strip()]
-        try:
-            page = int(request.query.get("page", "1"))
-            limit = int(request.query.get("limit", "48"))
-        except ValueError as error:
-            raise WorkflowError("提示词池分页参数无效") from error
-        selected_only = _query_bool(request, "selected_only", False)
-        return web.json_response(
-            prompt_pools.list(
-                profile,
-                query=request.query.get("q", ""),
-                page=page,
-                limit=limit,
-                selected_ids=selected_ids,
-                selected_only=selected_only,
-            )
-        )
+        return await _prompt_pool_response(dict(request.query))
+
+    async def query_prompt_pool(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        if set(body) - {"model_profile", "q", "page", "limit", "selected_ids", "selected_only", "collection", "custom_group", "sort"}:
+            raise WorkflowError("提示词池查询包含未知字段")
+        return await _prompt_pool_response(body)
 
     async def preview_prompt_pool_import(request: web.Request) -> web.Response:
         body = await _json_body(request)
-        unknown = set(body) - {"model_profile", "mode", "format", "content"}
-        if unknown:
-            raise WorkflowError(
-                f"提示词池导入包含未知字段: {', '.join(sorted(unknown))}"
-            )
+        if set(body) - {"model_profile", "mode", "format", "content", "bundleName", "targetGroupIds"}:
+            raise WorkflowError("提示词池导入包含未知字段")
         if "content" not in body:
             raise WorkflowError("提示词池导入 content 不能为空")
-        format_hint = body.get("format", "")
-        if not isinstance(format_hint, str):
+        file_format = body.get("format", "")
+        if not isinstance(file_format, str):
             raise WorkflowError("提示词池导入 format 必须是字符串")
-        parsed = parse_prompt_import_details(body["content"], format_hint)
-        return web.json_response(
-            prompt_pools.preview_import(
-                body.get("model_profile", "krea2"),
-                parsed,
-                mode=body.get("mode", "replace"),
-            )
-        )
+        if "bundleName" in body:
+            return web.json_response(prompt_pools.preview_structured_import(
+                body.get("model_profile", "krea2"), body["content"], file_format,
+                bundle_name=body["bundleName"], target_group_ids=body.get("targetGroupIds"),
+                mode=body.get("mode", "append"),
+            ))
+        if "targetGroupIds" in body:
+            raise WorkflowError("结构化导入需要 bundleName")
+        return web.json_response(prompt_pools.preview_import(
+            body.get("model_profile", "krea2"), parse_prompt_import_details(body["content"], file_format),
+            mode=body.get("mode", "replace"),
+        ))
 
     async def import_prompt_pool(request: web.Request) -> web.Response:
         body = await _json_body(request)
-        unknown = set(body) - {"model_profile", "items", "content", "mode", "format"}
-        if unknown:
-            raise WorkflowError(f"提示词池导入包含未知字段: {', '.join(sorted(unknown))}")
-        format_hint = body.get("format", "")
-        if not isinstance(format_hint, str):
+        if "rows" in body:
+            if set(body) - {"model_profile", "rows", "bundleName", "targetGroupIds", "mode"}:
+                raise WorkflowError("结构化导入不能混用 items/content/format 或未知字段")
+            return web.json_response(await prompt_pools.commit_structured_import(
+                body.get("model_profile", "krea2"), body["rows"], bundle_name=body.get("bundleName"),
+                target_group_ids=body.get("targetGroupIds"), mode=body.get("mode", "append"),
+            ))
+        if set(body) - {"model_profile", "items", "content", "mode", "format"}:
+            raise WorkflowError("提示词池导入包含未知字段")
+        if "items" in body and "content" in body:
+            raise WorkflowError("提示词池导入不能同时包含 items 和 content")
+        file_format = body.get("format", "")
+        if not isinstance(file_format, str):
             raise WorkflowError("提示词池导入 format 必须是字符串")
-        profile = body.get("model_profile", "krea2")
-        raw = body.get("items", body.get("content", []))
-        items = parse_prompt_import(raw, format_hint)
-        return web.json_response(
-            await prompt_pools.import_items(profile, items, mode=body.get("mode", "replace"))
-        )
+        items = parse_prompt_records(body.get("items", body.get("content", [])), file_format)
+        return web.json_response(await prompt_pools.import_items(
+            body.get("model_profile", "krea2"), items, mode=body.get("mode", "replace"),
+        ))
+
+    def _prompt_pool_item_fields(body: dict[str, Any], *, update: bool = False) -> dict[str, Any]:
+        allowed = {"model_profile", "text", "prompt", "title", "subtitle", "groupIds"}
+        if update:
+            allowed.add("id")
+        if set(body) - allowed:
+            raise WorkflowError("提示词池条目包含未知字段")
+        if ("text" in body) == ("prompt" in body):
+            raise WorkflowError("提示词池需要 text 或 prompt，且不能同时填写")
+        if update and "id" not in body:
+            raise WorkflowError("提示词池更新需要 id")
+        for key in ("title", "subtitle"):
+            if key in body and not isinstance(body[key], str):
+                raise WorkflowError(f"{key} 必须是字符串")
+        if "groupIds" in body and not isinstance(body["groupIds"], list):
+            raise WorkflowError("groupIds 必须是数组")
+        return {"title": body.get("title"), "subtitle": body.get("subtitle"), "group_ids": body.get("groupIds")}
 
     async def create_prompt_pool_item(request: web.Request) -> web.Response:
         body = await _json_body(request)
-        unknown = set(body) - {"model_profile", "text"}
-        if unknown:
-            raise WorkflowError(
-                f"提示词池条目包含未知字段: {', '.join(sorted(unknown))}"
-            )
-        if "text" not in body:
-            raise WorkflowError("提示词池 text 不能为空")
-        item = await prompt_pools.create_item(body.get("model_profile", "krea2"), body["text"])
+        fields = _prompt_pool_item_fields(body)
+        item = await prompt_pools.create_item(body.get("model_profile", "krea2"), body.get("text", body.get("prompt")), **fields)
         return web.json_response(item, status=201)
 
     async def ensure_prompt_pool_item(request: web.Request) -> web.Response:
         body = await _json_body(request)
-        if set(body) - {"model_profile", "text"}:
-            raise WorkflowError("提示词池条目包含未知字段")
-        if "text" not in body:
-            raise WorkflowError("提示词池 text 不能为空")
-        return web.json_response(
-            await prompt_pools.ensure_item(body.get("model_profile", "krea2"), body["text"])
-        )
+        fields = _prompt_pool_item_fields(body)
+        return web.json_response(await prompt_pools.ensure_item(
+            body.get("model_profile", "krea2"), body.get("text", body.get("prompt")), **fields,
+        ))
+
+    async def ensure_prompt_pool_items(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        if set(body) - {"model_profile", "items"} or "items" not in body:
+            raise WorkflowError("批量入池需要 items，且不能包含未知字段")
+        return web.json_response(await prompt_pools.ensure_items(body.get("model_profile", "krea2"), body["items"]))
 
     async def update_prompt_pool_item(request: web.Request) -> web.Response:
         body = await _json_body(request)
-        unknown = set(body) - {"model_profile", "id", "text"}
-        if unknown:
-            raise WorkflowError(
-                f"提示词池条目包含未知字段: {', '.join(sorted(unknown))}"
-            )
-        if "id" not in body or "text" not in body:
-            raise WorkflowError("提示词池更新需要 id 和 text")
-        return web.json_response(
-            await prompt_pools.update_item(
-                body.get("model_profile", "krea2"), body["id"], body["text"]
-            )
-        )
+        fields = _prompt_pool_item_fields(body, update=True)
+        return web.json_response(await prompt_pools.update_item(
+            body.get("model_profile", "krea2"), body["id"], body.get("text", body.get("prompt")), **fields,
+        ))
 
     async def delete_prompt_pool_items(request: web.Request) -> web.Response:
         body = await _json_body(request)
-        unknown = set(body) - {"model_profile", "ids"}
-        if unknown:
-            raise WorkflowError(
-                f"提示词池删除包含未知字段: {', '.join(sorted(unknown))}"
-            )
-        if "ids" not in body:
-            raise WorkflowError("提示词池删除需要 ids")
-        return web.json_response(
-            await prompt_pools.delete_items(body.get("model_profile", "krea2"), body["ids"])
-        )
+        if set(body) - {"model_profile", "ids"} or "ids" not in body:
+            raise WorkflowError("提示词池删除需要 ids，且不能包含未知字段")
+        return web.json_response(await prompt_pools.delete_items(body.get("model_profile", "krea2"), body["ids"]))
 
     async def delete_prompt_pool_item(request: web.Request) -> web.Response:
-        profile = request.query.get("model_profile", "krea2")
-        item_id = request.query.get("id")
-        return web.json_response(await prompt_pools.delete_item(profile, item_id))
+        return web.json_response(await prompt_pools.delete_item(request.query.get("model_profile", "krea2"), request.query.get("id")))
+
+    async def list_prompt_pool_groups(request: web.Request) -> web.Response:
+        return web.json_response(prompt_pools.list_groups(request.query.get("model_profile", "krea2")))
+
+    async def create_prompt_pool_group(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        if set(body) - {"model_profile", "name", "parentId"}:
+            raise WorkflowError("自定义分组包含未知字段")
+        return web.json_response(await prompt_pools.create_group(
+            body.get("model_profile", request.query.get("model_profile", "krea2")), body,
+        ), status=201)
+
+    async def update_prompt_pool_group(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        if set(body) - {"model_profile", "name", "parentId"}:
+            raise WorkflowError("自定义分组包含未知字段")
+        return web.json_response(await prompt_pools.update_group(
+            body.get("model_profile", request.query.get("model_profile", "krea2")), request.match_info["group_id"], body,
+        ))
+
+    async def delete_prompt_pool_group(request: web.Request) -> web.Response:
+        return web.json_response(await prompt_pools.delete_group(
+            request.query.get("model_profile", "krea2"), request.match_info["group_id"], request.query.get("deleteMode", "keep"),
+        ))
+
+    async def prompt_pool_template(request: web.Request) -> web.Response:
+        filename, content_type, body = prompt_pools.template(request.match_info["format"])
+        return web.Response(body=body, content_type=content_type,
+                            headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
     async def list_style_presets(request: web.Request) -> web.Response:
         return web.json_response(style_presets.list(request.query.get("model_profile")))
@@ -1646,10 +1692,17 @@ def create_app(
     app.router.add_get("/api/resource-ownership", resource_ownership)
     app.router.add_put("/api/resource-ownership", update_resource_ownership)
     app.router.add_get("/api/prompt-pools", list_prompt_pool)
+    app.router.add_post("/api/prompt-pools/query", query_prompt_pool)
+    app.router.add_get("/api/prompt-pools/groups", list_prompt_pool_groups)
+    app.router.add_post("/api/prompt-pools/groups", create_prompt_pool_group)
+    app.router.add_put("/api/prompt-pools/groups/{group_id}", update_prompt_pool_group)
+    app.router.add_delete("/api/prompt-pools/groups/{group_id}", delete_prompt_pool_group)
+    app.router.add_get("/api/prompt-pools/templates/{format}", prompt_pool_template)
     app.router.add_post("/api/prompt-pools/import/preview", preview_prompt_pool_import)
     app.router.add_post("/api/prompt-pools/import", import_prompt_pool)
     app.router.add_post("/api/prompt-pools/items", create_prompt_pool_item)
     app.router.add_post("/api/prompt-pools/items/ensure", ensure_prompt_pool_item)
+    app.router.add_post("/api/prompt-pools/items/ensure-many", ensure_prompt_pool_items)
     app.router.add_put("/api/prompt-pools/items", update_prompt_pool_item)
     app.router.add_post("/api/prompt-pools/items/delete", delete_prompt_pool_items)
     app.router.add_delete("/api/prompt-pools/items", delete_prompt_pool_item)
