@@ -19,14 +19,51 @@
       "url": "https://github.com/astral-sh/uv/releases/download/0.12.16/uv-x86_64-pc-windows-msvc.zip",
       "size": 17818061,
       "sha256": "f730454bf09019754e5e5abd71a8aa18683cb739cba0d9c720bac2e7c901160f",
-      "executable": "uv.exe"
+      "executable": "uv.exe",
+      "fileName": "uv-x86_64-pc-windows-msvc.zip",
+      "version": "0.12.16",
+      "executableSha256": "76de4c65c174ec178119a58ed63bf350bd5d0e20d25b3130502d58dbb13fa8ea",
+      "license": "MIT OR Apache-2.0",
+      "sourceArchive": {
+        "fileName": "uv-0.12.16.tar.gz",
+        "url": "https://api.github.com/repos/astral-sh/uv/tarball/0.12.16",
+        "size": 8686678,
+        "sha256": "3d3b0fe938906ac73baae68477f4161dc68acc474ce13ca738b125d7a92b6b96"
+      },
+      "licenseFiles": [
+        {
+          "fileName": "LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/astral-sh/uv/0.12.16/LICENSE-APACHE",
+          "size": 11357,
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        },
+        {
+          "fileName": "LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/astral-sh/uv/0.12.16/LICENSE-MIT",
+          "size": 1077,
+          "sha256": "860e3d7a86b84e6a7012c7a635fc64df475cebc6cce34dfeb73a5982ec58176c"
+        }
+      ]
     },
     {
       "id": "git",
       "url": "https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/MinGit-2.55.0.5-64-bit.zip",
       "size": 38989688,
       "sha256": "56d7b226b7693196cfc71fef26568f536c4a021ab6c37ff2db4287bed908e96e",
-      "executable": "cmd/git.exe"
+      "executable": "cmd/git.exe",
+      "fileName": "MinGit-2.55.0.5-64-bit.zip",
+      "version": "2.55.0.5",
+      "sources": [
+        {
+          "id": "huawei-mingit",
+          "label": "华为云 MinGit",
+          "url": "https://mirrors.huaweicloud.com/git-for-windows/v2.55.0.windows.5/MinGit-2.55.0.5-64-bit.zip",
+          "kind": "nativeMirror",
+          "region": "cn",
+          "priority": 10,
+          "verifiedAt": "2026-10-26T06:06:09.956578+00:00"
+        }
+      ]
     }
   ],
   "nodes": [
@@ -291,5 +328,43 @@
     "setuptools==84.1.0",
     "wheel==0.48.0"
   ],
-  "sam2Commit": "2b90b9f5ceec907a1c18123530e92e794ad901a4"
+  "sam2Commit": "2b90b9f5ceec907a1c18123530e92e794ad901a4",
+  "pythonRuntime": {
+    "implementation": "cpython",
+    "version": "3.11.9",
+    "build": "20240814",
+    "platform": "windows",
+    "architecture": "x86_64",
+    "installationKey": "cpython-3.11.9-windows-x86_64-none",
+    "artifact": {
+      "id": "python-cpython-3.11.9-20240814-win-x64",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20240814/cpython-3.11.9%2B20240814-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+      "fileName": "cpython-3.11.9+20240814-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+      "version": "3.11.9",
+      "archiveFormat": "tar.gz",
+      "size": 25072044,
+      "sha256": "8ac54a8d711ef0d49b62a2c3521c2d0403f1b221dc9d84c5f85fe48903e82523",
+      "executable": "",
+      "sources": [
+        {
+          "id": "npmmirror-python",
+          "label": "npmmirror Python",
+          "url": "https://registry.npmmirror.com/-/binary/python-build-standalone/20240814/cpython-3.11.9%2B20240814-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+          "kind": "nativeMirror",
+          "region": "cn",
+          "priority": 10,
+          "verifiedAt": "2026-10-26T06:06:09.956578+00:00"
+        },
+        {
+          "id": "nju-python",
+          "label": "南京大学 Python",
+          "url": "https://mirror.nju.edu.cn/github-release/astral-sh/python-build-standalone/20240814/cpython-3.11.9%2B20240814-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+          "kind": "nativeMirror",
+          "region": "cn",
+          "priority": 20,
+          "verifiedAt": "2026-10-26T06:06:09.956578+00:00"
+        }
+      ]
+    }
+  }
 }

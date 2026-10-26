@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "tools": [
+    {
+      "id": "uv",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.12.16/uv-x86_64-pc-windows-msvc.zip",
+      "size": 17818061,
+      "sha256": "f730454bf09019754e5e5abd71a8aa18683cb739cba0d9c720bac2e7c901160f",
+      "executable": "uv.exe",
+      "fileName": "uv-x86_64-pc-windows-msvc.zip",
+      "version": "0.12.16",
+      "executableSha256": "76de4c65c174ec178119a58ed63bf350bd5d0e20d25b3130502d58dbb13fa8ea",
+      "license": "MIT OR Apache-2.0",
+      "sourceArchive": {
+        "fileName": "uv-0.12.16.tar.gz",
+        "url": "https://api.github.com/repos/astral-sh/uv/tarball/0.12.16",
+        "size": 8686678,
+        "sha256": "3d3b0fe938906ac73baae68477f4161dc68acc474ce13ca738b125d7a92b6b96"
+      },
+      "licenseFiles": [
+        {
+          "fileName": "LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/astral-sh/uv/0.12.16/LICENSE-APACHE",
+          "size": 11357,
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        },
+        {
+          "fileName": "LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/astral-sh/uv/0.12.16/LICENSE-MIT",
+          "size": 1077,
+          "sha256": "860e3d7a86b84e6a7012c7a635fc64df475cebc6cce34dfeb73a5982ec58176c"
+        }
+      ]
+    },
+    {
+      "id": "aria2",
+      "url": "https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip",
+      "size": 2475379,
+      "sha256": "67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288",
+      "executable": "aria2-1.37.0-win-64bit-build1/aria2c.exe",
+      "fileName": "aria2-1.37.0-win-64bit-build1.zip",
+      "version": "1.37.0",
+      "archiveFormat": "zip",
+      "executableSha256": "be2099c214f63a3cb4954b09a0becd6e2e34660b886d4c898d260febfe9d70c2",
+      "license": "GPL-2.0-or-later; upstream Windows build notices included",
+      "sourceArchive": {
+        "fileName": "aria2-1.37.0.tar.xz",
+        "url": "https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0.tar.xz",
+        "size": 1705256,
+        "sha256": "60a420ad7085eb616cb6e2bdf0a7206d68ff3d37fb5a956dc44242eb2f79b66b"
+      },
+      "sourceDependencies": [
+        {
+          "fileName": "gmp-6.3.0.tar.xz",
+          "url": "https://gmplib.org/download/gmp/gmp-6.3.0.tar.xz",
+          "size": 2094196,
+          "sha256": "a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898"
+        },
+        {
+          "fileName": "expat-2.5.0.tar.xz",
+          "url": "https://github.com/libexpat/libexpat/releases/download/R_2_5_0/expat-2.5.0.tar.xz",
+          "size": 460560,
+          "sha256": "ef2420f0232c087801abf705e89ae65f6257df6b7931d37846a193ef2e8cdcbe"
+        },
+        {
+          "fileName": "sqlite-autoconf-3430100.tar.gz",
+          "url": "https://sqlite.org/2023/sqlite-autoconf-3430100.tar.gz",
+          "size": 3175971,
+          "sha256": "39116c94e76630f22d54cd82c3cea308565f1715f716d1b2527f1c9c969ba4d9"
+        },
+        {
+          "fileName": "zlib-1.3.tar.gz",
+          "url": "https://zlib.net/fossils/zlib-1.3.tar.gz",
+          "size": 1495873,
+          "sha256": "ff0ba4c292013dbc27530b3a81e1f9a813cd39de01ca5e0f8bf355702efa593e"
+        },
+        {
+          "fileName": "c-ares-1.19.1.tar.gz",
+          "url": "https://github.com/c-ares/c-ares/releases/download/cares-1_19_1/c-ares-1.19.1.tar.gz",
+          "size": 1579100,
+          "sha256": "321700399b72ed0e037d0074c629e7741f6b2ec2dda92956abe3e9671d3e268e"
+        },
+        {
+          "fileName": "libssh2-1.11.0.tar.xz",
+          "url": "https://libssh2.org/download/libssh2-1.11.0.tar.xz",
+          "size": 686796,
+          "sha256": "a488a22625296342ddae862de1d59633e6d446eff8417398e06674a49be3d7c2"
+        }
+      ]
+    }
+  ]
+}

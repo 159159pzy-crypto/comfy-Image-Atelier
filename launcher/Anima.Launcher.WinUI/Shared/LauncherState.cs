@@ -19,7 +19,7 @@ internal sealed partial class LauncherState : IDisposable
 
     public LauncherConfig Config { get; private set; }
     public ServiceManager Services { get; }
-    public Downloads Downloads { get; } = new(Credentials.Read);
+    public Downloads Downloads { get; }
     public ObservableCollection<ModelRow> Rows { get; } = [];
     public ObservableCollection<ModelGroup> Groups { get; } = [];
 
@@ -67,6 +67,12 @@ internal sealed partial class LauncherState : IDisposable
         root = getRoot;
         showWindow = showWindowAction;
         Config = File.Exists(configFile) ? LoadConfig() : new LauncherConfig { AppRoot = Program.AppRoot, DataDir = Path.Combine(Program.StateDir, "data") };
+        Downloads = new(Credentials.Read, engineOptions: new DownloadEngineOptions
+        {
+            Aria2PathResolver = async ct => await BundledTools.EnsureAsync("aria2", Path.Combine(Program.StateDir, "download-runtime"), ct),
+            NetworkPolicyResolver = () => NetworkPolicySnapshot.Capture(Config),
+        });
+        InitializeDownloadTasks();
         FreshInstallRequested = Config.InstallPending;
         Program.Log("配置已读取");
         Services = new ServiceManager(Program.StateDir, AppendLog);
@@ -120,9 +126,9 @@ internal sealed partial class LauncherState : IDisposable
     public void Save()
     {
         if (configWriteError is not null) throw new IOException(configWriteError);
-        JsonFile.Write(configFile, Config);
+        JsonFile.Write(configFile, WithSavedDownloadSettings(Config));
     }
-    public void Reloaded() => FieldsReloaded?.Invoke();
+    public void Reloaded() { Config = WithSavedDownloadSettings(Config); FieldsReloaded?.Invoke(); }
     public void GoTo(int page) => NavigateRequested?.Invoke(page);
     public void Show() => showWindow();
 
@@ -185,6 +191,7 @@ internal sealed partial class LauncherState : IDisposable
         next.Validate();
         ComfyLaunchArguments.ValidateForRoot(next.ComfyArguments, next.ComfyRoot);
         Config = next;
+        savedDownloadSettings = next.Clone();
         FreshInstallRequested = e.Fresh;
     }
 
@@ -228,7 +235,7 @@ internal sealed partial class LauncherState : IDisposable
         {
             if (resumeConfig is not null)
             {
-                Config = resumeConfig.Clone();
+                Config = WithSavedDownloadSettings(resumeConfig.Clone());
                 FreshInstallRequested = resumeFresh;
             }
             else if (applyDrafts) ApplyPendingFields();
@@ -236,12 +243,17 @@ internal sealed partial class LauncherState : IDisposable
             Config = Config.Clone();
             retryConfig = Config.Clone();
             retryFresh = FreshInstallRequested;
+            // The gate is held before awaiting a pause, so a second UI action cannot enter.
+            foreach (var owner in DownloadTasks.Owners.Where(o => o.Kind == "models" && o.Status == DownloadTaskStatus.Running
+                && SamePath(o.EnvironmentRoot, Config.ComfyRoot)))
+                await DownloadTasks.PauseOwnerAsync(owner.Id);
+            using var environmentLease = await EnvironmentOperationLease.AcquireAsync(Config.ComfyRoot, true, task.Token);
             await action(task.Token);
         }
         catch (OperationCanceledException) when (task.IsCancellationRequested)
         {
             retryable = true;
-            var message = cancelDownloads ? "下载已取消；模型包进度已保留，单文件临时下载已清理。" : "任务已暂停，点击继续可从已完成步骤恢复。";
+            var message = cancelDownloads ? "任务已取消，已下载文件保留。需要释放空间时，请在下载页单独删除未完成文件。" : "任务已暂停，点击继续可从已完成步骤恢复。";
             SetSetupInterruption(message, true);
             SetStatus(message);
             AppendLog(message);
@@ -249,6 +261,14 @@ internal sealed partial class LauncherState : IDisposable
         catch (OperationCanceledException ex)
         {
             retryable = true;
+            if (ex.CancellationToken.IsCancellationRequested)
+            {
+                const string message = "下载任务已停止，进度已保留。请在下载页选择继续或重试未完成的资源。";
+                SetSetupInterruption(message, true);
+                SetStatus(message);
+                AppendLog(message);
+                return;
+            }
             var error = new TimeoutException("网络或服务响应超时，请检查连接后重试。", ex);
             SetSetupInterruption(error.Message, false);
             TaskFailed?.Invoke(error);
@@ -256,6 +276,7 @@ internal sealed partial class LauncherState : IDisposable
         catch (Exception ex) { retryable = true; SetSetupInterruption(ex.Message, false); TaskFailed?.Invoke(ex); }
         finally
         {
+            activeInstallationPlan = null;
             task.Dispose();
             task = null;
             BusyChanged?.Invoke(false);
@@ -287,6 +308,7 @@ internal sealed partial class LauncherState : IDisposable
 
     private void InstallStageChanged(string stage)
     {
+        if (activeDownloadOwner is not null) DownloadTasks.SetOwnerPhase(activeDownloadOwner, "Installing", stage);
         ResetTransferProgress();
         ProgressChanged?.Invoke(-1); // Dependency stages have no byte total.
         SetStatus(stage);
@@ -294,7 +316,7 @@ internal sealed partial class LauncherState : IDisposable
 
     public IProgress<DownloadProgress> DownloadProgress() => new Progress<DownloadProgress>(p =>
     {
-        var percent = (int)Math.Clamp(p.Received * 100d / Math.Max(1, p.Total), 0, 100);
+        var percent = (int)Math.Clamp(p.Received * 100d / Math.Max(1, p.Total), 0, p.Phase == "Completed" ? 100 : 99);
         SetupDownloadPercent = percent;
         ProgressChanged?.Invoke(percent);
         var now = DateTime.UtcNow;
@@ -373,7 +395,15 @@ internal sealed partial class LauncherState : IDisposable
             Path.Combine(Program.Assets, "probe_comfy.py"), ct);
     }
 
-    public Task InstallAsync(CancellationToken ct) => InstallEnvironmentAsync(ct);
+    public async Task InstallAsync(CancellationToken ct)
+    {
+        var plan = reviewedEnvironmentPlan ?? await PlanInstallationAsync(FreshInstallRequested, ct);
+        var owner = DownloadTasks.RegisterOwner("install", "安装环境与基础模型", plan.CreateConfig(),
+            payload: JsonSerializer.SerializeToElement(plan, JsonFile.Options));
+        activeDownloadOwner = owner.Id;
+        try { await DownloadTasks.RunOwnerAsync(owner.Id, token => InstallEnvironmentAsync(token, plan), ct); }
+        finally { activeDownloadOwner = null; }
+    }
 
     private async Task InstallEnvironmentAsync(CancellationToken ct, InstallationPlan? reviewedPlan = null, bool prepareModels = true)
     {
@@ -388,6 +418,7 @@ internal sealed partial class LauncherState : IDisposable
         }
         var plan = reviewedPlan ?? (reviewedEnvironmentPlan is { } reviewed && reviewed.Fresh == fresh
             && reviewed.ConfigurationJson == JsonSerializer.Serialize(Config, JsonFile.Options) ? reviewed : await PlanInstallationAsync(fresh, ct));
+        activeInstallationPlan = plan;
         InstallSummaryText = plan.Describe();
         InstallSummaryChanged?.Invoke(InstallSummaryText);
         Config.InstallPending = fresh;
@@ -405,14 +436,14 @@ internal sealed partial class LauncherState : IDisposable
             UpdateSetupProgress(new("models", "准备 Anima 基础模型", SetupStageStatus.Running));
             SetStatus("环境已安装，正在准备 Anima 基础模型…");
             var probe = await TaggerRuntime.Probe(Config, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
-            var selected = Program.ModelProfiles.RequiredModels(Program.Models, Config.SelectedProfile).Select(m => m.Id).ToHashSet();
-            var inventory = await Inventory.Scan(probe, Program.Models, false, ct);
+            var selected = OperationProfiles.RequiredModels(OperationModels, Config.SelectedProfile).Select(m => m.Id).ToHashSet();
+            var inventory = await Inventory.Scan(probe, OperationModels, false, ct);
             var pending = inventory.Where(m => selected.Contains(m.Model.Id) && m.Missing).ToList();
             await DownloadModelsAsync(pending, ct);
             // A resumed install may already have the verified model, but may have
             // stopped before its first LoRA Manager classification was written.
             foreach (var item in inventory.Where(m => selected.Contains(m.Model.Id) && m.Model.Category == "diffusion_models"))
-                await ModelMetadata.EnsureDefaultAsync(Config, Program.Runtime, Program.Models, Program.ModelProfiles,
+                await ModelMetadata.EnsureDefaultAsync(Config, OperationRuntime, OperationModels, OperationProfiles,
                     item.FoundPath ?? item.Destination, ct, AppendLog);
             UpdateSetupProgress(new("models", "基础模型已准备", SetupStageStatus.Complete));
         }
@@ -448,7 +479,7 @@ internal sealed partial class LauncherState : IDisposable
         Config.Python = Inventory.FindPython(Config.ComfyRoot, Config.Python);
         SetStatus("正在读取 ComfyUI 有效模型路径…");
         var probe = await TaggerRuntime.Probe(Config, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
-        var scan = await Task.Run(() => Inventory.Scan(probe, Program.Models, hashes, ct), ct);
+        var scan = await Task.Run(() => Inventory.Scan(probe, OperationModels, hashes, ct), ct);
         UpdateSetupMissingModels(scan);
         var nodes = await Inventory.Nodes(Config.ComfyRoot, Program.Runtime, Commands.Find("git.exe"), ct);
         var loras = await Task.Run(() => Inventory.Loras(probe), ct);
@@ -467,7 +498,7 @@ internal sealed partial class LauncherState : IDisposable
 
     public void SelectBaseGroup()
     {
-        var required = Program.ModelProfiles.RequiredModels(Program.Models, Config.SelectedProfile).Select(m => m.Id).ToHashSet();
+        var required = OperationProfiles.RequiredModels(OperationModels, Config.SelectedProfile).Select(m => m.Id).ToHashSet();
         foreach (var row in Rows) row.Selected = required.Contains(row.Status.Model.Id) && row.CanSelect;
     }
 
@@ -480,15 +511,18 @@ internal sealed partial class LauncherState : IDisposable
         return token => DownloadModelIdsAsync(selectedIds, token);
     }
 
-    private async Task<List<ModelStatus>> ResolveModelIdsAsync(string[] modelIds, bool hashes, CancellationToken ct)
+    private async Task<List<ModelStatus>> ResolveModelIdsAsync(string[] modelIds, bool hashes, CancellationToken ct, LauncherConfig? configuration = null)
     {
-        ResolvePaths();
-        var models = modelIds.Select(id => Program.Models.Models.SingleOrDefault(model => model.Id == id)
+        var config = configuration ?? Config;
+        if (string.IsNullOrWhiteSpace(config.ComfyRoot)) throw new InvalidOperationException("请先选择 ComfyUI 环境。");
+        config.ComfyRoot = Inventory.NormalizeRoot(config.ComfyRoot);
+        config.Python = Inventory.FindPython(config.ComfyRoot, config.Python);
+        var models = modelIds.Select(id => OperationModels.Models.SingleOrDefault(model => model.Id == id)
             ?? throw new InvalidDataException("模型清单中已不存在此资源，请重新扫描：" + id)).ToArray();
         var script = Path.Combine(Program.Assets, "probe_comfy.py");
         var probe = ModelProbePolicy.NeedsTaggerRuntime(models)
-            ? await TaggerRuntime.Probe(Config, script, ct)
-            : await Inventory.Probe(Config.ComfyRoot, Config.Python, script, ct, Config.ComfyArguments);
+            ? await TaggerRuntime.Probe(config, script, ct)
+            : await Inventory.Probe(config.ComfyRoot, config.Python, script, ct, config.ComfyArguments);
         return await Task.Run(() => Inventory.Scan(probe, new ModelManifest(Program.Models.SchemaVersion, models), hashes, ct), ct);
     }
 
@@ -507,7 +541,7 @@ internal sealed partial class LauncherState : IDisposable
         if (missing.Count > 0) await DownloadModelsAsync(missing, ct);
         // A previous attempt can finish the model file before its metadata stage.
         foreach (var item in resolved.Where(item => !item.Missing && item.Model.Category == "diffusion_models"))
-            await ModelMetadata.EnsureDefaultAsync(Config, Program.Runtime, Program.Models, Program.ModelProfiles,
+            await ModelMetadata.EnsureDefaultAsync(Config, OperationRuntime, OperationModels, OperationProfiles,
                 item.FoundPath!, ct, AppendLog);
         if (refreshInventory) await Scan(ct);
         SetStatus(missing.Count == 0 ? "当前环境已有所选模型，校验通过，无需下载。"
@@ -529,12 +563,14 @@ internal sealed partial class LauncherState : IDisposable
 
     public async Task OpenModelFolderAsync(string category, FrameworkElement? anchor = null)
     {
-        if (Busy) { SetStatus("任务进行中，请稍后打开模型目录。"); return; }
-        await Run(async ct =>
+        try
         {
+            var ct = CancellationToken.None;
             if (string.IsNullOrWhiteSpace(Config.ComfyRoot)) { GoTo(1); SetStatus("先选择并检查 ComfyUI 目录，即可打开模型文件夹。"); return; }
-            ResolvePaths();
-            var probe = await TaggerRuntime.Probe(Config, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
+            var snapshot = Config.Clone();
+            snapshot.ComfyRoot = Inventory.NormalizeRoot(snapshot.ComfyRoot);
+            snapshot.Python = Inventory.FindPython(snapshot.ComfyRoot, snapshot.Python);
+            var probe = await TaggerRuntime.Probe(snapshot, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
             var paths = (probe.Paths.GetValueOrDefault(category) ?? []).Where(p => !string.IsNullOrWhiteSpace(p))
                 .Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             if (paths.Length == 0) throw new IOException("此环境没有配置该类型的模型目录，请先检查 ComfyUI 路径配置。");
@@ -553,7 +589,8 @@ internal sealed partial class LauncherState : IDisposable
                 menu.Items.Add(item);
             }
             menu.ShowAt(anchor);
-        });
+        }
+        catch (Exception ex) { TaskFailed?.Invoke(ex); }
     }
 
     // --- Services ---

@@ -74,6 +74,8 @@ $buildInfo = [ordered]@{
 Copy-Item -LiteralPath (Join-Path $content 'build-info.json') -Destination (Join-Path $candidate 'build-info.json')
 Copy-Item -LiteralPath (Join-Path $repo 'LICENSE') -Destination (Join-Path $content 'LICENSE')
 Copy-Item -LiteralPath (Join-Path $repo 'launcher\README.md') -Destination (Join-Path $content 'README.md')
+& (Join-Path $repo 'launcher\scripts\Prepare-DownloadTools.ps1') -BundleContentDirectory $content
+if ($LASTEXITCODE -ne 0) { throw 'Cannot verify embedded download tools.' }
 & $sdk restore (Join-Path $repo 'launcher\Anima.Launcher.WinUI\Anima.Launcher.WinUI.csproj') -r win-x64 --nologo
 if ($LASTEXITCODE -ne 0) { throw 'Launcher restore failed.' }
 & $python (Join-Path $repo 'launcher\scripts\export_notices.py') --assets (Join-Path $repo 'launcher\Anima.Launcher.WinUI\obj\project.assets.json') --output $content

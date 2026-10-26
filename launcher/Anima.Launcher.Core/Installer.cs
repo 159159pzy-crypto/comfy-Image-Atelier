@@ -18,14 +18,16 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
     private string? git;
     private string? uv;
     private ComfyDependencySnapshot? activeDependencies;
-    private Dictionary<string, string> Env(LauncherConfig config) => new()
+    private Dictionary<string, string> Env(LauncherConfig config, string? destination = null)
     {
+        var environment = new Dictionary<string, string>
+        {
         ["PATH"] = (git is null ? "" : Path.GetDirectoryName(git) + Path.PathSeparator) + Environment.GetEnvironmentVariable("PATH"),
         ["UV_PYTHON_INSTALL_DIR"] = Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "python"),
         ["UV_PYTHON_BIN_DIR"] = Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "bin"),
         ["UV_CACHE_DIR"] = Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "cache", "uv"),
-        ["TEMP"] = Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "temp"),
-        ["TMP"] = Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "temp"),
+        ["TEMP"] = InstallationTemporaryDirectory.CurrentPath(InstallationPlanner.ResolveRuntimeRoot(config, stateDir)),
+        ["TMP"] = InstallationTemporaryDirectory.CurrentPath(InstallationPlanner.ResolveRuntimeRoot(config, stateDir)),
         ["PIP_CACHE_DIR"] = Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "cache", "pip"),
         ["PIP_INDEX_URL"] = DownloadSources.PipIndexes(config)[0],
         ["PIP_EXTRA_INDEX_URL"] = "",
@@ -45,7 +47,10 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         ["GIT_CONFIG_VALUE_0"] = "true",
         ["GIT_CONFIG_KEY_1"] = "url." + DownloadSources.GitCandidates("https://github.com/", config)[0] + ".insteadOf",
         ["GIT_CONFIG_VALUE_1"] = "https://github.com/"
-    };
+        };
+        NetworkPolicySnapshot.Capture(config).AddEnvironment(environment, destination is null ? null : new Uri(destination));
+        return environment;
+    }
     public static void ConfigureGitEnvironment(IDictionary<string, string> environment, string source)
     {
         environment["GIT_CONFIG_COUNT"] = source == "https://github.com/" ? "1" : "2";
@@ -75,8 +80,9 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         var target = ToolInstallation.DirectoryFor(runtime, tool);
         var exe = Safety.Under(target, tool.Executable);
         if (await Task.Run(() => ToolInstallation.IsReady(runtime, tool, ct), ct)) return exe;
-        var zip = Path.Combine(runtime, "cache", name + ".zip");
-        await downloads.Fetch(name, DownloadSources.Candidates(tool.Url, config), zip, tool.Size, tool.Sha256, progress, ct);
+        var zip = BundledTools.Contains(tool) && BundledTools.IsAvailable(tool)
+            ? await BundledTools.MaterializeArchiveAsync(tool, runtime, ct)
+            : await ArtifactCache.FetchAsync(runtime, tool, config, downloads, progress, ct);
         return await ToolInstallation.InstallVerifiedArchive(runtime, tool, zip, ct);
     }
     private async Task Stage(LauncherConfig config, string stageId, string name, Func<Task> action)
@@ -125,7 +131,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             await Commands.Run(git!, ["init"], staging, log, ct);
             await WithSources("Git " + repo.Id, DownloadSources.GitCandidates(repo.Url, config), async source =>
             {
-                var env = Env(config);
+                var env = Env(config, source);
                 ConfigureGitEnvironment(env, "https://github.com/");
                 await GitFetchRecovery.Run(git!, ["fetch", "--depth", "1", source, repo.Commit], staging, log, ct, env);
             }, ct);
@@ -134,7 +140,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             if (actual != repo.Commit) throw new InvalidDataException("Git 来源提交与锁定版本不同。");
             await WithSources("Git 子模块", DownloadSources.GitCandidates("https://github.com/", config), async source =>
             {
-                var env = Env(config);
+                var env = Env(config, source);
                 ConfigureGitEnvironment(env, source);
                 await Commands.Run(git!, ["submodule", "update", "--init", "--recursive"], staging, log, ct, env);
             }, ct);
@@ -213,7 +219,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         }
         await WithSources("Python 包", DownloadSources.PipIndexes(config), async source =>
         {
-            var env = Env(config);
+            var env = Env(config, source);
             env["PIP_INDEX_URL"] = source;
             env["UV_DEFAULT_INDEX"] = source;
             var requirementsFiles = arguments.Where((arg, i) => i > 0 && arguments[i - 1] == "-r");
@@ -231,6 +237,8 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
 
     public static bool IsSourceFailure(Exception error)
     {
+        if (error is CommandFailureException command) return command.Kind is ProcessFailureKind.Transport or ProcessFailureKind.ServerUnavailable
+            or ProcessFailureKind.RateLimited or ProcessFailureKind.MissingResource or ProcessFailureKind.PackageUnavailable;
         if (error is TimeoutException or HttpRequestException) return true;
         if (error is not InvalidOperationException) return false;
         var message = error.Message.ToLowerInvariant();
@@ -252,28 +260,32 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             log($"{name} · 来源：{candidates[i]}");
             try { await action(candidates[i]); return; }
             catch (Exception ex) when (!ct.IsCancellationRequested && i + 1 < candidates.Length && IsSourceFailure(ex))
-            { log($"{name} 当前来源不可用，切换下一来源：{ex.Message}"); }
+            {
+                log($"{name} 当前来源不可用，切换下一来源：{DiagnosticRedaction.Text(ex.Message)}");
+                await Task.Delay(ex is CommandFailureException { Kind: ProcessFailureKind.RateLimited } ? TimeSpan.FromSeconds(15)
+                    : TimeSpan.FromSeconds(Math.Min(8, 1 << i)), ct);
+            }
         }
     }
 
     private async Task InstallPython(LauncherConfig config, CancellationToken ct)
     {
-        await WithSources("Python 运行时", DownloadSources.PythonMirrors(config), async source =>
-        {
-            var env = Env(config);
-            env["UV_PYTHON_INSTALL_MIRROR"] = source;
-            await Commands.Run(uv!, ["python", "install", manifest.PythonVersion], stateDir, log, ct, env);
-        }, ct);
+        var runtimeRoot = InstallationPlanner.ResolveRuntimeRoot(config, stateDir);
+        var runtime = PythonRuntimeInstallation.Resolve(manifest);
+        var archive = await ArtifactCache.FetchAsync(runtimeRoot, runtime.Artifact, config, downloads, progress, ct);
+        var installedPython = await PythonRuntimeInstallation.InstallAsync(uv!, runtimeRoot, runtime, archive, log, ct, Env(config));
         config.Python = Path.Combine(config.ComfyRoot, ".venv", "Scripts", "python.exe");
         config.PythonExplicit = false;
         // A failed --seed can leave python.exe but no pip behind; rerun seeding on retry.
         await WithSources("Python 基础包", DownloadSources.PipIndexes(config), async source =>
         {
-            var env = Env(config);
+            var env = Env(config, source);
             env["UV_DEFAULT_INDEX"] = source;
             env["PIP_INDEX_URL"] = source;
+            env["UV_PYTHON_DOWNLOADS"] = "never";
+            env["UV_PYTHON"] = installedPython;
             if (!File.Exists(config.Python))
-                await Commands.Run(uv!, ["venv", "--seed", "--python", manifest.PythonVersion, Path.Combine(config.ComfyRoot, ".venv")], stateDir, log, ct, env);
+                await Commands.Run(uv!, ["venv", "--seed", "--no-config", "--no-python-downloads", "--python", installedPython, Path.Combine(config.ComfyRoot, ".venv")], stateDir, log, ct, env);
             else
             {
                 try { await Commands.Run(config.Python, ["-m", "pip", "--version"], config.ComfyRoot, null, ct, env); }
@@ -292,7 +304,8 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             throw new IOException("修复依赖前请先停止此环境的 ComfyUI，避免运行中改动 Python 包。");
         Directory.CreateDirectory(stateDir);
         var runtime = InstallationPlanner.ResolveRuntimeRoot(config, stateDir);
-        Directory.CreateDirectory(Path.Combine(runtime, "temp"));
+        using var temporary = InstallationTemporaryDirectory.Enter(runtime);
+        log("安装临时目录：" + temporary.Path);
         git = await ResolveGit(config, ct);
         var gpuPins = await Commands.Run(config.Python, ["-B", "-c", "import importlib.metadata as m; print(chr(10).join(n+'=='+m.version(n) for n in ['torch','torchvision','torchaudio'] if m.packages_distributions().get(n)))"], config.ComfyRoot, null, ct);
         activeDependencies = dependencies;
@@ -365,6 +378,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         if (await ServiceManager.PortOpen(config.ComfyPort, ct) || OwnedComfyRunning())
             throw new IOException("修复可选依赖前请先停止 ComfyUI。");
         var runtime = InstallationPlanner.ResolveRuntimeRoot(config, stateDir);
+        using var temporary = InstallationTemporaryDirectory.Enter(runtime);
         var statusPath = Path.Combine(runtime, "optional-dependencies.json");
         try
         {
@@ -485,7 +499,8 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         if (!preflight.CanInstall) throw new InvalidOperationException(string.Join(Environment.NewLine, preflight.Issues.Where(i => i.Blocking).Select(i => i.Message)));
         var runtimeDirectory = InstallationPlanner.ResolveRuntimeRoot(config, stateDir);
         Directory.CreateDirectory(runtimeDirectory);
-        Directory.CreateDirectory(Path.Combine(runtimeDirectory, "temp"));
+        using var temporary = InstallationTemporaryDirectory.Enter(runtimeDirectory);
+        log("安装临时目录：" + temporary.Path);
         Directory.CreateDirectory(Path.Combine(runtimeDirectory, "bin"));
         InstallationPlanner.PreserveCompletedStages(config, manifest, stateDir);
         var file = Path.Combine(stateDir, "install-state.json");
@@ -521,8 +536,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
                 var wheels = new List<string>();
                 foreach (var wheel in manifest.TorchWheels)
                 {
-                    var destination = Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "cache", "wheels", wheel.Executable);
-                    await downloads.Fetch(wheel.Id, DownloadSources.Candidates(wheel.Url, config), destination, wheel.Size, wheel.Sha256, progress, ct);
+                    var destination = await ArtifactCache.FetchAsync(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), wheel, config, downloads, progress, ct);
                     wheels.Add(destination);
                 }
                 await Pip(config, wheels, ct);

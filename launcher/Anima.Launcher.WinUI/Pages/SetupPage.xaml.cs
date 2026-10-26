@@ -800,6 +800,8 @@ public sealed partial class SetupPage : LauncherPage
         });
     }
 
+    private void Downloads_Click(object sender, RoutedEventArgs e) => State.GoTo(6);
+
     private void Logs_Click(object sender, RoutedEventArgs e)
     {
         if (!assistant.IsWorking) RunUi(Shell.ShowSetupLogs);

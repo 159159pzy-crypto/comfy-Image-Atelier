@@ -27,7 +27,7 @@ internal sealed partial class LauncherState
     public InstallationPlan? SetupPlan { get; private set; }
     public PreflightResult? SetupPreflight { get; private set; }
     public bool SetupCanInstall => !Busy && setupReview.CanInstall && SetupPlan is not null;
-    public bool SetupCanResume => !Busy && (Setup.InstallFinished && Setup.ModelsPending
+    public bool SetupCanResume => !Busy && (Setup.InstallStarted && SetupPlan is not null || Setup.InstallFinished && Setup.ModelsPending
         || setupRetryAvailable && setupInstallAction is not null);
     public bool SetupImportNeedsRepair => setupImportNeedsRepair;
     public bool SetupLegacyDirectRoot => Setup.Fresh && Setup.DirectComfyRoot;
@@ -76,7 +76,7 @@ internal sealed partial class LauncherState
         if (route == SetupStep.Installing)
             SetupNotice = Setup.InstallFinished && Setup.ModelsPending
                 ? "环境已安装，所选模型尚未准备完成。点击继续可复用已下载文件。"
-                : "发现上次未完成的安装。重新检查后继续，已完成的文件和步骤会自动复用。";
+                : "发现上次未完成的安装。点击继续将使用原先确认的固定版本，已完成步骤会复用。";
         if (Setup.InstallStarted && Setup.ReviewedPlan is { } resumed && SamePath(resumed.ComfyRoot, SetupTarget(Setup)))
             SetupPlan = resumed;
         if (route == SetupStep.Location && saved?.InstallFinished == true)
@@ -309,10 +309,28 @@ internal sealed partial class LauncherState
         ResetSetupStages();
         PersistSetup();
         setupReview.Invalidate();
+        var owner = DownloadTasks.RegisterOwner("setup", "安装环境与所选模型", reviewed.CreateConfig(),
+            payload: System.Text.Json.JsonSerializer.SerializeToElement(reviewed, JsonFile.Options));
         setupInstallAction = async ct =>
         {
-            Config = reviewed.CreateConfig();
-            FreshInstallRequested = reviewed.Fresh;
+            activeDownloadOwner = owner.Id;
+            try { await DownloadTasks.RunOwnerAsync(owner.Id, token => ExecuteReviewedSetupAsync(reviewed, token), ct); }
+            finally { activeDownloadOwner = null; }
+        };
+        setupRetryAvailable = true;
+        await Run(setupInstallAction, applyDrafts: false, resumeConfig: reviewed.CreateConfig(), resumeFresh: reviewed.Fresh, setupOperation: true);
+    }
+
+    private async Task ExecuteReviewedSetupAsync(InstallationPlan reviewed, CancellationToken ct)
+    {
+        activeInstallationPlan = reviewed;
+        Config = WithSavedDownloadSettings(reviewed.CreateConfig());
+        FreshInstallRequested = reviewed.Fresh;
+        Setup.Step = SetupStep.Installing;
+        Setup.InstallStarted = true;
+        PersistSetup();
+        if (!Setup.InstallFinished)
+        {
             if (!reviewed.Fresh && !setupImportNeedsRepair)
             {
                 UpdateSetupProgress(new("verify", "检查已有环境", SetupStageStatus.Running));
@@ -331,25 +349,31 @@ internal sealed partial class LauncherState
             Setup.InstallFinished = true;
             Setup.ModelsPending = true;
             PersistSetup();
-            await RunSetupSelectedModelsAsync(reviewed.ModelIds.ToArray(), ct);
-        };
-        setupRetryAvailable = true;
-        await Run(setupInstallAction, applyDrafts: false, setupOperation: true);
+        }
+        else
+        {
+            // Reuse the installed interpreter, while retaining this owner's chosen transport snapshot.
+            Config.Python = Inventory.FindPython(Config.ComfyRoot, Setup.Draft.Python);
+            Config.InstallPending = false;
+            Config.ManagedComfy = Setup.Draft.ManagedComfy;
+            FreshInstallRequested = false;
+        }
+        await RunSetupSelectedModelsAsync(reviewed.ModelIds.ToArray(), ct);
     }
 
     public async Task ResumeSetupAsync()
     {
         if (Busy) return;
-        if (!SetupCanResume) { await CheckSetupAsync(); return; }
         SetupError = "";
         SetupNotice = "";
-        if (Setup.InstallFinished && Setup.ModelsPending)
+        if (SetupPlan is { } plan && Setup.InstallStarted)
         {
-            var ids = SetupModelSelection.ResolveIds(Program.Models, Program.ModelProfiles,
-                Config.SelectedProfile, Setup.OptionalModelIds).ToArray();
-            await Run(ct => RunSetupSelectedModelsAsync(ids, ct), applyDrafts: false, setupOperation: true);
+            var owner = DownloadTasks.RegisterOwner("setup", "安装环境与所选模型", plan.CreateConfig(),
+                payload: System.Text.Json.JsonSerializer.SerializeToElement(plan, JsonFile.Options));
+            await ResumeDownloadOwnerAsync(owner.Id);
             return;
         }
+        if (!SetupCanResume) { await CheckSetupAsync(); return; }
         await Run(setupInstallAction!, applyDrafts: false, setupOperation: true);
     }
 
@@ -431,7 +455,7 @@ internal sealed partial class LauncherState
 
     private void UpdateSetupMissingModels(List<ModelStatus> scan)
     {
-        var selected = Program.ModelProfiles.RequiredModels(Program.Models, SetupActive ? Setup.Draft.SelectedProfile : Config.SelectedProfile)
+        var selected = OperationProfiles.RequiredModels(OperationModels, SetupActive ? Setup.Draft.SelectedProfile : Config.SelectedProfile)
             .Select(m => m.Id).ToHashSet();
         SetupMissingModels = scan.Where(m => selected.Contains(m.Model.Id) && m.Missing).Select(m => m.Model.Name).ToArray();
         if (SetupActive && Setup.Step is SetupStep.Installing or SetupStep.Complete)

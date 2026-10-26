@@ -1,0 +1,38 @@
+{
+  "implementation": "cpython",
+  "version": "3.11.9",
+  "build": "20240814",
+  "platform": "windows",
+  "architecture": "x86_64",
+  "installationKey": "cpython-3.11.9-windows-x86_64-none",
+  "artifact": {
+    "id": "python-cpython-3.11.9-20240814-win-x64",
+    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20240814/cpython-3.11.9%2B20240814-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+    "fileName": "cpython-3.11.9+20240814-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+    "version": "3.11.9",
+    "archiveFormat": "tar.gz",
+    "size": 25072044,
+    "sha256": "8ac54a8d711ef0d49b62a2c3521c2d0403f1b221dc9d84c5f85fe48903e82523",
+    "executable": "",
+    "sources": [
+      {
+        "id": "npmmirror-python",
+        "label": "npmmirror Python",
+        "url": "https://registry.npmmirror.com/-/binary/python-build-standalone/20240814/cpython-3.11.9%2B20240814-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+        "kind": "nativeMirror",
+        "region": "cn",
+        "priority": 10,
+        "verifiedAt": "2026-10-26T06:06:09.956578+00:00"
+      },
+      {
+        "id": "nju-python",
+        "label": "南京大学 Python",
+        "url": "https://mirror.nju.edu.cn/github-release/astral-sh/python-build-standalone/20240814/cpython-3.11.9%2B20240814-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+        "kind": "nativeMirror",
+        "region": "cn",
+        "priority": 20,
+        "verifiedAt": "2026-10-26T06:06:09.956578+00:00"
+      }
+    ]
+  }
+}

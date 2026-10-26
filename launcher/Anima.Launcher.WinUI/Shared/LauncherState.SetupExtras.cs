@@ -28,7 +28,7 @@ internal sealed partial class LauncherState
         SetupNotice = "";
         ClearBatchProgress();
         UpdateSetupProgress(new("models", "确认所选模型并补齐缺失文件", SetupStageStatus.Running));
-        var required = Program.ModelProfiles.RequiredModels(Program.Models, Config.SelectedProfile).Select(m => m.Id).ToHashSet();
+        var required = OperationProfiles.RequiredModels(OperationModels, Config.SelectedProfile).Select(m => m.Id).ToHashSet();
         var optional = modelIds.Where(id => !required.Contains(id)).ToHashSet();
         var scan = await ResolveModelIdsAsync(required.ToArray(), true, ct);
         // Resolve optional resources separately: an unavailable optional runtime must
@@ -46,7 +46,7 @@ internal sealed partial class LauncherState
         SetupRequiredModelsReady = scan.Where(item => required.Contains(item.Model.Id)).All(item => !item.Missing);
         await DownloadModelsAsync(missing, ct, optional);
         foreach (var item in scan.Where(item => !item.Missing && item.Model.Category == "diffusion_models"))
-            await ModelMetadata.EnsureDefaultAsync(Config, Program.Runtime, Program.Models, Program.ModelProfiles,
+            await ModelMetadata.EnsureDefaultAsync(Config, OperationRuntime, OperationModels, OperationProfiles,
                 item.FoundPath!, ct, AppendLog);
         await ScanSetupModelsAsync(ct);
         SetupRequiredModelsReady = SetupModelsReadiness == SetupModelReadiness.Ready;

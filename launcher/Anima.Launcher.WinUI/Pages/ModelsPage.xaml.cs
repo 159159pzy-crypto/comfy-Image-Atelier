@@ -47,8 +47,8 @@ public sealed partial class ModelsPage : LauncherPage
     private void OnBusy(bool busy) => DispatcherQueue.TryEnqueue(() =>
     {
         ModelActions.IsEnabled = !busy;
-        ModelList.IsEnabled = !busy;
-        OpenLocationButton.IsEnabled = !busy && ModelList.SelectedItem is ModelRow;
+        ModelList.IsEnabled = true;
+        OpenLocationButton.IsEnabled = ModelList.SelectedItem is ModelRow;
     });
 
     private void OnBatchProgress() => DispatcherQueue.TryEnqueue(() =>
@@ -73,7 +73,7 @@ public sealed partial class ModelsPage : LauncherPage
             var verification = s.Model.IsPackage ? string.Join("\n", s.Model.Files.Select(file => file.Path + " · " + file.Sha256))
                 : s.Model.CanDownload ? s.Model.Sha256 : "仅手动导入；尚未锁定自动下载清单";
             Details.Text = $"{s.Model.Name}\n位置：{s.FoundPath ?? s.Destination}\n来源：{source}\nSHA-256：{verification}\n授权：{s.Model.License} {s.Model.LicenseUrl}";
-            OpenLocationButton.IsEnabled = !State.Busy;
+            OpenLocationButton.IsEnabled = true;
             OpenLicenseButton.IsEnabled = s.Model.SourceUrl.Length > 0 || s.Model.LicenseUrl.Length > 0 || s.Model.Urls.Length > 0;
         }
         else
@@ -92,7 +92,11 @@ public sealed partial class ModelsPage : LauncherPage
     }
     private async void Rescan_Click(object sender, RoutedEventArgs e) => await RunModelTask(ct => State.Scan(ct));
     private async void HashScan_Click(object sender, RoutedEventArgs e) => await RunModelTask(ct => State.Scan(ct, true));
-    private async void Download_Click(object sender, RoutedEventArgs e) => await RunModelTask(State.CaptureSelectedModelDownload());
+    private async void Download_Click(object sender, RoutedEventArgs e)
+    {
+        Shell.SyncPagesIntoConfig();
+        await State.StartSelectedModelDownloadsAsync();
+    }
     private async void TestImage_Click(object sender, RoutedEventArgs e) => await RunModelTask(State.TestGenerationAsync);
 
     private void SelectBase_Click(object sender, RoutedEventArgs e)
@@ -123,9 +127,16 @@ public sealed partial class ModelsPage : LauncherPage
 
     private async void OpenModelDir_Click(object sender, RoutedEventArgs e)
     {
-        if (State.Busy || ModelList.SelectedItem is not ModelRow row) return;
-        var modelId = row.Status.Model.Id;
-        await RunModelTask(ct => State.OpenModelLocationAsync(modelId, ct));
+        if (ModelList.SelectedItem is not ModelRow row) return;
+        try
+        {
+            var location = row.Status.FoundPath ?? row.Status.Destination;
+            var folder = row.Status.Model.IsPackage ? location : Path.GetDirectoryName(location);
+            if (string.IsNullOrWhiteSpace(folder)) throw new IOException("此模型目录尚未确定，请重新扫描。");
+            Directory.CreateDirectory(folder);
+            Program.Open(folder);
+        }
+        catch (Exception ex) { if (State.Root is { } root) await Dialogs.Error(root, ex.Message); }
     }
 
     private void OpenLicense_Click(object sender, RoutedEventArgs e)

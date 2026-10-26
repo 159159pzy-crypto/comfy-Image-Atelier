@@ -141,6 +141,13 @@
                             </StackPanel>
                         </Grid>
                         <TextBlock Text="默认选择 Anima。已存在的模型会复用；高级修复模型可在「模型资源」按需添加。" Style="{StaticResource StudioBodyStyle}" FontSize="11" />
+                        <ComboBox x:Name="NetworkModeBox" Header="网络连接" HorizontalAlignment="Stretch" SelectedIndex="0">
+                            <ComboBoxItem Content="系统代理" Tag="system" />
+                            <ComboBoxItem Content="直接连接" Tag="direct" />
+                            <ComboBoxItem Content="自定义 HTTP 代理" Tag="custom" />
+                        </ComboBox>
+                        <TextBox x:Name="ProxyBox" Header="自定义代理地址" PlaceholderText="http://127.0.0.1:7890" />
+                        <TextBlock Text="设置应用于下载、Git、uv 与 pip。系统 PAC 无法统一应用时会提示选择直连或明确的 HTTP 代理。暂停任务保留原设置。" Style="{StaticResource StudioBodyStyle}" FontSize="11" />
                         <Expander HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Header="高级下载设置">
                             <StackPanel Spacing="12" Margin="0,6,0,0">
                                 <TextBox x:Name="GitMirrorBox" Header="Git HTTPS 镜像模板" PlaceholderText="HTTPS 前缀或包含 {url} 的模板" TextChanged="Input_Changed" />

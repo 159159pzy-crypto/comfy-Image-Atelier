@@ -32,7 +32,7 @@ internal sealed partial class LauncherState
     }
 
     private SetupModelReview BuildSetupModelReview(List<ModelStatus> scan) => Core.SetupModelReview.Create(
-        Program.ModelProfiles.RequiredModels(Program.Models, Config.SelectedProfile), scan,
+        OperationProfiles.RequiredModels(OperationModels, Config.SelectedProfile), scan,
         status => status.Model.IsPackage
             ? ModelPackages.RemainingBytes(status.Model, status.Destination)
             : Downloads.RemainingBytes(status.Destination, status.Model.Size, status.Model.Sha256),
@@ -52,7 +52,7 @@ internal sealed partial class LauncherState
         NotifySetup();
         try
         {
-            var ids = Program.ModelProfiles.RequiredModels(Program.Models, Config.SelectedProfile).Select(model => model.Id).ToArray();
+            var ids = OperationProfiles.RequiredModels(OperationModels, Config.SelectedProfile).Select(model => model.Id).ToArray();
             // Only the required generation models are checked here. This never invokes
             // installation, repairs nodes, or applies the original installation draft.
             var scan = await ResolveModelIdsAsync(ids, true, ct);
@@ -149,7 +149,11 @@ internal sealed partial class LauncherState
         NotifySetup();
         await Run(async ct =>
         {
-            await DownloadModelIdsAsync(plan.ModelIds.ToArray(), ct, refreshInventory: false);
+            var targets = await ResolveModelIdsAsync(plan.ModelIds.ToArray(), true, ct);
+            foreach (var item in targets.Where(item => item.Missing)) ValidateDownload(item);
+            var owner = DownloadTasks.RegisterOwner("models", "基础模型", plan.CreateConfig(),
+                targets.Select(item => new ModelDownloadIntent(item.Model, item.Destination)), payload: CaptureModelContext(plan.CreateConfig()));
+            await DownloadTasks.RunOwnerAsync(owner.Id, token => DownloadFrozenModelsAsync(owner, token), ct);
             // A final required-model scan distinguishes safe downloads from any
             // remaining manual issues. Downloading never finishes onboarding.
             SetupModelsReadiness = SetupModelReadiness.Checking;

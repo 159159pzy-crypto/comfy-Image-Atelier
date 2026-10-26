@@ -140,34 +140,48 @@ public static class ComfyDependencyResolver
         var additionalFiles = additional.Select(path => PrepareNodeRequirements(path, Path.Combine(root, "nodes"), sam2Commit)).ToArray();
         var needsGit = RequirementFiles(additionalFiles).Any(path => File.ReadAllText(path).Contains("git+https://github.com/", StringComparison.OrdinalIgnoreCase));
         var reportPath = Path.Combine(root, "report.json");
-        var temporary = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(cacheRoot))!, "temp");
-        Directory.CreateDirectory(temporary);
-        Exception? last = null;
+        using var temporary = InstallationTemporaryDirectory.Enter(Path.GetDirectoryName(Path.GetFullPath(cacheRoot))!);
         var indexes = DownloadSources.PipIndexes(config);
-        foreach (var index in indexes)
-        foreach (var gitSource in needsGit ? DownloadSources.GitCandidates("https://github.com/", config) : new[] { "https://github.com/" })
+        return await WithPackageSourcesAsync(indexes,
+            needsGit ? DownloadSources.GitCandidates("https://github.com/", config) : new[] { "https://github.com/" }, async (index, gitSource) =>
         {
-            try
+            log?.Invoke("解析当前稳定版依赖（保留已安装 GPU 运行时）：" + index);
+            var env = environment is null ? new Dictionary<string, string>() : new Dictionary<string, string>(environment);
+            env["PIP_INDEX_URL"] = index; env["PIP_EXTRA_INDEX_URL"] = ""; env["PIP_CONSTRAINT"] = constraints;
+            env["PIP_CONFIG_FILE"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
+            env["PIP_CACHE_DIR"] = Path.Combine(cacheRoot, "pip"); env["TEMP"] = temporary.Path; env["TMP"] = temporary.Path;
+            Installer.ConfigureGitEnvironment(env, gitSource);
+            var arguments = new List<string> { "-m", "pip", "install", "--dry-run", "--disable-pip-version-check", "--timeout", "20", "--retries", "1", "--report", reportPath,
+                "--index-url", index, "-r", requirements, "-r", manager };
+            if (additionalFiles.Where((file, i) => file != additional[i]).Any()) arguments.Add("--no-build-isolation");
+            foreach (var file in additionalFiles) { arguments.Add("-r"); arguments.Add(file); }
+            await Commands.Run(config.Python, arguments, config.ComfyRoot, log, ct, env);
+            using var report = JsonDocument.Parse(File.ReadAllText(reportPath));
+            var pins = MergeConstraints(lines.Skip(1), report.RootElement);
+            foreach (var pin in gpu) if (!pins.Contains(pin, StringComparer.OrdinalIgnoreCase)) throw new InvalidOperationException("依赖解析试图改变已有 GPU 版本，已中止。");
+            var resolved = snapshot with { Constraints = pins, Resolved = true, PythonIdentity = identity, NodeRequirementsIdentity = nodeIdentity };
+            JsonFile.Write(saved, resolved);
+            return resolved;
+        }, ct, log);
+    }
+
+    public static async Task<T> WithPackageSourcesAsync<T>(IEnumerable<string> indexes, IEnumerable<string> gitSources,
+        Func<string, string, Task<T>> action, CancellationToken ct, Action<string>? log = null)
+    {
+        Exception? last = null;
+        var gitCandidates = gitSources.Distinct().ToArray();
+        foreach (var index in indexes.Distinct())
+        foreach (var gitSource in gitCandidates)
+        {
+            ct.ThrowIfCancellationRequested();
+            try { return await action(index, gitSource); }
+            catch (Exception ex) when (!ct.IsCancellationRequested && Installer.IsSourceFailure(ex))
             {
-                log?.Invoke("解析当前稳定版依赖（保留已安装 GPU 运行时）：" + index);
-                var env = environment is null ? new Dictionary<string, string>() : new Dictionary<string, string>(environment);
-                env["PIP_INDEX_URL"] = index; env["PIP_EXTRA_INDEX_URL"] = ""; env["PIP_CONSTRAINT"] = constraints;
-                env["PIP_CONFIG_FILE"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
-                env["PIP_CACHE_DIR"] = Path.Combine(cacheRoot, "pip"); env["TEMP"] = temporary; env["TMP"] = temporary;
-                Installer.ConfigureGitEnvironment(env, gitSource);
-                var arguments = new List<string> { "-m", "pip", "install", "--dry-run", "--disable-pip-version-check", "--timeout", "20", "--retries", "1", "--report", reportPath,
-                    "--index-url", index, "-r", requirements, "-r", manager };
-                if (additionalFiles.Where((file, i) => file != additional[i]).Any()) arguments.Add("--no-build-isolation");
-                foreach (var file in additionalFiles) { arguments.Add("-r"); arguments.Add(file); }
-                await Commands.Run(config.Python, arguments, config.ComfyRoot, log, ct, env);
-                using var report = JsonDocument.Parse(File.ReadAllText(reportPath));
-                var pins = MergeConstraints(lines.Skip(1), report.RootElement);
-                foreach (var pin in gpu) if (!pins.Contains(pin, StringComparer.OrdinalIgnoreCase)) throw new InvalidOperationException("依赖解析试图改变已有 GPU 版本，已中止。");
-                var resolved = snapshot with { Constraints = pins, Resolved = true, PythonIdentity = identity, NodeRequirementsIdentity = nodeIdentity };
-                JsonFile.Write(saved, resolved);
-                return resolved;
+                last = ex;
+                log?.Invoke("当前索引未完成解析：" + ex.Message);
+                // A missing PyPI distribution cannot be repaired by changing Git's URL.
+                if (ex is CommandFailureException { Kind: ProcessFailureKind.PackageUnavailable }) break;
             }
-            catch (Exception ex) when (!ct.IsCancellationRequested && Installer.IsSourceFailure(ex)) { last = ex; log?.Invoke("当前索引未完成解析：" + ex.Message); }
         }
         throw new InvalidOperationException("当前稳定版依赖无法在保留 GPU 版本的条件下解析。", last);
     }

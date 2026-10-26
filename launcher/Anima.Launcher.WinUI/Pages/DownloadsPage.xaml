@@ -1,0 +1,72 @@
+<local:LauncherPage
+    x:Class="Anima.Launcher.Pages.DownloadsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Anima.Launcher.Pages">
+    <ScrollViewer VerticalScrollMode="Enabled" VerticalScrollBarVisibility="Auto"
+                  HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled"
+                  HorizontalContentAlignment="Stretch" BringIntoViewOnFocusChange="True">
+    <Grid RowSpacing="12" Padding="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <StackPanel Spacing="7">
+            <TextBlock Text="下载任务" FontSize="28" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
+            <TextBlock Text="重启后任务保持待继续。暂停和取消都保留文件，删除未完成文件需要单独操作。" Style="{StaticResource StudioBodyStyle}" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button Content="一键继续" Click="ContinueAll_Click" />
+                <Button Content="全部暂停" Click="PauseAll_Click" />
+                <Button Content="网络设置" Click="Network_Click" />
+            </StackPanel>
+        </StackPanel>
+        <Grid Grid.Row="1" ColumnSpacing="8">
+            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+            <ComboBox x:Name="OwnerBox" Header="批次" DisplayMemberPath="Title" HorizontalAlignment="Stretch" SelectionChanged="Owner_Changed" />
+            <Button Grid.Column="1" Content="继续此批次" Click="ContinueOwner_Click" VerticalAlignment="Bottom" />
+            <ScrollViewer Grid.Row="1" Grid.ColumnSpan="2" MaxHeight="62" Margin="0,6,0,0" HorizontalScrollMode="Disabled">
+                <TextBlock x:Name="OwnerStatusText" TextWrapping="Wrap" IsTextSelectionEnabled="True" Foreground="{ThemeResource StudioSecondaryBrush}" />
+            </ScrollViewer>
+        </Grid>
+        <ListView x:Name="TaskList" Grid.Row="2" MinHeight="180" MaxHeight="480"
+                  ScrollViewer.VerticalScrollMode="Enabled" ScrollViewer.VerticalScrollBarVisibility="Auto"
+                  ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                  SelectionMode="Single" SelectionChanged="Task_Changed" HorizontalContentAlignment="Stretch" AutomationProperties.Name="下载文件列表">
+            <ListView.ItemTemplate>
+                <DataTemplate>
+                    <Grid Padding="8,10" RowSpacing="5" HorizontalAlignment="Stretch">
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextWrapping="Wrap" Foreground="{ThemeResource StudioTextBrush}" />
+                        <TextBlock Grid.Row="1" Text="{Binding Summary}" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource StudioSecondaryBrush}" />
+                        <ProgressBar Grid.Row="2" Value="{Binding Percent}" Minimum="0" Maximum="100" Height="4" />
+                        <TextBlock Grid.Row="3" Text="{Binding Detail}" TextWrapping="Wrap" FontSize="11" Foreground="{ThemeResource StudioSecondaryBrush}" />
+                    </Grid>
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
+        <StackPanel Grid.Row="3" Spacing="8">
+            <ScrollViewer MaxHeight="60" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled">
+                <TextBlock x:Name="SelectionText" Text="选择文件可查看状态与恢复操作。" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" />
+            </ScrollViewer>
+            <Grid ColumnSpacing="6" RowSpacing="6">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                <Button Content="暂停" Click="Pause_Click" HorizontalAlignment="Stretch" />
+                <Button Grid.Column="1" Content="原设置继续 / 重试" Click="Continue_Click" HorizontalAlignment="Stretch" />
+                <Button Grid.Column="2" Content="使用新来源继续" Click="NewSource_Click" HorizontalAlignment="Stretch" />
+                <Button Grid.Row="1" Content="取消（保留文件）" Click="Cancel_Click" HorizontalAlignment="Stretch" />
+                <Button Grid.Row="1" Grid.Column="1" Content="删除未完成文件…" Click="Delete_Click" HorizontalAlignment="Stretch" />
+                <Button Grid.Row="1" Grid.Column="2" Content="更多恢复操作" HorizontalAlignment="Stretch">
+                    <Button.Flyout>
+                        <MenuFlyout>
+                            <MenuFlyoutItem Text="打开所在目录" Click="Open_Click" />
+                            <MenuFlyoutItem Text="兼容模式重新下载…" Click="Compatibility_Click" />
+                        </MenuFlyout>
+                    </Button.Flyout>
+                </Button>
+            </Grid>
+            <TextBlock x:Name="Notice" TextWrapping="Wrap" IsTextSelectionEnabled="True" Foreground="{ThemeResource StudioSecondaryBrush}" />
+        </StackPanel>
+    </Grid>
+    </ScrollViewer>
+</local:LauncherPage>

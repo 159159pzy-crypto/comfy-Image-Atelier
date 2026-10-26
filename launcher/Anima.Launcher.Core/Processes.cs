@@ -27,8 +27,8 @@ public static class Commands
         using var process = new Process { StartInfo = Info(exe, args, cwd, env) };
         var output = new StringBuilder();
         var errors = new StringBuilder();
-        process.OutputDataReceived += (_, e) => { if (e.Data is not null) { lock (output) output.AppendLine(e.Data); log?.Invoke(e.Data); } };
-        process.ErrorDataReceived += (_, e) => { if (e.Data is not null) { lock (errors) errors.AppendLine(e.Data); log?.Invoke(e.Data); } };
+        process.OutputDataReceived += (_, e) => { if (e.Data is not null) { lock (output) output.AppendLine(e.Data); log?.Invoke(DiagnosticRedaction.Text(e.Data)); } };
+        process.ErrorDataReceived += (_, e) => { if (e.Data is not null) { lock (errors) { errors.AppendLine(e.Data); if (errors.Length > 65536) errors.Remove(0, errors.Length - 65536); } log?.Invoke(DiagnosticRedaction.Text(e.Data)); } };
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(timeout ?? DefaultTimeout);
         process.Start(); process.BeginOutputReadLine(); process.BeginErrorReadLine();
@@ -41,9 +41,7 @@ public static class Commands
         }
         if (process.ExitCode != 0)
         {
-            var tail = errors.ToString().TrimEnd();
-            var detail = tail.Length > 1200 ? tail[^1200..] : tail;
-            throw new InvalidOperationException($"{Path.GetFileName(exe)} 失败，退出码 {process.ExitCode}。{(detail.Length > 0 ? "末尾输出：" + detail : "请查看日志。")}");
+            throw new CommandFailureException(exe, process.ExitCode, output.ToString(), errors.ToString());
         }
         return output.ToString();
     }

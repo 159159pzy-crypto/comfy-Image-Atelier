@@ -11,6 +11,12 @@ internal sealed partial class LauncherState
     private void PublishBatch(ModelBatchProgressUpdate update)
     {
         BatchProgress = update;
+        SetupDownloadPercent = (int)update.Percent;
+        ProgressChanged?.Invoke((int)update.Percent);
+        ProgressText = $"整批 {update.CompletedItems}/{update.TotalItems} 项 · {update.Received / 1048576d:N1} / {update.Total / 1048576d:N1} MiB"
+            + (update.BytesPerSecond > 0 ? $" · {update.BytesPerSecond / 1048576d:N1} MiB/s" : "")
+            + (update.RemainingTime is { } remaining ? $" · 剩余 {remaining:hh\\:mm\\:ss}" : "");
+        TaskProgressChanged?.Invoke(ProgressText);
         BatchProgressChanged?.Invoke();
     }
 
@@ -24,6 +30,21 @@ internal sealed partial class LauncherState
     private static long ModelRemaining(ModelStatus item) => item.Model.IsPackage
         ? ModelPackages.RemainingBytes(item.Model, item.Destination)
         : Downloads.RemainingBytes(item.Destination, item.Model.Size, item.Model.Sha256);
+
+    private static long ModelAllocationRemaining(ModelStatus item) => item.Model.IsPackage
+        ? ModelPackages.RemainingAllocationBytes(item.Model, item.Destination)
+        : File.Exists(item.Destination) ? 0 : DownloadDiskSpace.RemainingAllocationBytes(item.Destination, item.Model.Size, item.Model.Sha256);
+
+    private static async Task CheckModelSpaceAsync(IEnumerable<ModelStatus> models, CancellationToken ct)
+    {
+        foreach (var volume in models.GroupBy(item => DownloadDiskSpace.VolumeRoot(item.Destination)))
+        {
+            var required = volume.Sum(ModelAllocationRemaining);
+            var available = await DownloadDiskSpace.AvailableForPlanningAsync(volume.Key, ct);
+            if (available < DownloadDiskSpace.SafetyMargin || required > available - DownloadDiskSpace.SafetyMargin)
+                throw new InsufficientSpaceException(volume.Key, required);
+        }
+    }
 
     private static void ValidateDownload(ModelStatus item)
     {
@@ -41,8 +62,7 @@ internal sealed partial class LauncherState
             catch (Exception ex) when (optionalIds?.Contains(item.Model.Id) == true)
             { SetupOptionalFailures.Add(item.Model.Name + "：" + ex.Message); }
         }
-        foreach (var volume in queue.Where(item => optionalIds?.Contains(item.Model.Id) != true).GroupBy(s => Path.GetPathRoot(s.Destination)))
-            Safety.FreeSpace(volume.Key!, volume.Sum(ModelRemaining));
+        await CheckModelSpaceAsync(queue.Where(item => optionalIds?.Contains(item.Model.Id) != true), ct);
         downloadQueue = queue;
         cancelDownloads = false;
         var batch = new ModelBatchProgress(queue.Select(item => item.Model), queue.ToDictionary(
@@ -54,13 +74,14 @@ internal sealed partial class LauncherState
         DownloadCancelable?.Invoke(true);
         try
         {
-            foreach (var item in queue)
+            await Task.WhenAll(queue.OrderBy(item => optionalIds?.Contains(item.Model.Id) == true).Select(async item =>
             {
+                using var priorityScope = activeDownloadOwner is null ? null : DownloadTasks.WithinOwner(activeDownloadOwner, optionalIds?.Contains(item.Model.Id) != true);
                 ct.ThrowIfCancellationRequested();
                 var progress = new Progress<DownloadProgress>(value =>
                 {
                     if (!ReferenceEquals(modelBatch, batch)) return;
-                    singleProgress.Report(value);
+                    if (queue.Count == 1) singleProgress.Report(value);
                     PublishBatch(batch.Report(item.Model.Id, value));
                 });
                 PublishBatch(batch.Report(item.Model.Id, new(item.Model.Name,
@@ -68,7 +89,7 @@ internal sealed partial class LauncherState
                 try
                 {
                     if (optionalIds?.Contains(item.Model.Id) == true)
-                        Safety.FreeSpace(item.Destination, ModelRemaining(item));
+                        await CheckModelSpaceAsync([item], ct);
                     await FetchModelAsync(item, progress, ct);
                     PublishBatch(batch.Complete(item.Model.Id));
                     requiredRemaining.Remove(item.Model.Id);
@@ -79,26 +100,26 @@ internal sealed partial class LauncherState
                     SetupOptionalFailures.Add(item.Model.Name + "：" + ex.Message);
                     AppendLog("可选模型下载失败：" + item.Model.Name + "：" + ex.Message);
                 }
-            }
+            }));
         }
         finally
         {
             // Invalidate posted callbacks before a later operation replaces the batch.
             modelBatch = null;
-            if (cancelDownloads) foreach (var item in queue.Where(item => !item.Model.IsPackage)) Downloads.CancelPartial(item.Destination);
             DownloadCancelable?.Invoke(false);
         }
     }
 
     private async Task FetchModelAsync(ModelStatus item, IProgress<DownloadProgress> progress, CancellationToken ct)
     {
+        var configuration = ModelDownloadConfiguration();
         if (item.Model.IsPackage)
-            await ModelPackages.Fetch(Downloads, item.Model, item.Destination, Config, progress, ct);
+            await ModelPackages.Fetch(Downloads, item.Model, item.Destination, configuration, progress, ct);
         else
-            await Downloads.Fetch(item.Model.Name, DownloadSources.ModelCandidates(item.Model, Config), item.Destination,
+            await Downloads.Fetch(item.Model.Name, DownloadSources.ModelCandidates(item.Model, configuration), item.Destination,
                 item.Model.Size, item.Model.Sha256, progress, ct);
         if (item.Model.Category == "diffusion_models")
-            await ModelMetadata.EnsureDefaultAsync(Config, Program.Runtime, Program.Models, Program.ModelProfiles,
+            await ModelMetadata.EnsureDefaultAsync(configuration, OperationRuntime, OperationModels, OperationProfiles,
                 item.Destination, ct, AppendLog);
     }
 }

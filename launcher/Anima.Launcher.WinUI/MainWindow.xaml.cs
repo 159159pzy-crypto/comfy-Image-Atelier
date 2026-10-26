@@ -21,6 +21,7 @@ public sealed partial class MainWindow : Window
     private readonly bool forceShow;
     private TaskbarIcon? tray;
     private volatile bool reallyClose;
+    private bool exiting;
     private bool minimizeNotified;
     private int selectedPage;
     private bool downloadCancelable;
@@ -138,8 +139,8 @@ public sealed partial class MainWindow : Window
             return;
         }
         // Tray and background service actions cannot abandon a running wizard.
-        if (State.SetupActive && index != 3) index = 5;
-        selectedPage = Math.Clamp(index, 0, 5);
+        if (State.SetupActive && index != 3 && index != 6) index = 5;
+        selectedPage = Math.Clamp(index, 0, 6);
         var page = selectedPage switch
         {
             1 => typeof(Pages.EnvironmentPage),
@@ -147,6 +148,7 @@ public sealed partial class MainWindow : Window
             3 => typeof(Pages.LogsPage),
             4 => typeof(Pages.SettingsPage),
             5 => typeof(Pages.SetupPage),
+            6 => typeof(Pages.DownloadsPage),
             _ => typeof(Pages.ServicesPage),
         };
         if (ContentFrame.CurrentSourcePageType != page) ContentFrame.Navigate(page);
@@ -196,12 +198,13 @@ public sealed partial class MainWindow : Window
 
     private void UpdateNavigation()
     {
-        var buttons = new[] { HomeNav, EnvironmentNav, ModelsNav, LogsNav, SettingsNav };
+        var buttons = new[] { HomeNav, EnvironmentNav, ModelsNav, LogsNav, SettingsNav, DownloadsNav };
         for (var i = 0; i < buttons.Length; i++)
         {
-            buttons[i].Background = i == selectedPage ? ThemeBrush("StudioSurfaceBrush") : new SolidColorBrush(Colors.Transparent);
-            buttons[i].Foreground = ThemeBrush(i == selectedPage ? "StudioTextBrush" : "StudioSecondaryBrush");
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(buttons[i], i == selectedPage ? "当前页面" : "");
+            var selected = int.Parse(buttons[i].Tag.ToString()!) == selectedPage;
+            buttons[i].Background = selected ? ThemeBrush("StudioSurfaceBrush") : new SolidColorBrush(Colors.Transparent);
+            buttons[i].Foreground = ThemeBrush(selected ? "StudioTextBrush" : "StudioSecondaryBrush");
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(buttons[i], selected ? "当前页面" : "");
         }
     }
 
@@ -255,16 +258,8 @@ public sealed partial class MainWindow : Window
         if (reallyClose) return;
         if (tray is null)
         {
-            // No tray icon means a hidden window would be unreachable. While a task
-            // runs, refuse to close so the user can pause it; otherwise allow the
-            // real exit — owned services keep running like "退出（保留服务）".
-            if (State.Busy)
-            {
-                args.Cancel = true;
-                StatusText.Text = "托盘不可用且任务进行中；请先暂停任务再退出。";
-                return;
-            }
-            Program.Log("托盘不可用，关闭窗口将直接退出（服务保留）。");
+            args.Cancel = true;
+            Exit(false);
             return;
         }
         args.Cancel = true;
@@ -282,9 +277,13 @@ public sealed partial class MainWindow : Window
         try { Activate(); } catch { }
     }
 
-    private void Exit(bool stop)
+    private async void Exit(bool stop)
     {
-        if (State.Busy) { ShowWindow(); StatusText.Text = "请先暂停当前任务再退出。"; return; }
+        if (reallyClose || exiting) return;
+        exiting = true;
+        StatusText.Text = "正在保存下载检查点并退出…";
+        try { await State.PauseDownloadsAndExitAsync(); }
+        catch (Exception ex) { exiting = false; Program.Log("保存下载状态失败：" + ex.Message); StatusText.Text = ex.Message; return; }
         reallyClose = true;
         try
         {

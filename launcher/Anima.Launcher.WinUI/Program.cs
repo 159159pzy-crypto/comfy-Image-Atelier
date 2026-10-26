@@ -65,6 +65,7 @@ internal static class Program
     }
     private static LauncherPackageInfo PackageInfo()
     {
+        BundledTools.VerifyEmbedded();
         var directory = AppContext.BaseDirectory;
         var build = JsonFile.Read<JsonElement>(Path.Combine(directory, "build-info.json"));
         LauncherUpdates.ValidateBuildInfo(build, Version);
@@ -85,7 +86,9 @@ internal static class Program
             if (!hash.Equals(match.Groups[1].Value, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("启动器资源校验失败：" + relative);
             files.Add(new(relative, input.Length, hash));
         }
-        foreach (var required in new[] { "AnimaRandomStudio.dll", "Anima.Launcher.Core.dll", "AnimaRandomStudio.pri", "Microsoft.UI.Xaml.dll", "System.Private.CoreLib.dll", "build-info.json", "LICENSE", "THIRD-PARTY-NOTICES.txt" })
+        foreach (var required in new[] { "AnimaRandomStudio.dll", "Anima.Launcher.Core.dll", "AnimaRandomStudio.pri", "Microsoft.UI.Xaml.dll", "System.Private.CoreLib.dll", "build-info.json", "LICENSE", "THIRD-PARTY-NOTICES.txt",
+            "Microsoft.AspNetCore.Server.Kestrel.Core.dll", "Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.dll",
+            "DOWNLOAD-TOOLS-NOTICES.txt", "DOWNLOAD-TOOLS-SOURCES.zip" })
             if (!seen.Contains(required)) throw new InvalidDataException("启动器包缺少 " + required);
         return new(1, Version, "single-exe-v1", Environment.ProcessPath!, directory, build, files.ToArray());
     }

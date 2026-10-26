@@ -65,6 +65,13 @@ public static class DownloadSources
     }
 
     public static string[] GitCandidates(string original, LauncherConfig config) => Candidates(original, config);
+    public static string[] ArtifactCandidates(Artifact artifact, LauncherConfig config)
+    {
+        Safety.ValidateArtifact(artifact);
+        var native = PreferChina(config) ? artifact.Sources.Where(source => source.Kind == "nativeMirror")
+            .OrderBy(source => source.Priority).Select(source => source.Url) : [];
+        return DistinctValidated(native.Concat(Candidates(artifact.Url, config)));
+    }
     public static string[] ModelCandidates(ModelItem model, LauncherConfig config) => ModelCandidates(model.Urls, model.ModelScope, config);
     public static string[] ModelCandidates(ModelFile file, LauncherConfig config) => ModelCandidates(file.Urls, file.ModelScope, config);
 
@@ -102,6 +109,9 @@ public static class DownloadSources
             "github.com" => "GitHub 官方",
             "mirror.sjtu.edu.cn" => "上海交大镜像",
             "download.pytorch.org" => "PyTorch 官方",
+            "registry.npmmirror.com" or "cdn.npmmirror.com" => "npmmirror 国内镜像",
+            "mirror.nju.edu.cn" or "mirrors.nju.edu.cn" => "南京大学镜像",
+            "mirrors.huaweicloud.com" => "华为云镜像",
             _ => uri.Host
         };
     }

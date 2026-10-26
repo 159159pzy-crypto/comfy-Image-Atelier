@@ -8,6 +8,8 @@ using System.Text.Json;
 using Anima.Launcher.Core;
 
 if (await LauncherUpdateProcessTests.TryHandleFixture(args)) return;
+if (await TaskServiceTests.TryHandleFixture(args)) return;
+if (await DownloadCrashTests.TryHandleFixture(args)) return;
 
 if (args.FirstOrDefault() == "--exit-fixture")
 {
@@ -45,6 +47,26 @@ var manifest = JsonFile.Read<RuntimeManifest>(Path.Combine(manifestDir, "launche
 var models = JsonFile.Read<ModelManifest>(Path.Combine(manifestDir, "model-manifest.json"));
 var taggerModels = JsonFile.Read<ModelManifest>(Path.Combine(root, "anima_webui", "tagger-models.json"));
 models = models with { Models = models.Models.Concat(taggerModels.Models).ToArray() };
+if (args.FirstOrDefault() == "--download-tools-acceptance")
+{
+    await ArtifactNetworkTests.RunAcceptance(root, Path.GetFullPath(args[1]));
+    return;
+}
+if (args.FirstOrDefault() == "--download-environment-acceptance")
+{
+    await ArtifactNetworkTests.RunEnvironmentAcceptance(root, Path.GetFullPath(args[1]));
+    return;
+}
+if (args.FirstOrDefault() == "--installation-temp-acceptance")
+{
+    await ArtifactNetworkTests.RunTemporaryDirectoryAcceptance(root, Path.GetFullPath(args[1]));
+    return;
+}
+if (args.FirstOrDefault() == "--seed-download-ui")
+{
+    await DownloadUiFixture.Seed(Path.GetFullPath(args[1]), root, models, args.Contains("--long-error"));
+    return;
+}
 if (args.FirstOrDefault() == "--preview-latest")
 {
     try
@@ -125,6 +147,53 @@ if (args.Contains("--download-sources-only"))
     count += await DownloadSourceTests.Run(work, models);
     Console.WriteLine($"{count} download source checks passed."); return;
 }
+if (args.Contains("--download-engine-only"))
+{
+    count += await DownloadEngineTests.Run(work);
+    Console.WriteLine($"{count} download engine checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--download-performance-only"))
+{
+    count += await DownloadPerformanceTests.Run(work);
+    Console.WriteLine($"{count} download performance checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--download-crash-only"))
+{
+    count += await DownloadCrashTests.Run(work);
+    Console.WriteLine($"{count} download crash recovery checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--download-tasks-only"))
+{
+    count += await TaskStoreTests.Run(work);
+    count += await TaskServiceTests.Run(work);
+    count += DownloadOwnerRecoveryTests.Run(work);
+    Console.WriteLine($"{count} durable download task checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--artifact-network-only"))
+{
+    count += await ArtifactNetworkTests.Run(work);
+    Console.WriteLine($"{count} artifact and network checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--environment-lock-only"))
+{
+    count += await EnvironmentOperationLeaseTests.Run(work);
+    Console.WriteLine($"{count} environment concurrency checks passed."); return;
+}
+if (args.Contains("--release-recovery-only"))
+{
+    count += await ReleaseRecoveryTests.Run(work, manifest);
+    Console.WriteLine($"{count} release recovery checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--download-owner-recovery-only"))
+{
+    count += DownloadOwnerRecoveryTests.Run(work);
+    Console.WriteLine($"{count} owner recovery checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--model-packages-only"))
+{
+    count += await ModelPackageTests.Run(work, manifest, taggerModels);
+    Console.WriteLine($"{count} model package checks passed; artifacts: {work}"); return;
+}
 if (args.Contains("--comfy-release-only"))
 {
     count += await ComfyReleaseUpdateTests.Run(work, manifest);
@@ -169,6 +238,10 @@ if (args.Contains("--assistant-only"))
     Console.WriteLine($"{count} Prompt Assistant checks passed; artifacts: {work}");
     return;
 }
+if (!args.Contains("--core-only"))
+{
+if (!args.Contains("--after-artifacts"))
+{
 if (!args.Contains("--resume-node-updates"))
 {
     count += await DownloadSourceTests.Run(work, models);
@@ -190,6 +263,13 @@ count += await SetupCompletionTests.Run(work);
 count += await SetupModelSelectionTests.Run(work, manifest, models,
     JsonFile.Read<ModelProfilesManifest>(Path.Combine(manifestDir, "model-profiles.json")));
 count += await ModelBatchProgressTests.Run();
+count += await DownloadEngineTests.Run(work);
+count += await TaskStoreTests.Run(work);
+count += await TaskServiceTests.Run(work);
+count += await ArtifactNetworkTests.Run(work);
+count += await EnvironmentOperationLeaseTests.Run(work);
+count += DownloadOwnerRecoveryTests.Run(work);
+}
 await ModelLibraryTests.RunAsync(models, work, Check);
 if (args.Contains("--onboarding-only"))
 {
@@ -205,6 +285,7 @@ if (args.Contains("--recovery-only"))
 {
     Console.WriteLine($"{count} recovery checks passed; artifacts: {work}");
     return;
+}
 }
 Safety.Validate(manifest, models); Check(true, "shipped manifests validate");
 var requiredV2Classes = new[] { "PromptSelector", "QuickGroupManager", "ResolutionPreset", "PromptExpand", "KreaSeedVarianceEnhancer", "ModelPassThrough", "VRAM_Debug", "Lora Loader (LoraManager)", "Any Switch (rgthree)", "ComfyMathExpression" };
@@ -556,6 +637,11 @@ var resumeManifest = manifest with
     Nodes = [],
     Tools = [new Artifact("resume-tool", "https://example.com/tool.zip", data.Length, hash, "tool.exe")],
     TorchWheels = [new Artifact("resume-wheel", "https://example.com/torch.whl", data.Length, hash, "torch.whl")],
+    PythonRuntime = PythonRuntimeInstallation.Resolve(manifest) with
+    {
+        Artifact = new Artifact("resume-python", "https://example.com/python.tar.gz", data.Length, hash, "python.exe")
+            { ArchiveFormat = "tar.gz" }
+    },
 };
 var resumedConfig = new LauncherConfig { InstallRoot = Path.Combine(work, "resume-install") };
 var resumeState = Path.Combine(work, "resume-install-state");
@@ -566,14 +652,21 @@ Directory.CreateDirectory(Path.GetDirectoryName(wheelCache)!);
 File.WriteAllBytes(wheelCache + ".part", data[..1000]);
 JsonFile.Write(wheelCache + ".part.json", new ResumeInfo(hash, data.Length, "https://example.com/torch.whl", null));
 var partialResumePlan = InstallationPlanner.Create(resumedConfig, resumeManifest, resumeState, true);
-Check(partialResumePlan.RuntimeBytes == emptyResumePlan.RuntimeBytes - 1000 && partialResumePlan.EstimatedDownloadBytes == emptyResumePlan.EstimatedDownloadBytes - 1000, "resumed installation reserves only missing wheel bytes");
+var partialAllocationCredit = Math.Min(data.Length, DownloadDiskSpace.AllocatedBytes(wheelCache + ".part"));
+Check(partialResumePlan.RuntimeBytes == emptyResumePlan.RuntimeBytes - partialAllocationCredit
+    && partialResumePlan.EstimatedDownloadBytes == emptyResumePlan.EstimatedDownloadBytes - 1000,
+    "resumed installation separates actual allocated disk bytes from retained network bytes");
 File.WriteAllBytes(wheelCache, data);
 File.WriteAllBytes(Path.Combine(runtimeCache, "resume-tool.zip"), data);
+var pythonArchive = ArtifactCache.PathFor(emptyResumePlan.RuntimeRoot, resumeManifest.PythonRuntime!.Artifact);
+Directory.CreateDirectory(Path.GetDirectoryName(pythonArchive)!);
+File.WriteAllBytes(pythonArchive, data);
 var cachedPlan = await InstallationPlanner.RefreshSpaceEstimateAsync(emptyResumePlan, default);
 Check(cachedPlan.EstimatedDownloadBytes == 0 && cachedPlan.RuntimeBytes == cachedPlan.RuntimeReserveBytes, "verified complete caches remove download allocation from the frozen plan");
 var corruptWheel = data.ToArray(); corruptWheel[0] ^= 1;
 File.WriteAllBytes(wheelCache, corruptWheel);
-await ThrowsType<InvalidDataException>(() => InstallationPlanner.RefreshSpaceEstimateAsync(emptyResumePlan, default), "same-size corrupt cache blocks preflight instead of being trusted");
+var damagedCachePlan = await InstallationPlanner.RefreshSpaceEstimateAsync(emptyResumePlan, default);
+Check(damagedCachePlan.EstimatedDownloadBytes == data.Length, "same-size corrupt legacy cache is excluded and fully budgeted for replacement");
 Check(File.ReadAllBytes(wheelCache).SequenceEqual(corruptWheel), "space preflight never deletes or rewrites a corrupt cache");
 File.WriteAllBytes(wheelCache, data);
 
@@ -632,12 +725,42 @@ var relocatedPlan = await InstallationPlanner.ResolveModelDestinationsAsync(
     InstallationPlanner.Create(resumedConfig, resumeManifest, resumeState, true, smallModels, profiles), externalProbe, smallModels, profiles, default);
 Check(relocatedPlan.Downloads.Single(a => a.Destination == existingExternalModel).InEnvironment && relocatedPlan.EstimatedDownloadBytes == 2 * data.Length, "resumed planning reuses an existing model from effective paths without hashing it twice");
 var relocatedVolumes = InstallationPlanner.EstimateVolumes(relocatedPlan);
+var relocatedBudgetDiagnostic = new
+{
+    relocatedPlan.EnvironmentReserveBytes, relocatedPlan.RuntimeReserveBytes, relocatedPlan.EnvironmentBytes, relocatedPlan.RuntimeBytes,
+    ModelBytes = data.Length, PartialWheelAllocationCredit = partialAllocationCredit, Volumes = relocatedVolumes,
+    Artifacts = relocatedPlan.Downloads.Select(artifact => new
+    {
+        artifact.Destination, artifact.Size, artifact.InEnvironment, artifact.Bundled, artifact.VerifiedExisting,
+        artifact.RequiresReplacement, artifact.RemainingBytes, artifact.RemainingAllocationBytes,
+        artifact.LegacyDestinations, artifact.VerifiedLegacyDestinations
+    }).ToArray()
+};
+JsonFile.Write(Path.Combine(work, "relocated-budget-diagnostic.json"), relocatedBudgetDiagnostic);
+Console.WriteLine("Relocated volume budget diagnostic: " + Path.Combine(work, "relocated-budget-diagnostic.json"));
+var unverifiedRuntimeArtifacts = relocatedPlan.Downloads.Where(artifact => !artifact.InEnvironment).ToArray();
+var expectedUnverifiedRuntimeAllocation = 3L * data.Length - partialAllocationCredit;
+Check(unverifiedRuntimeArtifacts.Length == 3
+    && unverifiedRuntimeArtifacts.Single(artifact => Path.GetFileName(artifact.Destination) == "torch.whl").RemainingAllocationBytes == data.Length - partialAllocationCredit
+    && unverifiedRuntimeArtifacts.Single(artifact => Path.GetFileName(artifact.Destination) == "tool.zip").RemainingAllocationBytes == data.Length
+    && unverifiedRuntimeArtifacts.Single(artifact => Path.GetFileName(artifact.Destination) == "python.tar.gz").RemainingAllocationBytes == data.Length
+    && relocatedPlan.RuntimeBytes == relocatedPlan.RuntimeReserveBytes + expectedUnverifiedRuntimeAllocation,
+    "new relocated plan conservatively budgets its unverified tool/Python caches and credits only the wheel partial allocation");
 Check(relocatedVolumes.Single(v => v.Volume == separateVolume).RequiredBytes == 2 * data.Length + 256L * 1024 * 1024
-    && relocatedVolumes.Single(v => v.Volume.Equals(Path.GetPathRoot(work), StringComparison.OrdinalIgnoreCase)).RequiredBytes == relocatedPlan.EnvironmentReserveBytes + relocatedPlan.RuntimeReserveBytes + 256L * 1024 * 1024,
-    "each effective model destination is budgeted on its own volume while component reserves stay on their installation volumes");
+    && relocatedVolumes.Single(v => v.Volume.Equals(Path.GetPathRoot(work), StringComparison.OrdinalIgnoreCase)).RequiredBytes
+        == relocatedPlan.EnvironmentReserveBytes + relocatedPlan.RuntimeReserveBytes + expectedUnverifiedRuntimeAllocation + data.Length + 256L * 1024 * 1024,
+    "each volume includes only its own unverified models and cache allocations plus component reserves and one safety margin");
 await ThrowsType<InvalidDataException>(() => InstallationPlanner.RefreshSpaceEstimateAsync(relocatedPlan, default), "preflight verifies the existing effective model path instead of a hardcoded models directory");
 File.WriteAllBytes(existingExternalModel, data);
-Check((await InstallationPlanner.RefreshSpaceEstimateAsync(relocatedPlan, default)).EstimatedDownloadBytes == 2 * data.Length, "verified external models need no duplicate download allocation");
+var verifiedRelocatedPlan = await InstallationPlanner.RefreshSpaceEstimateAsync(relocatedPlan, default);
+Check(verifiedRelocatedPlan.EstimatedDownloadBytes == 2 * data.Length, "verified external models need no duplicate download allocation");
+Check(verifiedRelocatedPlan.Downloads.Where(artifact => !artifact.InEnvironment).All(artifact => artifact.RemainingAllocationBytes == 0)
+    && verifiedRelocatedPlan.RuntimeBytes == verifiedRelocatedPlan.RuntimeReserveBytes,
+    "strong cache verification releases all three runtime archive allocations without dropping runtime component reserves");
+var verifiedRelocatedVolumes = InstallationPlanner.EstimateVolumes(verifiedRelocatedPlan);
+Check(verifiedRelocatedVolumes.Single(v => v.Volume == separateVolume).RequiredBytes == 2 * data.Length + 256L * 1024 * 1024
+    && verifiedRelocatedVolumes.Single(v => v.Volume.Equals(Path.GetPathRoot(work), StringComparison.OrdinalIgnoreCase)).RequiredBytes == verifiedRelocatedPlan.EnvironmentReserveBytes + verifiedRelocatedPlan.RuntimeReserveBytes + 256L * 1024 * 1024,
+    "verified external contents release only their own allocation while offline model volume and component reserves remain");
 
 var metadataRoot = Path.Combine(work, "model-metadata");
 Directory.CreateDirectory(metadataRoot);

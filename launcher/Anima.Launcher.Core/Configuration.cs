@@ -39,6 +39,8 @@ public sealed class LauncherConfig
     public string GitMirror { get; set; } = "";
     public string ModelMirror { get; set; } = "";
     public string PipIndex { get; set; } = "https://pypi.org/simple";
+    public string NetworkMode { get; set; } = "system";
+    public string ProxyAddress { get; set; } = "";
     public string CustomRepository { get; set; } = "";
     public string Theme { get; set; } = "system";
     public List<string> ComfyArguments { get; set; } = [];
@@ -51,6 +53,7 @@ public sealed class LauncherConfig
     {
         if (SchemaVersion != 1) throw new InvalidDataException("不支持此配置版本，请使用对应版本的启动器。");
         if (SelectedProfile is not ("anima" or "krea2")) throw new InvalidDataException("请选择 Anima 或 Krea 2 模型档案。");
+        NetworkPolicySnapshot.ValidateSettings(NetworkMode, ProxyAddress);
         if (ComfyPort is < 1024 or > 65535 || WebPort is < 1024 or > 65535 || ComfyPort == WebPort) throw new InvalidDataException("端口需为 1024–65535 的两个不同值。");
         foreach (var url in new[] { GitMirror, ModelMirror, PipIndex, CustomRepository }.Where(x => x.Length > 0)) Safety.Https(url.Replace("{url}", "https://github.com/example/repo.git"));
         if (ComfyArguments is null || ComfyArguments.Any(argument => argument is null)) throw new InvalidDataException("启动参数必须是字符串列表。");
@@ -59,13 +62,32 @@ public sealed class LauncherConfig
 }
 
 public sealed record Repository(string Id, string Url, string Commit, string[] RequiredClasses);
-public sealed record Artifact(string Id, string Url, long Size, string Sha256, string Executable);
+public sealed record ArtifactSource(string Id, string Label, string Url, string Kind = "nativeMirror", string Region = "cn", int Priority = 100)
+{
+    public string? VerifiedAt { get; init; }
+}
+public sealed record ArtifactSupplement(string FileName, string Url, long Size, string Sha256);
+public sealed record Artifact(string Id, string Url, long Size, string Sha256, string Executable)
+{
+    public string FileName { get; init; } = "";
+    public string Version { get; init; } = "";
+    public string ArchiveFormat { get; init; } = "zip";
+    public ArtifactSource[] Sources { get; init; } = [];
+    public string ExecutableSha256 { get; init; } = "";
+    public string License { get; init; } = "";
+    public ArtifactSupplement? SourceArchive { get; init; }
+    public ArtifactSupplement[] SourceDependencies { get; init; } = [];
+    public ArtifactSupplement[] LicenseFiles { get; init; } = [];
+}
 public sealed record ModelFile(string Path, long Size, string Sha256, string[] Urls)
 {
     public ModelScopeSource? ModelScope { get; init; }
     public bool CanDownload => Size > 0 && Regex.IsMatch(Sha256 ?? "", "^[a-fA-F0-9]{64}$") && Urls.Length > 0;
 }
-public sealed record RuntimeManifest(int SchemaVersion, string Version, string Validation, Repository Comfy, string PythonVersion, string TorchVersion, string TorchVisionVersion, string TorchAudioVersion, string TorchIndex, Artifact[] Tools, Repository[] Nodes, Artifact[] TorchWheels, string[] PythonConstraints, string Sam2Commit);
+public sealed record RuntimeManifest(int SchemaVersion, string Version, string Validation, Repository Comfy, string PythonVersion, string TorchVersion, string TorchVisionVersion, string TorchAudioVersion, string TorchIndex, Artifact[] Tools, Repository[] Nodes, Artifact[] TorchWheels, string[] PythonConstraints, string Sam2Commit)
+{
+    public PythonRuntimeArtifact? PythonRuntime { get; init; }
+}
 public sealed record ModelItem(string Id, string Name, string Group, string Category, string RelativePath, string[] Aliases, long Size, string Sha256, string[] Urls, string License, string LicenseUrl)
 {
     public ModelScopeSource? ModelScope { get; init; }
@@ -150,7 +172,24 @@ public static class Safety
         Commit(runtime.Sam2Commit);
         if (runtime.PythonConstraints.Length == 0 || runtime.PythonConstraints.Any(line => !Regex.IsMatch(line, "^[A-Za-z0-9_.-]+==[A-Za-z0-9.+!-]+$"))) throw new InvalidDataException("Python 依赖必须使用确定版本。");
         foreach (var repo in runtime.Nodes.Prepend(runtime.Comfy)) { Commit(repo.Commit); Https(repo.Url); Under(Path.GetTempPath(), repo.Id); }
-        foreach (var tool in runtime.Tools.Concat(runtime.TorchWheels)) { Https(tool.Url); Under(Path.GetTempPath(), tool.Executable); if (tool.Size <= 0 || !Regex.IsMatch(tool.Sha256, "^[a-fA-F0-9]{64}$")) throw new InvalidDataException("工具缺少哈希。"); }
+        foreach (var tool in runtime.Tools.Concat(runtime.TorchWheels)) ValidateArtifact(tool);
+        if (runtime.PythonRuntime is not null) runtime.PythonRuntime.Validate(runtime.PythonVersion);
+    }
+    public static void ValidateArtifact(Artifact artifact)
+    {
+        Https(artifact.Url);
+        Under(Path.GetTempPath(), artifact.Id);
+        if (artifact.Executable.Length > 0) Under(Path.GetTempPath(), artifact.Executable);
+        if (artifact.Size <= 0 || !Regex.IsMatch(artifact.Sha256, "^[a-fA-F0-9]{64}$")) throw new InvalidDataException("工具缺少哈希。");
+        _ = ArtifactCache.FileName(artifact);
+        if (artifact.ExecutableSha256.Length > 0 && !Regex.IsMatch(artifact.ExecutableSha256, "^[a-fA-F0-9]{64}$"))
+            throw new InvalidDataException("工具程序 SHA-256 无效。");
+        foreach (var source in artifact.Sources) Https(source.Url);
+        foreach (var item in artifact.SourceDependencies.Concat(artifact.LicenseFiles).Concat(artifact.SourceArchive is null ? [] : new[] { artifact.SourceArchive }))
+        {
+            Https(item.Url); Under(Path.GetTempPath(), item.FileName);
+            if (item.Size <= 0 || !Regex.IsMatch(item.Sha256, "^[a-fA-F0-9]{64}$")) throw new InvalidDataException("工具来源或许可资料缺少校验值。");
+        }
     }
     public static void FreeSpace(string path, long bytes)
     {

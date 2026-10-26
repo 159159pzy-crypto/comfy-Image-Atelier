@@ -6,8 +6,15 @@
     <DebugType>embedded</DebugType>
   </PropertyGroup>
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+  <ItemGroup>
     <EmbeddedResource Include="../scripts/patch_prompt_assistant.py" LogicalName="Anima.Launcher.Core.patch_prompt_assistant.py" />
     <EmbeddedResource Include="../scripts/check_triton.py" LogicalName="Anima.Launcher.Core.check_triton.py" />
     <EmbeddedResource Include="../manifests/runtime-dependencies.json" LogicalName="Anima.Launcher.Core.runtime-dependencies.json" />
+    <EmbeddedResource Include="../manifests/download-tools.json" LogicalName="Anima.Launcher.Core.download-tools.json" />
+    <EmbeddedResource Include="../manifests/python-runtime.json" LogicalName="Anima.Launcher.Core.python-runtime.json" />
+    <EmbeddedResource Include="../../tools/download-tools/uv-f730454bf09019754e5e5abd71a8aa18683cb739cba0d9c720bac2e7c901160f.zip" LogicalName="Anima.Launcher.Core.Tools.uv.zip" Condition="Exists('../../tools/download-tools/uv-f730454bf09019754e5e5abd71a8aa18683cb739cba0d9c720bac2e7c901160f.zip')" />
+    <EmbeddedResource Include="../../tools/download-tools/aria2-67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288.zip" LogicalName="Anima.Launcher.Core.Tools.aria2.zip" Condition="Exists('../../tools/download-tools/aria2-67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288.zip')" />
   </ItemGroup>
 </Project>

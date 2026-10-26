@@ -59,7 +59,7 @@ public sealed class SoftwareUpdatePanel : UserControl
         automatic.Toggled += AutomaticChanged;
         check.Click += async (_, _) => await State.CheckSoftwareUpdatesAsync(true);
         download.Click += async (_, _) => await State.DownloadSoftwareUpdateAsync();
-        pause.Click += (_, _) => State.PauseTask();
+        pause.Click += async (_, _) => await State.PauseSoftwareDownloadAsync();
         install.Click += async (_, _) =>
         {
             App.Shell.SyncPagesIntoConfig();
@@ -98,7 +98,7 @@ public sealed class SoftwareUpdatePanel : UserControl
             check.IsEnabled = !State.CheckingSoftwareUpdate && !State.Busy;
             check.Content = State.CheckingSoftwareUpdate ? "正在检查…" : "检查更新";
             download.Visibility = State.HasSoftwareRelease && !State.SoftwareUpdateReady ? Visibility.Visible : Visibility.Collapsed;
-            download.IsEnabled = !State.Busy && !State.CheckingSoftwareUpdate;
+            download.IsEnabled = !State.Busy && !State.CheckingSoftwareUpdate && !State.DownloadingSoftwareUpdate;
             download.Content = State.SoftwareDownloadPaused ? "继续下载" : "下载更新";
             pause.Visibility = State.DownloadingSoftwareUpdate ? Visibility.Visible : Visibility.Collapsed;
             pause.IsEnabled = State.DownloadingSoftwareUpdate;

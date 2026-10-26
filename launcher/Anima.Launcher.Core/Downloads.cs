@@ -1,12 +1,20 @@
-using System.Net;
-using System.Diagnostics;
-using System.Net.Http.Headers;
-using System.Reflection;
 using System.Security.Cryptography;
+using System.Text.RegularExpressions;
 
 namespace Anima.Launcher.Core;
 
-public sealed record DownloadProgress(string Name, long Received, long Total, string Stage);
+public sealed record DownloadProgress(string Name, long Received, long Total, string Stage)
+{
+    public string? TaskId { get; init; }
+    public string? Phase { get; init; }
+    public string? Engine { get; init; }
+    public string? Source { get; init; }
+    public DateTimeOffset? RetryAt { get; init; }
+    public double? Speed { get; init; }
+    public int? Connections { get; init; }
+    public int? Attempt { get; init; }
+    public string? FailureCode { get; init; }
+}
 public sealed record ResumeInfo(string Sha256, long Size, string Url, string? ETag);
 public sealed record DownloadPolicy
 {
@@ -14,77 +22,149 @@ public sealed record DownloadPolicy
     public TimeSpan IdleTimeout { get; init; } = TimeSpan.FromSeconds(20);
     public TimeSpan SlowWindow { get; init; } = TimeSpan.FromSeconds(20);
     public long MinimumBytesPerSecond { get; init; } = 256 * 1024;
+    public TimeSpan RetryDelay { get; init; } = TimeSpan.FromSeconds(2);
+    public TimeSpan MaximumAutomaticRetryDelay { get; init; } = TimeSpan.FromMinutes(5);
 }
-
 public sealed class SlowDownloadException(string message) : TimeoutException(message);
 
+/// <summary>Content identity, transport selection, safe publication and a destination lease shared by all callers.</summary>
 public sealed class Downloads : IDisposable
 {
-    private readonly HttpClient client;
     private readonly Func<string, string?> credential;
+    private readonly HttpMessageHandler? handler;
     private readonly DownloadPolicy policy;
-    public Downloads(Func<string, string?>? credential = null, HttpMessageHandler? handler = null, DownloadPolicy? policy = null)
+    private readonly DownloadSourceHealth health;
+    public IDownloadDispatcher? Dispatcher { get; set; }
+    public DownloadEngineOptions EngineOptions { get; set; }
+
+    public Downloads(Func<string, string?>? credential = null, HttpMessageHandler? handler = null, DownloadPolicy? policy = null,
+        DownloadEngineOptions? engineOptions = null)
     {
         this.policy = policy ?? new();
         if (this.policy.ResponseTimeout <= TimeSpan.Zero || this.policy.IdleTimeout <= TimeSpan.Zero
-            || this.policy.SlowWindow <= TimeSpan.Zero || this.policy.MinimumBytesPerSecond < 0)
-            throw new ArgumentOutOfRangeException(nameof(policy));
-        client = new HttpClient(handler ?? NetworkPolicy.HttpHandler()) { Timeout = Timeout.InfiniteTimeSpan };
-        var assembly = Assembly.GetEntryAssembly() ?? typeof(Downloads).Assembly;
-        var version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+')[0]
-            ?? assembly.GetName().Version?.ToString() ?? "unknown";
-        client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("AnimaRandomStudio", version));
+            || this.policy.SlowWindow <= TimeSpan.Zero || this.policy.MinimumBytesPerSecond < 0 || this.policy.RetryDelay < TimeSpan.Zero
+            || this.policy.MaximumAutomaticRetryDelay <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(policy));
         this.credential = credential ?? (_ => null);
+        this.handler = handler;
+        health = handler is null ? DownloadSourceHealth.Shared : new();
+        EngineOptions = engineOptions ?? new();
     }
+
     public static async Task<bool> Verify(string file, long size, string sha, CancellationToken ct)
     {
         if (!File.Exists(file) || new FileInfo(file).Length != size) return false;
         await using var stream = File.OpenRead(file);
         return Convert.ToHexString(await SHA256.HashDataAsync(stream, ct)).Equals(sha, StringComparison.OrdinalIgnoreCase);
     }
-    /// <summary>Additional allocation needed for this download; never hashes large files on the UI thread.</summary>
-    public static long RemainingBytes(string destination, long size, string sha)
-    {
-        if (size <= 0) return 0;
-        try
-        {
-            // Fetch verifies a final file or refuses to overwrite it, so its presence
-            // does not require a second allocation. This is not an integrity verdict.
-            if (File.Exists(destination)) return 0;
-            var part = destination + ".part";
-            if (!File.Exists(part) || !File.Exists(part + ".json")) return size;
-            var resume = JsonFile.Read<ResumeInfo>(part + ".json");
-            var length = new FileInfo(part).Length;
-            return resume.Sha256 == sha && resume.Size == size && length <= size ? size - length : size;
-        }
-        catch { return size; }
-    }
-    public Task Fetch(string name, string url, string destination, long size, string sha, IProgress<DownloadProgress>? progress, CancellationToken ct) =>
-        FetchOne(name, url, destination, size, sha, progress, ct, false, 2);
 
-    public async Task Fetch(string name, IEnumerable<string> urls, string destination, long size, string sha,
+    /// <summary>A persisted lower bound on bytes still needed. Sparse file length is never download progress.</summary>
+    public static long RemainingBytes(string destination, long size, string sha) => size <= 0 || File.Exists(destination)
+        ? 0 : Math.Max(0, size - DownloadCheckpoint.RetainedBytes(destination, size, sha));
+
+    public Task Fetch(string name, string url, string destination, long size, string sha, IProgress<DownloadProgress>? progress, CancellationToken ct) =>
+        Fetch(name, new[] { url }, destination, size, sha, progress, ct);
+
+    public Task Fetch(string name, IEnumerable<string> urls, string destination, long size, string sha,
         IProgress<DownloadProgress>? progress, CancellationToken ct)
     {
-        var candidates = urls.Select(url => Safety.Https(url).AbsoluteUri).Distinct(StringComparer.Ordinal).ToArray();
-        if (candidates.Length == 0) throw new InvalidDataException("没有可用的下载来源。");
-        if (size <= 0 || sha is null || !System.Text.RegularExpressions.Regex.IsMatch(sha, "^[a-fA-F0-9]{64}$"))
-            throw new InvalidDataException("下载需要确定的大小和 SHA-256。");
-        for (var index = 0; index < candidates.Length; index++)
+        // Capture before dispatch so an unowned task cannot silently fall back to system proxy settings.
+        var request = Normalize(new(name, urls.ToArray(), destination, size, sha)
+        { Network = EngineOptions.NetworkPolicyResolver?.Invoke() ?? NetworkPolicySnapshot.Capture() });
+        return Dispatcher is { } dispatcher ? dispatcher.FetchAsync(request, progress, ct) : FetchDirectAsync(request, progress, ct);
+    }
+
+    public async Task FetchDirectAsync(DownloadRequest request, IProgress<DownloadProgress>? progress, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        request = Normalize(request);
+        var options = EngineOptions;
+        request = request with { Network = request.Network ?? options.NetworkPolicyResolver?.Invoke() ?? NetworkPolicySnapshot.Capture() };
+        using var lease = await DownloadTargetLease.AcquireAsync(request.Destination, ct);
+        ValidatePartialFiles(request.Destination);
+        if (await Verify(request.Destination, request.Size, request.Sha256, ct))
+        { progress?.Report(new(request.Name, request.Size, request.Size, "已校验，跳过") { TaskId = request.TaskId, Phase = "Completed" }); return; }
+        if (File.Exists(request.Destination)) throw new IOException("已有文件校验不符，请先手动备份后重试：" + request.Destination);
+        // An engine may have exited after completing its file but before the launcher committed it.
+        if (await Verify(DownloadCheckpoint.AriaData(request.Destination), request.Size, request.Sha256, ct))
         {
             ct.ThrowIfCancellationRequested();
-            var url = candidates[index];
+            File.Move(DownloadCheckpoint.AriaData(request.Destination), request.Destination, false);
+            DownloadCheckpoint.Cleanup(request.Destination);
+            progress?.Report(new(request.Name, request.Size, request.Size, "已恢复校验完成的下载") { TaskId = request.TaskId, Phase = "Completed", Engine = "aria2" });
+            return;
+        }
+        string? aria2 = null;
+        // Keep native checkpoints on their owning engine even when a new threshold would select HTTP.
+        var useNative = request.Size >= options.MinimumAria2Bytes
+            || File.Exists(DownloadCheckpoint.AriaData(request.Destination))
+            || File.Exists(DownloadCheckpoint.AriaState(request.Destination))
+            || File.Exists(DownloadCheckpoint.AriaControl(request.Destination));
+        if (!request.PreferHttpClient && useNative)
+        {
+            try { aria2 = options.Aria2Path ?? (options.Aria2PathResolver is { } resolver ? await resolver(ct) : null); }
+            catch (Exception error) when (error is not OperationCanceledException)
+            { progress?.Report(new(request.Name, 0, request.Size, "并行引擎不可用，使用兼容下载") { Engine = "HttpClient", Phase = "Connecting", FailureCode = "engine_unavailable", TaskId = request.TaskId }); }
+            if (string.IsNullOrWhiteSpace(aria2) || !File.Exists(aria2)) aria2 = null;
+        }
+        if (aria2 is null && !request.PreferHttpClient)
+            await DownloadCheckpoint.RestoreLegacyBeforeFallbackAsync(request, ct);
+        await using var space = await DownloadDiskSpace.AcquireAsync(request.Destination, request.Size,
+            ReusablePart(request, aria2 is not null), ct, options.DiskSpaceOptions);
+        string Key(string url) => health.Key(url, credential, request.Network!);
+        request = request with { Urls = health.Order(request.Urls, Key) };
+        using var source = new SafeHttpSourceClient(credential, policy, request.Network!, handler, health);
+        IDownloadTransport compatible = new HttpClientTransport(source, policy);
+        IDownloadTransport? native = aria2 is null ? null : new Aria2Transport(source, policy, options, aria2);
+        for (var index = 0; index < request.Urls.Length; index++)
+        {
+            ct.ThrowIfCancellationRequested();
+            var url = request.Urls[index];
             var label = DownloadSources.Label(url);
-            var sourceProgress = new InlineProgress(value => progress?.Report(value with { Stage = value.Stage + " · " + label }));
+            var sourceProgress = new DownloadInlineProgress(value => progress?.Report(value with
+            { Stage = value.Stage + " · " + label, Source = label, TaskId = request.TaskId }));
+            var last = index == request.Urls.Length - 1;
             try
             {
-                sourceProgress.Report(new(name, File.Exists(destination + ".part") ? new FileInfo(destination + ".part").Length : 0, size, "连接来源"));
-                await FetchOne(name, url, destination, size, sha, sourceProgress, ct, index < candidates.Length - 1,
-                    index < candidates.Length - 1 ? 0 : 2);
+                if (health.Cooldown(Key(url)) is { } retryAt)
+                    sourceProgress.Report(new(request.Name, DownloadCheckpoint.RetainedBytes(request.Destination, request.Size, request.Sha256), request.Size,
+                        "等待来源冷却后继续") { Phase = "RetryWaiting", RetryAt = retryAt });
+                sourceProgress.Report(new(request.Name, DownloadCheckpoint.RetainedBytes(request.Destination, request.Size, request.Sha256), request.Size, "连接来源") { Phase = "Connecting" });
+                if (native is not null)
+                {
+                    try
+                    {
+                        await native.FetchAsync(request, url, sourceProgress, ct, new(!last, last ? 3 : 0, Space: space));
+                        health.Succeeded(Key(url));
+                        return;
+                    }
+                    catch (DownloadSourceException error) when (error.StatusCode == System.Net.HttpStatusCode.RequestedRangeNotSatisfiable)
+                    {
+                        // Exactly one independent full GET. Sparse progress remains untouched and cannot become a HTTP prefix.
+                        sourceProgress.Report(new(request.Name, 0, request.Size, "服务器拒绝并行断点，保留原断点并尝试一次完整下载")
+                        { Engine = "HttpClient", Phase = "Connecting", FailureCode = "range_rejected" });
+                        await compatible.FetchAsync(request, url, sourceProgress, ct, new(!last, 0, RestartWithoutRange: true, Space: space));
+                        health.Succeeded(Key(url));
+                        return;
+                    }
+                    catch (Exception error) when (error is DownloadEngineUnavailableException or RangeNotSupportedException)
+                    {
+                        if (error is RangeNotSupportedException && !last && File.Exists(DownloadCheckpoint.AriaData(request.Destination)))
+                            throw;
+                        await DownloadCheckpoint.RestoreLegacyBeforeFallbackAsync(request, ct);
+                        sourceProgress.Report(new(request.Name, 0, request.Size, error is RangeNotSupportedException
+                            ? "来源不支持并行分段，使用兼容下载" : "并行引擎不可用，使用兼容下载") { Phase = "Connecting", Engine = "HttpClient" });
+                    }
+                }
+                await compatible.FetchAsync(request, url, sourceProgress, ct, new(!last, last ? 3 : 0, Space: space));
+                health.Succeeded(Key(url));
+                if (!request.PreferHttpClient && !File.Exists(DownloadCheckpoint.AriaData(request.Destination)))
+                    DownloadCheckpoint.Cleanup(request.Destination, includeLegacy: false);
                 return;
             }
-            catch (Exception ex) when (!ct.IsCancellationRequested && index < candidates.Length - 1 && IsSourceFailure(ex))
+            catch (Exception error) when (!ct.IsCancellationRequested && !last && IsSourceFailure(error))
             {
-                var reason = ex switch
+                if (error is not HttpRequestException { StatusCode: System.Net.HttpStatusCode.TooManyRequests }) health.Failure(Key(url));
+                var reason = error switch
                 {
                     SlowDownloadException => "持续低速",
                     TimeoutException => "连接超时",
@@ -92,160 +172,102 @@ public sealed class Downloads : IDisposable
                     HttpRequestException { StatusCode: { } status } => "HTTP " + (int)status,
                     _ => "连接中断"
                 };
-                progress?.Report(new(name, File.Exists(destination + ".part") ? new FileInfo(destination + ".part").Length : 0,
-                    size, label + " " + reason + "，切换至 " + DownloadSources.Label(candidates[index + 1])));
+                progress?.Report(new(request.Name, DownloadCheckpoint.RetainedBytes(request.Destination, request.Size, request.Sha256), request.Size,
+                    label + " " + reason + "，切换至 " + DownloadSources.Label(request.Urls[index + 1]))
+                { TaskId = request.TaskId, Phase = "Connecting", Source = label, FailureCode = reason });
             }
         }
     }
 
-    // All URL/identity validation happens before entering the candidate loop. Only
-    // response contract/digest failures can produce InvalidDataException inside it.
-    private static bool IsSourceFailure(Exception exception) => exception is HttpRequestException or TimeoutException or InvalidDataException;
-
-    private async Task FetchOne(string name, string url, string destination, long size, string sha,
-        IProgress<DownloadProgress>? progress, CancellationToken ct, bool detectSlow, int retries)
+    private static bool IsSourceFailure(Exception error) => error is HttpRequestException or TimeoutException or InvalidDataException;
+    private static string? ReusablePart(DownloadRequest request, bool native)
     {
-        Safety.Https(url);
-        if (size <= 0 || sha is null || !System.Text.RegularExpressions.Regex.IsMatch(sha, "^[a-fA-F0-9]{64}$"))
+        try
+        {
+            if (native && File.Exists(DownloadCheckpoint.AriaData(request.Destination)))
+                return DownloadCheckpoint.Read(request.Destination, request.Size, request.Sha256) is not null
+                    ? DownloadCheckpoint.AriaData(request.Destination) : null;
+            var part = request.Destination + ".part";
+            if (!File.Exists(part) || !File.Exists(part + ".json")) return null;
+            var identity = JsonFile.Read<ResumeInfo>(part + ".json");
+            return identity.Size == request.Size && identity.Sha256.Equals(request.Sha256, StringComparison.OrdinalIgnoreCase)
+                && new FileInfo(part).Length <= request.Size ? part : null;
+        }
+        catch (Exception error) when (error is IOException or System.Text.Json.JsonException or UnauthorizedAccessException) { return null; }
+    }
+    private static DownloadRequest Normalize(DownloadRequest request)
+    {
+        if (request.Size <= 0 || request.Sha256 is null || !Regex.IsMatch(request.Sha256, "^[a-fA-F0-9]{64}$"))
             throw new InvalidDataException("下载需要确定的大小和 SHA-256。");
-        var part = destination + ".part";
-        for (var attempt = 0; ; attempt++)
-        {
-            try { await FetchAttempt(name, url, destination, size, sha, progress, ct, detectSlow); return; }
-            // Restart stale ranges once. At the final source also restart a bad
-            // whole-file digest: an earlier mirror may have supplied a bad partial.
-            catch (InvalidDataException) when (attempt == 0 && !File.Exists(destination) && (File.Exists(part) || retries > 0))
-            {
-                File.Delete(part); File.Delete(part + ".json");
-                progress?.Report(new(name, 0, size, "断点与来源不符，重新下载"));
-            }
-            catch (Exception ex) when (attempt < retries && !ct.IsCancellationRequested
-                && (ex is HttpRequestException { StatusCode: null } or HttpRequestException { StatusCode: >= HttpStatusCode.InternalServerError } or OperationCanceledException))
-            {
-                progress?.Report(new(name, File.Exists(part) ? new FileInfo(part).Length : 0, size, "连接中断，自动续传"));
-                await Task.Delay(TimeSpan.FromSeconds(attempt + 1), ct);
-            }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-            {
-                throw new TimeoutException($"{name} 下载响应超时，已保留可续传的数据；请重试或切换来源。");
-            }
-        }
+        // Both standalone and dispatched downloads persist resume metadata, so share the same stable-URL boundary.
+        var urls = request.Urls.Select(DownloadTaskIdentity.StableUrl).Distinct(StringComparer.Ordinal).ToArray();
+        if (urls.Length == 0) throw new InvalidDataException("没有可用的下载来源。");
+        if (string.IsNullOrWhiteSpace(request.Destination)) throw new InvalidDataException("下载目标路径为空。");
+        return request with { Urls = urls, Destination = Path.GetFullPath(request.Destination) };
     }
-    private async Task FetchAttempt(string name, string url, string destination, long size, string sha, IProgress<DownloadProgress>? progress, CancellationToken ct, bool detectSlow)
+
+    public static IReadOnlyList<string> PartialFiles(string destination) => new[]
     {
-        if (await Verify(destination, size, sha, ct)) { progress?.Report(new(name, size, size, "已校验，跳过")); return; }
-        if (File.Exists(destination)) throw new IOException($"已有文件校验不符，请先手动备份后重试：{destination}");
-        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-        var part = destination + ".part";
-        var state = part + ".json";
-        ResumeInfo? resume = null;
-        try { if (File.Exists(state)) resume = JsonFile.Read<ResumeInfo>(state); } catch { /* Restart an invalid partial download. */ }
-        if (resume?.Sha256 != sha || resume.Size != size || !File.Exists(part) || new FileInfo(part).Length > size)
-        {
-            File.Delete(part); File.Delete(state); resume = null;
-        }
-        var offset = File.Exists(part) ? new FileInfo(part).Length : 0;
-        Safety.FreeSpace(destination, size - offset);
-        while (offset != size)
-        {
-            // Bounded requests avoid multi-GB gateway responses and retain restartable chunks.
-            long? end = size > 64L * 1024 * 1024 ? Math.Min(size - 1, offset + 32L * 1024 * 1024 - 1) : null;
-            using var response = await Request(url, offset, end, resume?.Url == url ? resume.ETag : null, ct);
-            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden) throw new HttpRequestException("来源需要访问权限；在设置中保存该官方站点令牌，或手动导入文件。", null, response.StatusCode);
-            response.EnsureSuccessStatusCode();
-            if (offset > 0 && response.StatusCode == HttpStatusCode.OK) offset = 0;
-            if (response.StatusCode == HttpStatusCode.PartialContent && (response.Content.Headers.ContentRange?.From != offset || response.Content.Headers.ContentRange?.Length != size
-                || response.Content.Headers.ContentRange?.To is null)) throw new InvalidDataException("服务器断点范围与清单不符。");
-            var expectedEnd = response.StatusCode == HttpStatusCode.PartialContent ? response.Content.Headers.ContentRange!.To!.Value : size - 1;
-            if (expectedEnd < offset || expectedEnd >= size) throw new InvalidDataException("下载范围不合法。");
-            if (response.Content.Headers.ContentLength is long length && length != expectedEnd + 1 - offset) throw new InvalidDataException("下载大小与锁定文件不符；可能返回了登录页或来源已更改。");
-            JsonFile.Write(state, new ResumeInfo(sha, size, url, response.Headers.ETag?.ToString()));
-            resume = new ResumeInfo(sha, size, url, response.Headers.ETag?.ToString());
-            await using var input = await OpenResponseStream(response, ct);
-            await using (var output = new FileStream(part, offset == 0 ? FileMode.Create : FileMode.Append, FileAccess.Write, FileShare.Read, 131072, true))
-            {
-                var buffer = new byte[131072];
-                long received = offset;
-                var lastProgress = Environment.TickCount64;
-                var speedStarted = Stopwatch.GetTimestamp();
-                long speedBytes = 0;
-                while (true)
-                {
-                    using var idle = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                    idle.CancelAfter(policy.IdleTimeout);
-                    int count;
-                    try { count = await input.ReadAsync(buffer, idle.Token); }
-                    catch (IOException ex) { throw new HttpRequestException("下载连接中断，已保留断点。", ex); }
-                    if (count == 0) break;
-                    received += count;
-                    if (received > expectedEnd + 1) throw new InvalidDataException("下载超过声明大小。");
-                    await output.WriteAsync(buffer.AsMemory(0, count), ct);
-                    speedBytes += count;
-                    var elapsed = Stopwatch.GetElapsedTime(speedStarted);
-                    if (detectSlow && elapsed >= policy.SlowWindow)
-                    {
-                        if (speedBytes / elapsed.TotalSeconds < policy.MinimumBytesPerSecond)
-                            throw new SlowDownloadException("下载来源持续低速，已保留断点。");
-                        speedStarted = Stopwatch.GetTimestamp(); speedBytes = 0;
-                    }
-                    if (Environment.TickCount64 - lastProgress > 200) { progress?.Report(new(name, received, size, "下载中")); lastProgress = Environment.TickCount64; }
-                }
-                await output.FlushAsync(ct);
-                if (received < expectedEnd + 1) throw new HttpRequestException("连接提前结束，将从已下载位置继续。");
-                offset = received;
-            }
-        }
-        progress?.Report(new(name, size, size, "SHA-256 校验中"));
-        if (!await Verify(part, size, sha, ct))
-        {
-            File.Delete(part); File.Delete(state);
-            throw new InvalidDataException("下载不完整或 SHA-256 不符，已删除无效临时文件；可切换来源重试。");
-        }
-        File.Move(part, destination, false);
-        File.Delete(state);
-        progress?.Report(new(name, size, size, "完成"));
-    }
-    private async Task<HttpResponseMessage> Request(string url, long offset, long? end, string? etag, CancellationToken ct)
+        destination + ".part", destination + ".part.json", destination + ".part.json.tmp",
+        destination + ".http-restart.part", destination + ".http-restart.part.json", destination + ".http-restart.part.json.tmp",
+        DownloadCheckpoint.AriaData(destination), DownloadCheckpoint.AriaControl(destination), DownloadCheckpoint.AriaControl(destination) + "__temp",
+        DownloadCheckpoint.AriaState(destination), DownloadCheckpoint.AriaState(destination) + ".tmp"
+    };
+    public static async Task CancelPartialAsync(string destination, CancellationToken ct = default)
     {
-        var original = Safety.Https(url);
-        var uri = original;
-        for (int redirects = 0; redirects < 10; redirects++)
+        using var lease = await DownloadTargetLease.AcquireAsync(destination, ct);
+        DownloadCheckpoint.Cleanup(destination);
+    }
+
+    /// <summary>Task-scoped cleanup rechecks content identity after acquiring the cross-process destination lease.</summary>
+    public static async Task CancelPartialAsync(string destination, long size, string sha, bool allowUnidentified,
+        CancellationToken ct = default)
+    {
+        using var lease = await DownloadTargetLease.AcquireAsync(destination, ct);
+        ValidatePartialOwnership(destination, size, sha, allowUnidentified);
+        DownloadCheckpoint.Cleanup(destination);
+    }
+
+    internal static void ValidatePartialOwnership(string destination, long size, string sha, bool allowUnidentified)
+    {
+        ValidatePartialFiles(destination);
+        foreach (var (metadata, paths) in new[]
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-            if (offset > 0 || end.HasValue)
+            (destination + ".part.json", new[] { destination + ".part", destination + ".part.json", destination + ".part.json.tmp" }),
+            (destination + ".http-restart.part.json", new[] { destination + ".http-restart.part", destination + ".http-restart.part.json", destination + ".http-restart.part.json.tmp" }),
+            (DownloadCheckpoint.AriaState(destination), new[] { DownloadCheckpoint.AriaData(destination), DownloadCheckpoint.AriaControl(destination),
+                DownloadCheckpoint.AriaControl(destination) + "__temp", DownloadCheckpoint.AriaState(destination), DownloadCheckpoint.AriaState(destination) + ".tmp" })
+        })
+        {
+            if (!paths.Any(File.Exists)) continue;
+            PartialIdentity? identity = null;
+            try { if (File.Exists(metadata)) identity = JsonFile.Read<PartialIdentity>(metadata); }
+            catch (System.Text.Json.JsonException) { }
+            if (identity is { Size: > 0 } && identity.Sha256 is { Length: 64 })
             {
-                request.Headers.Range = new RangeHeaderValue(offset, end);
-                if (!string.IsNullOrEmpty(etag)) request.Headers.TryAddWithoutValidation("If-Range", etag);
+                if (identity.Size != size || !string.Equals(identity.Sha256, sha, StringComparison.OrdinalIgnoreCase))
+                    throw new DownloadCheckpointException("目标当前断点属于另一个内容版本，已拒绝从此任务清理；其他任务的文件保持不变。");
             }
-            // Credentials never cross hosts or reach a user-selected mirror.
-            if (uri.Host == original.Host && uri.Host is "civitai.com" or "huggingface.co")
-            {
-                var token = credential(uri.Host);
-                if (!string.IsNullOrWhiteSpace(token)) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            }
-            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            deadline.CancelAfter(policy.ResponseTimeout);
-            var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
-            if ((int)response.StatusCode is not (301 or 302 or 303 or 307 or 308)) return response;
-            var location = response.Headers.Location;
-            response.Dispose();
-            if (location is null) throw new HttpRequestException("下载重定向缺少目标。");
-            uri = location.IsAbsoluteUri ? location : new Uri(uri, location);
-            // Signed CDN queries are allowed only as server redirects, never persisted or logged.
-            if (uri.Scheme != "https" || uri.UserInfo.Length > 0) throw new InvalidDataException("拒绝不安全的下载重定向。");
+            else if (!allowUnidentified)
+                throw new DownloadCheckpointException("同一目标存在多个历史内容版本，当前断点缺少可确认身份，已保留文件供检查。");
         }
-        throw new HttpRequestException("下载重定向次数过多。");
     }
-    public static void CancelPartial(string destination)
+
+    private sealed record PartialIdentity(long Size, string Sha256);
+    private static void ValidatePartialFiles(string destination)
     {
-        File.Delete(destination + ".part"); File.Delete(destination + ".part.json");
+        foreach (var path in PartialFiles(destination))
+        {
+            try
+            {
+                var attributes = File.GetAttributes(path);
+                if ((attributes & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0)
+                    throw new IOException("下载暂存路径不是普通文件，已停止以保留现有内容：" + path);
+            }
+            catch (FileNotFoundException) { }
+            catch (DirectoryNotFoundException) { }
+        }
     }
-    private static async Task<Stream> OpenResponseStream(HttpResponseMessage response, CancellationToken ct)
-    {
-        try { return await response.Content.ReadAsStreamAsync(ct); }
-        catch (IOException ex) { throw new HttpRequestException("无法读取下载响应。", ex); }
-    }
-    private sealed class InlineProgress(Action<DownloadProgress> report) : IProgress<DownloadProgress>
-    { public void Report(DownloadProgress value) => report(value); }
-    public void Dispose() => client.Dispose();
+    public static void CancelPartial(string destination) => CancelPartialAsync(destination).GetAwaiter().GetResult();
+    public void Dispose() => handler?.Dispose();
 }

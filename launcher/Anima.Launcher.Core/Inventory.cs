@@ -48,7 +48,7 @@ public static class Inventory
                     continue;
                 }
                 var packagePath = Safety.Under(packageRoots[0], item.RelativePath);
-                var packageState = await ModelPackages.State(item, packagePath, ct);
+                var packageState = await ModelPackages.State(item, packagePath, ct, forceVerification: hashes);
                 results.Add(new(item, packageState, Directory.Exists(packagePath) ? packagePath : null, packagePath));
                 continue;
             }

@@ -110,8 +110,13 @@ public sealed partial class EnvironmentPage : LauncherPage
     private void OpenSetup_Click(object sender, RoutedEventArgs e) => Shell.OpenSetup();
     private async void SaveSources_Click(object sender, RoutedEventArgs e)
     {
-        SyncConfig();
-        await State.Run(_ => { State.Save(); State.SetStatus("下载设置已保存，下次下载和更新时使用。"); return Task.CompletedTask; });
+        try
+        {
+            State.SaveDownloadSettings((SourceBox.SelectedItem as SourceProfile)?.Id ?? "official",
+                GitMirrorBox.Text, HfMirrorBox.Text, PipBox.Text,
+                (NetworkModeBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "system", ProxyBox.Text);
+        }
+        catch (Exception ex) { await ShowError(ex); }
     }
 
     private void LoadFields()
@@ -129,6 +134,8 @@ public sealed partial class EnvironmentPage : LauncherPage
             GitMirrorBox.Text = draft?.GitMirror ?? c.GitMirror;
             HfMirrorBox.Text = draft?.HfMirror ?? c.ModelMirror;
             PipBox.Text = draft?.PipIndex ?? c.PipIndex;
+            NetworkModeBox.SelectedIndex = c.NetworkMode switch { "direct" => 1, "custom" => 2, _ => 0 };
+            ProxyBox.Text = c.ProxyAddress;
             CustomRepoBox.Text = draft?.CustomRepository ?? c.CustomRepository;
             SystemInfo.Text = State.SystemInfoText;
             ImportMode.IsChecked = !fresh;

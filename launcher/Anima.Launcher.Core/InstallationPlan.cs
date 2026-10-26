@@ -17,7 +17,16 @@ public sealed record InstallationDownload(string Destination, long Size, string 
     // Final single-file models and tool caches remain protected from replacement.
     public bool RepairableStaging { get; init; }
     public bool RequiresReplacement { get; init; }
-    public long RemainingBytes => RequiresReplacement ? Size : global::Anima.Launcher.Core.Downloads.RemainingBytes(Destination, Size, Sha256);
+    public string[] LegacyDestinations { get; init; } = [];
+    public string[] VerifiedLegacyDestinations { get; init; } = [];
+    public bool VerifiedExisting { get; init; }
+    public bool Bundled { get; init; }
+    public long RemainingBytes => Bundled ? 0 : RequiresReplacement ? Size : LegacyDestinations.Aggregate(
+        global::Anima.Launcher.Core.Downloads.RemainingBytes(Destination, Size, Sha256),
+        (remaining, path) => Math.Min(remaining, global::Anima.Launcher.Core.Downloads.RemainingBytes(path, Size, Sha256)));
+    public long RemainingAllocationBytes => RequiresReplacement ? Size : VerifiedExisting || VerifiedLegacyDestinations.Length > 0 ? 0
+        : LegacyDestinations.Aggregate(DownloadDiskSpace.RemainingAllocationBytes(Destination, Size, Sha256),
+            (remaining, path) => Math.Min(remaining, DownloadDiskSpace.RemainingAllocationBytes(path, Size, Sha256)));
 }
 public sealed record PreflightResult(ImmutableArray<PreflightIssue> Issues, ImmutableArray<VolumeEstimate> Volumes)
 {
@@ -38,6 +47,8 @@ public sealed record InstallationPlan(
     public long RuntimeReserveBytes { get; init; }
     public ImmutableArray<InstallationDownload> Downloads { get; init; } = [];
     public ImmutableArray<string> ModelIds { get; init; } = [];
+    public ModelItem[] FrozenModels { get; init; } = [];
+    public ModelProfileDefinition? FrozenProfile { get; init; }
     public ImmutableArray<ModelStatus> ModelInventory { get; init; } = [];
     public bool ModelPathsDeferred { get; init; }
     public long DeferredModelBytes { get; init; }
@@ -207,20 +218,26 @@ public static class InstallationPlanner
             Safety.Under(Path.Combine(snapshot.ComfyRoot, "models"), m.Category + "/" + m.RelativePath), m.Size, m.Sha256, true)).ToList();
         if (fresh)
         {
-            artifacts.AddRange(manifest.TorchWheels.Select(w => new InstallationDownload(Path.Combine(snapshot.RuntimeRoot, "cache", "wheels", w.Executable), w.Size, w.Sha256, false)));
+            InstallationDownload Cached(Artifact artifact) => new(ArtifactCache.PathFor(snapshot.RuntimeRoot, artifact), artifact.Size, artifact.Sha256, false)
+                { LegacyDestinations = ArtifactCache.LegacyPaths(snapshot.RuntimeRoot, artifact), Bundled = BundledTools.IsAvailable(artifact), RepairableStaging = true };
+            artifacts.AddRange(manifest.TorchWheels.Select(Cached));
             artifacts.AddRange(manifest.Tools.Where(t => !ToolInstallation.IsReady(snapshot.RuntimeRoot, t))
-                .Select(t => new InstallationDownload(Path.Combine(snapshot.RuntimeRoot, "cache", t.Id + ".zip"), t.Size, t.Sha256, false)));
+                .Select(Cached));
+            var python = PythonRuntimeInstallation.Resolve(manifest);
+            if (!PythonRuntimeInstallation.IsReady(snapshot.RuntimeRoot, python)) artifacts.Add(Cached(python.Artifact));
         }
         var (environmentReserve, runtimeReserve) = RemainingComponentReserves(snapshot, manifest, stateDir, fresh);
-        var environmentDownloads = deferredBytes + artifacts.Where(a => a.InEnvironment).Sum(a => a.RemainingBytes);
-        var runtimeDownloads = artifacts.Where(a => !a.InEnvironment).Sum(a => a.RemainingBytes);
+        var environmentDownloads = deferredBytes + artifacts.Where(a => a.InEnvironment).Sum(a => a.RemainingAllocationBytes);
+        var runtimeDownloads = artifacts.Where(a => !a.InEnvironment).Sum(a => a.RemainingAllocationBytes);
+        var networkDownloads = deferredBytes + artifacts.Sum(a => a.RemainingBytes);
         var stages = (fresh
             ? new[] { "检查系统与磁盘", "准备隔离工具", "安装 ComfyUI 与 Python", "安装 CUDA / PyTorch", "安装必要节点", "验证依赖", "下载所选模型" }
             : new[] { "检查现有环境", "补齐缺失节点", "验证依赖", "检查所选模型" }).ToImmutableArray();
         return new(JsonSerializer.Serialize(snapshot, JsonFile.Options), snapshot.ComfyRoot, snapshot.RuntimeRoot,
-            snapshot.SelectedProfile, fresh, environmentReserve + environmentDownloads, runtimeReserve + runtimeDownloads, environmentDownloads + runtimeDownloads, stages)
+            snapshot.SelectedProfile, fresh, environmentReserve + environmentDownloads, runtimeReserve + runtimeDownloads, networkDownloads, stages)
         { ResolvedRuntime = fresh ? null : manifest, EnvironmentReserveBytes = environmentReserve, RuntimeReserveBytes = runtimeReserve, Downloads = artifacts.ToImmutableArray(),
-            ModelIds = required.Select(model => model.Id).ToImmutableArray(), DeferredModelBytes = deferredBytes, ModelPathsDeferred = deferredBytes > 0 };
+            ModelIds = required.Select(model => model.Id).ToImmutableArray(), FrozenModels = required,
+            FrozenProfile = profiles?.Get(snapshot.SelectedProfile), DeferredModelBytes = deferredBytes, ModelPathsDeferred = deferredBytes > 0 };
     }
 
     private static (long Environment, long Runtime) RemainingComponentReserves(LauncherConfig config, RuntimeManifest manifest, string stateDir, bool fresh)
@@ -407,6 +424,13 @@ public static class InstallationPlanner
         if (!Path.TrimEndingDirectorySeparator(Path.GetFullPath(probe.Root)).Equals(
                 Path.TrimEndingDirectorySeparator(Path.GetFullPath(plan.ComfyRoot)), StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("模型目录探测结果与安装目标不一致，请重新检查环境。");
+        if (plan.FrozenModels.Length > 0)
+        {
+            var frozenIds = plan.FrozenModels.Select(model => model.Id).ToHashSet(StringComparer.Ordinal);
+            models = models with { Models = models.Models.Where(model => !frozenIds.Contains(model.Id)).Concat(plan.FrozenModels).ToArray() };
+        }
+        if (plan.FrozenProfile is not null)
+            profiles = profiles with { Profiles = profiles.Profiles.Where(profile => profile.Id != plan.SelectedProfile).Append(plan.FrozenProfile).ToArray() };
         var selected = new ModelManifest(models.SchemaVersion, SelectedModels(plan, models, profiles));
         var inventory = await Inventory.Scan(probe, selected, false, ct);
         var artifacts = plan.Downloads.Where(a => !a.InEnvironment).ToList();
@@ -448,12 +472,13 @@ public static class InstallationPlanner
             catch (Exception ex) when (ex is not OperationCanceledException)
             { inventory.Add(new(model, "目录待确认", null, "")); }
         }
-        return WithRemainingDownloads(plan with { Downloads = artifacts.ToImmutableArray(), ModelInventory = inventory.ToImmutableArray(),
+        return WithRemainingDownloads(plan with { Downloads = artifacts.ToImmutableArray(), ModelInventory = inventory.ToImmutableArray(), FrozenModels = selected.Models,
             DeferredModelBytes = deferred, ModelPathsDeferred = deferred > 0 });
     }, ct);
 
     private static ModelItem[] SelectedModels(InstallationPlan plan, ModelManifest models, ModelProfilesManifest profiles)
     {
+        if (plan.FrozenModels.Length > 0) return plan.FrozenModels;
         if (plan.ModelIds.IsEmpty) return plan.Fresh ? profiles.RequiredModels(models, plan.SelectedProfile) : [];
         var byId = models.Models.ToDictionary(model => model.Id, StringComparer.Ordinal);
         return plan.ModelIds.Distinct().Select(id => byId.TryGetValue(id, out var model) ? model
@@ -462,9 +487,10 @@ public static class InstallationPlanner
 
     private static InstallationPlan WithRemainingDownloads(InstallationPlan plan)
     {
-        var environment = plan.DeferredModelBytes + plan.Downloads.Where(a => a.InEnvironment).Sum(a => a.RemainingBytes);
-        var runtime = plan.Downloads.Where(a => !a.InEnvironment).Sum(a => a.RemainingBytes);
-        return plan with { EnvironmentBytes = plan.EnvironmentReserveBytes + environment, RuntimeBytes = plan.RuntimeReserveBytes + runtime, EstimatedDownloadBytes = environment + runtime };
+        var environment = plan.DeferredModelBytes + plan.Downloads.Where(a => a.InEnvironment).Sum(a => a.RemainingAllocationBytes);
+        var runtime = plan.Downloads.Where(a => !a.InEnvironment).Sum(a => a.RemainingAllocationBytes);
+        return plan with { EnvironmentBytes = plan.EnvironmentReserveBytes + environment, RuntimeBytes = plan.RuntimeReserveBytes + runtime,
+            EstimatedDownloadBytes = plan.DeferredModelBytes + plan.Downloads.Sum(a => a.RemainingBytes) };
     }
 
     public static async Task<InstallationPlan> RefreshSpaceEstimateAsync(InstallationPlan plan, CancellationToken ct)
@@ -472,22 +498,37 @@ public static class InstallationPlanner
         // Verification of multi-GB caches must not synchronously block WinUI.
         return await Task.Run(async () =>
         {
-            long environment = plan.DeferredModelBytes, runtime = 0;
+            long environment = plan.DeferredModelBytes, runtime = 0, network = plan.DeferredModelBytes;
             var refreshed = ImmutableArray.CreateBuilder<InstallationDownload>(plan.Downloads.Length);
             foreach (var artifact in plan.Downloads)
             {
                 ct.ThrowIfCancellationRequested();
+                var usableLegacy = new List<string>();
+                var verifiedLegacy = new List<string>();
+                foreach (var legacy in artifact.LegacyDestinations)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (File.Exists(legacy))
+                    {
+                        if (await global::Anima.Launcher.Core.Downloads.Verify(legacy, artifact.Size, artifact.Sha256, ct))
+                        { usableLegacy.Add(legacy); verifiedLegacy.Add(legacy); }
+                    }
+                    else if (global::Anima.Launcher.Core.Downloads.RemainingBytes(legacy, artifact.Size, artifact.Sha256) < artifact.Size)
+                        usableLegacy.Add(legacy);
+                }
                 var damaged = File.Exists(artifact.Destination)
                     && !await global::Anima.Launcher.Core.Downloads.Verify(artifact.Destination, artifact.Size, artifact.Sha256, ct);
                 if (damaged && !artifact.RepairableStaging)
                     throw new InvalidDataException("已有安装文件校验不符，已保留原文件，请备份处理后继续：" + artifact.Destination);
-                var current = artifact with { RequiresReplacement = damaged };
+                var current = artifact with { RequiresReplacement = damaged, LegacyDestinations = usableLegacy.ToArray(),
+                    VerifiedExisting = File.Exists(artifact.Destination) && !damaged, VerifiedLegacyDestinations = verifiedLegacy.ToArray() };
                 refreshed.Add(current);
-                var remaining = current.RemainingBytes;
+                var remaining = current.RemainingAllocationBytes;
+                network += current.RemainingBytes;
                 if (artifact.InEnvironment) environment += remaining; else runtime += remaining;
             }
             return plan with { Downloads = refreshed.ToImmutable(), EnvironmentBytes = plan.EnvironmentReserveBytes + environment,
-                RuntimeBytes = plan.RuntimeReserveBytes + runtime, EstimatedDownloadBytes = environment + runtime };
+                RuntimeBytes = plan.RuntimeReserveBytes + runtime, EstimatedDownloadBytes = network };
         }, ct);
     }
 
@@ -501,14 +542,31 @@ public static class InstallationPlanner
     public static ImmutableArray<VolumeEstimate> EstimateVolumes(InstallationPlan plan) => new[]
         {
             (Path: plan.ComfyRoot, Bytes: plan.EnvironmentReserveBytes + plan.DeferredModelBytes), (Path: plan.RuntimeRoot, Bytes: plan.RuntimeReserveBytes)
-        }.Concat(plan.Downloads.Select(a => (Path: a.Destination, Bytes: a.RemainingBytes))
+        }.Concat(plan.Downloads.Select(a => (Path: a.Destination, Bytes: a.RemainingAllocationBytes))
             .Where(a => a.Bytes > 0))
-        .GroupBy(x => Path.GetPathRoot(x.Path)!, StringComparer.OrdinalIgnoreCase).Select(group =>
+        // The short build scratch helper only selects ancestors on this same volume;
+        // RuntimeReserveBytes already includes the pip build/extraction allowance.
+        .Select(x => (x.Bytes, Root: PlanningVolumeRoot(x.Path)))
+        .GroupBy(x => x.Root.Volume, StringComparer.OrdinalIgnoreCase).Select(group =>
         {
             long? available = null;
-            try { available = new DriveInfo(group.Key).AvailableFreeSpace; } catch { }
+            // An offline volume still belongs in the review. Never substitute the
+            // logical drive's free bytes when its physical target could not resolve.
+            if (group.All(x => x.Root.Resolved))
+                try { available = DownloadDiskSpace.AvailableBytes(group.Key); } catch { }
             return new VolumeEstimate(group.Key, checked(group.Sum(x => x.Bytes) + 256L * 1024 * 1024), available);
         }).ToImmutableArray();
+
+    private static (string Volume, bool Resolved) PlanningVolumeRoot(string path)
+    {
+        try { return (DownloadDiskSpace.VolumeRoot(path), true); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Display-only fallback. Download admission continues to require the
+            // actual volume through DownloadDiskSpace.VolumeRoot / AcquireAsync.
+            return (Path.GetPathRoot(Path.GetFullPath(path))!, false);
+        }
+    }
 
     public static async Task<PreflightResult> PreflightAsync(InstallationPlan plan, CancellationToken ct)
     {
@@ -553,10 +611,21 @@ public static class InstallationPlanner
             try { CheckWriteAccess(path); }
             catch (Exception ex) { issues.Add(new("directory_access", $"目录不可写：{path}。{ex.Message}")); }
         }
+        try { using var temporary = InstallationTemporaryDirectory.Enter(plan.RuntimeRoot); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        { issues.Add(new("temporary_directory", ex.Message)); }
         try { plan = await RefreshSpaceEstimateAsync(plan, ct); }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) { issues.Add(new("cache_invalid", ex.Message)); }
-        var volumes = EstimateVolumes(plan);
+        var volumeBuilder = ImmutableArray.CreateBuilder<VolumeEstimate>();
+        foreach (var volume in EstimateVolumes(plan))
+        {
+            if (volume.AvailableBytes is null) { volumeBuilder.Add(volume); continue; }
+            try { volumeBuilder.Add(volume with { AvailableBytes = await DownloadDiskSpace.AvailableForPlanningAsync(volume.Volume, ct) }); }
+            catch (OperationCanceledException) { throw; }
+            catch { volumeBuilder.Add(volume with { AvailableBytes = null }); }
+        }
+        var volumes = volumeBuilder.ToImmutable();
         foreach (var volume in volumes)
         {
             if (volume.AvailableBytes is null) issues.Add(new("volume_unavailable", $"无法读取磁盘 {volume.Volume} 的可用空间。"));

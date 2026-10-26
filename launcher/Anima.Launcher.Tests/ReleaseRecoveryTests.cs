@@ -122,6 +122,8 @@ internal static class ReleaseRecoveryTests
         var toolConfig = new LauncherConfig { RuntimeRoot = toolRuntime, ComfyRoot = Path.Combine(recovery, "unused-comfy") };
         var toolInstaller = new Installer(recovery, toolManifest, offline, _ => { }, null);
         var resolved = await Tool(toolInstaller, artifact.Id, toolConfig);
+        var addressedArchive = ArtifactCache.PathFor(toolRuntime, artifact);
+        Check(File.Exists(addressedArchive), "legacy verified tool archive migrates into content-addressed cache");
         Check(File.Exists(Path.Combine(toolTarget, "runtime", "required.dll")) && File.ReadAllText(resolved) == "complete fixture cmd/tool.exe",
             "an executable left by interrupted extraction is recovered from the verified cache");
         Check(refusedNetwork.Seen.Count == 0, "tool recovery reuses its verified archive without downloading");
@@ -134,7 +136,7 @@ internal static class ReleaseRecoveryTests
         File.WriteAllBytes(dependency, changedDependency);
         Check(!ToolInstallation.IsReady(toolRuntime, artifact), "same-size corruption in a tool dependency invalidates readiness");
         var unfinishedPlan = InstallationPlanner.Create(toolConfig, toolManifest with { Nodes = [], TorchWheels = [] }, recovery, true);
-        Check(unfinishedPlan.Downloads.Any(entry => entry.Destination == zipPath), "planner budgets a corrupt tool instead of trusting its executable");
+        Check(unfinishedPlan.Downloads.Any(entry => entry.Destination == addressedArchive), "planner budgets a corrupt tool instead of trusting its executable");
         await Tool(toolInstaller, artifact.Id, toolConfig);
         Check(File.ReadAllBytes(dependency).SequenceEqual(originalDependency), "tool retry repairs a corrupt dependency from its verified cached archive");
         File.Delete(dependency);
@@ -142,12 +144,12 @@ internal static class ReleaseRecoveryTests
         using (var cancellation = new CancellationTokenSource())
         {
             cancellation.Cancel();
-            try { await ToolInstallation.InstallVerifiedArchive(toolRuntime, artifact, zipPath, cancellation.Token); Check(false, "cancelled tool repair cannot publish a completion receipt"); }
+            try { await ToolInstallation.InstallVerifiedArchive(toolRuntime, artifact, addressedArchive, cancellation.Token); Check(false, "cancelled tool repair cannot publish a completion receipt"); }
             catch (OperationCanceledException) { Check(!File.Exists(dependency), "cancelled tool repair cannot publish a completion receipt"); }
         }
         await Tool(toolInstaller, artifact.Id, toolConfig);
         var finishedPlan = InstallationPlanner.Create(toolConfig, toolManifest with { Nodes = [], TorchWheels = [] }, recovery, true);
-        Check(finishedPlan.Downloads.Length == 0 && ToolInstallation.IsReady(toolRuntime, artifact), "planner and installer agree after complete tool recovery");
+        Check(!finishedPlan.Downloads.Any(entry => entry.Destination == addressedArchive) && ToolInstallation.IsReady(toolRuntime, artifact), "planner and installer agree after complete tool recovery");
 
         // Both endpoints and processes are fixtures created by this test. No ComfyUI,
         // launcher configuration or pre-existing local service participates.

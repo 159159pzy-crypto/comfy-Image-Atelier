@@ -10,6 +10,7 @@ internal sealed partial class LauncherState
     private InstalledLauncher? downloadedSoftware;
     private bool softwareExitPending;
     private bool softwareInitialized;
+    private readonly SoftwareDownloadGate softwareDownloadGate = new();
     private LauncherUpdates SoftwareUpdates => softwareUpdates ??= new(Program.StateDir, Environment.ProcessPath!, Program.Version, AppendLog);
 
     public event Action? SoftwareUpdateChanged;
@@ -21,7 +22,7 @@ internal sealed partial class LauncherState
     public double SoftwareUpdatePercent { get; private set; } = -1;
     public string SoftwareUpdateStatus { get; private set; } = "可检查启动器和工作台的新版本。便携版与安装版共用更新。";
     public bool HasSoftwareRelease => softwareRelease is not null;
-    public bool SoftwareUpdateReady => downloadedSoftware is not null;
+    public bool SoftwareUpdateReady => downloadedSoftware is not null && !DownloadingSoftwareUpdate;
     public string SoftwareReleaseNotes => softwareRelease?.Notes ?? "";
     public string SoftwareVersionText => $"当前版本 {Program.Version}" + (softwareRelease is { } release ? $"  ·  新版本 {release.Version}（{release.Size / 1048576d:N1} MiB）"
         : downloadedSoftware is { } downloaded ? $"  ·  已下载 {downloaded.Version}（{downloaded.Size / 1048576d:N1} MiB）" : "");
@@ -49,8 +50,7 @@ internal sealed partial class LauncherState
         if (Config.AutoCheckUpdates) await CheckSoftwareUpdatesAsync(false);
     }
 
-    private static bool IsNewerSoftwareVersion(string candidate) => Version.TryParse(candidate.TrimStart('v'), out var next)
-        && Version.TryParse(Program.Version, out var current) && next > current;
+    private static bool IsNewerSoftwareVersion(string candidate) => DownloadIntegrationPolicy.IsNewerSoftwareVersion(candidate, Program.Version);
 
     private void MatchDownloadedSoftware()
     {
@@ -76,7 +76,7 @@ internal sealed partial class LauncherState
 
     public async Task CheckSoftwareUpdatesAsync(bool manual)
     {
-        if (CheckingSoftwareUpdate || Busy || softwareLifetime.IsCancellationRequested || (!manual && !Config.AutoCheckUpdates)) return;
+        if (CheckingSoftwareUpdate || softwareDownloadGate.IsOccupied || DownloadingSoftwareUpdate || Busy || softwareLifetime.IsCancellationRequested || (!manual && !Config.AutoCheckUpdates)) return;
         CheckingSoftwareUpdate = true;
         if (manual) SoftwareUpdateStatus = "正在检查官方稳定版本…";
         NotifySoftwareUpdate();
@@ -99,27 +99,46 @@ internal sealed partial class LauncherState
         finally { CheckingSoftwareUpdate = false; NotifySoftwareUpdate(); }
     }
 
-    public Task DownloadSoftwareUpdateAsync() => Run(DownloadSoftwareUpdateCoreAsync, applyDrafts: false);
-
-    private async Task DownloadSoftwareUpdateCoreAsync(CancellationToken ct)
+    public async Task DownloadSoftwareUpdateAsync()
     {
-        var release = softwareRelease ?? throw new InvalidOperationException("请先检查新版本。");
+        if (softwareRelease is null || CheckingSoftwareUpdate || softwareDownloadGate.IsOccupied || DownloadingSoftwareUpdate) return;
+        var owner = DownloadTasks.RegisterOwner("software", "启动器更新 " + softwareRelease.Version, WithSavedDownloadSettings(Config),
+            payload: System.Text.Json.JsonSerializer.SerializeToElement(softwareRelease, JsonFile.Options));
+        await ResumeDownloadOwnerAsync(owner.Id);
+    }
+
+    public async Task PauseSoftwareDownloadAsync()
+    {
+        foreach (var owner in DownloadTasks.Owners.Where(o => o.Kind == "software" && o.Status == DownloadTaskStatus.Running))
+            await DownloadTasks.PauseOwnerAsync(owner.Id);
+    }
+
+    private Task DownloadSoftwareUpdateCoreAsync(CancellationToken ct) => DownloadSoftwareUpdateCoreAsync(ct, softwareRelease ?? throw new InvalidOperationException("请先检查新版本。"), Config.Clone());
+
+    private async Task DownloadSoftwareUpdateCoreAsync(CancellationToken ct, LauncherRelease release, LauncherConfig configuration)
+    {
         DownloadingSoftwareUpdate = true;
         SoftwareDownloadPaused = false;
         SoftwareUpdatePercent = -1;
         SoftwareUpdateStatus = "正在下载新版；当前生图任务保持运行。";
         NotifySoftwareUpdate();
         var footerProgress = DownloadProgress();
+        var acceptingProgress = true;
         var progress = new Progress<DownloadProgress>(p =>
         {
-            SoftwareUpdatePercent = p.Total > 0 ? p.Received * 100d / p.Total : -1;
+            if (!acceptingProgress) return;
+            // The transport's SHA check is followed by executable/build provenance checks.
+            if (p.Phase == "Completed") p = p with { Phase = "Verifying", Stage = "核验更新包内容与构建信息" };
+            SoftwareUpdatePercent = p.Total > 0 ? Math.Min(99.9, p.Received * 100d / p.Total) : -1;
             SoftwareUpdateStatus = $"{p.Stage} · {p.Received / 1048576d:N1} / {p.Total / 1048576d:N1} MiB";
-            footerProgress.Report(p);
+            if (!HasActiveModelDownload()) footerProgress.Report(p);
             NotifySoftwareUpdate();
         });
         try
         {
-            downloadedSoftware = await SoftwareUpdates.DownloadAsync(release, Downloads, progress, ct, Config);
+            downloadedSoftware = await SoftwareUpdates.DownloadAsync(release, Downloads, progress, ct, configuration);
+            acceptingProgress = false;
+            SoftwareUpdatePercent = 100;
             SoftwareUpdateStatus = "下载与完整性校验完成。空闲时点击「重启并更新」。";
             SetStatus(SoftwareUpdateStatus);
         }
@@ -135,12 +154,16 @@ internal sealed partial class LauncherState
             SoftwareUpdateStatus = "下载未完成，可重试：" + ex.Message;
             throw;
         }
-        finally { DownloadingSoftwareUpdate = false; NotifySoftwareUpdate(); }
+        finally { acceptingProgress = false; DownloadingSoftwareUpdate = false; NotifySoftwareUpdate(); }
     }
 
     public async Task RestartForSoftwareUpdateAsync()
     {
-        if (Busy || CheckingSoftwareUpdate || downloadedSoftware is null || Root is null) return;
+        if (Busy || CheckingSoftwareUpdate || DownloadingSoftwareUpdate || downloadedSoftware is null || Root is null) return;
+        using var softwareReservation = softwareDownloadGate.TryEnter();
+        if (softwareReservation is null) return;
+        // Keep the user's selected candidate stable while the confirmation dialog and preparation await.
+        var candidate = downloadedSoftware;
         if (Config.SetupComplete && DevAppRoot)
         {
             SoftwareUpdateStatus = "当前工作台使用源码目录，完整更新不能自动替换源码。请改用发布版工作台后更新。";
@@ -158,6 +181,7 @@ internal sealed partial class LauncherState
         var message = "即将更新启动器和工作台并重新打开软件。模型、配置和历史数据会保留；原来停止的服务保持停止。";
         if (Config.PinnedAppRoot.Length > 0) message += "\n本次完整更新将解除工作台的固定回退版本。";
         if (!await Dialogs.Confirm(Root, "重启并更新", message, "重启并更新", "稍后")) return;
+        await DownloadTasks.PauseAllAsync();
         var handedOff = false;
         await Run(async ct =>
         {
@@ -168,7 +192,7 @@ internal sealed partial class LauncherState
                 if (!ServiceManager.IsOurWebUi(health, Config)) throw new IOException("当前工作台不属于此环境，无法安全更新。");
                 if (await IsWorkbenchBusyAsync(ct)) throw new IOException("工作台正在生成或有排队任务。新版已保留，请在空闲后重试。");
             }
-            var transaction = await SoftwareUpdates.PrepareAsync(downloadedSoftware, Config, wasRunning, ct);
+            var transaction = await SoftwareUpdates.PrepareAsync(candidate, Config, wasRunning, ct);
             handedOff = SoftwareUpdates.StartCoordinator(transaction);
             if (!handedOff) throw new IOException("无法启动更新协调进程，当前版本保持运行。");
         }, applyDrafts: false);

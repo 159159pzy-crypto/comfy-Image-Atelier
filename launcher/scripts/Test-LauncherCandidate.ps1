@@ -43,7 +43,7 @@ try {
     $package = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
     if ($package.protocolVersion -ne 1 -or $package.version -ne $info.version -or $package.packageFormat -ne 'single-exe-v1') { throw 'Executable package metadata differs from its release metadata.' }
     if (($package.buildInfo | ConvertTo-Json -Depth 20 -Compress) -cne ($info | ConvertTo-Json -Depth 20 -Compress)) { throw 'External and embedded build-info.json differ.' }
-    foreach ($required in @('AnimaRandomStudio.dll', 'Anima.Launcher.Core.dll', 'AnimaRandomStudio.deps.json', 'AnimaRandomStudio.runtimeconfig.json', 'AnimaRandomStudio.pri', 'Microsoft.UI.Xaml.dll', 'System.Private.CoreLib.dll', 'README.md', 'LICENSE', 'THIRD-PARTY-NOTICES.txt', 'third-party-packages.json', 'build-info.json')) {
+    foreach ($required in @('AnimaRandomStudio.dll', 'Anima.Launcher.Core.dll', 'AnimaRandomStudio.deps.json', 'AnimaRandomStudio.runtimeconfig.json', 'AnimaRandomStudio.pri', 'Microsoft.UI.Xaml.dll', 'System.Private.CoreLib.dll', 'README.md', 'LICENSE', 'THIRD-PARTY-NOTICES.txt', 'third-party-packages.json', 'build-info.json', 'Microsoft.AspNetCore.Server.Kestrel.Core.dll', 'Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.dll', 'DOWNLOAD-TOOLS-NOTICES.txt', 'DOWNLOAD-TOOLS-SOURCES.zip')) {
         if ($package.files.path -notcontains $required) { throw "Required embedded file missing: $required" }
     }
 } finally {

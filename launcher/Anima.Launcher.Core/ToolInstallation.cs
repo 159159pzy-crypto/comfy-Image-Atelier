@@ -35,6 +35,7 @@ public static class ToolInstallation
                 if (!Convert.ToHexString(SHA256.HashData(input)).Equals(file.Sha256, StringComparison.OrdinalIgnoreCase)) return false;
             }
             return names.Contains(tool.Executable.Replace('\\', '/'))
+                && (tool.ExecutableSha256.Length == 0 || receipt.Files.Single(file => file.Path == tool.Executable.Replace('\\', '/')).Sha256.Equals(tool.ExecutableSha256, StringComparison.OrdinalIgnoreCase))
                 && Directory.EnumerateFiles(target, "*", SearchOption.AllDirectories).Count() == receipt.Files.Length + 1;
         }
         catch (OperationCanceledException) { throw; }
@@ -43,7 +44,10 @@ public static class ToolInstallation
 
     public static async Task<string> InstallVerifiedArchive(string runtime, Artifact tool, string archive, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         if (!await Downloads.Verify(archive, tool.Size, tool.Sha256, ct)) throw new InvalidDataException("工具归档与锁定的大小或 SHA-256 不符。");
+        using var targetLease = await DownloadTargetLease.AcquireAsync(DirectoryFor(runtime, tool), ct);
+        if (IsReady(runtime, tool, ct)) return Safety.Under(DirectoryFor(runtime, tool), tool.Executable);
         return await Task.Run(() =>
         {
             var target = DirectoryFor(runtime, tool);
@@ -69,6 +73,8 @@ public static class ToolInstallation
                 using var input = File.OpenRead(path);
                 return new InstalledToolFile(Path.GetRelativePath(staging, path).Replace('\\', '/'), input.Length, Convert.ToHexString(SHA256.HashData(input)));
             }).ToArray();
+            if (tool.ExecutableSha256.Length > 0 && !files.Single(file => file.Path == tool.Executable.Replace('\\', '/')).Sha256.Equals(tool.ExecutableSha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("工具程序与锁定的 SHA-256 不符。");
             JsonFile.Write(Path.Combine(staging, ReceiptName), new InstalledTool(tool.Id, tool.Sha256, tool.Size, tool.Executable, files));
             ct.ThrowIfCancellationRequested();
             if (Directory.Exists(target))
