@@ -18,6 +18,9 @@ function setup() {
   const ctx = createFrontendContext({
     document: { getElementById: id => elements[id] },
     profileSettingsDefaults: profile => ({ model_profile: profile, loras: [], negative_prompt: '' }),
+    randomWorkbenchDefaultSettings: profile => ({ model_profile: profile, count: 4 }),
+    SECTIONS: ['character', 'clothing', 'pose', 'background', 'expression'],
+    profileStateFrom: settings => ({ modes: {}, counts: {}, fixed: {}, pools: plain(settings.pools || {}) }),
     profileConfig: () => ({}), currentProfile: () => 'anima',
     // The server must retain secondary defaults for historical compatibility.
     config: { single_defaults: { latent: { pipeline: 'secondary' }, face_pipeline: 'secondary' } },
@@ -29,6 +32,7 @@ function setup() {
   const state = vm.runInContext('singleWorkbenchState', ctx);
   state.ready = true;
   state.mode = 'single';
+  ctx.singleWorkbenchCapture = () => ({ settings: { count: 1 }, profileDrafts: {} });
   ctx.singleWorkbenchSwitch = (mode, profile, options) => {
     state.mode = mode;
     state.single = plain(options.settings.single || {});
@@ -102,6 +106,37 @@ test('sending legacy single history preserves secondary routes and low frequency
   assert.equal(single.positive_prompt, 'saved authored prompt');
   assert.equal(state.promptSeed, 77);
   assert.equal(elements.singleSampleSeed.disabled, false);
+});
+
+test('a failed reference import leaves the current workbench and detail intact', async () => {
+  const { ctx, imported, saved } = setup(); const messages = [];
+  ctx.request = async () => { throw new Error('原图不可用'); };
+  ctx.toast = message => messages.push(message);
+  let closed = 0; ctx.motionDialog = () => closed++;
+  await ctx.singleWorkbenchFromHistory(historyRecord('random'), true);
+  assert.equal(imported.length, 0); assert.equal(saved.length, 0); assert.equal(closed, 0);
+  assert.match(messages[0], /原图不可用/);
+});
+
+test('closing or changing the detail during reference import prevents a late workbench switch', async () => {
+  const { ctx, imported, state } = setup(); let resolve;
+  ctx.request = () => new Promise(yes => { resolve = yes; });
+  const record = historyRecord('random'); ctx.selectedRecord = record; ctx.detailContext = { origin: 'random' };
+  const importing = ctx.singleWorkbenchFromHistory(record, true);
+  ctx.detailContext = { origin: 'single' }; state.historyTransferRequest++;
+  resolve({ id: 'new-managed-reference' }); await importing;
+  assert.equal(imported.length, 0); assert.equal(state.historyTransferBusy, false);
+});
+
+test('reference import finishes before committing the destination workbench', async () => {
+  const { ctx, imported } = setup(); let resolve; const events = [];
+  ctx.request = () => new Promise(yes => { resolve = yes; });
+  ctx.singleWorkbenchSetInput = image => events.push(`input:${image.id}`);
+  ctx.artworkRevealWorkbench = () => events.push('reveal');
+  const importing = ctx.singleWorkbenchFromHistory(historyRecord('random'), true);
+  assert.equal(imported.length, 0);
+  resolve({ id: 'managed-reference' }); await importing;
+  assert.equal(imported.length, 1); assert.deepEqual(events, ['input:managed-reference', 'reveal']);
 });
 
 test('restoring single history makes the fixed seed editable before persisting', () => {

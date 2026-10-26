@@ -154,7 +154,7 @@ test('reference load failure only changes the thumbnail status and late image ev
   const label = { firstChild: { textContent: '' } }, promptHost = { append() {} }, outputSize = {};
   ctx.selectedRecord = saved;
   ctx.ui = { detailDialog: { classList: { toggle() {}, remove() {} } }, detailStats: { innerHTML: '', querySelector: () => outputSize },
-    detailMain: { append() {} }, detailScroll: { append() {} },
+    detailMain: { append() {} }, detailScroll: { append() {} }, detailDrawerHome: { append() {} },
     detailPositive: { closest: () => label }, detailNegative: { closest: () => label },
     detailSelection: { innerHTML: '', querySelector: selector => selector === '[data-single-prompts]' ? promptHost : reference, querySelectorAll: () => [] },
     detailImage: { complete: false, naturalWidth: 1024, naturalHeight: 1536, getAttribute: () => '/api/images/7' }, variantButton: {}, variantModes: { querySelectorAll: () => [] },
@@ -258,7 +258,7 @@ test('opening one top-level historical group closes its siblings and leaves nest
   assert.ok(groups.every(group => !group.open));
 });
 
-test('switching workbenches preserves shared prompt nodes and returns drawers to their original home', () => {
+test('switching workbenches preserves shared prompt nodes without moving action dock content', () => {
   const ctx = context(), positive = {}, negative = {}, classes = new Set();
   const mount = () => ({ append(...children) { this.children = children; }, scrollTop: 500 });
   ctx.ui = { detailMain: mount(), detailScroll: mount(), detailDrawerHome: mount(), replayDrawer: {}, variantDrawer: {},
@@ -266,11 +266,11 @@ test('switching workbenches preserves shared prompt nodes and returns drawers to
     detailDialog: { classList: { toggle(name, value) { value ? classes.add(name) : classes.delete(name); }, remove(name) { classes.delete(name); } } } };
   ctx.singleDetailLayout(true);
   assert.deepEqual(ctx.ui.detailMain.children, [positive, negative]);
-  assert.deepEqual(ctx.ui.detailScroll.children, [ctx.ui.replayDrawer, ctx.ui.variantDrawer]);
+  assert.equal(ctx.ui.detailDrawerHome.children, undefined);
   assert.equal(ctx.ui.detailScroll.scrollTop, 0);
   assert.equal(classes.has('is-single-detail'), true);
   classes.add('is-regenerating');
   ctx.singleDetailLayout(false);
-  assert.deepEqual(ctx.ui.detailDrawerHome.children, [ctx.ui.replayDrawer, ctx.ui.variantDrawer]);
+  assert.equal(ctx.ui.detailDrawerHome.children, undefined);
   assert.equal(classes.size, 0);
 });

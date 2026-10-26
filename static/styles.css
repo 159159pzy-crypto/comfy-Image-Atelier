@@ -901,7 +901,7 @@ dialog::backdrop { background: rgba(0, 0, 0, .32); backdrop-filter: blur(8px); o
 
 /* ---------- 全尺寸图片预览 ---------- */
 html.image-preview-open { overflow: hidden; }
-html.image-preview-open #detailImage { visibility: hidden; }
+.image-preview-source-hidden { visibility: hidden; }
 .image-preview-dialog {
   position: fixed;
   inset: 0;

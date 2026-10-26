@@ -69,6 +69,7 @@ function singleWorkbenchSetInput(value, { activate = true } = {}) {
   const state = singleWorkbenchState;
   state.inputImage = value;
   state.single.input_image_id = value?.id || "";
+  if (typeof imageCleanupScheduleLeases === "function") imageCleanupScheduleLeases();
   if (value && activate) {
     state.generationMode = "img2img";
     ui.base_mode.value = "normal";
@@ -161,6 +162,8 @@ async function singleWorkbenchRestoreInput() {
   const current = () => token === state.inputRequest && id === state.single.input_image_id
     && profile === currentProfile() && singleWorkbenchActive();
   try {
+    if (typeof imageCleanupSyncLeases === "function") await imageCleanupSyncLeases();
+    if (!current()) return;
     const value = await request(`/api/input-images/${encodeURIComponent(id)}`, { signal: controller.signal });
     if (!current()) return;
     if (value.id !== id) throw new Error("返回的参考图与保存记录不匹配。");

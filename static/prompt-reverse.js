@@ -71,6 +71,7 @@ function promptReverseMarkup() {
 function promptReversePersist() {
   for (const draft of Object.values(promptReverseState.drafts)) promptReverseSaveView(draft);
   try { localStorage.setItem(PROMPT_REVERSE_KEY, JSON.stringify({ version: 2, mode: promptReverseState.mode, drafts: promptReverseState.drafts })); } catch { /* Keep the active draft usable. */ }
+  if (typeof imageCleanupScheduleLeases === "function") imageCleanupScheduleLeases();
 }
 function promptReverseFingerprint(draft, method = draft.method) {
   if (method === "metadata" || method === "none") return JSON.stringify([draft.imageId]);
@@ -452,6 +453,8 @@ async function promptReverseRestore(profile) {
   const draft = promptReverseDraft(profile), runtime = promptReverseRuntime(profile), token = runtime.request, epoch = promptReverseState.epoch, imageId = draft.imageId;
   if (imageId) {
     try {
+      if (typeof imageCleanupSyncLeases === "function") await imageCleanupSyncLeases();
+      if (epoch !== promptReverseState.epoch || draft !== promptReverseState.drafts[profile] || imageId !== draft.imageId || token !== runtime.request) return;
       const asset = await request(`/api/prompt-images/${encodeURIComponent(imageId)}`);
       if (epoch !== promptReverseState.epoch || draft !== promptReverseState.drafts[profile] || imageId !== draft.imageId || token !== runtime.request) return;
       if (asset.id !== imageId) throw new Error("图片记录不匹配");
@@ -472,6 +475,7 @@ function promptReverseClear() {
   for (const runtime of Object.values(promptReverseState.runtime)) { runtime.abort?.abort(); clearTimeout(runtime.timer); }
   promptReverseState.drafts = {}; promptReverseState.runtime = {}; promptReverseState.mode = "rewrite";
   localStorage.removeItem(PROMPT_REVERSE_KEY); localStorage.removeItem(PROMPT_REVERSE_LEGACY_KEY); promptReverseRender();
+  if (typeof imageCleanupScheduleLeases === "function") imageCleanupScheduleLeases();
 }
 function promptReverseReadView(value) {
   const view = promptReverseEmptyView();

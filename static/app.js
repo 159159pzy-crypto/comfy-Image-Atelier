@@ -629,7 +629,7 @@ async function requestFavorites(path, options = {}) {
 // Protection lasts until restart. Observe new controls and later enable attempts
 // so asynchronous resource/history refreshes cannot re-enable protected writes.
 const STORAGE_CONTROLS = {
-  history: "#startButton, #confirmReplay, #confirmVariant, #deleteRecord",
+  history: "#startButton, #confirmReplay, #confirmVariant, #deleteRecord, #artworkFolderSave, #artworkFolderDeleteSubmit, #artworkMembershipSave, #artworkDeleteSubmit, #artworkBatchFavorite, #artworkBatchRemove, #artworkBatchDelete, [data-artwork-write], .artwork-star, #detailArtworkFavorite",
   style_presets: "#savePreset, .preset-actions button",
   custom_prompts: '#customForm button[type="submit"], #deleteCustom, #customGroupForm button[type="submit"], #deleteCustomGroup, #commitImport, [data-storage-write="custom_prompts"], [data-favorite-custom-write]',
   lora_triggers: '#loraTriggerForm button[type="submit"], #resetLoraTriggers',
@@ -1961,6 +1961,11 @@ function renderBatch(batch, queue = currentQueue) {
       if (typeof singleWorkbenchActive === "function" && singleWorkbenchActive()) historyDirty = true;
       else loadHistory(historyPage);
     } else loadHistory(1);
+    if (typeof artworkLibraryState !== "undefined" && artworkLibraryState.mount) {
+      const view = artworkLibraryState.mount;
+      artworkInvalidateHistory(view);
+      if (!artworkLibraryState.busy) void loadHistory(view.page, view);
+    }
   }
 }
 async function refreshConnection() {
@@ -2023,17 +2028,21 @@ async function pollBatch() {
     pollBatchPending = false;
   }
 }
-function card(record, index) {
+function card(record, index, historyView = null) {
   const article = document.createElement("article");
   article.className = "image-card is-loading";
   article.dataset.recordId = String(record.id);
   article.record = record;
+  article.historyView = historyView;
   const button = document.createElement("button");
   button.type = "button";
   button.dataset.recordId = String(record.id);
   button.setAttribute("aria-label", `查看 ${record.filename || "生成结果"}`);
   button.innerHTML = `<img loading="lazy" decoding="async" fetchpriority="low" src="/api/images/${record.id}/thumbnail" alt="Anima 生成结果"><span class="image-failure" hidden>图片加载失败</span><div class="card-copy"><strong>${escapeHtml(record.filename)}</strong><span>#${record.sequence} · Seed ${record.sample_seed}</span></div>`;
-  button.addEventListener("click", () => openDetail(article.record));
+  button.addEventListener("click", () => {
+    if (typeof artworkCardActivate === "function") artworkCardActivate(article.record, article.historyView);
+    else openDetail(article.record, { historyView: article.historyView });
+  });
   const image = button.querySelector("img");
   const markLoaded = () => {
     article.classList.remove("is-loading");
@@ -2051,6 +2060,7 @@ function card(record, index) {
     else markFailed({ target: image });
   }
   article.append(button);
+  if (typeof artworkDecorateCard === "function") artworkDecorateCard(article);
   if (typeof IntersectionObserver !== "undefined") {
     card.visibilityObserver ||= new IntersectionObserver(entries => {
       for (const entry of entries) entry.target.classList.toggle("is-offscreen", !entry.isIntersecting);
@@ -2060,32 +2070,53 @@ function card(record, index) {
   return article;
 }
 let historyRequest = 0;
-function cacheHistoryPage(data) {
+function historyViewState(view = null) {
+  if (view) return view;
+  return historyViewState.home ||= {
+    kind: "home", queryEpoch: 0, total: 0,
+    get query() { return typeof artworkLibraryState === "undefined" ? { source: "", folder: "" } : artworkLibraryState.homeQuery; },
+    get page() { return historyPage; }, set page(value) { historyPage = value; },
+    get pages() { return historyPages; }, set pages(value) { historyPages = value; },
+    get items() { return historyItems; }, set items(value) { historyItems = value; },
+    get cache() { return historyCache; },
+    get requestId() { return historyRequest; }, set requestId(value) { historyRequest = value; },
+    get dirty() { return historyDirty; }, set dirty(value) { historyDirty = value; },
+    get elements() { return ui; },
+  };
+}
+function cacheHistoryPage(data, queryKey = null, historyView = null) {
+  const view = historyViewState(historyView);
+  queryKey ??= typeof artworkHistoryKey === "function" ? artworkHistoryKey(view) : "";
   if (!data || !Number.isFinite(Number(data.page))) return;
-  historyCache.set(Number(data.page), data);
+  if (typeof artworkHistoryKey === "function" && queryKey !== artworkHistoryKey(view)) return;
+  data.historyQueryKey = queryKey;
+  view.cache.set(Number(data.page), data);
 }
 
-function renderHistoryPage(data) {
-  historyDirty = false;
-  const previousPage = historyPage;
-  historyPage = Number(data.page) || 1;
-  historyPages = Number(data.pages) || 1;
-  historyItems = Array.isArray(data.items) ? data.items : [];
-  cacheHistoryPage(data);
-  const existing = new Map([...ui.gallery.children].map(node => [node.dataset.recordId, node]));
+function renderHistoryPage(data, historyView = null) {
+  const view = historyViewState(historyView), elements = view.elements;
+  view.dirty = false;
+  const previousPage = view.page;
+  view.page = Number(data.page) || 1;
+  view.pages = Number(data.pages) || 1;
+  view.total = Number(data.total) || 0;
+  view.items = Array.isArray(data.items) ? data.items : [];
+  cacheHistoryPage(data, null, view);
+  const existing = new Map([...elements.gallery.children].map(node => [node.dataset.recordId, node]));
   const retained = new Set();
-  historyItems.forEach((record, index) => {
+  view.items.forEach((record, index) => {
     let node = existing.get(String(record.id));
     const fresh = !node;
-    if (!node) node = card(record, index);
+    if (!node) node = card(record, index, view);
     node.record = record;
+    node.historyView = view;
     const button = node.querySelector("button");
     button.setAttribute("aria-label", `查看 ${record.filename || "生成结果"}`);
     node.querySelector(".card-copy strong").textContent = record.filename || "生成结果";
     node.querySelector(".card-copy span").textContent = `#${record.sequence} · Seed ${record.sample_seed}`;
     retained.add(node);
-    if (ui.gallery.children[index] !== node) ui.gallery.insertBefore(node, ui.gallery.children[index] || null);
-    if (fresh && previousPage === historyPage && existing.size && typeof StudioMotion !== "undefined") {
+    if (elements.gallery.children[index] !== node) elements.gallery.insertBefore(node, elements.gallery.children[index] || null);
+    if (fresh && previousPage === view.page && existing.size && typeof StudioMotion !== "undefined") {
       node.hidden = true;
       StudioMotion.presence(node, true, { from: { opacity: 0, y: 6 }, manageInert: false });
     }
@@ -2094,36 +2125,40 @@ function renderHistoryPage(data) {
     card.visibilityObserver?.unobserve(node);
     node.remove();
   }
-  if (previousPage !== historyPage && typeof StudioMotion !== "undefined") {
-    StudioMotion.spring(ui.gallery, "page", { opacity: 1 }, {
+  if (previousPage !== view.page && typeof StudioMotion !== "undefined") {
+    StudioMotion.spring(elements.gallery, "page", { opacity: 1 }, {
       initial: { opacity: .4 }, response: .2,
-      onUpdate: value => { ui.gallery.style.opacity = value.opacity; },
-      onComplete: () => ui.gallery.style.removeProperty("opacity"),
+      onUpdate: value => { elements.gallery.style.opacity = value.opacity; },
+      onComplete: () => elements.gallery.style.removeProperty("opacity"),
     });
   }
-  ui.emptyState.hidden = historyItems.length > 0;
+  elements.emptyState.hidden = view.items.length > 0;
   const historyUnavailable = config.storage_status?.history?.available === false;
-  ui.emptyState.querySelector("strong").textContent = historyUnavailable ? "历史记录暂不可用" : "等待第一张作品";
-  ui.emptyState.querySelector("small").textContent = historyUnavailable
+  elements.emptyState.querySelector("strong").textContent = historyUnavailable ? "历史记录暂不可用" : "等待第一张作品";
+  elements.emptyState.querySelector("small").textContent = historyUnavailable
     ? "原历史文件已受保护，生成已暂停。请按顶部提示修复文件后重启。"
     : "完成生成后会出现在这里";
-  ui.pageLabel.textContent = `${historyPage} / ${historyPages}`;
-  ui.prevPage.disabled = historyPage <= 1;
-  ui.nextPage.disabled = historyPage >= historyPages;
-  ui.historyCount.textContent = historyUnavailable ? "历史存储不可用" : `${data.total || 0} 张图片`;
+  elements.pageLabel.textContent = `${view.page} / ${view.pages}`;
+  elements.prevPage.disabled = view.page <= 1;
+  elements.nextPage.disabled = view.page >= view.pages;
+  elements.historyCount.textContent = historyUnavailable ? "历史存储不可用" : `${data.total || 0} 张图片`;
+  if (typeof artworkRenderSelection === "function") artworkRenderSelection();
   updatePreviewNavigation();
 }
 
-async function loadHistory(page = historyPage) {
+async function loadHistory(page = historyPage, historyView = null) {
+  const view = historyViewState(historyView);
   // 与 loadPool 相同的竞态守卫:快速翻页时丢弃乱序到达的旧响应。
-  const requestId = ++historyRequest;
+  const requestId = ++view.requestId;
+  const queryKey = typeof artworkHistoryKey === "function" ? artworkHistoryKey(view) : "";
   try {
-    const source = document.getElementById("historyWorkbenchFilter")?.value || "";
-    const data = await request(`/api/history?page=${page}&limit=24${source ? `&workbench=${source}` : ""}`);
-    if (requestId !== historyRequest) return;
-    renderHistoryPage(data);
+    const params = typeof artworkHistoryParams === "function" ? artworkHistoryParams(view) : "";
+    const data = await request(`/api/history?page=${page}&limit=24${params}`);
+    if (view.closed || requestId !== view.requestId || (typeof artworkHistoryKey === "function" && queryKey !== artworkHistoryKey(view))) return;
+    renderHistoryPage(data, view);
+    return data;
   } catch (error) {
-    if (requestId !== historyRequest) return;
+    if (view.closed || requestId !== view.requestId) return;
     toast(error.message);
   }
 }
@@ -2154,6 +2189,7 @@ async function revealSelectedImageFile() {
 }
 
 function renderDetail(record) {
+  if (typeof artworkRenderDetail === "function") artworkRenderDetail(record);
   resetRevealImageFile();
   ui.detailImage.src = `/api/images/${record.id}`;
   ui.detailImage.alt = record.filename ? `生成结果：${record.filename}` : "生成结果";
@@ -2189,13 +2225,15 @@ function updateDetailRecord(record) {
   ++regenerationRequest;
   regenerationOptions = null;
   closeRegenerationDrawers(false, true);
+  if (typeof closeDetailActionPanels === "function") closeDetailActionPanels({ immediate: true });
   renderDetail(record);
   if (detailContext?.origin === "single" && typeof singleGalleryState !== "undefined") singleGalleryState.viewerRecord = record;
 }
-function openDetail(record, { origin = "random", returnFocus = null } = {}) {
+function openDetail(record, { origin = "random", returnFocus = null, historyView = null } = {}) {
   if (!record) return;
   closeImagePreview({ immediate: true, restoreFocus: false });
-  detailContext = { origin, returnFocus: returnFocus || document.activeElement };
+  detailContext = { origin, returnFocus: returnFocus || document.activeElement, historyView: historyViewState(historyView) };
+  if (typeof artworkShowDetail === "function") artworkShowDetail();
   updateDetailRecord(record);
   updatePreviewNavigation();
   motionDialog(ui.detailDialog, true);
@@ -2203,8 +2241,12 @@ function openDetail(record, { origin = "random", returnFocus = null } = {}) {
 function suppressDetailReturnFocus() {
   if (detailContext) detailContext.returnFocus = null;
 }
+function invalidateHistoryTransfer() {
+  if (typeof singleWorkbenchState !== "undefined") singleWorkbenchState.historyTransferRequest = (singleWorkbenchState.historyTransferRequest || 0) + 1;
+}
 function finishDetailClose() {
   if (ui.detailDialog.open) return;
+  if (typeof singleWorkbenchState !== "undefined") singleWorkbenchState.historyTransferRequest = (singleWorkbenchState.historyTransferRequest || 0) + 1;
   resetRevealImageFile();
   const context = detailContext;
   closeImagePreview({ immediate: true, restoreFocus: false });
@@ -2213,14 +2255,81 @@ function finishDetailClose() {
   ++regenerationRequest;
   regenerationOptions = null;
   detailContext = null;
+  closeRegenerationDrawers(false, true);
+  if (typeof closeDetailActionPanels === "function") closeDetailActionPanels({ immediate: true });
+  const fromLibrary = typeof artworkLibraryState !== "undefined" && Boolean(artworkLibraryState.mount);
+  if (typeof artworkCloseLibrary === "function") artworkCloseLibrary();
   if (context?.origin === "single" && typeof singleGalleryDetailClosed === "function") singleGalleryDetailClosed();
+  if (fromLibrary) return;
   if (document.querySelector?.("dialog[open]")) return;
   if (context?.returnFocus?.isConnected && !context.returnFocus.disabled) context.returnFocus.focus({ preventScroll: true });
   else if (context?.returnFocus && context.origin === "single") document.getElementById("singlePreview")?.focus({ preventScroll: true });
   else if (context?.returnFocus && context.origin === "random") {
     // Crossing random archive pages replaces the original thumbnail element.
-    const target = ui.gallery.querySelector(`button[data-record-id="${selectedRecord?.id}"]`) || ui.gallery.querySelector("button") || document.getElementById("historyWorkbenchFilter");
+    const target = ui.gallery.querySelector(`button[data-record-id="${selectedRecord?.id}"]`) || ui.gallery.querySelector("button") || document.querySelector("[data-artwork-open]");
     target?.focus({ preventScroll: true });
+  }
+}
+
+function releaseDetailForLibrary() {
+  if (typeof singleWorkbenchState !== "undefined") singleWorkbenchState.historyTransferRequest = (singleWorkbenchState.historyTransferRequest || 0) + 1;
+  resetRevealImageFile();
+  closeImagePreview({ immediate: true, restoreFocus: false });
+  closeRegenerationDrawers(false, true);
+  closeDetailActionPanels({ immediate: true });
+  ui.detailImage.onload = ui.detailImage.onerror = null;
+  // Keep the outgoing pixels until the shared view transition finishes. The
+  // next detail replaces them, and the native dialog close releases the src.
+  ++regenerationRequest;
+  regenerationOptions = null;
+  selectedRecord = null;
+  detailContext = null;
+}
+
+function setDetailActionPanelVisible(panel, visible, immediate = false) {
+  if (typeof DetailActionFold !== "undefined") DetailActionFold.set(panel, visible, immediate);
+  else { panel.hidden = !visible; panel.inert = !visible; }
+}
+
+function closeDetailActionPanels({ restoreFocus = false, immediate = false } = {}) {
+  let trigger = null;
+  for (const button of document.querySelectorAll("[data-detail-action]")) {
+    if (button.getAttribute("aria-expanded") === "true") trigger = button;
+    button.setAttribute("aria-expanded", "false");
+  }
+  for (const panel of document.querySelectorAll("[data-detail-panel]")) setDetailActionPanelVisible(panel, false, immediate);
+  if (restoreFocus) trigger?.focus({ preventScroll: true });
+  return Boolean(trigger);
+}
+
+function toggleDetailActionPanel(name) {
+  if (typeof artworkDetailVisible === "function" && !artworkDetailVisible()) return;
+  const trigger = document.querySelector(`[data-detail-action="${name}"]`);
+  const panel = document.querySelector(`[data-detail-panel="${name}"]`);
+  if (!trigger || !panel) return;
+  const opening = trigger.getAttribute("aria-expanded") !== "true";
+  closeRegenerationDrawers(false);
+  closeDetailActionPanels();
+  if (!opening) return;
+  setDetailActionPanelVisible(panel, true);
+  trigger.setAttribute("aria-expanded", "true");
+}
+
+function containArtworkFocus(event) {
+  if (event.key !== "Tab" || !ui.detailDialog.open) return;
+  const focusable = [...ui.detailDialog.querySelectorAll("button, a[href], input, select, textarea, summary, [tabindex]")].filter(element => {
+    if (element.tabIndex < 0 || element.matches(":disabled") || !element.getClientRects().length || element.closest("[hidden], [inert]")) return false;
+    if (getComputedStyle(element).visibility === "hidden") return false;
+    // Closed disclosures can still report a box for their nested summary.
+    for (let parent = element.parentElement; parent && parent !== ui.detailDialog; parent = parent.parentElement) {
+      if (parent.tagName === "DETAILS" && !parent.open && !parent.querySelector(":scope > summary")?.contains(element)) return false;
+    }
+    return true;
+  });
+  if (!focusable.length) { event.preventDefault(); return; }
+  const current = focusable.indexOf(document.activeElement);
+  if (current < 0 || (event.shiftKey ? current === 0 : current === focusable.length - 1)) {
+    event.preventDefault(); focusable[event.shiftKey ? focusable.length - 1 : 0].focus({ preventScroll: true });
   }
 }
 
@@ -2241,21 +2350,23 @@ function setCurrentPreviewRecord(record) {
   else { selectedRecord = record; if (record) renderDetail(record); }
 }
 
-function previewRecordIndex(record, items = historyItems) {
+function previewHistoryView() { return historyViewState(imagePreview.context?.historyView || (typeof detailContext !== "undefined" ? detailContext?.historyView : null)); }
+function previewRecordIndex(record, items = previewHistoryView().items) {
   if (!record || !Array.isArray(items)) return -1;
   return items.findIndex((item) => String(item.id) === String(record.id));
 }
 
 function selectedHistoryLocation() {
   if (imagePreview.context?.kind === "single") return imagePreview.context.history.location();
+  const view = previewHistoryView();
   const currentIndex = previewRecordIndex(selectedRecord);
-  if (currentIndex >= 0) return { page: historyPage, items: historyItems, index: currentIndex };
-  for (const [page, data] of historyCache) {
+  if (currentIndex >= 0) return { page: view.page, items: view.items, index: currentIndex };
+  for (const [page, data] of view.cache) {
     const items = Array.isArray(data?.items) ? data.items : [];
     const index = previewRecordIndex(selectedRecord, items);
     if (index >= 0) return { page, items, index };
   }
-  return { page: historyPage, items: historyItems, index: -1 };
+  return { page: view.page, items: view.items, index: -1 };
 }
 
 function previewNeighborAvailable(direction) {
@@ -2263,7 +2374,7 @@ function previewNeighborAvailable(direction) {
   const location = selectedHistoryLocation();
   if (location.index >= 0 && location.index + direction >= 0 && location.index + direction < location.items.length) return true;
   const targetPage = location.page + (direction > 0 ? 1 : -1);
-  return targetPage >= 1 && targetPage <= historyPages;
+  return targetPage >= 1 && targetPage <= previewHistoryView().pages;
 }
 
 function updatePreviewNavigation() {
@@ -2283,16 +2394,17 @@ function announcePreview(message) {
 
 function previewPositionLabel(record = currentPreviewRecord()) {
   if (imagePreview.context?.kind === "single") return imagePreview.context.history.label(record);
+  const view = previewHistoryView();
   const location = previewRecordIndex(record) >= 0
-    ? { page: historyPage, items: historyItems, index: previewRecordIndex(record) }
+    ? { page: view.page, items: view.items, index: previewRecordIndex(record) }
     : selectedHistoryLocation();
   if (location.index < 0) return record?.filename || "当前图片";
-  const total = Number(ui.historyCount.textContent.match(/\d+/)?.[0] || 0);
+  const total = Number(view.elements.historyCount.textContent.match(/\d+/)?.[0] || 0);
   let position = (location.page - 1) * 24 + location.index + 1;
   let priorPagesAreCached = true;
   let cachedBefore = 0;
   for (let page = 1; page < location.page; page += 1) {
-    const data = historyCache.get(page);
+    const data = view.cache.get(page);
     if (!data || !Array.isArray(data.items)) {
       priorPagesAreCached = false;
       break;
@@ -2371,12 +2483,15 @@ function preloadPreviewNeighbors() {
   }
 }
 
-async function loadHistoryPageForPreview(page) {
-  const cached = historyCache.get(page);
-  if (cached) return cached;
-  const source = document.getElementById("historyWorkbenchFilter")?.value || "";
-  const data = await request(`/api/history?page=${page}&limit=24${source ? `&workbench=${source}` : ""}`);
-  cacheHistoryPage(data);
+async function loadHistoryPageForPreview(page, historyView = null) {
+  const view = historyView || previewHistoryView();
+  const queryKey = typeof artworkHistoryKey === "function" ? artworkHistoryKey(view) : "";
+  const cached = view.cache.get(page);
+  if (cached && cached.historyQueryKey === queryKey) return cached;
+  const params = typeof artworkHistoryParams === "function" ? artworkHistoryParams(view) : "";
+  const data = await request(`/api/history?page=${page}&limit=24${params}`);
+  if (view.closed || (typeof artworkHistoryKey === "function" && queryKey !== artworkHistoryKey(view))) return null;
+  cacheHistoryPage(data, queryKey, view);
   return data;
 }
 
@@ -2386,7 +2501,7 @@ function previewNeighbor(direction, location = selectedHistoryLocation()) {
     return { record: location.items[index], page: location.page, data: null };
   }
   const targetPage = location.page + (direction > 0 ? 1 : -1);
-  if (targetPage < 1 || targetPage > historyPages) return null;
+  if (targetPage < 1 || targetPage > previewHistoryView().pages) return null;
   return { record: null, page: targetPage, data: null };
 }
 
@@ -2477,7 +2592,7 @@ async function switchPreviewImage(record, requestId, { src = null, label = null 
 async function navigatePreview(direction, focusTarget = null) {
   if (imagePreview.context?.kind === "single") return imagePreview.context.history.navigate(direction, focusTarget);
   if (!["open", "opening", "switching"].includes(imagePreview.phase)) return;
-  const context = imagePreview.context;
+  const context = imagePreview.context, view = previewHistoryView();
   const restoreFocus = () => {
     if (!focusTarget?.isConnected) return;
     if (!focusTarget.disabled) focusTarget.focus({ preventScroll: true });
@@ -2493,7 +2608,8 @@ async function navigatePreview(direction, focusTarget = null) {
     const target = previewNeighbor(direction, location);
     if (!target) return { ...location, boundary: true };
     if (target.record) return { page: location.page, items: location.items, index: location.index + direction, data: location.data };
-    const data = await loadHistoryPageForPreview(target.page);
+    const data = await loadHistoryPageForPreview(target.page, view);
+    if (!data) return { ...location, boundary: true };
     const items = Array.isArray(data.items) ? data.items : [];
     return items.length ? { page: target.page, items, index: direction > 0 ? 0 : items.length - 1, data } : { ...location, boundary: true };
   }) };
@@ -2515,7 +2631,7 @@ async function navigatePreview(direction, focusTarget = null) {
     const switched = await switchPreviewImage(record, requestId);
     if (!current()) return;
     if (!switched) throw new Error("图片加载失败，请重试");
-    if (target.data) renderHistoryPage(target.data);
+    if (target.data) renderHistoryPage(target.data, view);
     if (target.boundary) announcePreview(direction < 0 ? "已经是第一张图片" : "已经是最后一张图片");
     restoreFocus();
   } catch (error) {
@@ -2826,12 +2942,25 @@ function imagePreviewSourceFrame() {
     (imageTop + height * scale - bottom) / scale,
     (left - imageLeft) / scale,
   ].map(value => Math.max(0, value) + "px").join(" ");
+  let opacity = 1;
+  // A source opened during its dialog's entrance has inherited transparency.
+  // Preserve that alpha when lifting the bitmap into the independent top layer.
+  for (let element = sourceElement; element; element = element.parentElement) {
+    const alpha = Number(getComputedStyle(element).opacity);
+    if (Number.isFinite(alpha)) opacity *= clampPreview(alpha, 0, 1);
+    if (element === sourceContainer) break;
+  }
   return {
     width: width + "px", height: height + "px",
     transform: "translate3d(" + (cx - stage.left - stage.width / 2) + "px, " + (cy - stage.top - stage.height / 2) + "px, 0) scale(" + scale + ")",
     clipPath: "inset(" + insets + " round " + (18 / scale) + "px)",
-    opacity: 1,
+    opacity,
   };
+}
+
+function setImagePreviewSourceHidden(hidden) {
+  const source = imagePreview.context?.sourceElement || ui.detailImage;
+  source?.classList?.toggle("image-preview-source-hidden", hidden);
 }
 
 async function openImagePreview(event, context = null) {
@@ -2840,14 +2969,10 @@ async function openImagePreview(event, context = null) {
   if (context && imagePreview.phase === "closed") imagePreview.context = context;
   if (!imagePreview.context && imagePreview.phase === "closed") imagePreview.context = detailContext?.origin === "single" && typeof singleGalleryContext === "function"
     ? singleGalleryContext()
-    : { kind: "random", sourceElement: ui.detailImage, sourceContainer: ui.detailDialog, returnFocus: ui.detailImage, isValid: () => ui.detailDialog.open };
+    : { kind: "random", historyView: detailContext?.historyView, sourceElement: ui.detailImage, sourceContainer: ui.detailDialog, returnFocus: ui.detailImage, isValid: () => ui.detailDialog.open && (typeof artworkDetailVisible !== "function" || artworkDetailVisible()) };
   const record = currentPreviewRecord();
   const source = imagePreview.context?.src || (record ? `/api/images/${record.id}` : "");
-  if (!record || !source || !ui.detailDialog.open) return;
-  // Keep the clicked bitmap exactly where it is while its parent is entering.
-  // The source is released only behind the veil or after an early return flight.
-  if (imagePreview.phase === "closed") freezeImagePreviewSourcePresence();
-
+  if (!record || !source || !ui.detailDialog.open || (typeof artworkDetailVisible === "function" && !artworkDetailVisible())) return;
   // Reverse-reopen: if the exit animation is still in flight, bounce back from
   // the live frame instead of ignoring the click (previously felt like a hang).
   if (imagePreview.phase === "closing") {
@@ -2887,6 +3012,9 @@ async function openImagePreview(event, context = null) {
   // The browser's HTTP cache can reuse the source; decoded preview resources
   // belong to the open viewer and are released when it closes.
   ui.imagePreviewImage.hidden = true;
+  setImagePreviewSourceHidden(false);
+  ui.imagePreviewVeil.getAnimations().forEach(animation => animation.cancel());
+  ui.imagePreviewVeil.style.opacity = "0";
   ui.imagePreviewStatus.hidden = false;
   ui.imagePreviewStatus.textContent = "正在加载原图…";
   if (source) ui.imagePreviewImage.src = source;
@@ -2900,13 +3028,16 @@ async function openImagePreview(event, context = null) {
   updatePreviewNavigation();
   announcePreview(`正在打开${previewPositionLabel(record)}`);
   imagePreview.context?.onOpen?.();
-  animateImagePreviewVeil(1, previewMotion("--motion-slow", 360));
   try {
     await ui.imagePreviewImage.decode();
-    if (token !== imagePreview.token || imagePreview.context?.isValid?.() === false) return;
+    if (token !== imagePreview.token) return;
+    if (imagePreview.context?.isValid?.() === false) return finishImagePreviewClose(false);
     // If a close was requested while decoding, keep the image hidden and let
     // the in-flight close animation finish instead of starting a new entry.
     if (imagePreview.phase === "closing") return;
+    // The detail remains visible and free to finish entering while decoding.
+    // Freeze only when the decoded bitmap is ready to take over its geometry.
+    freezeImagePreviewSourcePresence();
     ui.imagePreviewStatus.hidden = true;
     ui.imagePreviewImage.hidden = false;
     imagePreview.committedSrc = source;
@@ -2924,10 +3055,17 @@ async function openImagePreview(event, context = null) {
         completeImagePreviewSourcePresence();
       }
     });
+    // The animation commits its initial frame synchronously. Transfer visibility
+    // in the same task so there is never a frame with both bitmaps hidden.
+    setImagePreviewSourceHidden(true);
+    animateImagePreviewVeil(1, previewMotion("--motion-slow", 360));
   } catch {
     if (token !== imagePreview.token) return;
     imagePreview.phase = "error";
-    completeImagePreviewSourcePresence();
+    setImagePreviewSourceHidden(false);
+    ui.imagePreviewImage.hidden = true;
+    ui.imagePreviewStatus.hidden = false;
+    completeImagePreviewSourcePresence(true);
     ui.imagePreviewStatus.textContent = "图片加载失败，请关闭后重试。";
     imagePreview.context?.onError?.(record);
   }
@@ -2935,6 +3073,8 @@ async function openImagePreview(event, context = null) {
 
 function finishImagePreviewClose(restoreFocus = true) {
   const context = imagePreview.context;
+  // Return ownership before releasing the overlay bitmap or its decoded source.
+  setImagePreviewSourceHidden(false);
   if (imagePreview.sourcePresence) completeImagePreviewSourcePresence(true);
   clearPreviewCache();
   imagePreview.pendingReturnFocus = restoreFocus ? context : null;
@@ -2995,7 +3135,8 @@ function closeImagePreview({ immediate = false, restoreFocus = true } = {}) {
     animateImagePreviewVeil(0, previewMotion("--motion-medium", 240));
     animateImagePreview(live || liveImagePreviewFrame(), imagePreviewSourceFrame(), previewMotion("--motion-medium", 240), () => finishImagePreviewClose(restoreFocus));
   } else {
-    animateImagePreviewVeil(0, previewMotion("--motion-medium", 240), () => finishImagePreviewClose(restoreFocus));
+    // Loading and failed opens never obscured the source or raised the veil.
+    finishImagePreviewClose(restoreFocus);
   }
 }
 
@@ -3161,16 +3302,8 @@ function imagePreviewWheel(event) {
 }
 
 function collapseRegenerationDrawer(drawer, immediately = false) {
-  if (typeof StudioMotion === "undefined") {
-    drawer.hidden = true;
-    drawer.classList.remove("closing");
-    return;
-  }
-  drawer.classList.add("closing");
-  StudioMotion.presence(drawer, false, {
-    from: { opacity: 0, y: -5, scale: .985 }, immediate: immediately,
-    onComplete: () => drawer.classList.remove("closing"),
-  });
+  drawer.regenerationOpenToken = null;
+  setDetailActionPanelVisible(drawer, false, immediately);
 }
 
 function closeRegenerationDrawers(restoreFocus = true, immediately = false) {
@@ -3243,21 +3376,17 @@ async function openRegenerationDrawer(kind, trigger) {
     trigger.focus({ preventScroll: true });
     return;
   }
+  if (typeof closeDetailActionPanels === "function") closeDetailActionPanels();
   regenerationTrigger = trigger;
+  const token = drawer.regenerationOpenToken = {};
   drawer.regenerationCloseToken = null;
   drawer.classList.remove("closing");
-  if (typeof StudioMotion !== "undefined") StudioMotion.presence(drawer, true, { from: { opacity: 0, y: -5, scale: .985 } });
-  else drawer.hidden = false;
-  if (ui.detailDialog.classList.contains("is-single-detail")) {
-    ui.detailDialog.classList.add("is-regenerating");
-    ui.detailScroll.scrollTop = 0;
-  }
+  setDetailActionPanelVisible(drawer, true);
   trigger.setAttribute("aria-expanded", "true");
   const record = selectedRecord;
   await loadRegenerationOptions();
-  if (selectedRecord !== record || drawer.hidden || drawer.classList.contains("closing")) return;
-  const focusTarget = kind === "replay" ? ui.confirmReplay : ui.variantModes.querySelector("input:checked");
-  focusTarget?.focus({ preventScroll: true });
+  if (selectedRecord !== record || drawer.regenerationOpenToken !== token || drawer.hidden || drawer.classList.contains("closing")) return;
+  if (typeof DetailActionFold !== "undefined") DetailActionFold.refresh();
 }
 
 function selectedRegenerationMode() {
@@ -3270,8 +3399,8 @@ function selectedRedrawSections() {
 
 function setRedrawSectionsVisible(visible) {
   const el = ui.redrawSections;
-  if (typeof StudioMotion === "undefined") { el.hidden = !visible; return; }
-  StudioMotion.presence(el, visible, { from: { opacity: 0, y: -6 } });
+  el.hidden = !visible;
+  if (typeof DetailActionFold !== "undefined") DetailActionFold.refresh();
 }
 
 function updateVariantDrawer() {
@@ -5811,6 +5940,7 @@ ui.imagePreviewDialog.addEventListener("close", () => {
   restoreImagePreviewCloseFocus();
 });
 ui.detailDialog.addEventListener("close", finishDetailClose);
+ui.detailDialog.addEventListener("keydown", containArtworkFocus);
 ui.revealImageFile.addEventListener("click", revealSelectedImageFile);
 new ResizeObserver(() => {
   if (imagePreview.phase === "open") {
@@ -5822,40 +5952,61 @@ new ResizeObserver(() => {
   } else if (imagePreview.phase === "closing") finishImagePreviewClose();
 }).observe(ui.imagePreviewStage);
 ui.closeDialog.addEventListener("click", () => {
+  if (typeof artworkLibraryState !== "undefined" && artworkLibraryState.busy) return;
+  invalidateHistoryTransfer();
   closeImagePreview({ immediate: true, restoreFocus: false });
   closeRegenerationDrawers(false);
   motionDialog(ui.detailDialog, false);
 });
 ui.detailDialog.addEventListener("click", (event) => {
   if (event.target === ui.detailDialog) {
+    event.preventDefault(); // This host owns dismissal, including its busy guard.
+    if (typeof artworkLibraryState !== "undefined" && artworkLibraryState.busy) return;
+    invalidateHistoryTransfer();
     closeImagePreview({ immediate: true, restoreFocus: false });
     closeRegenerationDrawers(false);
     motionDialog(ui.detailDialog, false);
     return;
   }
   if (
-    (!ui.replayDrawer.hidden || !ui.variantDrawer.hidden) &&
-    !event.target.closest(".regeneration-drawer, .reproduce-actions")
-  )
-    closeRegenerationDrawers();
-});
-ui.detailDialog.addEventListener("cancel", (event) => {
-  if (!ui.replayDrawer.hidden || !ui.variantDrawer.hidden) {
-    event.preventDefault();
-    closeRegenerationDrawers();
+    (typeof artworkDetailVisible !== "function" || artworkDetailVisible()) &&
+    !event.target.closest("#detailActionFold, .detail-primary-actions")
+  ) {
+    closeRegenerationDrawers(false);
+    closeDetailActionPanels();
   }
 });
+ui.detailDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  if (typeof artworkLibraryState !== "undefined" && artworkLibraryState.busy) return;
+  const inDetail = typeof artworkDetailVisible !== "function" || artworkDetailVisible();
+  if (inDetail && [ui.replayDrawer, ui.variantDrawer].some(drawer => !drawer.hidden && drawer.dataset?.motionState !== "closing" && !drawer.classList?.contains("closing"))) {
+    closeRegenerationDrawers();
+    return;
+  }
+  if (inDetail && closeDetailActionPanels({ restoreFocus: true })) return;
+  if (typeof artworkBack === "function" && artworkBack()) return;
+  invalidateHistoryTransfer();
+  motionDialog(ui.detailDialog, false);
+});
+for (const button of document.querySelectorAll("[data-detail-action]")) {
+  button.addEventListener("click", () => toggleDetailActionPanel(button.dataset.detailAction));
+}
 ui.restoreSettings.addEventListener("click", () => {
   if (!selectedRecord) return;
-  suppressDetailReturnFocus();
-  closeImagePreview({ immediate: true, restoreFocus: false });
-  if (typeof singleWorkbenchRestoreHistory === "function") singleWorkbenchRestoreHistory(selectedRecord);
-  else applySettings(selectedRecord.settings);
-  motionDialog(ui.detailDialog, false);
-  schedulePersist();
-  toast("已载入历史设置");
+  try {
+    if (typeof singleWorkbenchRestoreHistory === "function") singleWorkbenchRestoreHistory(selectedRecord);
+    else applySettings(selectedRecord.settings);
+    suppressDetailReturnFocus();
+    closeImagePreview({ immediate: true, restoreFocus: false });
+    motionDialog(ui.detailDialog, false);
+    schedulePersist();
+    if (typeof artworkRevealWorkbench === "function") artworkRevealWorkbench();
+    toast("已载入历史参数，保留生成数量和卡池配置");
+  } catch (error) { toast(`载入失败：${error.message}`); }
 });
 async function deleteSelectedHistoryRecord() {
+  if (typeof artworkOpenDelete === "function") { if (selectedRecord) artworkOpenDelete([selectedRecord]); return; }
   if (!selectedRecord || !confirm("只删除 WebUI 历史记录，图片文件会保留。继续吗？")) return;
   const deletedId = selectedRecord.id;
   const owner = detailContext;
@@ -6177,6 +6328,8 @@ async function initialize() {
       ui.draftStatus.textContent = "使用模板默认设置";
     }
     if (typeof initializeSingleWorkbench === "function") initializeSingleWorkbench({ legacyRestored: Boolean(restored) });
+    if (typeof initializeArtworkLibrary === "function") initializeArtworkLibrary();
+    if (typeof initializeImageCleanup === "function") initializeImageCleanup();
     if (typeof StudioMotion !== "undefined") {
       StudioMotion.bindDisclosures(document);
       StudioMotion.bindDialogs(document);

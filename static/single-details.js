@@ -146,8 +146,6 @@ function bindSingleDetailGroups(container) {
 function singleDetailLayout(single) {
   // Keep the shared prompt nodes alive while rebuilding groups or switching workbenches.
   ui.detailMain.append(ui.detailPositive.closest("label"), ui.detailNegative.closest("label"));
-  const target = single ? ui.detailScroll : ui.detailDrawerHome;
-  target.append(ui.replayDrawer, ui.variantDrawer);
   ui.detailScroll.scrollTop = 0;
   ui.detailDialog.classList.toggle("is-single-detail", single);
   ui.detailDialog.classList.remove("is-regenerating");

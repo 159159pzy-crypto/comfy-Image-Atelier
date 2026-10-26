@@ -49,7 +49,7 @@ function setup() {
     ui: { gallery, emptyState: empty, pageLabel: {}, prevPage: {}, nextPage: {}, historyCount: {} },
     config: {}, historyDirty: true, historyPage: 1, historyPages: 1, historyItems: [], historyCache: new Map(), updatePreviewNavigation() {},
   });
-  load(ctx, 'card', 'cacheHistoryPage', 'renderHistoryPage');
+  load(ctx, 'historyViewState', 'card', 'cacheHistoryPage', 'renderHistoryPage');
   return { ctx, gallery, opened };
 }
 const record = (id, workbench = 'random') => ({ id, filename: `${id}.png`, sequence: id, sample_seed: 0, settings: { workbench } });
@@ -97,11 +97,28 @@ test('unchanged refresh preserves image nodes and focus targets; metadata and cl
   assert.equal(gallery.children[1], nodes[0]);
 });
 
+test('manager rendering and paging keep home nodes and thumbnails mounted and card actions retain their owner', () => {
+  const { ctx, gallery } = setup(), opened = [];
+  ctx.artworkCardActivate = (record, view) => opened.push({ id: record.id, view });
+  ctx.renderHistoryPage({ page: 3, pages: 4, total: 80, items: [record(49), record(50)] });
+  const homeNodes = [...gallery.children], homeImages = gallery.querySelectorAll('img');
+  const manager = { kind: 'library', page: 1, pages: 1, queryEpoch: 0, items: [], cache: new Map(), query: { source: '', folder: 'trip' }, elements: {
+    gallery: element('gallery'), emptyState: { querySelector: () => ({}) }, pageLabel: {}, prevPage: {}, nextPage: {}, historyCount: {},
+  } };
+  ctx.renderHistoryPage({ page: 1, pages: 2, total: 30, items: [record(1)] }, manager);
+  ctx.renderHistoryPage({ page: 2, pages: 2, total: 30, items: [record(25)] }, manager);
+  manager.elements.gallery.children[0].querySelector('button').listeners.get('click')();
+  assert.equal(opened[0].id, 25); assert.equal(opened[0].view, manager);
+  assert.deepEqual(gallery.children, homeNodes); assert.deepEqual(gallery.querySelectorAll('img'), homeImages);
+  assert.equal(ctx.historyPage, 3); assert.equal(ctx.historyItems[0].id, 49);
+  assert.equal(ctx.historyCache.size, 1); assert.equal(manager.cache.size, 2);
+});
+
 test('details load the original for both workbenches and release it only after the dialog closes', () => {
   const image = element('img');
   const ctx = vm.createContext({
     ui: { detailImage: image, detailDialog: { open: true }, detailMeta: {}, detailPositive: {}, detailNegative: {}, detailStats: {}, detailSelection: {} },
-    resetRevealImageFile() {}, renderSingleDetail() {}, resetSingleDetail() {},
+    resetRevealImageFile() {}, renderSingleDetail() {}, resetSingleDetail() {}, closeRegenerationDrawers() {},
     normalizeSettings: settings => ({ ...settings, loras: [] }), SECTIONS: [], escapeHtml: String,
     detailContext: { origin: 'random' }, closeImagePreview() {}, regenerationRequest: 0, regenerationOptions: {}, document: { querySelector: () => null },
   });

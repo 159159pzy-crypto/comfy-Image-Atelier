@@ -216,7 +216,7 @@ function previewContext() {
     document: { documentElement: { classList: { remove() {} } } },
     ui: { imagePreviewVeil: { getAnimations: () => [] }, imagePreviewImage: { classList: { remove() {} }, removeAttribute() {} }, imagePreviewStatus: {}, imagePreviewAnnouncement: {}, imagePreviewDialog: { classList: { remove() {} }, dataset: {} } },
   });
-  load(ctx, 'clearPreviewCache', 'trimPreviewCache', 'preloadRecord', 'preloadPreviewNeighbors', 'finishImagePreviewClose');
+  load(ctx, 'clearPreviewCache', 'trimPreviewCache', 'preloadRecord', 'preloadPreviewNeighbors', 'setImagePreviewSourceHidden', 'finishImagePreviewClose');
   return { ctx, images, pending };
 }
 test('decoded preview cache retains only the current image and its two neighbors', async () => {

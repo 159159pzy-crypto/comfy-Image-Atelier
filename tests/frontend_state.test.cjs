@@ -663,6 +663,7 @@ test('a late bitmap selection cannot replace the newest single viewer selection'
 
 test('canvas opens single detail first while a random archive entry keeps random origin', () => {
   const ctx = galleryContext();
+  vm.runInContext(functionSource('historyViewState'), ctx);
   vm.runInContext(functionSource('openDetail'), ctx);
   ctx.state.lastCompleted = singleRecord(20);
   ctx.ui.detailDialog.open = false;
@@ -832,6 +833,7 @@ test('single delete updates its detail in place and closes only when no neighbor
 
 test('a rejected random page request cannot overwrite a newly opened single fullscreen', async () => {
   const ctx = galleryContext(), page = deferred();
+  for (const name of ['historyViewState', 'previewHistoryView']) vm.runInContext(functionSource(name), ctx);
   vm.runInContext(functionSource('navigatePreview'), ctx);
   ctx.imagePreview.context = { kind: 'random' };
   ctx.selectedHistoryLocation = () => ({ page: 1, items: [], index: -1 });
@@ -912,7 +914,7 @@ test('disabled single canvas returns detail focus to its preview region unless s
 
 test('fullscreen restores focus after native close rendering without stealing a new dialog', () => {
   const ctx = galleryContext(), frames = [];
-  for (const name of ['clearPreviewCache', 'finishImagePreviewClose', 'restoreImagePreviewCloseFocus']) vm.runInContext(functionSource(name), ctx);
+  for (const name of ['clearPreviewCache', 'setImagePreviewSourceHidden', 'finishImagePreviewClose', 'restoreImagePreviewCloseFocus']) vm.runInContext(functionSource(name), ctx);
   ctx.requestAnimationFrame = fn => frames.push(fn);
   ctx.document.documentElement = { classList: { remove() {} } };
   Object.assign(ctx.imagePreview, { pointers: new Set(), context: ctx.singleGalleryContext() });

@@ -8,6 +8,7 @@ const vm = require('node:vm');
 const plain = value => JSON.parse(JSON.stringify(value));
 const sources = ['single-workbench.js', 'single-compatibility.js', 'single-layout.js']
   .map(file => fs.readFileSync(path.join(__dirname, '../static', file), 'utf8'));
+const appSource = fs.readFileSync(path.join(__dirname, '../static/app.js'), 'utf8');
 
 function setup() {
   const elements = {}, notices = [], persisted = [];
@@ -96,6 +97,7 @@ function setup() {
     console, document, Element, HTMLElement: Element, HTMLInputElement, HTMLTextAreaElement, clearTimeout,
     window: { scrollX: 0, scrollY: 0, scrollTo() {} },
     config: { single_defaults: {} }, resources: { samplers: [], schedulers: [] }, profileDrafts: {},
+    draft: {}, kreaPromptPoolSelection: [], clone: plain,
     SECTIONS: ['character', 'clothing', 'pose', 'background', 'expression'],
     currentProfile: () => profile,
     profileConfig: value => ({ clip_name: `${value}-clip`, vae_name: `${value}-vae`, clip_type: `${value}-type` }),
@@ -103,10 +105,16 @@ function setup() {
       latent: { enabled: false }, seedvr2: { enabled: false, weight_dtype: 'default' },
       nvidia: { enabled: false, resize_type: 'scale by multiplier', quality: 'high' }, face_refine: { enabled: false },
     } }),
-    ui: { base_mode: { value: 'normal' }, latent_upscale_enabled: { checked: false }, detailDialog: { close() {} } },
+    ui: { base_mode: { value: 'normal' }, latent_upscale_enabled: { checked: false },
+      krea_prompt_pool_enabled: { checked: false }, detailDialog: { close() {} } },
     toast: (...args) => notices.push(args), closeImagePreview() {},
     singleWorkbenchCancelInput() {}, singleWorkbenchRestoreInput() {},
+    renderDimensions() {}, renderKreaPromptPool() {}, updatePoolOverview() {},
   });
+  for (const name of ['defaultPools', 'profileStateFrom']) {
+    const start = appSource.indexOf(`function ${name}(`);
+    vm.runInContext(appSource.slice(start, appSource.indexOf('\n}', start) + 2), ctx);
+  }
   for (const source of sources) vm.runInContext(source, ctx);
   const state = vm.runInContext('singleWorkbenchState', ctx);
   const layout = vm.runInContext('singleLayoutState', ctx);

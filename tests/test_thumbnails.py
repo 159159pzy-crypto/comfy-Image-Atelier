@@ -15,7 +15,7 @@ from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from PIL import Image, ImageCms
 
 from anima_webui.comfy import ComfyError
-from anima_webui.server import HISTORY_KEY, THUMBNAILS_KEY, create_app
+from anima_webui.server import ARTWORK_DELETION_KEY, HISTORY_KEY, THUMBNAILS_KEY, create_app
 from anima_webui.thumbnails import CACHE_TTL_SECONDS, ThumbnailStore, make_thumbnail
 from anima_webui.workflow import DEFAULT_SETTINGS
 from test_server import APP_DIR, FakeComfy, _write_fake_tools
@@ -377,20 +377,21 @@ class ThumbnailApiTests(unittest.IsolatedAsyncioTestCase):
         await self.client.get(self.endpoint)
         app = self.client.server.app
         history = app[HISTORY_KEY]
-        original_delete = history.delete_image
+        deletion_service = app[ARTWORK_DELETION_KEY]
+        original_delete = deletion_service.delete
         started = asyncio.Event()
         release = asyncio.Event()
 
-        async def delayed_delete(image_id):
+        async def delayed_delete(*args, **kwargs):
             started.set()
             await release.wait()
-            return await original_delete(image_id)
+            return await original_delete(*args, **kwargs)
 
         route = next(route for route in app.router.routes()
                      if route.method == "DELETE" and route.resource.canonical == "/api/history/{image_id}")
         request = make_mocked_request("DELETE", f"/api/history/{self.record['id']}", app=app,
                                      match_info={"image_id": str(self.record["id"])})
-        with mock.patch.object(history, "delete_image", side_effect=delayed_delete):
+        with mock.patch.object(deletion_service, "delete", side_effect=delayed_delete):
             deleting = asyncio.create_task(route.handler(request))
             try:
                 await asyncio.wait_for(started.wait(), 3)

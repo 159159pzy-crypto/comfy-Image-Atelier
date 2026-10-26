@@ -92,10 +92,10 @@ test('single drawers close immediately, restore details and ignore outdated reso
       detailDialog: { classList: { contains: name => classes.has(name), remove: name => classes.delete(name), add: name => classes.add(name) } },
       confirmReplay: { focus() { focused = true; } }, variantModes: { querySelector: () => null } }, loadRegenerationOptions: () => pending.promise,
     document: { contains: () => true } });
-  for (const name of ['collapseRegenerationDrawer', 'closeRegenerationDrawers', 'openRegenerationDrawer']) vm.runInContext(functionSource(name), ctx);
+  for (const name of ['setDetailActionPanelVisible', 'collapseRegenerationDrawer', 'closeRegenerationDrawers', 'openRegenerationDrawer']) vm.runInContext(functionSource(name), ctx);
   const opening = ctx.openRegenerationDrawer('replay', trigger);
-  assert.equal(classes.has('is-regenerating'), true);
-  assert.equal(ctx.ui.detailScroll.scrollTop, 0);
+  assert.equal(classes.has('is-regenerating'), false, 'inline generation options do not hide historical details');
+  assert.equal(ctx.ui.detailScroll.scrollTop, 80, 'opening actions preserves the detail reading position');
   assert.equal(replay.hidden, false);
   ctx.closeRegenerationDrawers();
   assert.equal(replay.hidden, true);
@@ -104,47 +104,19 @@ test('single drawers close immediately, restore details and ignore outdated reso
   assert.equal(focused, false);
 });
 
-test('random drawers reverse from current motion and only the latest close can hide them', async () => {
-  const frames = new Map(); let now = 0, serial = 0;
-  const classList = () => {
-    const values = new Set();
-    return { contains: name => values.has(name), add: name => values.add(name), remove: name => values.delete(name) };
-  };
-  const drawer = () => ({ hidden: true, classList: classList(), dataset: {}, style: {} });
+test('an older resource response cannot steal focus after closing and reopening the same record', async () => {
+  const pending = [deferred(), deferred()]; let request = 0, focuses = 0;
+  const drawer = () => ({ hidden: true, classList: { contains: () => false, remove() {} } });
   const replay = drawer(), variant = drawer(), trigger = { focus() {}, setAttribute() {} };
   const ctx = vm.createContext({ selectedRecord: { id: 7 }, regenerationTrigger: null,
     ui: { replayDrawer: replay, variantDrawer: variant, reproduceImage: trigger, variantButton: trigger,
-      detailDialog: { classList: classList() }, confirmReplay: { focus() {} }, variantModes: { querySelector: () => null } },
-    loadRegenerationOptions: async () => ({}), document: { contains: () => true, addEventListener() {} },
-    matchMedia: () => ({ matches: false, addEventListener() {} }), performance: { now: () => now },
-    requestAnimationFrame: callback => { frames.set(++serial, callback); return serial; }, cancelAnimationFrame: id => frames.delete(id),
-  });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '../static/motion.js'), 'utf8'), ctx);
-  const step = (ms = 16) => { now += ms; const callbacks = [...frames.values()]; frames.clear(); callbacks.forEach(callback => callback(now)); };
-  const settle = () => { for (let i = 0; frames.size && i < 200; i++) step(); assert.equal(frames.size, 0); };
-  for (const name of ['collapseRegenerationDrawer', 'closeRegenerationDrawers', 'openRegenerationDrawer']) vm.runInContext(functionSource(name), ctx);
-  await ctx.openRegenerationDrawer('replay', trigger);
-  step(80);
-  ctx.closeRegenerationDrawers();
-  assert.equal(replay.classList.contains('closing'), true);
-  step(40);
-  const mid = ctx.StudioMotion.snapshot(replay, 'presence').value.progress;
-  await ctx.openRegenerationDrawer('replay', trigger);
-  assert.equal(replay.classList.contains('closing'), false);
-  assert.equal(ctx.StudioMotion.snapshot(replay, 'presence').value.progress, mid);
-  settle();
-  assert.equal(replay.hidden, false, 'old close callback cannot hide reopened drawer');
-  ctx.closeRegenerationDrawers();
-  step(40);
-  await ctx.openRegenerationDrawer('replay', trigger);
-  step(40);
-  ctx.closeRegenerationDrawers();
-  step(40);
-  assert.equal(replay.hidden, false, 'old close cycle cannot complete a later close cycle');
-  settle();
-  assert.equal(replay.hidden, true);
-  await ctx.openRegenerationDrawer('replay', trigger);
+      detailDialog: { classList: { remove() {} } }, confirmReplay: { focus() { focuses++; } } },
+    loadRegenerationOptions: () => pending[request++].promise, document: { contains: () => true, activeElement: trigger } });
+  for (const name of ['setDetailActionPanelVisible', 'collapseRegenerationDrawer', 'closeRegenerationDrawers', 'openRegenerationDrawer']) vm.runInContext(functionSource(name), ctx);
+  const old = ctx.openRegenerationDrawer('replay', trigger);
   ctx.closeRegenerationDrawers(false, true);
-  assert.equal(replay.hidden, true, 'changing records closes drawers immediately');
-  assert.equal(replay.classList.contains('closing'), false);
+  const latest = ctx.openRegenerationDrawer('replay', trigger);
+  pending[0].resolve({}); await old; assert.equal(focuses, 0);
+  ctx.document.activeElement = { id: 'another-action' };
+  pending[1].resolve({}); await latest; assert.equal(focuses, 0, 'resource checks must not override a newer user focus choice');
 });

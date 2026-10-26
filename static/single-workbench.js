@@ -180,11 +180,13 @@ function singleWorkbenchPersist() {
     localStorage.setItem(VIEW_KEY, JSON.stringify({ version: 1, activeSection, views: poolViews }));
     ui.draftStatus.textContent = `本地草稿已保存 ${formatSavedTime(savedAt)}`;
   } catch { ui.draftStatus.textContent = "浏览器未允许保存草稿"; }
+  if (typeof imageCleanupScheduleLeases === "function") imageCleanupScheduleLeases();
   return true;
 }
-function singleWorkbenchSwitch(mode, profile = currentProfile(), { save = true, settings = null } = {}) {
+function singleWorkbenchSwitch(mode, profile = currentProfile(), { save = true, settings = null, poolDraft = null } = {}) {
   if (!singleWorkbenchState.ready) return;
   if (save) singleWorkbenchPersist();
+  if (typeof invalidatePoolContext === "function") invalidatePoolContext();
   const state = singleWorkbenchState;
   const animateMode = save && state.mode !== mode;
   state.promptRevision++;
@@ -200,6 +202,19 @@ function singleWorkbenchSwitch(mode, profile = currentProfile(), { save = true, 
   profileDrafts = singleWorkbenchClone(target?.profileDrafts || {});
   const next = settings || target?.settings || (mode === "single" ? singleWorkbenchDefaultSettings(profile) : randomWorkbenchDefaultSettings(profile));
   applySettings({ ...next, workbench: mode, model_profile: profile });
+  // Inactive fixed text is deliberately omitted from generation settings. Keep
+  // the complete editor state when restoring a draft or importing history.
+  const preservedPools = poolDraft || (!settings ? target?.profileDrafts?.[profile] : null);
+  if (preservedPools) {
+    for (const key of ["modes", "counts", "fixed", "pools"]) {
+      if (preservedPools[key] !== undefined) draft[key] = singleWorkbenchClone(preservedPools[key]);
+    }
+    if (preservedPools.kreaPromptPoolEnabled !== undefined) ui.krea_prompt_pool_enabled.checked = Boolean(preservedPools.kreaPromptPoolEnabled);
+    if (preservedPools.kreaPromptPoolSelection !== undefined) kreaPromptPoolSelection = singleWorkbenchClone(preservedPools.kreaPromptPoolSelection);
+    renderDimensions();
+    renderKreaPromptPool();
+    updatePoolOverview();
+  }
   document.getElementById("singleSeedMode").value = target?.seedMode || (target ? "random" : "fixed");
   document.getElementById("singleSampleSeed").value = target?.seed || "0";
   state.promptSeed = Number(target?.promptSeed || 0);
@@ -389,7 +404,32 @@ function singleWorkbenchShowSettings() {
 }
 function singleWorkbenchRestoreHistory(record) {
   const mode = record.settings?.workbench === "single" ? "single" : "random";
-  singleWorkbenchSwitch(mode, record.settings?.model_profile || "anima", { settings: record.settings });
+  const profile = record.settings?.model_profile || "anima";
+  const target = singleWorkbenchState.mode === mode && currentProfile() === profile
+    ? singleWorkbenchCapture() : singleWorkbenchState.drafts[mode]?.[profile];
+  const fallback = mode === "single" ? singleWorkbenchDefaultSettings(profile) : randomWorkbenchDefaultSettings(profile);
+  const current = target?.settings || fallback;
+  const poolDraft = profileStateFrom(current);
+  const storedPools = target?.profileDrafts?.[profile];
+  for (const key of ["modes", "counts", "fixed", "pools"]) {
+    if (storedPools?.[key] !== undefined) poolDraft[key] = singleWorkbenchClone(storedPools[key]);
+  }
+  poolDraft.kreaPromptPoolEnabled = Boolean(storedPools?.kreaPromptPoolEnabled ?? current.krea_prompt_pool?.enabled);
+  poolDraft.kreaPromptPoolSelection = singleWorkbenchClone(storedPools?.kreaPromptPoolSelection ?? current.krea_prompt_pool?.ids ?? []);
+  const settings = { ...singleWorkbenchClone(record.settings || {}),
+    count: mode === "single" ? 1 : current.count ?? fallback.count,
+    pools: singleWorkbenchClone(poolDraft.pools),
+    krea_prompt_pool: {
+      enabled: poolDraft.kreaPromptPoolEnabled,
+      ids: singleWorkbenchClone(poolDraft.kreaPromptPoolSelection),
+    },
+  };
+  for (const section of SECTIONS) {
+    settings[`random_${section}`] = poolDraft.modes[section] === "pool";
+    settings[`random_${section}_count`] = Number(poolDraft.counts[section] || 1);
+    settings[`fixed_${section}`] = poolDraft.modes[section] === "fixed" ? poolDraft.fixed[section] || "" : "";
+  }
+  singleWorkbenchSwitch(mode, profile, { settings, poolDraft });
   document.getElementById("singleSeedMode").value = "fixed";
   document.getElementById("singleSampleSeed").value = record.sample_seed ?? 0;
   singleWorkbenchState.promptSeed = record.prompt_seed ?? 0;
@@ -398,8 +438,29 @@ function singleWorkbenchRestoreHistory(record) {
   singleWorkbenchShowSettings();
 }
 async function singleWorkbenchFromHistory(record, asImage = false) {
-  if (!record) return;
-  if (typeof suppressDetailReturnFocus === "function") suppressDetailReturnFocus();
+  if (!record || singleWorkbenchState.historyTransferBusy) return;
+  // Resolve the managed reference before changing the user's current draft.
+  // A failed or abandoned import must leave the detail and its list in place.
+  let importedInput = null;
+  if (asImage) {
+    const token = singleWorkbenchState.historyTransferRequest = (singleWorkbenchState.historyTransferRequest || 0) + 1;
+    const owner = typeof detailContext !== "undefined" ? detailContext : null;
+    const sourceProfile = currentProfile();
+    const trigger = document.getElementById("useAsInputImage");
+    singleWorkbenchState.historyTransferBusy = true;
+    if (trigger) { trigger.disabled = true; trigger.setAttribute("aria-busy", "true"); }
+    try {
+      importedInput = await request("/api/input-images/from-history", { method: "POST", body: JSON.stringify({ image_id: record.id }) });
+      if (token !== singleWorkbenchState.historyTransferRequest || sourceProfile !== currentProfile()
+        || (owner && (owner !== detailContext || selectedRecord !== record))) return;
+    } catch (error) {
+      if (token === singleWorkbenchState.historyTransferRequest && (!owner || owner === detailContext)) toast(`参考图导入失败：${error.message}`);
+      return;
+    } finally {
+      singleWorkbenchState.historyTransferBusy = false;
+      if (trigger) { trigger.disabled = false; trigger.removeAttribute("aria-busy"); }
+    }
+  }
   const profile = record.settings?.model_profile || "anima";
   const settings = singleWorkbenchMerge(singleWorkbenchDefaultSettings(profile), record.settings || {});
   settings.workbench = "single"; settings.count = 1; settings.generation_mode = "txt2img";
@@ -416,25 +477,13 @@ async function singleWorkbenchFromHistory(record, asImage = false) {
   singleWorkbenchState.promptSeed = record.prompt_seed || 0;
   document.getElementById("singleSeedMode").value = "fixed";
   singleWorkbenchLayout();
+  if (importedInput) singleWorkbenchSetInput(importedInput);
+  if (typeof suppressDetailReturnFocus === "function") suppressDetailReturnFocus();
   closeImagePreview({ immediate: true, restoreFocus: false }); motionDialog(ui.detailDialog, false);
   singleWorkbenchShowSettings();
-  if (asImage) {
-    singleWorkbenchCancelInput({ render: false });
-    const token = singleWorkbenchState.inputRequest;
-    const current = () => token === singleWorkbenchState.inputRequest && profile === currentProfile() && singleWorkbenchActive();
-    singleWorkbenchState.inputBusy = "upload"; singleWorkbenchRenderInput();
-    try {
-      const input = await request("/api/input-images/from-history", { method: "POST", body: JSON.stringify({ image_id: record.id }) });
-      if (!current()) return;
-      singleWorkbenchSetInput(input);
-    } catch (error) {
-      if (!current()) return;
-      singleWorkbenchState.inputError = error.message; toast(error.message);
-      singleWorkbenchState.inputBusy = ""; singleWorkbenchRenderInput();
-      return;
-    }
-  }
-  singleWorkbenchPersist(); toast(asImage ? "已送入单图工作台作为参考图" : "已载入最终提示词和生成参数");
+  singleWorkbenchPersist();
+  if (typeof artworkRevealWorkbench === "function") artworkRevealWorkbench();
+  toast(asImage ? "已送入单图工作台作为参考图" : "已载入最终提示词和生成参数");
 }
 function singleWorkbenchApplyPreset(item) {
   const current = readSettings(); const snapshot = singleWorkbenchClone(item.settings || {});
@@ -491,7 +540,6 @@ function initializeSingleWorkbench({ legacyRestored = false } = {}) {
   document.getElementById("singleManagePromptRules").addEventListener("click", openPromptRuleDialog);
   document.getElementById("singleUndoNormalization").addEventListener("click", undoPromptNormalization);
   if (typeof clearNormalizationUndo === "function") clearNormalizationUndo();
-  document.getElementById("historyWorkbenchFilter").addEventListener("change", () => { historyCache.clear(); void loadHistory(1); });
   document.getElementById("sendToSingle").addEventListener("click", () => singleWorkbenchFromHistory(selectedRecord));
   document.getElementById("useAsInputImage").addEventListener("click", () => singleWorkbenchFromHistory(selectedRecord, true));
   window.addEventListener("pagehide", singleWorkbenchPersist);

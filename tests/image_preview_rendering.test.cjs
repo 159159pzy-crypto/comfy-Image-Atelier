@@ -19,7 +19,7 @@ function classList() {
 
 function element() {
   const attrs = new Map(), listeners = new Map(), writes = [], animations = [];
-  const properties = { removeProperty(name) { delete this[name]; } };
+  const properties = { removeProperty(name) { delete this[name]; }, setProperty(name, value) { this[name] = String(value); } };
   return {
     attrs, listeners, writes, animations, classList: classList(), dataset: {}, hidden: false,
     style: new Proxy(properties, { set(target, name, value) { writes.push([name, value]); target[name] = value; return true; } }),
@@ -71,6 +71,7 @@ function setup({ width = 4000, height = 3000, reducedMotion = false, devicePixel
     Image: class { decode() { return Promise.resolve(); } }, Element: class {},
   });
   if (motion) vm.runInContext(fs.readFileSync(path.join(__dirname, '../static/motion.js'), 'utf8'), ctx);
+  vm.runInContext(source.slice(source.indexOf('function historyViewState('), source.indexOf('function cacheHistoryPage(')), ctx);
   vm.runInContext(source.slice(source.indexOf('const imagePreview ='), source.indexOf('let regenerationOptions =')), ctx);
   vm.runInContext(source.slice(source.indexOf('const IMAGE_PREVIEW_MAX_ZOOM'), source.indexOf('function collapseRegenerationDrawer')), ctx);
   const doubleClickStart = source.indexOf('ui.imagePreviewImage.addEventListener("dblclick"');
@@ -329,6 +330,152 @@ test('a decode completing after close cannot reveal the hidden original or resta
   assert.equal(h.image.hidden, true);
   assert.equal(h.image.getAttribute('src'), null);
   assert.equal(h.image.animations.length, 0);
+});
+
+for (const mode of [{ motion: false }, { motion: true }, { motion: true, reducedMotion: true }]) {
+  test(`cold preview keeps its source until a rendered bitmap is ready (${JSON.stringify(mode)})`, async () => {
+    const h = setup(mode);
+    let decoded;
+    h.image.decode = () => new Promise(resolve => { decoded = resolve; });
+    h.state.phase = 'closed'; h.state.context = null;
+    Object.assign(h.ui.detailImage, { isConnected: true,
+      getBoundingClientRect: () => ({ left: 100, top: 100, right: 340, bottom: 280, width: 240, height: 180 }) });
+    h.ui.detailDialog.getBoundingClientRect = () => ({ left: 40, top: 50, right: 900, bottom: 750, width: 860, height: 700 });
+    const sourceClasses = h.ui.detailImage.classList;
+    const toggle = sourceClasses.toggle.bind(sourceClasses);
+    let transferred = false;
+    sourceClasses.toggle = (name, hidden) => {
+      if (name === 'image-preview-source-hidden' && hidden) {
+        assert.equal(h.image.hidden, false, 'the decoded bitmap must already be visible');
+        assert.ok(parseFloat(h.image.style.width) > 0, 'layout must precede the handoff');
+        assert.ok(mode.motion ? h.ctx.StudioMotion.snapshot(h.image, 'flight') : h.image.animations.length,
+          'the initial animation frame must precede the handoff');
+        assert.equal(h.ui.imagePreviewVeil.animations.length, 0, 'the veil must wait for the handoff');
+        transferred = true;
+      }
+      return toggle(name, hidden);
+    };
+    const opening = h.ctx.openImagePreview(null, { kind: 'random', sourceElement: h.ui.detailImage, sourceContainer: h.ui.detailDialog });
+    assert.equal(h.state.phase, 'loading');
+    assert.equal(sourceClasses.contains('image-preview-source-hidden'), false);
+    assert.equal(h.image.hidden, true);
+    assert.equal(h.ui.imagePreviewStatus.hidden, false);
+    assert.equal(h.ui.imagePreviewVeil.style.opacity, '0');
+    assert.equal(h.ui.imagePreviewVeil.animations.length, 0);
+    decoded(); await opening;
+    assert.equal(transferred, true);
+    assert.equal(sourceClasses.contains('image-preview-source-hidden'), true);
+    assert.equal(h.ui.imagePreviewStatus.hidden, true);
+    assert.equal(h.ui.imagePreviewVeil.animations.length, 1);
+    let bitmapHidden = h.image.hidden;
+    Object.defineProperty(h.image, 'hidden', { get: () => bitmapHidden, set(value) {
+      if (value) assert.equal(sourceClasses.contains('image-preview-source-hidden'), false,
+        'closing must restore the source before hiding the overlay bitmap');
+      bitmapHidden = value;
+    } });
+    h.ctx.closeImagePreview({ immediate: true });
+    assert.equal(h.state.phase, 'closed');
+    assert.equal(sourceClasses.contains('image-preview-source-hidden'), false);
+    assert.equal(h.image.getAttribute('src'), null);
+  });
+}
+
+test('canceling a cold preview returns immediately and ignores its late decode', async () => {
+  const h = setup({ motion: true });
+  let decoded;
+  h.image.decode = () => new Promise(resolve => { decoded = resolve; });
+  h.state.phase = 'closed'; h.state.context = null;
+  const opening = h.ctx.openImagePreview(null, { kind: 'random', sourceElement: h.ui.detailImage });
+  h.ctx.closeImagePreview();
+  assert.equal(h.state.phase, 'closed');
+  assert.equal(h.ui.imagePreviewDialog.open, false);
+  assert.equal(h.ui.detailImage.classList.contains('image-preview-source-hidden'), false);
+  assert.equal(h.frames.size, 0);
+  decoded(); await opening;
+  assert.equal(h.state.phase, 'closed');
+  assert.equal(h.image.hidden, true);
+  assert.equal(h.ui.imagePreviewVeil.animations.length, 0);
+});
+
+test('a failed original decode keeps the detail visible and closes without a veil animation', async () => {
+  const h = setup();
+  h.image.decode = async () => { throw new Error('decode failed'); };
+  h.state.phase = 'closed'; h.state.context = null;
+  await h.ctx.openImagePreview(null, { kind: 'random', sourceElement: h.ui.detailImage });
+  assert.equal(h.state.phase, 'error');
+  assert.equal(h.ui.detailImage.classList.contains('image-preview-source-hidden'), false);
+  assert.equal(h.ui.imagePreviewStatus.hidden, false);
+  assert.match(h.ui.imagePreviewStatus.textContent, /加载失败/);
+  assert.equal(h.ui.imagePreviewVeil.style.opacity, '0');
+  assert.equal(h.ui.imagePreviewVeil.animations.length, 0);
+  h.ctx.closeImagePreview();
+  assert.equal(h.state.phase, 'closed');
+});
+
+test('a decode whose source view became invalid releases its loading overlay', async () => {
+  const h = setup();
+  h.state.phase = 'closed'; h.state.context = null;
+  await h.ctx.openImagePreview(null, { kind: 'random', sourceElement: h.ui.detailImage, isValid: () => false });
+  assert.equal(h.state.phase, 'closed');
+  assert.equal(h.ui.imagePreviewDialog.open, false);
+  assert.equal(h.ui.detailImage.classList.contains('image-preview-source-hidden'), false);
+});
+
+test('the source flight preserves opacity inherited from an entering detail and its content', () => {
+  const h = setup(), content = element();
+  Object.assign(h.ui.detailImage, { isConnected: true, parentElement: content,
+    getBoundingClientRect: () => ({ left: 100, top: 100, right: 340, bottom: 280, width: 240, height: 180 }) });
+  content.parentElement = h.ui.detailDialog;
+  h.ui.detailDialog.getBoundingClientRect = () => ({ left: 40, top: 50, right: 900, bottom: 750, width: 860, height: 700 });
+  h.state.context = { kind: 'random', sourceElement: h.ui.detailImage, sourceContainer: h.ui.detailDialog };
+  h.ui.detailImage.style.opacity = '.8'; content.style.opacity = '.75'; h.ui.detailDialog.style.opacity = '.6';
+  near(h.ctx.imagePreviewSourceFrame().opacity, .36, 'lifted pixels keep the exact source alpha');
+  h.ui.detailImage.style.opacity = content.style.opacity = h.ui.detailDialog.style.opacity = '1';
+  assert.equal(h.ctx.imagePreviewSourceFrame().opacity, 1, 'a completed dialog returns to an opaque source');
+});
+
+test('an early return resumes the frozen detail from its visible alpha without a brightness jump', async () => {
+  const h = setup({ motion: true });
+  h.state.phase = 'closed'; h.state.context = null;
+  Object.assign(h.ui.detailImage, { isConnected: true, parentElement: h.ui.detailDialog,
+    getBoundingClientRect: () => ({ left: 100, top: 100, right: 340, bottom: 280, width: 240, height: 180 }) });
+  h.ui.detailDialog.getBoundingClientRect = () => ({ left: 40, top: 50, right: 900, bottom: 750, width: 860, height: 700 });
+  h.ctx.StudioMotion.dialog(h.ui.detailDialog, true); h.frame(64);
+  const alpha = Number(h.ui.detailDialog.style.opacity);
+  assert.ok(alpha > 0 && alpha < 1);
+  await h.ctx.openImagePreview(null, { kind: 'random', sourceElement: h.ui.detailImage, sourceContainer: h.ui.detailDialog });
+  near(Number(h.image.style.opacity), alpha, 'entry begins at the visible parent alpha');
+  h.frame(32); h.ctx.closeImagePreview();
+  h.settle(); await flush();
+  assert.equal(h.state.phase, 'closed');
+  near(Number(h.ui.detailDialog.style.opacity), alpha, 'the parent resumes from the same alpha on return');
+  assert.equal(h.ui.detailImage.classList.contains('image-preview-source-hidden'), false);
+  h.settle(); await flush();
+  assert.equal(h.ui.detailDialog.style.opacity, '', 'the parent finishes at its normal opaque style');
+});
+
+test('reopening an exiting preview retains its bitmap until the latest close finishes', async () => {
+  const h = setup({ motion: true });
+  h.state.phase = 'closed'; h.state.context = null;
+  Object.assign(h.ui.detailImage, { isConnected: true,
+    getBoundingClientRect: () => ({ left: 100, top: 100, right: 340, bottom: 280, width: 240, height: 180 }) });
+  h.ui.detailDialog.getBoundingClientRect = () => ({ left: 40, top: 50, right: 900, bottom: 750, width: 860, height: 700 });
+  await h.ctx.openImagePreview(null, { kind: 'random', sourceElement: h.ui.detailImage, sourceContainer: h.ui.detailDialog });
+  h.settle(); await flush();
+  h.ctx.closeImagePreview(); h.frame(32);
+  const before = h.ctx.StudioMotion.snapshot(h.image, 'flight');
+  await h.ctx.openImagePreview();
+  const after = h.ctx.StudioMotion.snapshot(h.image, 'flight');
+  near(before.value.width, after.value.width); near(before.velocity.width, after.velocity.width);
+  assert.equal(h.ui.detailImage.classList.contains('image-preview-source-hidden'), true);
+  assert.equal(h.image.hidden, false);
+  h.settle(); await flush();
+  assert.equal(h.state.phase, 'open');
+  assert.equal(h.ui.imagePreviewDialog.open, true);
+  h.ctx.closeImagePreview(); h.settle(); await flush();
+  assert.equal(h.state.phase, 'closed');
+  assert.equal(h.ui.detailImage.classList.contains('image-preview-source-hidden'), false);
+  assert.equal(h.image.hidden, true);
 });
 
 test('closing cancels queued renders and animation work and releases decoded preloads', async () => {
