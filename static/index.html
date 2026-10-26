@@ -307,7 +307,7 @@
 
   <aside id="poolDrawer" class="pool-drawer glass" aria-hidden="true" aria-labelledby="poolTitle" inert>
     <header class="drawer-header">
-      <div><span id="poolKicker" class="kicker">PROMPT POOL</span><h2 id="poolTitle">角色池</h2><p id="poolMeta">0 项可用 · 0 项已选</p></div>
+      <div><span id="poolKicker" class="kicker">PROMPT POOL</span><h2 id="poolTitle">角色池</h2><p id="poolMeta">0 项匹配 · 0 项已选</p><p id="poolModeNote" hidden></p></div>
       <button id="closePool" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button>
     </header>
     <div class="pool-toolbar">
@@ -319,12 +319,20 @@
       <button id="clearFilters" class="button ghost compact" type="button">清除筛选</button>
     </div>
     <div class="pool-actions">
+      <div class="pool-selection-actions" role="group" aria-label="选择词条">
       <button id="selectPage" class="button ghost" type="button">选中本页</button>
-      <button id="selectAllPool" class="button ghost" type="button">全选词库</button>
-      <button id="clearPool" class="button ghost" type="button">清空</button>
+      <button id="selectFilteredPool" class="button ghost" type="button" title="跨页追加所有匹配词条，保留其他已选词条">选择全部筛选结果</button>
+      <button id="clearPool" class="button ghost" type="button">清空已选</button>
+      <details id="poolMoreSelection" class="pool-more-selection">
+        <summary class="button ghost">更多选择</summary>
+        <div class="pool-more-content"><button id="selectAllPool" class="button ghost" type="button" aria-describedby="wholePoolHelp">使用整个词库</button><p id="wholePoolHelp">忽略当前筛选，从整个词库随机抽取，今后新增的词条也会自动参与。</p></div>
+      </details>
       <button id="favoriteSelection" class="button ghost" type="button" disabled>收藏本次选择</button>
+      </div>
+      <div class="pool-content-actions" role="group" aria-label="管理词条">
       <button id="importCustom" class="button ghost compact" type="button">批量导入</button>
       <button id="addCustom" class="button primary compact" type="button"><span aria-hidden="true">+</span> 自定义</button>
+      </div>
     </div>
     <div class="pool-browser">
       <nav id="poolSidebar" class="pool-sidebar" aria-label="池分类"></nav>
@@ -355,13 +363,17 @@
       <button id="clearKreaPoolFilters" class="button ghost compact" type="button">清除筛选</button>
     </div>
     <div class="pool-actions">
+      <div class="pool-selection-actions" role="group" aria-label="选择词条">
       <button id="kreaPoolSelectPage" class="button ghost" type="button">选中本页</button>
-      <button id="kreaPoolSelectAll" class="button ghost" type="button">全选筛选结果</button>
-      <button id="clearKreaPoolSelection" class="button ghost" type="button">清空选择</button>
+      <button id="kreaPoolSelectAll" class="button ghost" type="button" title="跨页追加所有匹配词条，保留其他已选词条">选择全部筛选结果</button>
+      <button id="clearKreaPoolSelection" class="button ghost" type="button">清空已选</button>
       <button id="kreaPoolFavoriteSelection" class="button ghost" type="button" disabled>收藏本次选择</button>
+      </div>
+      <div class="pool-content-actions" role="group" aria-label="管理词条">
       <button id="kreaPoolDeleteSelection" class="button danger compact" type="button" disabled>批量删除</button>
       <button id="kreaPoolOpenImport" class="button ghost compact" type="button">批量导入</button>
       <button id="kreaPoolAddItem" class="button primary compact" type="button">＋ 自定义</button>
+      </div>
     </div>
     <div class="pool-browser krea-pool-browser"><nav id="kreaPoolSidebar" class="pool-sidebar" aria-label="自然语言池分类"></nav><section class="pool-results"><div id="kreaPromptPoolList" class="pool-grid" aria-live="polite"></div></section></div>
     <footer class="drawer-footer">

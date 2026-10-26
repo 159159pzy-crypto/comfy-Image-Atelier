@@ -2,6 +2,7 @@
 const kreaPoolView = {
   collection: "", customGroup: "", groups: [], favorites: { groups: [], items: [] },
   collapsed: new Set(), editor: null, favoriteIds: [], busy: false, itemSession: 0,
+  selectionRevision: 0, selectionOperation: null, selectionSummary: null, resultContext: null,
 };
 function kreaElement(tag, className = "", text = null) {
   const element = document.createElement(tag);
@@ -16,7 +17,54 @@ function kreaButton(text, action, className = "button ghost compact") {
 function kreaFavoriteUrl(suffix = "") { return `/api/favorites/prompt${suffix}?model_profile=krea2`; }
 function kreaEpoch() { return typeof sharedFavoritesState === "undefined" ? 0 : sharedFavoritesState.epoch; }
 function kreaCurrent(epoch) { return currentProfile() === "krea2" && epoch === kreaEpoch(); }
+function kreaSelectionSignature() { return JSON.stringify(kreaPromptPoolSelection); }
+function kreaSelectionContext() {
+  return { epoch: kreaEpoch(), revision: kreaPoolView.selectionRevision,
+    globalRevision: typeof poolContextRevision === "undefined" ? 0 : poolContextRevision,
+    query: JSON.stringify(kreaQuery()) };
+}
+function kreaDraftContextCurrent(context) {
+  return kreaCurrent(context.epoch) &&
+    context.globalRevision === (typeof poolContextRevision === "undefined" ? 0 : poolContextRevision);
+}
+function kreaSelectionContextCurrent(context) {
+  return kreaDraftContextCurrent(context) && context.revision === kreaPoolView.selectionRevision &&
+    context.query === JSON.stringify(kreaQuery());
+}
+function kreaSelectedCount() {
+  const summary = kreaPoolView.selectionSummary;
+  return summary?.signature === kreaSelectionSignature() ? summary.total : new Set(kreaPromptPoolSelection).size;
+}
+function kreaPoolResultsCurrent() {
+  return Boolean(kreaPoolView.resultContext && kreaSelectionContextCurrent(kreaPoolView.resultContext));
+}
+function updateKreaSelectionButtons() {
+  if (!ui.kreaPoolSelectAll) return;
+  const resultsCurrent = kreaPoolResultsCurrent();
+  ui.kreaPoolSelectAll.disabled = kreaPoolView.busy || (resultsCurrent && !kreaPoolQueryCount);
+  ui.kreaPoolSelectPage.disabled = kreaPoolView.busy || !resultsCurrent || !kreaPromptPool.items?.length;
+  ui.kreaPromptPoolList?.querySelectorAll('input[type="checkbox"]').forEach(input => { input.disabled = !resultsCurrent; });
+}
+function invalidateKreaPoolSelection() {
+  ++kreaPoolView.selectionRevision; ++kreaPromptPoolRequest;
+  kreaPoolView.selectionOperation = null; kreaPoolView.busy = false; kreaPoolView.selectionSummary = null;
+  updateKreaSelectionButtons();
+}
+function beginKreaSelection() {
+  if (currentProfile() !== "krea2") return null;
+  if (kreaPoolView.selectionOperation && kreaSelectionContextCurrent(kreaPoolView.selectionOperation)) return null;
+  const operation = kreaSelectionContext();
+  kreaPoolView.selectionOperation = operation; kreaPoolView.busy = true;
+  updateKreaSelectionButtons();
+  return operation;
+}
+function finishKreaSelection(operation) {
+  if (kreaPoolView.selectionOperation !== operation) return;
+  kreaPoolView.selectionOperation = null; kreaPoolView.busy = false;
+  updateKreaSelectionButtons();
+}
 function resetKreaPoolContext() {
+  invalidateKreaPoolSelection();
   ++kreaPromptPoolRequest; ++kreaImportRequest; ++kreaPoolView.itemSession;
   kreaPoolView.editor = null; editingKreaPromptItem = null; kreaImportPreview = null;
   for (const id of ["kreaPromptItemDialog", "kreaPromptImportDialog", "kreaGroupDialog", "kreaFavoriteSelectionDialog"]) {
@@ -32,12 +80,14 @@ function kreaQuery({ page = 1, limit = 48, q = ui.kreaPoolSearch.value.trim(), s
 async function queryKreaPool(body) {
   return request("/api/prompt-pools/query", { method: "POST", body: JSON.stringify(body) });
 }
-async function fetchAllKreaPromptPoolItems(query = ui.kreaPoolSearch.value.trim(), options = {}) {
+async function fetchAllKreaPromptPoolItems(query = ui.kreaPoolSearch.value.trim(), options = {}, current = () => true) {
   const body = kreaQuery({ ...options, q: query, limit: 500 });
   const first = await queryKreaPool(body), items = [...(first.items || [])];
+  if (!current()) return null;
   for (let start = 2; start <= first.pages; start += 6) {
     const pages = Array.from({ length: Math.min(6, first.pages - start + 1) }, (_, index) => start + index);
     const results = await Promise.all(pages.map(page => queryKreaPool({ ...body, page })));
+    if (!current()) return null;
     results.forEach(result => items.push(...(result.items || [])));
   }
   return { items, count: first.count, poolCount: first.pool_count };
@@ -52,10 +102,12 @@ function openKreaPromptPool() {
   void loadKreaPromptPool();
 }
 function closeKreaPromptPool() {
+  invalidateKreaPoolSelection();
   setKreaSidebarOpen(false); ui.kreaPoolDrawer.classList.remove("open");
-  ui.kreaPoolDrawer.setAttribute("aria-hidden", "true"); ui.kreaPoolDrawer.setAttribute("inert", "");
-  animatePoolSurface(ui.kreaPoolDrawer, ui.kreaPoolBackdrop, false);
+  ui.kreaPoolDrawer.setAttribute("inert", "");
   ui.openKreaPromptPool.focus({ preventScroll: true });
+  ui.kreaPoolDrawer.setAttribute("aria-hidden", "true");
+  animatePoolSurface(ui.kreaPoolDrawer, ui.kreaPoolBackdrop, false);
 }
 function setKreaSidebarOpen(open) {
   ui.kreaPoolSidebar.classList.toggle("mobile-open", open);
@@ -64,13 +116,14 @@ function setKreaSidebarOpen(open) {
 }
 async function loadKreaPromptPool({ page = kreaPoolPage } = {}) {
   if (currentProfile() !== "krea2") { renderKreaPromptPool(); return; }
-  const requestId = ++kreaPromptPoolRequest, epoch = kreaEpoch();
+  const requestId = ++kreaPromptPoolRequest, context = kreaSelectionContext();
+  kreaPoolView.resultContext = null; updateKreaSelectionButtons();
   try {
     const [payload, groups, favorites] = await Promise.all([
       queryKreaPool(kreaQuery({ page })),
       request("/api/prompt-pools/groups?model_profile=krea2"), request(kreaFavoriteUrl()),
     ]);
-    if (requestId !== kreaPromptPoolRequest || !kreaCurrent(epoch)) return;
+    if (requestId !== kreaPromptPoolRequest || !kreaSelectionContextCurrent(context)) return;
     kreaPoolView.groups = groups.groups || []; kreaPoolView.favorites = favorites;
     if ((kreaPoolView.collection && kreaPoolView.collection !== "__all__" && !favorites.groups.some(g => g.id === kreaPoolView.collection)) ||
         (kreaPoolView.customGroup && !kreaPoolView.groups.some(g => g.id === kreaPoolView.customGroup))) {
@@ -81,29 +134,35 @@ async function loadKreaPromptPool({ page = kreaPoolPage } = {}) {
     if (kreaPoolPage > Math.max(1, kreaPoolPages)) return loadKreaPromptPool({ page: Math.max(1, kreaPoolPages) });
     kreaPoolQueryCount = Number(payload.count || 0); kreaPoolTotalCount = Number(payload.pool_count || 0);
     kreaPromptPool = { ...payload, count: kreaPoolTotalCount };
+    kreaPoolView.resultContext = context;
+    kreaPoolView.selectionSummary = Number.isFinite(payload.selection_total)
+      ? { signature: kreaSelectionSignature(), total: Math.max(0, payload.selection_total) } : null;
     renderKreaPromptPool(); renderKreaPoolSidebar();
   } catch (error) {
-    if (requestId === kreaPromptPoolRequest && kreaCurrent(epoch)) toast(`Krea 2 提示词池读取失败：${error.message}`);
+    if (requestId === kreaPromptPoolRequest && kreaSelectionContextCurrent(context)) toast(`Krea 2 提示词池读取失败：${error.message}`);
   }
 }
 function renderKreaPromptPool() {
-  const enabled = currentProfile() === "krea2", selected = new Set(kreaPromptPoolSelection);
+  const enabled = currentProfile() === "krea2", selected = new Set(kreaPromptPoolSelection), selectedCount = kreaSelectedCount();
   ui.kreaPromptPoolControls.hidden = !enabled; ui.animaPromptPoolControls.hidden = enabled;
-  ui.krea_prompt_pool_enabled.disabled = !enabled || !Number(kreaPromptPool.count || 0) || !selected.size;
-  ui.kreaPromptPoolCount.textContent = `${kreaPromptPool.count || 0} 项 · 已选 ${selected.size}`;
-  ui.kreaPoolMeta.textContent = `${kreaPoolQueryCount} 项匹配 · ${selected.size} 项已选`;
-  ui.kreaPoolSelectionLabel.textContent = `已选择 ${selected.size} 项`;
+  ui.krea_prompt_pool_enabled.disabled = !enabled || !Number(kreaPromptPool.count || 0) || !selectedCount;
+  ui.kreaPromptPoolCount.textContent = `${kreaPromptPool.count || 0} 项 · 已选 ${selectedCount}`;
+  ui.kreaPoolMeta.textContent = `${kreaPoolQueryCount} 项匹配 · ${selectedCount} 项已选`;
+  ui.kreaPoolSelectionLabel.textContent = `已选择 ${selectedCount} 项`;
   ui.kreaPoolPageLabel.textContent = `${kreaPoolPage} / ${Math.max(1, kreaPoolPages)}`;
   ui.kreaPoolPrev.disabled = kreaPoolPage <= 1; ui.kreaPoolNext.disabled = kreaPoolPage >= kreaPoolPages;
-  ui.kreaPoolDeleteSelection.disabled = !selected.size;
-  ui.kreaPoolFavoriteSelection.disabled = !selected.size;
+  ui.kreaPoolDeleteSelection.disabled = !selectedCount;
+  ui.kreaPoolFavoriteSelection.disabled = !selectedCount;
+  updateKreaSelectionButtons();
   ui.kreaPromptPoolList.replaceChildren(...(kreaPromptPool.items || []).map(item => {
     const row = kreaElement("article", `krea-prompt-row${selected.has(item.id) ? " selected" : ""}${item.favorite ? " favorite" : ""}`);
     const checkbox = kreaElement("input"); checkbox.type = "checkbox"; checkbox.checked = selected.has(item.id);
+    checkbox.disabled = !kreaPoolResultsCurrent();
     checkbox.setAttribute("aria-label", `选择 ${item.title || "自然语言提示词"}`);
     checkbox.addEventListener("change", async () => {
+      if (!kreaPoolResultsCurrent()) return;
       if (checkbox.checked) await selectKreaItems([item]);
-      else { kreaPromptPoolSelection = kreaPromptPoolSelection.filter(id => id !== item.id); schedulePersist(); await loadKreaPromptPool(); }
+      else { invalidateKreaPoolSelection(); kreaPromptPoolSelection = kreaPromptPoolSelection.filter(id => id !== item.id); schedulePersist(); await loadKreaPromptPool(); }
     });
     const copy = kreaElement("div", "krea-prompt-copy"); copy.title = item.text;
     copy.append(kreaElement("strong", "", item.title || item.text), kreaElement("small", "", item.subtitle || ""), kreaElement("span", "krea-prompt-body", item.text));
@@ -129,19 +188,30 @@ function renderKreaPromptPool() {
   updatePoolOverview();
   if (typeof protectStorageControls === "function") protectStorageControls();
 }
+async function applyKreaSelection(items, operation) {
+  if (!items.length || !kreaSelectionContextCurrent(operation)) return;
+  const missing = items.filter(item => item.in_pool === false);
+  if (missing.length) await request("/api/prompt-pools/items/ensure-many", { method: "POST", body: JSON.stringify({ model_profile: "krea2", items: missing.map(({ title, subtitle, text }) => ({ title, subtitle, text })) }) });
+  if (!kreaSelectionContextCurrent(operation)) return;
+  invalidateKreaPoolSelection();
+  kreaPromptPoolSelection = [...new Set([...kreaPromptPoolSelection, ...items.map(item => item.id)])];
+  ui.krea_prompt_pool_enabled.checked = true;
+  schedulePersist(); await loadKreaPromptPool();
+}
 async function selectKreaItems(items) {
-  if (currentProfile() !== "krea2" || kreaPoolView.busy) return;
-  const epoch = kreaEpoch();
-  kreaPoolView.busy = true;
+  const operation = beginKreaSelection(); if (!operation) return;
   try {
-    const missing = items.filter(item => item.in_pool === false);
-    if (missing.length) await request("/api/prompt-pools/items/ensure-many", { method: "POST", body: JSON.stringify({ model_profile: "krea2", items: missing.map(({ title, subtitle, text }) => ({ title, subtitle, text })) }) });
-    if (!kreaCurrent(epoch)) return;
-    kreaPromptPoolSelection = [...new Set([...kreaPromptPoolSelection, ...items.map(item => item.id)])];
-    if (items.length) ui.krea_prompt_pool_enabled.checked = true;
-    schedulePersist(); await loadKreaPromptPool();
-  } catch (error) { if (kreaCurrent(epoch)) { toast(error.message); renderKreaPromptPool(); } }
-  finally { kreaPoolView.busy = false; }
+    await applyKreaSelection(items, operation);
+  } catch (error) { if (kreaSelectionContextCurrent(operation)) { toast(error.message); renderKreaPromptPool(); } }
+  finally { finishKreaSelection(operation); }
+}
+async function selectAllKreaFilteredItems() {
+  const operation = beginKreaSelection(); if (!operation) return;
+  try {
+    const result = await fetchAllKreaPromptPoolItems(undefined, {}, () => kreaSelectionContextCurrent(operation));
+    if (result && kreaSelectionContextCurrent(operation)) await applyKreaSelection(result.items, operation);
+  } catch (error) { if (kreaSelectionContextCurrent(operation)) toast(error.message); }
+  finally { finishKreaSelection(operation); }
 }
 function kreaDescendants(groups, id) {
   const ids = new Set([id]);
@@ -163,7 +233,7 @@ function renderKreaPoolSidebar() {
     const heading = kreaElement("div", "facet-heading"); heading.append(kreaElement("h3", "", favorite ? "收藏分组" : "自定义分组"));
     const add = kreaButton("+", () => openKreaGroupDialog(kind), ""); add.title = favorite ? "新建收藏分组" : "新建自定义分组"; add.setAttribute("aria-label", add.title); heading.append(add); section.append(heading);
     const tree = kreaElement("div", "favorite-tree");
-    const filter = id => { if (favorite) kreaPoolView.collection = id; else kreaPoolView.customGroup = id; setKreaSidebarOpen(false); void loadKreaPromptPool({ page: 1 }); };
+    const filter = id => { invalidateKreaPoolSelection(); if (favorite) kreaPoolView.collection = id; else kreaPoolView.customGroup = id; setKreaSidebarOpen(false); void loadKreaPromptPool({ page: 1 }); };
     const active = favorite ? kreaPoolView.collection : kreaPoolView.customGroup;
     const all = kreaButton(favorite ? "全部提示词" : "不限分组", () => filter(""), active === "" ? "active" : ""); tree.append(all);
     if (favorite) tree.append(kreaButton(`全部收藏  ${kreaPoolView.favorites.items?.length || 0}`, () => filter("__all__"), active === "__all__" ? "active" : ""));
@@ -209,25 +279,27 @@ function openKreaPromptItemDialog(item = null) {
   motionDialog(ui.kreaPromptItemDialog, true); ui.kreaPromptItemName.focus({ preventScroll: true });
 }
 async function saveKreaPromptItem(event) {
-  event.preventDefault(); const previousId = editingKreaPromptItem?.id, wasSelected = kreaPromptPoolSelection.includes(previousId), epoch = kreaEpoch();
+  event.preventDefault(); const previousId = editingKreaPromptItem?.id, context = kreaSelectionContext();
   const session = kreaPoolView.itemSession;
   const body = { model_profile: "krea2", title: ui.kreaPromptItemName.value.trim(), subtitle: ui.kreaPromptItemSubtitle.value.trim(), text: ui.kreaPromptItemText.value.trim(), groupIds: kreaChecked(ui.kreaPromptItemGroups), ...(previousId ? { id: previousId } : {}) };
   if (!body.title || !body.text || currentProfile() !== "krea2") return;
   try {
     const item = await request("/api/prompt-pools/items", { method: previousId ? "PUT" : "POST", body: JSON.stringify(body) });
-    if (!kreaCurrent(epoch)) return;
-    if (wasSelected) kreaPromptPoolSelection = [...new Set(kreaPromptPoolSelection.map(id => id === previousId ? item.id : id))];
+    if (!kreaDraftContextCurrent(context)) return;
+    invalidateKreaPoolSelection();
+    kreaPromptPoolSelection = [...new Set(kreaPromptPoolSelection.map(id => id === previousId ? item.id : id))];
     if (session === kreaPoolView.itemSession) { motionDialog(ui.kreaPromptItemDialog, false); editingKreaPromptItem = null; }
     await loadKreaPromptPool(); schedulePersist(); toast(previousId ? "提示词已更新" : "提示词已新增");
   } catch (error) { toast(error.message); }
 }
 async function deleteKreaPromptPoolSelection(ids = kreaPromptPoolSelection) {
-  const epoch = kreaEpoch();
+  const context = kreaSelectionContext();
   const targets = [...new Set(ids.map(String))];
   if (!targets.length || !confirm(`从 Krea 2 词池删除 ${targets.length} 条提示词？已保存的收藏仍会保留。`)) return;
   try {
     await request("/api/prompt-pools/items/delete", { method: "POST", body: JSON.stringify({ model_profile: "krea2", ids: targets }) });
-    if (!kreaCurrent(epoch)) return;
+    if (!kreaDraftContextCurrent(context)) return;
+    invalidateKreaPoolSelection();
     kreaPromptPoolSelection = kreaPromptPoolSelection.filter(id => !targets.includes(id));
     if (!kreaPromptPoolSelection.length) ui.krea_prompt_pool_enabled.checked = false;
     if (editingKreaPromptItem && targets.includes(editingKreaPromptItem.id)) motionDialog(ui.kreaPromptItemDialog, false);
@@ -293,9 +365,10 @@ async function importKreaFavoriteChild() {
 }
 function notifyKreaFavorites() { if (typeof sharedFavoritesChanged === "function") sharedFavoritesChanged({ model_profile: "krea2", section: "prompt" }); }
 async function reconcileKreaSelection(validIds = null) {
-  const epoch = kreaEpoch();
+  const context = kreaSelectionContext();
   const ids = new Set(validIds || (await fetchAllKreaPromptPoolItems("", { all: true })).items.map(item => item.id));
-  if (!kreaCurrent(epoch)) return;
+  if (!kreaSelectionContextCurrent(context)) return;
+  invalidateKreaPoolSelection();
   kreaPromptPoolSelection = kreaPromptPoolSelection.filter(id => ids.has(id));
   if (!kreaPromptPoolSelection.length) ui.krea_prompt_pool_enabled.checked = false;
   schedulePersist();
@@ -389,7 +462,7 @@ function renderKreaPromptImportPreview() {
   ui.kreaPromptImportCommit.textContent = preview.options.mode === "replace" ? "确认替换整个词池" : "确认导入";
 }
 async function commitKreaPromptImport() {
-  const preview = kreaImportPreview, epoch = kreaEpoch();
+  const preview = kreaImportPreview, context = kreaSelectionContext();
   if (!preview || preview.fingerprint !== JSON.stringify(kreaImportOptions())) { await previewKreaPromptImport(); return; }
   if (preview.saving) return;
   if (preview.options.mode === "replace" && !confirm("替换整个 Krea 2 词池及自定义分组？现有收藏快照仍会保留。")) return;
@@ -397,13 +470,13 @@ async function commitKreaPromptImport() {
   ui.kreaPromptImportCommit.disabled = true;
   try {
     const payload = await request("/api/prompt-pools/import", { method: "POST", body: JSON.stringify({ model_profile: "krea2", mode: preview.options.mode, rows: preview.rows, bundleName: preview.options.bundleName, targetGroupIds: preview.options.targetGroupIds }) });
-    if (!kreaCurrent(epoch)) return;
+    if (!kreaDraftContextCurrent(context)) return;
     if (preview.options.mode === "replace") await reconcileKreaSelection(preview === kreaImportPreview ? payload.valid_ids : null);
-    if (!kreaCurrent(epoch)) return;
+    if (!kreaDraftContextCurrent(context)) return;
     if (preview === kreaImportPreview) { motionDialog(ui.kreaPromptImportDialog, false); kreaImportPreview = null; }
     await loadKreaPromptPool({ page: 1 });
     schedulePersist(); toast(`导入完成：新增 ${payload.imported || 0} 条，更新 ${payload.updated || 0} 条`);
-  } catch (error) { if (preview === kreaImportPreview && kreaCurrent(epoch)) { ui.kreaPromptImportHint.textContent = `导入失败：${error.message}`; ui.kreaPromptImportCommit.disabled = false; } }
+  } catch (error) { if (preview === kreaImportPreview && kreaDraftContextCurrent(context)) { ui.kreaPromptImportHint.textContent = `导入失败：${error.message}`; ui.kreaPromptImportCommit.disabled = false; } }
   finally { preview.saving = false; }
 }
 function initializeKreaPromptPool() {
@@ -413,13 +486,13 @@ function initializeKreaPromptPool() {
   for (const id of ["closeKreaPool", "confirmKreaPool", "kreaPoolBackdrop"]) on(id, "click", closeKreaPromptPool);
   on("toggleKreaPoolSidebar", "click", () => setKreaSidebarOpen(!ui.kreaPoolSidebar.classList.contains("mobile-open")));
   matchMedia("(max-width: 620px)").addEventListener("change", () => setKreaSidebarOpen(false));
-  on("kreaPoolSearch", "input", () => { clearTimeout(kreaPoolSearchTimer); kreaPoolSearchTimer = setTimeout(() => void loadKreaPromptPool({ page: 1 }), 220); });
-  for (const id of ["kreaPoolSort", "kreaPoolSelectedOnly"]) on(id, "change", () => void loadKreaPromptPool({ page: 1 }));
-  on("clearKreaPoolFilters", "click", () => { kreaPoolView.collection = ""; kreaPoolView.customGroup = ""; ui.kreaPoolSearch.value = ""; ui.kreaPoolSort.value = ""; ui.kreaPoolSelectedOnly.checked = false; void loadKreaPromptPool({ page: 1 }); });
-  on("kreaPoolSelectPage", "click", () => void selectKreaItems(kreaPromptPool.items || []));
-  on("kreaPoolSelectAll", "click", async () => { const epoch = kreaEpoch(); ui.kreaPoolSelectAll.disabled = true; try { const result = await fetchAllKreaPromptPoolItems(); if (kreaCurrent(epoch)) await selectKreaItems(result.items); } catch (error) { if (kreaCurrent(epoch)) toast(error.message); } finally { ui.kreaPoolSelectAll.disabled = false; } });
-  on("clearKreaPoolSelection", "click", () => { kreaPromptPoolSelection = []; ui.krea_prompt_pool_enabled.checked = false; schedulePersist(); void loadKreaPromptPool(); });
-  on("krea_prompt_pool_enabled", "change", schedulePersist);
+  on("kreaPoolSearch", "input", () => { invalidateKreaPoolSelection(); clearTimeout(kreaPoolSearchTimer); kreaPoolSearchTimer = setTimeout(() => void loadKreaPromptPool({ page: 1 }), 220); });
+  for (const id of ["kreaPoolSort", "kreaPoolSelectedOnly"]) on(id, "change", () => { invalidateKreaPoolSelection(); return loadKreaPromptPool({ page: 1 }); });
+  on("clearKreaPoolFilters", "click", () => { invalidateKreaPoolSelection(); kreaPoolView.collection = ""; kreaPoolView.customGroup = ""; ui.kreaPoolSearch.value = ""; ui.kreaPoolSort.value = ""; ui.kreaPoolSelectedOnly.checked = false; return loadKreaPromptPool({ page: 1 }); });
+  on("kreaPoolSelectPage", "click", () => kreaPoolResultsCurrent() ? selectKreaItems(kreaPromptPool.items || []) : undefined);
+  on("kreaPoolSelectAll", "click", selectAllKreaFilteredItems);
+  on("clearKreaPoolSelection", "click", () => { invalidateKreaPoolSelection(); kreaPromptPoolSelection = []; ui.krea_prompt_pool_enabled.checked = false; schedulePersist(); return loadKreaPromptPool(); });
+  on("krea_prompt_pool_enabled", "change", () => { invalidateKreaPoolSelection(); schedulePersist(); return loadKreaPromptPool(); });
   on("kreaPoolPrev", "click", () => void loadKreaPromptPool({ page: Math.max(1, kreaPoolPage - 1) }));
   on("kreaPoolNext", "click", () => void loadKreaPromptPool({ page: Math.min(kreaPoolPages, kreaPoolPage + 1) }));
   on("kreaPoolDeleteSelection", "click", () => void deleteKreaPromptPoolSelection());

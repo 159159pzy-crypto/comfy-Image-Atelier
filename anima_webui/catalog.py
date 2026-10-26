@@ -498,6 +498,8 @@ class PromptCatalog:
         page: int = 1,
         limit: int = 48,
         selection: dict[str, Any] | None = None,
+        selection_state: dict[str, Any] | None = None,
+        ids_only: bool = False,
     ) -> dict[str, Any]:
         self._check_section(section)
         category_values = list(categories or ([] if not category else ([category] if isinstance(category, str) else category)))
@@ -553,6 +555,11 @@ class PromptCatalog:
             entries = sorted(entries, key=lambda item: (item.get("favorite_key") not in favorite_keys_for_sort, normalize_text(item.get("title"))))
         elif section == "character":
             entries = sorted(entries, key=lambda item: (-int(item.get("post_count") or 0), normalize_text(item.get("title"))))
+        totals = {"total": len(entries), "pool_total": len(self._items[section])}
+        if selection_state is not None:
+            totals["selected_total"] = len(self._selection_candidates(section, selection_state))
+        if ids_only:
+            return {"ids": [item["id"] for item in entries], **totals}
         page = max(1, int(page or 1))
         limit = min(100, max(1, int(limit or 48)))
         total = len(entries)
@@ -564,7 +571,7 @@ class PromptCatalog:
             "page": page,
             "pages": pages,
             "limit": limit,
-            "total": total,
+            **totals,
             "categories": sorted({value for item in self._items[section] for value in item.get("categories") or []}),
             "facets": self.facets(section),
         }

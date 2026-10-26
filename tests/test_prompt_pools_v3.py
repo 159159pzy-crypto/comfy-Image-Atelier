@@ -168,6 +168,23 @@ class StructuredPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.store.list("krea2", collection="__all__", favorites=favorites)["items"][0]["in_pool"])
         self.assertEqual(favorites["items"][0]["text"], "Original text")
 
+    async def test_selection_total_counts_only_actual_pool_ids_across_filters(self):
+        first = await self.store.create_item("krea2", "First scene")
+        second = await self.store.create_item("krea2", "Second scene")
+        orphan_id = self.store.item_id("Only a favorite")
+        favorites = {"groups": [{"id": "default"}], "items": [
+            {"id": "orphan", "text": "Only a favorite", "groupIds": ["default"]},
+        ]}
+        selected = [first["id"], first["id"], second["id"], "missing", orphan_id]
+        filtered = self.store.list("krea2", query="First", selected_ids=selected)
+        self.assertEqual((filtered["count"], filtered["selected_count"], filtered["selection_total"]), (1, 1, 2))
+        before = self.path.read_bytes()
+        orphan = self.store.list("krea2", collection="default", favorites=favorites, selected_ids=selected)
+        self.assertEqual((orphan["count"], orphan["selected_count"], orphan["selection_total"]), (1, 0, 2))
+        self.assertEqual(self.path.read_bytes(), before)
+        empty = self.store.list("krea2", query="no matches", selected_ids=selected, selected_only=True)
+        self.assertEqual((empty["count"], empty["selected_count"], empty["selection_total"]), (0, 0, 2))
+
     def test_templates_and_csv_preserve_multiline_metadata(self):
         for fmt in ("json", "csv"):
             with self.subTest(fmt=fmt):

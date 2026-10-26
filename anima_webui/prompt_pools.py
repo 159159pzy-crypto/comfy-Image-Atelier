@@ -266,6 +266,7 @@ class PromptPoolStore(StorageProtection):
             return str(item.get("text") or item.get("customContent") or "").strip()
         favorite_by_text = {favorite_text(item).casefold(): item for item in saved if favorite_text(item)}
         actual = {item["text"].casefold(): item for item in self.items.get(profile, [])}
+        selection_total = sum(self.item_id(item["text"]) in selected for item in actual.values())
         values = []
         if collection:
             candidates = [item for item in saved if collection == "__all__" or collection_ids.intersection(item.get("groupIds", []))]
@@ -301,6 +302,7 @@ class PromptPoolStore(StorageProtection):
                 "items": [{**item, "selected": item["id"] in selected and item["in_pool"]}
                           for item in values[(page - 1) * limit:page * limit]],
                 "count": total, "total": total, "pool_count": len(actual), "selected_count": selected_count,
+                "selection_total": selection_total,
                 "page": page, "limit": limit, "pages": (total + limit - 1) // limit if total else 0}
 
     @staticmethod

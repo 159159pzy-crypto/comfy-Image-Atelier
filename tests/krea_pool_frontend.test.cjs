@@ -30,7 +30,7 @@ function setup({ request, initialize = true } = {}) {
   const get = id => elements[id] ||= element('div', id);
   const ui = new Proxy({}, { get: (target, id) => target[id] ||= get(id), set: (target, id, value) => { target[id] = value; return true; } });
   const ctx = vm.createContext({
-    ui, console, currentProfile: () => profile, sharedFavoritesState: { epoch: 0 },
+    ui, console, currentProfile: () => profile, sharedFavoritesState: { epoch: 0 }, poolContextRevision: 0,
     kreaPromptPool: { items: [], count: 0 }, kreaPromptPoolSelection: [], kreaPromptPoolRequest: 0,
     kreaPoolPage: 1, kreaPoolPages: 0, kreaPoolQueryCount: 0, kreaPoolTotalCount: 0, kreaPoolSearchTimer: null,
     editingKreaPromptItem: null, kreaImportRequest: 0, kreaImportPreview: null,
@@ -179,6 +179,201 @@ test('bulk selection ignores a delayed result from a profile that has been left'
   ui.profile('anima'); ui.profile('krea2'); ui.selection(['fresh']);
   gate.resolve({ items: [{ id: 'old-result', in_pool: true }], count: 1, pool_count: 1, pages: 1 }); await pending;
   assert.deepEqual(plain(ui.ctx.kreaPromptPoolSelection), ['fresh']);
+});
+
+test('filtered bulk selection appends all pages using one frozen filter and selection snapshot', async () => {
+  const items = Array.from({ length: 1201 }, (_, i) => ({ id: `item-${i}`, in_pool: true }));
+  const ui = setup({ request: call => {
+    if (call.url !== '/api/prompt-pools/query') return;
+    const { page, limit } = call.body;
+    return { items: items.slice((page - 1) * limit, page * limit), count: items.length, pool_count: 1500,
+      selection_total: call.body.selected_ids.length, page, pages: Math.ceil(items.length / limit) };
+  } });
+  ui.selection(['outside', 'item-0']); ui.ui.kreaPoolSearch.value = 'city';
+  ui.run('kreaPoolView.collection="default"; kreaPoolView.customGroup="district"');
+  await ui.ui.kreaPoolSelectAll.emit('click');
+  assert.equal(ui.ctx.kreaPromptPoolSelection.length, 1202);
+  assert.equal(ui.ctx.kreaPromptPoolSelection[0], 'outside');
+  assert.equal(ui.ctx.kreaPromptPoolSelection.at(-1), 'item-1200');
+  const batches = ui.calls.filter(call => call.url === '/api/prompt-pools/query' && call.body.limit === 500);
+  assert.equal(batches.length, 3);
+  for (const call of batches) {
+    assert.deepEqual([call.body.q, call.body.collection, call.body.custom_group], ['city', 'default', 'district']);
+    assert.deepEqual(call.body.selected_ids, ['outside', 'item-0']);
+  }
+  assert.equal(ui.persists(), 1);
+});
+
+test('a failed later bulk page does not append its already-fetched first page', async () => {
+  const ui = setup({ request: call => {
+    if (call.url !== '/api/prompt-pools/query') return;
+    if (call.body.page === 2) throw new Error('后续页失败');
+    return { items: [{ id: 'first-page', in_pool: true }], count: 501, pool_count: 501, pages: 2 };
+  } });
+  ui.selection(['existing']); await ui.ui.kreaPoolSelectAll.emit('click');
+  assert.deepEqual(plain(ui.ctx.kreaPromptPoolSelection), ['existing']);
+  assert.equal(ui.persists(), 0); assert.match(ui.messages[0], /后续页失败/);
+  assert.equal(ui.run('kreaPoolView.busy'), false);
+});
+
+test('empty bulk results leave both selection and pool enablement unchanged', async () => {
+  const ui = setup(); ui.selection(['outside']); ui.ui.krea_prompt_pool_enabled.checked = false;
+  await ui.ui.kreaPoolSelectAll.emit('click');
+  assert.deepEqual(plain(ui.ctx.kreaPromptPoolSelection), ['outside']);
+  assert.equal(ui.ui.krea_prompt_pool_enabled.checked, false); assert.equal(ui.persists(), 0);
+});
+
+test('repeated bulk clicks share the active operation instead of launching another fetch', async () => {
+  const gate = deferred(), ui = setup({ request: call => call.body?.limit === 500 ? gate.promise : undefined });
+  const first = ui.ui.kreaPoolSelectAll.emit('click');
+  await ui.ui.kreaPoolSelectAll.emit('click');
+  assert.equal(ui.calls.filter(call => call.body?.limit === 500).length, 1);
+  assert.equal(ui.ui.kreaPoolSelectAll.disabled, true);
+  gate.resolve({ items: [{ id: 'one', in_pool: true }], pages: 1 }); await first;
+  assert.deepEqual(plain(ui.ctx.kreaPromptPoolSelection), ['one']); assert.equal(ui.persists(), 1);
+});
+
+test('clear selection revokes an in-flight bulk result and does not re-enable the pool', async () => {
+  const gate = deferred(), ui = setup({ request: call => call.body?.limit === 500 ? gate.promise : undefined });
+  ui.selection(['existing']); const pending = ui.ui.kreaPoolSelectAll.emit('click');
+  await ui.ui.clearKreaPoolSelection.emit('click');
+  gate.resolve({ items: [{ id: 'late', in_pool: true }], pages: 1 }); await pending;
+  assert.deepEqual(plain(ui.ctx.kreaPromptPoolSelection), []);
+  assert.equal(ui.ui.krea_prompt_pool_enabled.checked, false); assert.equal(ui.persists(), 1);
+});
+
+test('filter changes revoke pending bulk work before the debounced list request starts', async () => {
+  const gate = deferred(), ui = setup({ request: call => call.body?.limit === 500 ? gate.promise : undefined });
+  const pending = ui.ui.kreaPoolSelectAll.emit('click');
+  ui.ui.kreaPoolSearch.value = 'different'; await ui.ui.kreaPoolSearch.emit('input');
+  gate.resolve({ items: [{ id: 'late', in_pool: true }], pages: 8 }); await pending;
+  assert.deepEqual(plain(ui.ctx.kreaPromptPoolSelection), []); assert.equal(ui.persists(), 0);
+  assert.equal(ui.calls.filter(call => call.body?.limit === 500).length, 1);
+});
+
+test('an old operation cannot unlock a newer bulk selection after its context changed', async () => {
+  const gates = [], ui = setup({ request: call => {
+    if (call.body?.limit !== 500) return;
+    const gate = deferred(); gates.push(gate); return gate.promise;
+  } });
+  const old = ui.ui.kreaPoolSelectAll.emit('click');
+  ui.ctx.poolContextRevision++; ui.ctx.invalidateKreaPoolSelection();
+  const fresh = ui.ui.kreaPoolSelectAll.emit('click');
+  gates[0].resolve({ items: [{ id: 'old', in_pool: true }], pages: 1 }); await old;
+  assert.equal(ui.run('kreaPoolView.busy'), true); assert.equal(ui.ui.kreaPoolSelectAll.disabled, true);
+  gates[1].resolve({ items: [{ id: 'new', in_pool: true }], pages: 1 }); await fresh;
+  assert.deepEqual(plain(ui.ctx.kreaPromptPoolSelection), ['new']); assert.equal(ui.run('kreaPoolView.busy'), false);
+});
+
+test('same-profile history or workbench restoration rejects pending reads and legacy selections', async () => {
+  const readGate = deferred(), ensureGate = deferred();
+  const ui = setup({ request: call => call.url.endsWith('/ensure-many') ? ensureGate.promise : call.url === '/api/prompt-pools/query' ? readGate.promise : undefined });
+  const read = ui.ctx.loadKreaPromptPool();
+  const select = ui.ctx.selectKreaItems([{ id: 'legacy', text: 'Legacy', in_pool: false }]);
+  ui.ctx.poolContextRevision++; ui.selection(['restored']); ui.ui.krea_prompt_pool_enabled.checked = false;
+  readGate.resolve({ items: [{ id: 'stale' }], count: 99, pool_count: 99, pages: 1 });
+  ensureGate.resolve({ items: [{ id: 'legacy' }] }); await Promise.all([read, select]);
+  assert.deepEqual(plain(ui.ctx.kreaPromptPoolSelection), ['restored']);
+  assert.equal(ui.ctx.kreaPromptPool.count, 0); assert.equal(ui.ui.krea_prompt_pool_enabled.checked, false);
+  assert.equal(ui.persists(), 0);
+});
+
+test('a manual deselection revokes a pending legacy selection and reloads selected-only results', async () => {
+  const gate = deferred();
+  const ui = setup({ request: call => call.url.endsWith('/ensure-many') ? gate.promise : undefined });
+  ui.selection(['selected']); ui.ui.kreaPoolSelectedOnly.checked = true;
+  ui.ctx.kreaPromptPool = { count: 1, items: [{ id: 'selected', title: '已选', in_pool: true }] };
+  ui.run('kreaPoolView.resultContext = kreaSelectionContext()');
+  ui.ctx.renderKreaPromptPool();
+  const pending = ui.ctx.selectKreaItems([{ id: 'legacy', text: 'Legacy', in_pool: false }]);
+  await ui.ui.kreaPromptPoolList.children[0].children[0].click();
+  gate.resolve({ items: [{ id: 'legacy' }] }); await pending;
+  assert.deepEqual(plain(ui.ctx.kreaPromptPoolSelection), []);
+  assert.equal(ui.calls.find(call => call.url === '/api/prompt-pools/query').body.selected_only, true);
+  assert.equal(ui.ui.kreaPoolSelectionLabel.textContent, '已选择 0 项');
+});
+
+test('global valid selection counts exclude missing ids without shrinking to the current filter', async () => {
+  const ui = setup({ request: call => call.url === '/api/prompt-pools/query'
+    ? { items: [{ id: 'a' }], count: 1, pool_count: 30, selection_total: 2, selected_count: 1, page: 1, pages: 1 } : undefined });
+  ui.selection(['a', 'b', 'removed']); ui.ui.kreaPoolSearch.value = 'only a';
+  await ui.ctx.loadKreaPromptPool();
+  assert.equal(ui.ui.kreaPoolSelectionLabel.textContent, '已选择 2 项');
+  assert.equal(ui.ui.kreaPoolMeta.textContent, '1 项匹配 · 2 项已选');
+  assert.equal(ui.ctx.kreaSelectedCount(), 2);
+  ui.selection(['removed']); ui.ctx.kreaPoolQueryCount = 0;
+  ui.run('kreaPoolView.selectionSummary = { signature: kreaSelectionSignature(), total: 0 }');
+  ui.ctx.renderKreaPromptPool();
+  assert.equal(ui.ui.kreaPoolFavoriteSelection.disabled, true);
+  assert.equal(ui.ui.kreaPoolDeleteSelection.disabled, true);
+  assert.equal(ui.ui.krea_prompt_pool_enabled.disabled, true);
+});
+
+test('a new search disables stale page selection while full filtered selection remains available', async () => {
+  const gate = deferred(), ui = setup({ request: call => {
+    if (call.url !== '/api/prompt-pools/query') return;
+    if (call.body.q === 'new' && call.body.limit === 500) return gate.promise;
+    return { items: [{ id: 'old', in_pool: true }], count: 1, pool_count: 1, page: 1, pages: 1 };
+  } });
+  await ui.ctx.loadKreaPromptPool(); assert.equal(ui.ui.kreaPoolSelectPage.disabled, false);
+  ui.ui.kreaPoolSearch.value = 'new'; await ui.ui.kreaPoolSearch.emit('input');
+  assert.equal(ui.ui.kreaPoolSelectPage.disabled, true);
+  assert.equal(ui.ui.kreaPromptPoolList.children[0].children[0].disabled, true);
+  await ui.ui.kreaPoolSelectPage.emit('click');
+  assert.deepEqual(plain(ui.ctx.kreaPromptPoolSelection), []);
+  ui.ctx.kreaPoolQueryCount = 0; ui.ctx.updateKreaSelectionButtons();
+  assert.equal(ui.ui.kreaPoolSelectAll.disabled, false, 'old empty result must not block the new filter');
+  const pending = ui.ui.kreaPoolSelectAll.emit('click');
+  gate.resolve({ items: [{ id: 'new', in_pool: true }], count: 1, pages: 1 }); await pending;
+  assert.deepEqual(plain(ui.ctx.kreaPromptPoolSelection), ['new']);
+});
+
+test('paging disables the previous page until the requested results arrive', async () => {
+  const gate = deferred(), ui = setup({ request: call => {
+    if (call.url !== '/api/prompt-pools/query') return;
+    return call.body.page === 2 ? gate.promise : { items: [{ id: 'first', in_pool: true }], count: 49, pool_count: 49, page: 1, pages: 2 };
+  } });
+  await ui.ctx.loadKreaPromptPool(); const pending = ui.ctx.loadKreaPromptPool({ page: 2 });
+  assert.equal(ui.ui.kreaPoolSelectPage.disabled, true);
+  await ui.ui.kreaPoolSelectPage.emit('click'); assert.deepEqual(plain(ui.ctx.kreaPromptPoolSelection), []);
+  gate.resolve({ items: [{ id: 'second', in_pool: true }], count: 49, pool_count: 49, page: 2, pages: 2 }); await pending;
+  assert.equal(ui.ui.kreaPoolSelectPage.disabled, false);
+  assert.equal(ui.ctx.kreaPromptPool.items[0].id, 'second');
+});
+
+test('changing the pool switch refreshes the result context so current items stay selectable', async () => {
+  const ui = setup({ request: call => call.url === '/api/prompt-pools/query'
+    ? { items: [{ id: 'one', in_pool: true }], count: 1, pool_count: 1, selection_total: 1, page: 1, pages: 1 } : undefined });
+  ui.selection(['one']); await ui.ctx.loadKreaPromptPool();
+  ui.ui.krea_prompt_pool_enabled.checked = false; await ui.ui.krea_prompt_pool_enabled.emit('change');
+  assert.equal(ui.ui.kreaPoolSelectPage.disabled, false);
+  assert.equal(ui.ui.kreaPromptPoolList.children[0].children[0].disabled, false);
+  assert.equal(ui.ui.krea_prompt_pool_enabled.checked, false);
+});
+
+test('a same-profile workbench restore prevents late item saves from rewriting selected ids', async () => {
+  const gate = deferred(), ui = setup({ request: call => call.url === '/api/prompt-pools/items' ? gate.promise : undefined });
+  ui.selection(['old']); ui.ctx.openKreaPromptItemDialog({ id: 'old', title: '旧条目', text: 'Old prose.' });
+  const pending = ui.ctx.saveKreaPromptItem({ preventDefault() {} });
+  ui.ctx.poolContextRevision++; ui.selection(['restored']);
+  gate.resolve({ id: 'new' }); await pending;
+  assert.deepEqual(plain(ui.ctx.kreaPromptPoolSelection), ['restored']); assert.equal(ui.persists(), 0);
+});
+
+test('a same-profile workbench restore prevents late deletion from trimming its selection', async () => {
+  const gate = deferred(), ui = setup({ request: call => call.url.endsWith('/items/delete') ? gate.promise : undefined });
+  ui.selection(['shared']); const pending = ui.ctx.deleteKreaPromptPoolSelection();
+  ui.ctx.poolContextRevision++; ui.selection(['shared', 'restored']);
+  gate.resolve({ deleted: 1 }); await pending;
+  assert.deepEqual(plain(ui.ctx.kreaPromptPoolSelection), ['shared', 'restored']); assert.equal(ui.persists(), 0);
+});
+
+test('a late replacement import cannot reconcile a new same-profile workbench draft', async () => {
+  const gate = deferred(), ui = setup({ request: call => call.url.endsWith('/import/preview') ? previewRows() : call.url.endsWith('/import') ? gate.promise : undefined });
+  importDraft(ui.ui, 'replace'); ui.selection(['original']); await ui.ctx.previewKreaPromptImport();
+  const pending = ui.ctx.commitKreaPromptImport(); ui.ctx.poolContextRevision++; ui.selection(['restored']);
+  gate.resolve({ valid_ids: ['original'], imported: 1 }); await pending;
+  assert.deepEqual(plain(ui.ctx.kreaPromptPoolSelection), ['restored']); assert.equal(ui.persists(), 0);
 });
 
 test('a completed item save cannot close a newer item editor in the same profile', async () => {

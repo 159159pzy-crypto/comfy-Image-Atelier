@@ -166,7 +166,10 @@ const ui = Object.fromEntries(
     "selectedOnly",
     "clearFilters",
     "selectPage",
+    "selectFilteredPool",
     "selectAllPool",
+    "poolMoreSelection",
+    "poolModeNote",
     "clearPool",
     "favoriteSelection",
     "addCustom",
@@ -513,6 +516,12 @@ let poolPages = 1;
 let poolItems = [];
 let poolFacets = {};
 let poolRequest = 0;
+let poolContextRevision = 0;
+let poolSelectionOperation = null;
+let poolResultContext = "";
+let poolQueryCount = null;
+const poolSelectionStats = new Map();
+let poolTotalsRequest = 0;
 let editingCustom = null;
 let editingCustomGroup = null;
 let editingFavoriteItem = null;
@@ -999,6 +1008,7 @@ function restoreProfileDraft(profile, settings = {}, { preferStored = true } = {
   };
 }
 function switchProfileDraft(nextProfile, { applyDefaults = true } = {}) {
+  if (typeof invalidatePoolContext === "function") invalidatePoolContext();
   const next = normalizeProfileId(nextProfile);
   const previous = currentProfile();
   if (previous !== next) saveCurrentProfileDraft();
@@ -1153,12 +1163,16 @@ function readUpscalerControls() {
 
 function refreshProfileData() {
   const section = activeSection;
+  const profile = currentProfile();
+  const revision = typeof poolContextRevision === "undefined" ? null : poolContextRevision;
   ++poolRequest;
   return Promise.allSettled([
     loadResources(),
     loadLoraInventory(),
     loadStylePresets(),
-    loadCustomGroups(section).then(() => loadPool()),
+    loadCustomGroups(section).then(() => {
+      if (section === activeSection && profile === currentProfile() && (revision === null || revision === poolContextRevision)) return loadPool();
+    }),
   ]);
 }
 function invalidateResourceInventories() {
@@ -1175,6 +1189,7 @@ function invalidateResourceInventories() {
 }
 
 function applySettings(raw, { useProfileDraft = false } = {}) {
+  if (typeof invalidatePoolContext === "function") invalidatePoolContext();
   invalidatePromptNormalization();
   const settings = normalizeSettings(raw || defaults || {});
   const previousProfile = currentProfile();
@@ -1198,6 +1213,7 @@ function applySettings(raw, { useProfileDraft = false } = {}) {
   if (typeof setRandomDualControls === "function") setRandomDualControls(settings);
   if (typeof sharedParametersApply === "function") sharedParametersApply(settings, raw);
   restoreProfileDraft(settings.model_profile, useProfileDraft ? (profileDrafts[settings.model_profile] || settings) : settings, { preferStored: useProfileDraft });
+  if (typeof refreshPoolSelectionTotals === "function") void refreshPoolSelectionTotals();
   const storedProfileState = profileDrafts[settings.model_profile];
   if (useProfileDraft && storedProfileState) {
     ui.krea_prompt_pool_enabled.checked = Boolean(storedProfileState.kreaPromptPoolEnabled);
@@ -1337,9 +1353,38 @@ function isLegacyDefaultLoras(value) {
 
 function selectedCount(section) {
   const selection = draft.pools[section] || { mode: "include", ids: [], excluded_ids: [] };
+  const stats = typeof poolSelectionStats !== "undefined" ? poolSelectionStats.get(section) : null;
+  if (stats?.selectionKey === JSON.stringify(selection)) return stats.selectedTotal;
   return selection.mode === "all"
-    ? Math.max(0, Number(config.catalog?.counts?.[section] || 0) - selection.excluded_ids.length)
-    : selection.ids.length;
+    ? Math.max(0, Number(config.catalog?.counts?.[section] || 0) - new Set(selection.excluded_ids).size)
+    : new Set(selection.ids).size;
+}
+
+async function refreshPoolSelectionTotals() {
+  const requestId = ++poolTotalsRequest;
+  // Workbench/history restoration finishes restoring its complete editor draft
+  // synchronously after applySettings; count that final state, not its interim one.
+  await Promise.resolve();
+  if (requestId !== poolTotalsRequest || currentProfile() !== "anima") return;
+  const pools = draft.pools;
+  const results = await Promise.allSettled(SECTIONS.map(async section => {
+    const selection = clone(pools[section]);
+    const data = await request(`/api/pools/${section}/query`, { method: "POST", body: JSON.stringify({
+      model_profile: "anima", page: 1, limit: 1, selection_state: selection,
+    }) });
+    return { section, selectionKey: JSON.stringify(selection), data };
+  }));
+  if (requestId !== poolTotalsRequest || currentProfile() !== "anima" || pools !== draft.pools) return;
+  for (const result of results) {
+    if (result.status !== "fulfilled") continue;
+    const { section, selectionKey, data } = result.value;
+    if (selectionKey !== JSON.stringify(pools[section])) continue;
+    if (Number.isFinite(data.pool_total)) config.catalog.counts[section] = data.pool_total;
+    if (Number.isFinite(data.selected_total)) poolSelectionStats.set(section, { selectionKey, selectedTotal: data.selected_total });
+  }
+  renderDimensions();
+  updatePoolOverview();
+  if (ui.poolDrawer.classList.contains("open")) updatePoolSelectionControls();
 }
 
 function renderDimensions() {
@@ -1386,7 +1431,7 @@ function updatePeopleTotal() {
 }
 function updatePoolOverview() {
   ui.poolOverview.textContent = currentProfile() === "krea2"
-    ? `${kreaPromptPool.count || 0} 项词条 · ${kreaPromptPoolSelection.length} 项已选`
+    ? `${kreaPromptPool.count || 0} 项词条 · ${typeof kreaSelectedCount === "function" ? kreaSelectedCount() : kreaPromptPoolSelection.length} 项已选`
     : `${SECTIONS.reduce((sum, section) => sum + selectedCount(section), 0)} 项已选`;
 }
 
@@ -3469,6 +3514,7 @@ function selectionHas(section, id) {
   return selection.mode === "all" ? !selection.excluded_ids.includes(id) : selection.ids.includes(id);
 }
 function toggleSelection(section, id, checked) {
+  if (section !== activeSection || poolResultContext !== poolSelectionContext()) return;
   const selection = draft.pools[section];
   if (selection.mode === "all")
     selection.excluded_ids = checked
@@ -3476,12 +3522,100 @@ function toggleSelection(section, id, checked) {
       : [...new Set([...selection.excluded_ids, id])];
   else if (checked) selection.ids = [...new Set([...selection.ids, id])];
   else selection.ids = selection.ids.filter((value) => value !== id);
+  return poolSelectionChanged();
+}
+
+// A selection operation belongs to one view and draft, including same-model
+// history imports and workbench switches. Older requests must never write back.
+function invalidatePoolContext() {
+  poolContextRevision++;
+  poolRequest++;
+  poolSelectionOperation = null;
+  if (ui.selectFilteredPool) {
+    ui.selectFilteredPool.disabled = false;
+    ui.selectFilteredPool.textContent = "选择全部筛选结果";
+  }
+  if (typeof invalidateKreaPoolSelection === "function") invalidateKreaPoolSelection();
+}
+function poolSelectionContext() {
+  return JSON.stringify({ section: activeSection, query: poolQueryBody(), selectedOnly: currentView().selectedOnly, selection: draft.pools[activeSection] });
+}
+function poolSelectionQuery() {
+  const selection = clone(draft.pools[activeSection]);
+  return { ...poolQueryBody(), selection_state: selection, ...(currentView().selectedOnly ? { selection } : {}) };
+}
+function updatePoolSelectionControls() {
+  const busy = Boolean(poolSelectionOperation);
+  const current = poolResultContext === poolSelectionContext();
+  ui.poolGrid.inert = !current;
+  ui.selectPage.disabled = !current || !poolItems.length || busy;
+  ui.selectFilteredPool.disabled = busy || (current && poolQueryCount === 0);
+  ui.selectFilteredPool.textContent = busy ? "正在选择…" : "选择全部筛选结果";
+  const all = draft.pools[activeSection]?.mode === "all";
+  ui.poolModeNote.hidden = !all;
+  ui.poolModeNote.textContent = all ? "整个词库参与随机抽取，新增词条也会自动参与；手动取消的词条除外。" : "";
+  ui.poolSelectionLabel.textContent = `${all ? "整个词库" : "已选择"} · ${selectedCount(activeSection)} 项`;
+  ui.poolMeta.textContent = `${poolQueryCount ?? "—"} 项匹配 · ${selectedCount(activeSection)} 项已选${favoritesAvailable ? "" : " · 收藏离线"}`;
+}
+function poolSelectionChanged() {
+  invalidatePoolContext();
   renderPoolItems();
   renderDimensions();
   updatePoolOverview();
   updatePoseConflict();
-  updateFavoriteSelectionButton();
   schedulePersist();
+  return loadPool();
+}
+async function selectFilteredPool() {
+  if (poolSelectionOperation || currentProfile() !== "anima") return;
+  clearTimeout(ui.poolSearch._timer);
+  invalidatePoolContext();
+  const operation = { revision: poolContextRevision, context: poolSelectionContext(), section: activeSection };
+  const body = poolSelectionQuery();
+  poolSelectionOperation = operation;
+  updatePoolSelectionControls();
+  const current = () => poolSelectionOperation === operation && operation.revision === poolContextRevision && operation.context === poolSelectionContext();
+  try {
+    const data = await request(`/api/pools/${operation.section}/ids`, { method: "POST", body: JSON.stringify(body) });
+    if (!current()) return;
+    const ids = new Set(data.ids || []);
+    if (!ids.size) { toast("没有匹配的词条，选择未改变"); return; }
+    const selection = draft.pools[operation.section];
+    if (selection.mode === "all") selection.excluded_ids = selection.excluded_ids.filter(id => !ids.has(id));
+    else selection.ids = [...new Set([...selection.ids, ...ids])];
+    await poolSelectionChanged();
+  } catch (error) {
+    if (current()) toast(`选择筛选结果失败：${error.message}`);
+  } finally {
+    if (poolSelectionOperation === operation) {
+      poolSelectionOperation = null;
+      updatePoolSelectionControls();
+    }
+  }
+}
+function setPoolMoreSelection(open, { immediate = false, restoreFocus = false } = {}) {
+  const menu = ui.poolMoreSelection, summary = menu.querySelector?.("summary"), panel = menu.querySelector?.(".pool-more-content");
+  summary?.setAttribute("aria-expanded", String(open));
+  if (!panel || typeof StudioMotion === "undefined") { menu.open = open; if (panel) { panel.hidden = !open; panel.inert = !open; } }
+  else {
+    if (!menu.open) panel.hidden = true;
+    menu.open = true;
+    StudioMotion.presence(panel, open, {
+      from: { opacity: 0, y: -6, scale: .985 }, response: .3, damping: 1, immediate,
+      onComplete: () => { menu.open = open; },
+    });
+  }
+  if (restoreFocus) summary?.focus({ preventScroll: true });
+}
+
+function useEntirePool() {
+  setPoolMoreSelection(false, { immediate: true, restoreFocus: true });
+  draft.pools[activeSection] = { mode: "all", ids: [], excluded_ids: [] };
+  return poolSelectionChanged();
+}
+function clearPoolSelection() {
+  draft.pools[activeSection] = { mode: "include", ids: [], excluded_ids: [] };
+  return poolSelectionChanged();
 }
 
 function favoriteKey(item) {
@@ -3551,7 +3685,12 @@ async function loadCustomGroups(section = activeSection) {
 
 let drawerTrigger = null;
 async function openPool(section) {
+  invalidatePoolContext();
+  const revision = poolContextRevision;
   activeSection = section;
+  poolResultContext = "";
+  poolQueryCount = null;
+  setPoolMoreSelection(false, { immediate: true });
   poolPage = 1;
   const view = currentView();
   drawerTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -3568,7 +3707,9 @@ async function openPool(section) {
   ui.poolLanguage.value = view.language;
   ui.selectedOnly.checked = view.selectedOnly;
   ui.poolSearch.focus({ preventScroll: true });
+  updatePoolSelectionControls();
   await Promise.all([loadFavorites(section), loadCustomGroups(section)]);
+  if (revision !== poolContextRevision || section !== activeSection) return;
   await loadPool();
   schedulePersist();
 }
@@ -3589,13 +3730,17 @@ function hideDrawerBackdrop() {
 }
 
 function closePool() {
+  invalidatePoolContext();
+  setPoolMoreSelection(false, { immediate: true });
   currentView().scrollTop = ui.poolGrid.scrollTop;
   setPoolSidebarOpen(false);
   ui.poolDrawer.classList.remove("open");
-  ui.poolDrawer.setAttribute("aria-hidden", "true");
   ui.poolDrawer.setAttribute("inert", "");
+  const focusTarget = drawerTrigger && document.contains(drawerTrigger)
+    ? drawerTrigger : ui.dimensionList.querySelector(`[data-manage="${activeSection}"]`) || ui.model_profile;
+  focusTarget?.focus({ preventScroll: true });
+  ui.poolDrawer.setAttribute("aria-hidden", "true");
   hideDrawerBackdrop();
-  if (drawerTrigger && document.contains(drawerTrigger)) drawerTrigger.focus({ preventScroll: true });
   drawerTrigger = null;
   schedulePersist();
 }
@@ -3652,59 +3797,49 @@ function poolQueryBody() {
 }
 async function loadPool() {
   const requestedProfile = currentProfile();
-  const requestId = ++poolRequest;
   if (requestedProfile === "krea2") {
     await loadKreaPromptPool();
     return;
   }
+  invalidatePoolContext();
+  const requestedSection = activeSection;
+  const requestId = poolRequest;
   const view = currentView();
+  const context = poolSelectionContext();
+  const current = () => requestId === poolRequest && requestedProfile === currentProfile() && context === poolSelectionContext();
+  updatePoolSelectionControls();
   try {
-    const query = poolQueryBody();
-    let data;
-    if (view.selectedOnly)
-      data = await request(`/api/pools/${activeSection}/query`, {
-        method: "POST",
-        body: JSON.stringify({ ...query, selection: draft.pools[activeSection] }),
-      });
-    else {
-      const params = new URLSearchParams({
-        model_profile: query.model_profile,
-        page: query.page,
-        limit: query.limit,
-        q: query.q,
-        sort: query.sort,
-        collection: query.collection,
-        custom_group: query.custom_group,
-        gender: query.gender,
-        hair: query.hair,
-        eye: query.eye,
-        series: query.series,
-      });
-      query.categories.forEach((value) => params.append("category", value));
-      query.traits.forEach((value) => params.append("trait", value));
-      data = await request(`/api/pools/${activeSection}?${params}`);
-    }
-    if (requestId !== poolRequest || requestedProfile !== currentProfile()) return;
+    const data = await request(`/api/pools/${requestedSection}/query`, {
+      method: "POST", body: JSON.stringify(poolSelectionQuery()),
+    });
+    if (!current()) return;
     poolItems = data.items || [];
     poolFacets = data.facets || {};
     poolPages = data.pages;
     poolPage = data.page;
+    poolQueryCount = data.total;
+    poolResultContext = poolSelectionContext();
+    if (Number.isFinite(data.pool_total)) config.catalog.counts[requestedSection] = data.pool_total;
+    if (Number.isFinite(data.selected_total)) poolSelectionStats.set(requestedSection, {
+      selectionKey: JSON.stringify(draft.pools[requestedSection]), selectedTotal: data.selected_total,
+    });
     if (activeSection === "pose") poolItems.forEach((item) => poseItemCache.set(item.id, item));
     ui.poolPageLabel.textContent = `${data.page} / ${data.pages}`;
     ui.poolPrev.disabled = data.page <= 1;
     ui.poolNext.disabled = data.page >= data.pages;
-    ui.poolMeta.textContent = `${data.total} 项可用 · ${selectedCount(activeSection)} 项已选${favoritesAvailable ? "" : " · 收藏离线"}`;
     renderPoolSidebar();
     renderPoolItems();
+    renderDimensions();
+    updatePoolOverview();
     updatePoseConflict();
     requestAnimationFrame(() => {
-      if (view.scrollTop && poolPage === 1) {
+      if (requestId === poolRequest && view.scrollTop && poolPage === 1) {
         ui.poolGrid.scrollTop = view.scrollTop;
         view.scrollTop = 0;
       }
     });
   } catch (error) {
-    if (requestId !== poolRequest) return;
+    if (!current()) return;
     toast(error.message);
   }
 }
@@ -4255,7 +4390,7 @@ function renderPoolItems() {
       return article;
     }),
   );
-  ui.poolSelectionLabel.textContent = `已选择 ${selectedCount(activeSection)} 项`;
+  updatePoolSelectionControls();
   updateFavoriteSelectionButton();
 }
 
@@ -4687,6 +4822,7 @@ function deleteFavoriteGroup() {
 }
 
 function selectCurrentPage(checked) {
+  if (poolResultContext !== poolSelectionContext() || poolSelectionOperation) return;
   for (const item of poolItems) {
     const selection = draft.pools[activeSection];
     if (selection.mode === "all")
@@ -4696,12 +4832,7 @@ function selectCurrentPage(checked) {
     else if (checked) selection.ids = [...new Set([...selection.ids, item.id])];
     else selection.ids = selection.ids.filter((value) => value !== item.id);
   }
-  renderPoolItems();
-  renderDimensions();
-  updatePoolOverview();
-  updatePoseConflict();
-  updateFavoriteSelectionButton();
-  schedulePersist();
+  return poolSelectionChanged();
 }
 
 function openCustom(item = null) {
@@ -6054,6 +6185,8 @@ ui.poolSidebar.addEventListener("keydown", handleGroupTreeKeydown);
 ui.poolSearch.addEventListener("input", () => {
   currentView().query = ui.poolSearch.value;
   poolPage = 1;
+  invalidatePoolContext();
+  updatePoolSelectionControls();
   clearTimeout(ui.poolSearch._timer);
   ui.poolSearch._timer = setTimeout(loadPool, 220);
   schedulePersist();
@@ -6095,23 +6228,22 @@ ui.poolNext.addEventListener("click", () => {
   loadPool();
 });
 ui.selectPage.addEventListener("click", () => selectCurrentPage(true));
-ui.selectAllPool.addEventListener("click", () => {
-  draft.pools[activeSection] = { mode: "all", ids: [], excluded_ids: [] };
-  renderPoolItems();
-  renderDimensions();
-  updatePoolOverview();
-  updatePoseConflict();
-  updateFavoriteSelectionButton();
-  schedulePersist();
+ui.selectFilteredPool.addEventListener("click", selectFilteredPool);
+ui.selectAllPool.addEventListener("click", useEntirePool);
+ui.clearPool.addEventListener("click", clearPoolSelection);
+ui.poolMoreSelection.querySelector("summary").setAttribute("aria-expanded", "false");
+ui.poolMoreSelection.querySelector("summary").addEventListener("click", event => {
+  event.preventDefault(); // Own this anchored popover; generic details animate height.
+  setPoolMoreSelection(event.currentTarget.getAttribute("aria-expanded") !== "true");
 });
-ui.clearPool.addEventListener("click", () => {
-  draft.pools[activeSection] = { mode: "include", ids: [], excluded_ids: [] };
-  renderPoolItems();
-  renderDimensions();
-  updatePoolOverview();
-  updatePoseConflict();
-  updateFavoriteSelectionButton();
-  schedulePersist();
+document.addEventListener("click", event => {
+  if (ui.poolMoreSelection.open && !ui.poolMoreSelection.contains(event.target)) setPoolMoreSelection(false);
+});
+ui.poolMoreSelection.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || ui.poolMoreSelection.querySelector("summary").getAttribute("aria-expanded") !== "true") return;
+  event.preventDefault();
+  event.stopPropagation();
+  setPoolMoreSelection(false, { restoreFocus: true });
 });
 ui.favoriteSelection.addEventListener("click", openFavoriteSelectionDialog);
 ui.favoriteSelectionForm.addEventListener("submit", saveFavoriteSelection);

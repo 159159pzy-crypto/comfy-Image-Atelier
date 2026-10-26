@@ -157,6 +157,39 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["items"][0]["id"], "clothing:coat")
         self.assertEqual(self.catalog.count("character"), 4)
 
+    def test_ids_query_shares_combined_filters_and_sorting(self):
+        cases = [
+            ("character", {"gender": "1girl", "hair": "blue", "eye": "red", "series": "series"}),
+            ("character", {"sort": "favorite-first", "favorite_keys": {"beta"}}),
+            ("pose", {"query": "point", "categories": ["Gestures & Arms"], "traits": ["hand", "pointing"],
+                      "favorite_keys": {"point"}, "favorites_only": True}),
+            ("pose", {"selection": {"mode": "all", "excluded_ids": ["pose:stand"]}}),
+            ("pose", {"selection": {"mode": "include", "ids": []}}),
+        ]
+        for section, query in cases:
+            with self.subTest(section=section, query=query):
+                page = self.catalog.search(section, **query)
+                ids = self.catalog.search(section, **query, ids_only=True)
+                self.assertEqual(ids["ids"], [item["id"] for item in page["items"]])
+                self.assertEqual(ids["total"], page["total"])
+                self.assertEqual(ids["pool_total"], self.catalog.count(section))
+                self.assertNotIn("items", ids)
+                self.assertNotIn("facets", ids)
+
+    def test_selection_totals_are_valid_unique_and_independent_of_filters(self):
+        states = [
+            ({"mode": "include", "ids": ["pose:stand", "pose:sit", "pose:sit", "missing", "clothing:coat"]}, 2),
+            ({"mode": "all", "excluded_ids": ["pose:stand", "pose:stand", "missing", "clothing:coat"]}, 3),
+            ({"mode": "include", "ids": []}, 0),
+        ]
+        for state, expected in states:
+            for ids_only in (False, True):
+                with self.subTest(state=state, ids_only=ids_only):
+                    result = self.catalog.search("pose", query="no matching result", selection_state=state, ids_only=ids_only)
+                    self.assertEqual(result["selected_total"], expected)
+                    self.assertEqual(result["total"], 0)
+                    self.assertEqual(result["pool_total"], 4)
+
     def test_anima_character_facets_and_combined_filters(self):
         result = self.catalog.search("character", gender="1girl", hair="blue", eye="red", series="series")
         self.assertEqual(result["total"], 1)

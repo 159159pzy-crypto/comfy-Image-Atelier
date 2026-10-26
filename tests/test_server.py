@@ -14,7 +14,7 @@ from aiohttp.test_utils import TestClient, TestServer
 APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_DIR))
 
-from anima_webui.server import COMFY_KEY, HISTORY_KEY, MANAGER_KEY, create_app  # noqa: E402
+from anima_webui.server import CATALOG_KEY, COMFY_KEY, HISTORY_KEY, MANAGER_KEY, create_app  # noqa: E402
 from anima_webui.comfy import ComfyError  # noqa: E402
 from anima_webui.image_location import ImageLocationError  # noqa: E402
 from anima_webui.workflow import DEFAULT_SETTINGS  # noqa: E402
@@ -1086,6 +1086,62 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["id"] for item in excluded["items"]], ["pose:sit"])
         bad = await self.client.post("/api/pools/pose/query", json={"page": "abc"})
         self.assertEqual(bad.status, 400)
+
+    async def test_pool_ids_cover_large_results_without_pagination_or_full_items(self):
+        catalog = self.client.server.app[CATALOG_KEY]
+        entries = [catalog._to_entry("character", {
+            "name": f"character {index:04}", "copyright": "large", "post_count": index,
+        }) for index in range(8000)]
+        catalog._items["character"] = entries
+        catalog._by_id.update({item["id"]: item for item in entries})
+        expected = [item["id"] for item in reversed(entries)]
+        for limit in (1, 48, 100, 999999):
+            with self.subTest(limit=limit):
+                response = await self.client.post("/api/pools/character/ids", json={"page": 2, "limit": limit})
+                self.assertEqual(response.status, 200)
+                self.assertEqual(await response.json(), {"ids": expected, "total": 8000, "pool_total": 8000})
+        page = await (await self.client.get("/api/pools/character?limit=999999")).json()
+        self.assertEqual((len(page["items"]), page["pages"], page["pool_total"]), (100, 80, 8000))
+
+    async def test_pool_ids_use_combined_collection_group_and_content_filters(self):
+        group = await (await self.client.post("/api/custom-groups/pose", json={"name": "Match"})).json()
+        item = await (await self.client.post("/api/custom-prompts", json={
+            "section": "pose", "title": "Matching pose", "prompt": "matching pose",
+            "categories": ["Gestures & Arms"], "traits": ["hand", "pointing"],
+            "groupIds": [group["group"]["id"]],
+        })).json()
+        await self.client.put("/api/favorites/pose/item", json={"id": item["id"], "favorite": True})
+        query = {"q": "matching", "custom_group": group["group"]["id"], "collection": "default",
+                 "categories": ["Gestures & Arms"], "traits": ["hand", "pointing"], "sort": "favorite-first",
+                 "selection_state": {"mode": "include", "ids": [item["id"], "pose:stand", "missing"]}}
+        page = await (await self.client.post("/api/pools/pose/query", json=query)).json()
+        result = await (await self.client.post("/api/pools/pose/ids", json=query)).json()
+        self.assertEqual([value["id"] for value in page["items"]], [item["id"]])
+        self.assertEqual(result, {"ids": [item["id"]], "total": 1, "pool_total": 3, "selected_total": 2})
+        query["selection"] = {"mode": "include", "ids": ["pose:stand"]}
+        result = await (await self.client.post("/api/pools/pose/ids", json=query)).json()
+        self.assertEqual((result["ids"], result["selected_total"]), ([], 2))
+
+    async def test_pool_selection_totals_do_not_filter_legacy_list_results(self):
+        legacy = await (await self.client.get("/api/pools/pose?q=Standing")).json()
+        self.assertEqual((legacy["total"], legacy["pool_total"]), (1, 2))
+        self.assertNotIn("selected_total", legacy)
+        states = [
+            ({"mode": "include", "ids": ["pose:stand", "pose:sit", "pose:sit", "missing", "clothing:coat"]}, 2),
+            ({"mode": "all", "excluded_ids": ["pose:stand", "pose:stand", "missing", "clothing:coat"]}, 1),
+        ]
+        for state, expected in states:
+            for endpoint in ("query", "ids"):
+                with self.subTest(endpoint=endpoint, state=state):
+                    result = await (await self.client.post(f"/api/pools/pose/{endpoint}", json={
+                        "q": "Standing", "selection_state": state,
+                    })).json()
+                    self.assertEqual((result["total"], result["pool_total"], result["selected_total"]), (1, 2, expected))
+        for body in ({"model_profile": "krea2"}, {"selection_state": []}, {"selection_state": {"ids": "bad"}}):
+            for endpoint in ("query", "ids"):
+                with self.subTest(body=body, endpoint=endpoint):
+                    response = await self.client.post(f"/api/pools/pose/{endpoint}", json=body)
+                    self.assertEqual(response.status, 400)
 
     async def test_non_local_host_or_origin_is_rejected(self):
         # 回归 #P2-2:恶意网页的 CSRF/DNS 重绑定应被本机来源校验拦截。

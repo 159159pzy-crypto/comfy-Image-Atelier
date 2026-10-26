@@ -426,9 +426,10 @@ def create_app(
         )
 
     async def _pool_response(
-        section: str, params: dict[str, Any], selection: dict[str, Any] | None
+        section: str, params: dict[str, Any], selection: dict[str, Any] | None,
+        *, ids_only: bool = False,
     ) -> web.Response:
-        """GET /api/pools 与 POST /api/pools/query 共用的参数归一化与搜索。"""
+        """列表和全部匹配 ID 共用参数归一化、筛选与排序。"""
         try:
             model_profile = normalize_model_profile(params.get("model_profile", "anima"))
         except ValueError as error:
@@ -440,10 +441,19 @@ def create_app(
             # /api/prompt-pools for Krea natural-language entries instead.
             raise WorkflowError("Krea 2 使用独立自然语言提示词池")
         try:
-            page = int(params.get("page") or 1)
-            limit = int(params.get("limit") or 48)
+            page = 1 if ids_only else int(params.get("page") or 1)
+            limit = 48 if ids_only else int(params.get("limit") or 48)
         except (TypeError, ValueError) as error:
             raise WorkflowError("分页参数无效") from error
+        selection_state = params.get("selection_state")
+        if selection_state is not None and not isinstance(selection_state, dict):
+            raise WorkflowError("selection_state 必须是对象")
+        if selection_state is not None:
+            if selection_state.get("mode", "include") not in ("include", "all"):
+                raise WorkflowError("selection_state.mode 必须是 include 或 all")
+            for key in ("ids", "excluded_ids"):
+                if key in selection_state and not isinstance(selection_state[key], list):
+                    raise WorkflowError(f"selection_state.{key} 必须是数组")
         collection = str(params.get("collection") or "")
         sort = str(params.get("sort") or "")
         custom_group = str(params.get("custom_group") or "")
@@ -466,6 +476,8 @@ def create_app(
             page=page,
             limit=limit,
             selection=selection,
+            selection_state=selection_state,
+            ids_only=ids_only,
         )
         return web.json_response(result)
 
@@ -481,14 +493,20 @@ def create_app(
         params["traits"] = request.query.getall("trait", [])
         return await _pool_response(request.match_info["section"], params, None)
 
-    async def pool_query(request: web.Request) -> web.Response:
+    async def _pool_query_response(request: web.Request, *, ids_only: bool = False) -> web.Response:
         body = await _json_body(request)
         params = dict(body)
         params.setdefault("model_profile", "anima")
         params["categories"] = body.get("categories") if isinstance(body.get("categories"), list) else []
         params["traits"] = body.get("traits") if isinstance(body.get("traits"), list) else []
         selection = body.get("selection") if isinstance(body.get("selection"), dict) else None
-        return await _pool_response(request.match_info["section"], params, selection)
+        return await _pool_response(request.match_info["section"], params, selection, ids_only=ids_only)
+
+    async def pool_query(request: web.Request) -> web.Response:
+        return await _pool_query_response(request)
+
+    async def pool_ids(request: web.Request) -> web.Response:
+        return await _pool_query_response(request, ids_only=True)
 
     def request_favorites(request: web.Request) -> FavoritesService:
         try:
@@ -1808,6 +1826,7 @@ def create_app(
     app.router.add_delete("/api/favorites/{section}/groups/{group_id}", delete_favorite_group)
     app.router.add_get("/api/pools/{section}", pool)
     app.router.add_post("/api/pools/{section}/query", pool_query)
+    app.router.add_post("/api/pools/{section}/ids", pool_ids)
     app.router.add_get("/api/custom-prompts", list_custom_prompts)
     app.router.add_post("/api/custom-prompts", create_custom_prompt)
     app.router.add_put("/api/custom-prompts/{item_id}", update_custom_prompt)
