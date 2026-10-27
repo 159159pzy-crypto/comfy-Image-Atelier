@@ -2,7 +2,7 @@
 
 ## 安装与使用
 
-1.2.0 起，从 [最新 Release](https://github.com/159159pzy-crypto/comfyui-random-image-generation/releases/latest) 下载 `AnimaRandomStudio-Setup-win-x64.exe` 安装，或直接下载 `AnimaRandomStudio.exe` 运行。`AnimaRandomStudio-portable-win-x64.zip` 仅包含同一份 EXE。源码 ZIP 不包含 EXE。运行依赖自动提取到用户缓存，EXE 旁无需 DLL 或资源文件。
+本版为 [1.4.0 beta Release](https://github.com/159159pzy-crypto/comfyui-random-image-generation/releases/tag/1.4.0)，需手动下载；[最新正式 Release](https://github.com/159159pzy-crypto/comfyui-random-image-generation/releases/latest) 继续提供稳定版。1.2.0 起，下载 `AnimaRandomStudio-Setup-win-x64.exe` 安装，或直接下载 `AnimaRandomStudio.exe` 运行。`AnimaRandomStudio-portable-win-x64.zip` 仅包含同一份 EXE。源码 ZIP 不包含 EXE。运行依赖自动提取到用户缓存，EXE 旁无需 DLL 或资源文件。
 
 安装版默认按用户安装到 `%LOCALAPPDATA%/Programs/AnimaRandomStudio`，也可选择其他位置；创建开始菜单入口，可选桌面快捷方式；卸载保留用户数据、模型和环境。
 
@@ -122,7 +122,7 @@ python launcher/scripts/patch_prompt_assistant.py --root '<Prompt Assistant 插�
 
 `--check` 不修改文件：返回码 0 表示已安装，2 表示已识别但待安装，1 表示不支持或文件异常。补丁脚本内嵌在启动器 Core 程序集中，发布包不依赖源码目录。
 
-可将 `templates/workflow_ui_v2.json` 拖进 ComfyUI 检查缺失节点；应用实际提交使用 `templates/workflow_api_v2.json`。节点及版本见 [运行清单](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.3.1/launcher/manifests/launcher-manifest.json)。
+可将 `templates/workflow_ui_v2.json` 拖进 ComfyUI 检查缺失节点；应用实际提交使用 `templates/workflow_api_v2.json`。节点及版本见 [运行清单](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.4.0/launcher/manifests/launcher-manifest.json)。
 
 ## 本地图像反推模型
 
@@ -176,4 +176,4 @@ pwsh ./launcher/scripts/Test-LauncherInstaller.ps1 -CandidateDirectory './dist/c
 
 需要源码目录的双击入口时，可运行 `pwsh ./Build-Launcher.ps1 -InstallRootEntry`；部署到根目录的 EXE 与发布单文件一致，不依赖同级 `.launcher`；替换前旧入口备份在 `.launcher` 中。普通构建不会修改根入口或快捷方式。
 
-包内附带第三方许可和依赖清单；ComfyUI、节点与模型单独下载。已知依赖限制见 [依赖说明](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.3.1/docs/dependencies.md)。
+包内附带第三方许可和依赖清单；ComfyUI、节点与模型单独下载。已知依赖限制见 [依赖说明](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.4.0/docs/dependencies.md)。

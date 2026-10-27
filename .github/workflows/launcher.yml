@@ -99,7 +99,15 @@ jobs:
           $version = [System.IO.File]::ReadAllText('launcher/version.txt').Trim()
           if ($env:RELEASE_TAG -notin @($version, "v$version")) { throw 'Tag must match launcher/version.txt.' }
           ./launcher/scripts/Test-LauncherCandidate.ps1 -CandidateDirectory dist/release -ExpectedCommit $env:RELEASE_SHA -ExpectedVersion $version -RequireClean
-          gh release create $env:RELEASE_TAG --verify-tag --draft --title $version --notes-file RELEASE_NOTES.md dist/release/AnimaRandomStudio.exe dist/release/AnimaRandomStudio-Setup-win-x64.exe dist/release/AnimaRandomStudio-portable-win-x64.zip dist/release/SHA256SUMS.txt dist/release/build-info.json
+          $releaseTitle = (Get-Content -LiteralPath RELEASE_NOTES.md -TotalCount 1) -replace '^#\s+', ''
+          $isBeta = $releaseTitle -match '(?i)\bbeta\b'
+          $releaseFlags = @()
+          if ($isBeta) { $releaseFlags += '--prerelease' }
+          gh release create $env:RELEASE_TAG --verify-tag --draft --title $releaseTitle --notes-file RELEASE_NOTES.md @releaseFlags dist/release/AnimaRandomStudio.exe dist/release/AnimaRandomStudio-Setup-win-x64.exe dist/release/AnimaRandomStudio-portable-win-x64.zip dist/release/SHA256SUMS.txt dist/release/build-info.json
           if ($LASTEXITCODE -ne 0) { throw 'Release creation failed; existing assets were not overwritten.' }
-          gh release edit $env:RELEASE_TAG --draft=false --latest
+          if ($isBeta) {
+            gh release edit $env:RELEASE_TAG --draft=false --prerelease --latest=false
+          } else {
+            gh release edit $env:RELEASE_TAG --draft=false --latest
+          }
           if ($LASTEXITCODE -ne 0) { throw 'Assets are uploaded as a draft; publishing the release failed.' }

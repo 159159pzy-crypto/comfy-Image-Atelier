@@ -4,3 +4,7 @@ launcher/tests/fixtures/prompt-assistant/pinned/** text eol=lf whitespace=-blank
 docs/launcher-onboarding-style-acceptance-2026-10-22.md export-ignore
 docs/launcher-model-onboarding-acceptance-2026-10-24.md export-ignore
 docs/launcher-modelscope-acceptance-2026-10-24.md export-ignore
+docs/launcher-download-context-acceptance-2026-10-27.md export-ignore
+docs/launcher-download-context-evidence-2026-10-27/** export-ignore
+docs/screenshots/download-context-2026-10-27/** export-ignore
+launcher/docs/download-acceptance.md export-ignore
