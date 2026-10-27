@@ -19,15 +19,33 @@ function Get-VerifiedDownload($Spec, [string]$Destination) {
         (Get-Item -LiteralPath $Destination).Length -eq [long]$Spec.size -and
         (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash -eq $Spec.sha256) { return $Destination }
     [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($Destination)) | Out-Null
-    $temporary = $Destination + '.download-' + [Guid]::NewGuid().ToString('N')
-    try {
-        Invoke-WebRequest -Uri $Spec.url -OutFile $temporary -TimeoutSec 180 -MaximumRedirection 10 -Headers @{ 'User-Agent' = 'AnimaRandomStudio-Build' }
-        if ((Get-Item -LiteralPath $temporary).Length -ne [long]$Spec.size -or
-            (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash -ne $Spec.sha256) { throw "Integrity verification failed: $([System.IO.Path]::GetFileName($Destination))" }
-        if (Test-Path -LiteralPath $Destination) { Move-Item -LiteralPath $Destination -Destination ($Destination + '.invalid-' + [Guid]::NewGuid().ToString('N')) }
-        Move-Item -LiteralPath $temporary -Destination $Destination
-    } finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary } }
-    return $Destination
+    $sources = @($Spec.url) + @(Get-OptionalManifestItems $Spec 'fallbackUrls')
+    foreach ($source in $sources) {
+        if ($source -notmatch '^https://') { throw 'Invalid pinned tool source URL.' }
+    }
+    foreach ($source in $sources) {
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            $temporary = $Destination + '.download-' + [Guid]::NewGuid().ToString('N')
+            try {
+                # Keep diagnostics out of the success stream: callers receive
+                # only the verified archive path, never a list of log lines.
+                Write-Host "Downloading $([System.IO.Path]::GetFileName($Destination)) (attempt $attempt/3): $source"
+                Invoke-WebRequest -Uri $source -OutFile $temporary -TimeoutSec 180 -MaximumRedirection 10 -Headers @{ 'User-Agent' = 'AnimaRandomStudio-Build' }
+                if ((Get-Item -LiteralPath $temporary).Length -ne [long]$Spec.size -or
+                    (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash -ne $Spec.sha256) { throw "Integrity verification failed: $([System.IO.Path]::GetFileName($Destination))" }
+                if (Test-Path -LiteralPath $Destination) { Move-Item -LiteralPath $Destination -Destination ($Destination + '.invalid-' + [Guid]::NewGuid().ToString('N')) }
+                Move-Item -LiteralPath $temporary -Destination $Destination
+                return $Destination
+            } catch {
+                $lastFailure = $_.Exception.Message
+                Write-Warning "Download failed from ${source}: $lastFailure"
+            } finally {
+                if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary }
+            }
+            if ($attempt -lt 3) { Start-Sleep -Seconds 2 }
+        }
+    }
+    throw "All pinned sources failed for $([System.IO.Path]::GetFileName($Destination)): $lastFailure"
 }
 
 function Get-OptionalManifestItems($Object, [string]$Name) {
