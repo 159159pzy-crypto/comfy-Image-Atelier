@@ -13,7 +13,7 @@ PUBLIC_MARKDOWN = {
     "launcher/tests/fixtures/prompt-assistant/README.md",
 }
 LOCAL_PARTS = {
-    ".git", ".codex-local", ".claude", ".launcher", ".venv", "venv",
+    ".git", ".codex-local", ".claude", ".launcher", ".anima-temp", ".venv", "venv",
     "__pycache__", ".pytest_cache", ".ruff_cache", ".playwright-cli",
     "node_modules", "bin", "obj", "test-results", "playwright-report",
 }

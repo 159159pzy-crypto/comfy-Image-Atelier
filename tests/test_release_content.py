@@ -8,7 +8,7 @@ from scripts.check_release_content import MACHINE_PATH, check_path
 
 @pytest.mark.parametrize("name", [
     "data/history.json", "output/report.json", "dist/package.zip",
-    ".codex-local/notes.md", ".claude/settings.json", "launcher/Core/obj/build.json",
+    ".codex-local/notes.md", ".claude/settings.json", ".anima-temp/.anima-owner", "launcher/Core/obj/build.json",
     "anima_webui/__pycache__/server.pyc", ".env", "AGENTS.md",
     "docs/acceptance.md", "docs/conversation.md", "AnimaRandomStudio.exe",
 ])

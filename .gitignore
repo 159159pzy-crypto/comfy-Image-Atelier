@@ -39,6 +39,7 @@ _tmp*
 
 # Windows launcher build outputs
 dist/
+.anima-temp/
 launcher/**/bin/
 launcher/**/obj/
 launcher/payload.zip

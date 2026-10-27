@@ -334,17 +334,22 @@ class CleanupTests(unittest.IsolatedAsyncioTestCase):
     async def test_comfy_reparse_point_is_not_followed_even_inside_owned_root(self):
         root, relative, _ = await self.local_copy()
         await self.age()
-        target = root / relative
+        # Windows CI can expose TEMP through an 8.3 alias. The lifecycle uses
+        # the resolved root, so inject the attribute at that same real path.
+        target = (root / relative).resolve(strict=True)
         original = os.lstat
+        injected = []
 
         def reparse(path, *args, **kwargs):
             result = original(path, *args, **kwargs)
             if Path(path) == target:
+                injected.append(Path(path))
                 return SimpleNamespace(st_mode=result.st_mode, st_file_attributes=0x400)
             return result
 
         with patch("anima_webui.asset_lifecycle.os.lstat", side_effect=reparse):
             result = await self.service.run()
+        self.assertTrue(injected, "The reparse-point attribute must reach the cleanup path check")
         self.assertEqual(result["deleted_files"], 0)
         self.assertTrue(result["errors"])
         self.assertTrue(target.exists())
