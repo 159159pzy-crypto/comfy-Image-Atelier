@@ -44,6 +44,9 @@ jobs:
             }
           }
           Remove-Item -LiteralPath nuget-audit.json
+      - name: Prepare verified download tools for launcher tests
+        shell: pwsh
+        run: ./launcher/scripts/Prepare-DownloadTools.ps1
       - run: dotnet run -c Release --project launcher/Anima.Launcher.Tests
         env:
           ANIMA_LAUNCHER_TEST_ROOT: ${{ runner.temp }}/anima-launcher-tests

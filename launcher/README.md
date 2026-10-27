@@ -146,6 +146,7 @@ dotnet run -c Release --project launcher/Anima.Launcher.Tests -- --tagger-downlo
 ```powershell
 python -m pip install -e '.[dev]'
 python scripts/check_release.py
+pwsh ./launcher/scripts/Prepare-DownloadTools.ps1
 dotnet run -c Release --project launcher/Anima.Launcher.Tests
 python launcher/scripts/test_prompt_assistant_patch.py
 pwsh ./launcher/scripts/Test-LauncherPackage.ps1
@@ -153,6 +154,8 @@ pwsh ./Build-Launcher.ps1
 ```
 
 输出位于新的 `dist/candidates/<构建编号>`：独立 `AnimaRandomStudio.exe`、仅含相同 EXE 的 ZIP、`AnimaRandomStudio-Setup-win-x64.exe`、三份下载文件的 `SHA256SUMS.txt` 及 `build-info.json`。`candidate.json` 仅用于本地定位输出。单文件内部的 `FILES.sha256` 覆盖所有内嵌运行文件（排除清单自身与外层 EXE）；来源资料和第三方许可随 EXE 内嵌。正式发布要求提交已保存、工作树干净。
+
+首次运行启动器测试前，工具准备脚本会下载并核验锁定的 aria2、uv、来源归档与许可文件；测试直接使用这些真实下载引擎。缓存位于忽略的 `tools/download-tools`，不能依赖开发机已有缓存跳过此步骤。
 
 构建脚本下载锁定的 Inno Setup 6.7.3 到忽略的 `tools` 目录，验证官方 SHA-256 与 Pyrsys B.V. 数字签名后准备编译器。安装程序始终包含与便携版逐字节相同的最终 EXE。
 
