@@ -48,7 +48,6 @@
                         <Button x:Name="HomeNav" Content="概览" Tag="0" Style="{StaticResource StudioNavButtonStyle}" Click="Nav_Click" />
                         <Button x:Name="EnvironmentNav" Content="安装环境" Tag="1" Style="{StaticResource StudioNavButtonStyle}" Click="Nav_Click" />
                         <Button x:Name="ModelsNav" Content="模型资源" Tag="2" Style="{StaticResource StudioNavButtonStyle}" Click="Nav_Click" />
-                        <Button x:Name="DownloadsNav" Content="下载" Tag="6" Style="{StaticResource StudioNavButtonStyle}" Click="Nav_Click" />
                         <Button x:Name="LogsNav" Content="日志" Tag="3" Style="{StaticResource StudioNavButtonStyle}" Click="Nav_Click" />
                         <Button x:Name="SettingsNav" Tag="4" Style="{StaticResource StudioNavButtonStyle}" Click="Nav_Click" AutomationProperties.Name="设置" ToolTipService.ToolTip="设置">
                             <FontIcon Glyph="&#xE713;" FontSize="15" />
@@ -75,6 +74,8 @@
                         <FontIcon Glyph="&#xE712;" FontSize="14" />
                         <Button.Flyout>
                             <MenuFlyout>
+                                <MenuFlyoutItem Text="查看全部下载" Click="Downloads_Click" />
+                                <MenuFlyoutSeparator />
                                 <MenuFlyoutItem Text="打开工作台" Click="OpenWebUI_Click" />
                                 <MenuFlyoutItem Text="打开 ComfyUI" Click="OpenComfy_Click" />
                                 <MenuFlyoutItem Text="停止本程序服务" Click="Stop_Click" />

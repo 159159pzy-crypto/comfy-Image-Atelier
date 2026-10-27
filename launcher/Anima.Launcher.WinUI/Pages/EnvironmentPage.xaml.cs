@@ -3,6 +3,7 @@ using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
+using System.Text.Json;
 using Windows.Storage.Pickers;
 using WinRT.Interop;
 
@@ -17,6 +18,8 @@ public sealed partial class EnvironmentPage : LauncherPage
     private bool previewConfirmed;
     private int previewVersion;
     private int previewRequestVersion;
+    private string? displayedInstallationOwner;
+    private string? displayedConfiguration;
 
     public EnvironmentPage()
     {
@@ -29,33 +32,42 @@ public sealed partial class EnvironmentPage : LauncherPage
     {
         base.OnNavigatedTo(e);
         active = true;
-        previewConfirmed = false;
-        previewVersion++;
-        LoadFields();
+        var configuration = JsonSerializer.Serialize(State.Config, JsonFile.Options);
+        if (!Shell.ReturningFromDownloads || displayedConfiguration != configuration)
+        {
+            previewConfirmed = false;
+            previewVersion++;
+            LoadFields();
+        }
+        displayedConfiguration = configuration;
         State.FieldsReloaded += OnReloaded;
         State.BusyChanged += OnBusy;
         State.InstallSummaryChanged += OnSummary;
         State.ComfyUpdateChanged += OnComfyUpdate;
         State.NodeUpdateChanged += OnNodeUpdate;
+        State.DownloadsChanged += OnDownloadsChanged;
         UpdateComfyMaintenance();
         UpdateNodeMaintenance();
+        UpdateInstallationProgress();
+        ConfigurationPanel.IsEnabled = !State.Busy;
+        OpenSetupButton.IsEnabled = !State.Busy;
+        ApplyInstallEligibility();
     }
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
         if (!State.Busy && !State.SetupActive) SyncConfig();
         active = false;
-        previewConfirmed = false;
-        previewVersion++;
         State.FieldsReloaded -= OnReloaded;
         State.BusyChanged -= OnBusy;
         State.InstallSummaryChanged -= OnSummary;
         State.ComfyUpdateChanged -= OnComfyUpdate;
         State.NodeUpdateChanged -= OnNodeUpdate;
+        State.DownloadsChanged -= OnDownloadsChanged;
         base.OnNavigatedFrom(e);
     }
 
-    private void OnReloaded() => DispatcherQueue.TryEnqueue(() => { if (active) LoadFields(); });
+    private void OnReloaded() => DispatcherQueue.TryEnqueue(() => { if (active) { LoadFields(); UpdateInstallationProgress(); } });
     private void OnBusy(bool busy) => DispatcherQueue.TryEnqueue(() =>
     {
         ConfigurationPanel.IsEnabled = !busy;
@@ -63,7 +75,50 @@ public sealed partial class EnvironmentPage : LauncherPage
         UpdateComfyMaintenance();
         UpdateNodeMaintenance();
         ApplyInstallEligibility();
+        UpdateInstallationProgress();
     });
+    private void OnDownloadsChanged() => DispatcherQueue.TryEnqueue(() => { if (active) UpdateInstallationProgress(); });
+    private void UpdateInstallationProgress()
+    {
+        var progress = State.InstallationDownloadProgress;
+        displayedInstallationOwner = progress?.OwnerId;
+        InstallationProgressPanel.Visibility = progress is null ? Visibility.Collapsed : Visibility.Visible;
+        if (progress is null) return;
+        var status = progress.Status switch
+        {
+            DownloadTaskStatus.Running => "正在安装", DownloadTaskStatus.Pausing => "正在暂停",
+            DownloadTaskStatus.Completed => "安装已完成", DownloadTaskStatus.Canceled => "已取消，文件保留",
+            DownloadTaskStatus.Failed => "安装未完成，可以重试", DownloadTaskStatus.NeedsReview => "需要处理后继续",
+            _ => "安装待继续"
+        };
+        InstallationStatusText.Text = status + (progress.Detail.Length > 0 ? "\n" + progress.Detail : "");
+        InstallationProgressBar.IsIndeterminate = progress.Indeterminate;
+        InstallationProgressBar.Value = progress.Percent;
+        InstallationTransferText.Text = progress.Total > 0
+            ? $"已下载 {progress.Received / 1048576d:N1} / {progress.Total / 1048576d:N1} MiB"
+                + (progress.Speed > 0 ? $" · {progress.Speed / 1048576d:N1} MiB/s" : "")
+                + (progress.Indeterminate ? "\n正在处理安装步骤。" : "")
+            : progress.Status is DownloadTaskStatus.Running or DownloadTaskStatus.Pausing ? "正在处理安装步骤。" : "已完成的下载和安装步骤会在继续时复用。";
+        InstallationErrorText.Text = progress.Error;
+        InstallationErrorText.Visibility = progress.Error.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        PauseInstallationButton.Visibility = progress.Status is DownloadTaskStatus.Running or DownloadTaskStatus.Pausing ? Visibility.Visible : Visibility.Collapsed;
+        PauseInstallationButton.IsEnabled = progress.Status == DownloadTaskStatus.Running;
+        ResumeInstallationButton.Visibility = progress.Status is DownloadTaskStatus.Queued or DownloadTaskStatus.Paused or DownloadTaskStatus.Failed or DownloadTaskStatus.NeedsReview ? Visibility.Visible : Visibility.Collapsed;
+        ResumeInstallationButton.IsEnabled = !State.Busy;
+        ResumeInstallationButton.Content = progress.Status is DownloadTaskStatus.Failed or DownloadTaskStatus.NeedsReview ? "重试安装" : "继续安装";
+    }
+    private async void PauseInstallation_Click(object sender, RoutedEventArgs e)
+    {
+        if (displayedInstallationOwner is not { } owner) return;
+        try { await State.PauseInstallationDownloadAsync(owner); }
+        catch (Exception error) { await ShowError(error); }
+    }
+    private async void ResumeInstallation_Click(object sender, RoutedEventArgs e)
+    {
+        if (displayedInstallationOwner is not { } owner || State.Busy) return;
+        await State.ResumeDownloadOwnerAsync(owner);
+    }
+    private void InstallationDetails_Click(object sender, RoutedEventArgs e) => Shell.OpenDownloads(1, displayedInstallationOwner);
     private void OnSummary(string text)
     {
         var reviewedHere = previewing && State.InstallPreviewReady;

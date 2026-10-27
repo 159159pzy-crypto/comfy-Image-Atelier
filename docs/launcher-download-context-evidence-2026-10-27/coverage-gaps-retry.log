@@ -1,0 +1,189 @@
+PASS: creating durable intent does not start networking
+PASS: same frozen owner deduplicates without a caller-maintained id
+PASS: UI owner snapshots cannot mutate persisted identities
+PASS: changing size or version cannot reuse an owner id
+PASS: signed input URLs are rejected before persistence
+PASS: opaque owner payload cannot persist credentials
+PASS: opaque owner payload cannot persist signed CDN URLs
+PASS: signed URLs in model display metadata are rejected before registration
+PASS: signed URLs in owner source configuration are rejected before registration
+PASS: rejected registrations do not poison the durable task database
+PASS: explicit source switch preserves environment, profile, destination and artifact identity
+PASS: source switch is a recorded transport revision
+PASS: completed file alone does not mark a model or package published
+PASS: coordinator records model completion only after final publication work
+PASS: owner captures frozen network policy instead of mutable defaults
+PASS: only successful owner coordination records completion
+PASS: task JSON contains neither rejected tokens nor signed URLs
+PASS: restart recovers interrupted list as paused without resuming any network request
+PASS: restart preserves exact artifact and destination
+PASS: restart preserves the actual last file and owner errors while marking them paused
+PASS: new explicit request does not silently reactivate a canceled owner
+PASS: corrupt task store is preserved with a readable recovery warning
+PASS: failed recovery does not overwrite the original task store
+PASS: tampered stored destination is rejected by immutable fingerprint
+PASS: display speed starts from the first sample without counting scheduler wait time
+PASS: display speed smooths a brief dip using elapsed-time weighting
+PASS: retry waiting clears display ETA and the resumed source starts a fresh speed window
+PASS: new attempts and final verification never reuse a previous transfer speed
+PASS: scheduler limits all file transfers to two active writers
+PASS: queued file uses released slot without exceeding global concurrency
+PASS: required model queued later starts before an optional queued resource
+PASS: historical required attempt can be canceled before a new optional attempt
+PASS: a reused historical required task is optional for its new execution and stays behind a currently required task
+PASS: one merged waiter may cancel independently
+PASS: same content and destination merge into one active transfer
+PASS: different content cannot write a destination with an unfinished task
+PASS: completed download returns only after releasing its execution and scheduler slot
+PASS: surviving merged waiter receives verified file
+PASS: canceling one file leaves unrelated files in its model batch running
+PASS: restart preserves child cancellation while its sibling was still running
+PASS: explicit child cancellation interrupts its owning coordinator
+PASS: canceled child cannot reappear through continue-all paused owners
+PASS: explicit file cancellation remains a canceled terminal intent
+PASS: new explicit owner after cancellation adopts its new transport settings for identical content
+PASS: derived resource owner preserves an explicit compatibility-engine recovery choice
+PASS: owner pause waits for child writer cancellation
+PASS: pause preserves a resumable owner and file
+PASS: owner file cannot bypass required package or installation finalization
+PASS: explicit compatibility and source changes preserve frozen identity
+PASS: cleanup preview enumerates exact owned temporary files and bytes
+PASS: explicit cleanup removes only this task's incomplete files
+PASS: cleanup fixture preserves a canceled old version record
+PASS: new version may pause at the same target after the old version was canceled
+PASS: old canceled task cannot preview another paused version's partial files
+PASS: old canceled task cannot delete another paused version's partial files
+PASS: rejected old-task cleanup preserves the new version's bytes and intent
+PASS: on-disk metadata protects a newer version even after both tasks are canceled
+PASS: target cleanup gate rejects a different identity while cleanup waits on its destination lease
+PASS: target cleanup gate also rejects a same-identity writer until deletion finishes
+PASS: cleanup admission is target-scoped and creates no replacement task or network request
+PASS: identity-checked cleanup removes only partial files and preserves a complete final artifact
+PASS: target gate is released after cleanup so the selected identity can validate its final file
+PASS: cleanup rechecks metadata under the cross-process destination lease
+PASS: identity change while awaiting the lease preserves both partial and final files
+PASS: shared unfinished owner prevents cleanup preview
+PASS: shared unfinished owner prevents cleanup execution
+PASS: rejected shared cleanup does not cancel a valid owner
+PASS: failed engine produces a durable failed task
+PASS: durable failure messages redact signed URLs and token values
+PASS: stable source rejects decoded credential query key password
+PASS: stable source rejects decoded credential query key secret
+PASS: stable source rejects decoded credential query key api%5Fkey
+PASS: stable source rejects decoded credential query key access_%74oken
+PASS: stable source rejects decoded credential query key pass%77ord
+PASS: stable source rejects decoded credential query key client%5Fsecret
+PASS: stable source rejects decoded credential query key %6bey
+PASS: rejected credential URLs never reach task persistence or a download source
+PASS: invalid local checkpoint stops before attempting any source
+PASS: local checkpoint failure persists needs-review and explicit recovery actions without source failover
+PASS: explicit new attempt increments its durable count and clears previous retry failure state
+PASS: cleanup preview reports physical allocated bytes instead of a sparse file's logical length
+PASS: completed compatible download can preview its preserved obsolete native scratch
+PASS: cleaning obsolete scratch preserves completed status and the verified final file
+PASS: automatic source retry count is retained in the task record after Retry-After waiting
+PASS: different package destinations serialize access to their shared historical staging identity
+PASS: concurrent package coordinators publish two complete independently verified directories
+PASS: package waits on another process's staging lease before any child download or publication
+PASS: package safely continues and publishes after the external lease is released
+PASS: owner does not start when its running intent cannot be persisted
+PASS: file does not start when its queued intent cannot be persisted
+PASS: persistence failure leaves no waiting execution or occupied scheduler slot
+PASS: download can be retried after task storage becomes writable
+PASS: live legacy batch cannot be split underneath its existing coordinator
+PASS: legacy task JSON without resource links loads without changing its frozen identity
+PASS: legacy split atomically creates three independent model owners without networking
+PASS: resource split retains the frozen environment, package identity, payload and destination
+PASS: repeated legacy split reuses exactly the persisted child owners
+PASS: split preserves published models, canceled intent and the actual recoverable resource error
+PASS: old files are associated only with their exact resource child while preserving legacy history
+PASS: one canceled model does not make another failed model unrecoverable through the legacy group
+PASS: failed resource still exposes retry after process restart and legacy migration
+PASS: consistent task snapshot is detached from mutable persistent relationships
+PASS: unfinished legacy sibling cannot prevent a fresh explicit model request from adopting its new source
+PASS: verified child files alone do not mark the legacy package published
+PASS: resource completion clears its stale legacy error and updates the parent completion count
+PASS: continuing a sibling model never resurrects an explicitly canceled model
+PASS: resource relationships and aggregate completion survive a real store round trip
+PASS: converted parent cannot restart a multi-model coordinator
+PASS: failed resource migration restores the entire in-memory state and leaves original disk JSON intact
+PASS: restart after interrupted migration ignores incomplete temporary JSON and restores the original unsplit intent
+PASS: interrupted legacy migration can be retried after restart without losing or duplicating model owners
+PASS: only all published resources complete the legacy parent and clear its error
+PASS: store rejects a child relationship that redirects a model to another resource
+PASS: pausing a package stops every package member while the separately owned sibling keeps downloading
+PASS: independent sibling can finish while the package remains paused
+PASS: legacy split reuses an already running single-model owner instead of creating a duplicate coordinator
+PASS: legacy group reflects its reused active resource owner
+PASS: restart retains shared resource links and recovers all interrupted children and their parent without network activity
+PASS: restart preserves failed and needs-review owners with their retry actions and original errors
+PASS: insufficient disk budget fails the durable model with retry available before network or model data is written
+PASS: disk failure preserves frozen model identity and cannot mark the model or file complete
+PASS: the same model owner retries successfully after disk capacity becomes available and only then publishes completion
+PASS: model row selects its current environment and exact artifact without stale failure or foreign progress
+PASS: changed model content does not inherit progress for a previous file version
+PASS: identical basenames in a different destination do not match a model row
+PASS: duplicate historical file records cannot double-count one model artifact
+PASS: a newer cancellation hides older failures and never exposes an automatic resume action
+PASS: latest completed model clears earlier errors even when its files were reused without a new transfer record
+PASS: fully transferred package remains incomplete until coordinator publication succeeds
+PASS: package completion follows published model identity rather than individual file status
+PASS: paused resource does not claim another owner's active shared transfer as its own running work
+PASS: legacy parent relationship resolves to one effective package row without repeating parent failure
+PASS: needs-review model exposes retry without presenting a running pause action
+PASS: running model row clears its checked state and cannot be selected for a duplicate download
+PASS: paused model row exposes continue and remains selectable for an explicit request
+PASS: failed model row exposes retry rather than a pause or ambiguous continue action
+PASS: environment maintenance disables model actions without hiding the recovery state
+PASS: historical completed download does not hide a missing local file or prevent an explicit replacement
+PASS: inventory refresh after completed publication clears selection and shows the model as ready
+PASS installation page uses the current environment's latest outcome instead of an old failed attempt
+PASS active current installation takes priority and trailing directory separators do not hide it
+PASS an unconfigured environment cannot display another environment's installation
+PASS downloaded files keep the installation indeterminate until its coordinator completes
+PASS installation completion is driven by the owner rather than transferred bytes
+PASS paused progress retains byte counts and suppresses stale speed
+PASS settings recovery selects the highest valid version and excludes canceled child transfers
+PASS settings recovery excludes obsolete versions, malformed releases, and completed candidates
+PASS an older paused download cannot replace the newer release found by an update check
+PASS a paused artifact cannot replace a newly checked release with a different hash
+PASS a stale release cache still allows recovery of a newer validated saved download
+PASS software resume uses the original validated release payload
+PASS software presentation never mutates paused or canceled download records
+PASS: owner for environment A resets global completion receipt for environment B
+PASS: environment A never reuses environment B interpreter or assistant completion
+PASS: recovery decisions do not mutate the caller's unrelated setup receipt
+PASS: same-environment recovery preserves the installed interpreter and installation results
+PASS: same-environment recovery takes all six transport choices from the resumed owner
+PASS: effective recovery plan retains its release and leaves the original reviewed plan unchanged
+PASS: frozen model hashes and profile determine restored requirements despite current manifest changes
+PASS: recovery outputs cannot mutate the saved model snapshot
+PASS: completed same-environment receipt for another release refuses the old plan
+PASS: actual installed revision takes precedence over an older matching receipt
+PASS: actual target revision conflict is rejected even when global setup belongs elsewhere
+PASS: matching installed revision permits the frozen installation to continue
+PASS: import and repair plans without a pinned release preserve an existing core version
+PASS: recovery never fills a missing frozen model snapshot from a newer catalog
+PASS: recovery never fills a missing frozen profile from a newer catalog
+PASS: legacy inventory migrates exact saved model identities when the profile requires only those filenames
+PASS: legacy inventory refuses a current profile requiring a different model filename
+PASS: legacy inventory missing a selected model cannot use a new catalog as a substitute
+PASS: incomplete frozen requirements are rejected before installation or model download
+PASS: unfinished receipts cannot skip installation by lending an unverified interpreter
+PASS: owner environment cannot redirect a frozen installation plan
+PASS: saving defaults during installation does not change later model URLs or the owner's proxy snapshot
+PASS: new independent tasks immediately use saved official sources and direct networking
+PASS: frozen transport overlay preserves the actual installed interpreter and environment target
+PASS: resuming an old owner restores displayed defaults without mutating its frozen transport
+PASS: operation configuration cannot mutate owner identity or saved UI settings
+PASS: all restored metadata passes select the frozen runtime despite changed current node commits
+PASS: ordinary model operations use the current runtime when no installation plan is active
+PASS: continue-all selects only the highest valid software version rather than the last updated owner
+PASS: continue-all excludes obsolete releases, malformed payloads, completed and canceled owners
+PASS: software selection never cancels skipped records, rewrites release identity, or applies an update
+PASS: explicit software resume must be newer than the running version
+PASS: different software owners cannot enter the global update slot concurrently
+PASS: software failure or completion releases the slot for explicit next-version resume
+PASS: late duplicate disposal cannot release a newer software owner's reservation
+PASS: software reservation releases after the entire validation and ready-state publication boundary
+188 durable download task checks passed; artifacts: F:\comfyuishengtu\output\launcher-tests\752de462cb0b4d078a1f38371c4d5b79

@@ -254,7 +254,7 @@
                 <Grid ColumnSpacing="12">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                     <TextBlock x:Name="FooterHint" Style="{StaticResource StudioBodyStyle}" FontSize="12" VerticalAlignment="Center" AutomationProperties.AutomationId="SetupFooterHint" />
-                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8"><HyperlinkButton Content="下载任务" Click="Downloads_Click" Padding="4,3" /><HyperlinkButton Content="查看日志" Click="Logs_Click" Padding="4,3" AutomationProperties.AutomationId="SetupLogs" /></StackPanel>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8"><HyperlinkButton Content="查看下载详情" Click="Downloads_Click" Padding="4,3" /><HyperlinkButton Content="查看日志" Click="Logs_Click" Padding="4,3" AutomationProperties.AutomationId="SetupLogs" /></StackPanel>
                 </Grid>
                 <Grid Grid.Row="1" ColumnSpacing="10">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>

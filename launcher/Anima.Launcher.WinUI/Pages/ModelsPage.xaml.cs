@@ -16,16 +16,19 @@ public sealed partial class ModelsPage : LauncherPage
         ModelList.SelectionChanged += (_, _) => UpdateDetails();
     }
 
-    protected override void OnNavigatedTo(NavigationEventArgs e)
+    protected override async void OnNavigatedTo(NavigationEventArgs e)
     {
         base.OnNavigatedTo(e);
         active = true;
         State.Scanned += OnScanned;
         State.BusyChanged += OnBusy;
-        State.BatchProgressChanged += OnBatchProgress;
-        OnBatchProgress();
+        State.DownloadsChanged += OnDownloads;
+        State.FieldsReloaded += OnFieldsReloaded;
+        OnDownloads();
         OnBusy(State.Busy);
         UpdateDetails();
+        await State.EnsureModelLibraryAsync();
+        if (active) UpdateDetails();
     }
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
@@ -33,7 +36,8 @@ public sealed partial class ModelsPage : LauncherPage
         active = false;
         State.Scanned -= OnScanned;
         State.BusyChanged -= OnBusy;
-        State.BatchProgressChanged -= OnBatchProgress;
+        State.DownloadsChanged -= OnDownloads;
+        State.FieldsReloaded -= OnFieldsReloaded;
         base.OnNavigatedFrom(e);
     }
 
@@ -46,21 +50,23 @@ public sealed partial class ModelsPage : LauncherPage
 
     private void OnBusy(bool busy) => DispatcherQueue.TryEnqueue(() =>
     {
-        ModelActions.IsEnabled = !busy;
+        if (!active) return;
+        ModelActions.IsEnabled = !busy && !State.PreparingModelDownloads;
+        State.RefreshModelDownloadRows();
         ModelList.IsEnabled = true;
         OpenLocationButton.IsEnabled = ModelList.SelectedItem is ModelRow;
     });
 
-    private void OnBatchProgress() => DispatcherQueue.TryEnqueue(() =>
+    private async void OnFieldsReloaded() { if (active) await State.EnsureModelLibraryAsync(); }
+
+    private void OnDownloads() => DispatcherQueue.TryEnqueue(() =>
     {
         if (!active) return;
-        DownloadProgressPanel.Visibility = State.BatchProgress is null ? Visibility.Collapsed : Visibility.Visible;
-        if (State.BatchProgress is not { } batch) return;
-        ModelsBatchBar.Value = batch.Percent;
-        ModelsFileBar.Value = 100d * batch.FileReceived / Math.Max(1, batch.FileTotal);
-        BatchText.Text = $"整批模型 {batch.CompletedItems}/{batch.TotalItems} 项 · {batch.Percent:N1}% · {batch.Received / 1048576d:N1} / {batch.Total / 1048576d:N1} MiB"
-            + (batch.BytesPerSecond > 0 ? $" · {batch.BytesPerSecond / 1048576d:N1} MiB/s" : "");
-        CurrentResourceText.Text = batch.Name + " · " + batch.Stage;
+        ModelActions.IsEnabled = !State.Busy && !State.PreparingModelDownloads;
+        DownloadButton.Content = State.PreparingModelDownloads ? "正在检查模型…" : "下载所选模型";
+        var pending = State.Rows.Count(r => r.Download is { Status: not (DownloadTaskStatus.Completed or DownloadTaskStatus.Canceled) });
+        DownloadSummary.Text = pending > 0 ? $"{pending} 个模型任务 · 可在条目中暂停、继续或重试" : "下载进度和操作会显示在对应模型中。";
+        UpdateDetails();
     });
 
     private void UpdateDetails()
@@ -90,14 +96,24 @@ public sealed partial class ModelsPage : LauncherPage
         Shell.SyncPagesIntoConfig();
         await State.Run(action);
     }
-    private async void Rescan_Click(object sender, RoutedEventArgs e) => await RunModelTask(ct => State.Scan(ct));
-    private async void HashScan_Click(object sender, RoutedEventArgs e) => await RunModelTask(ct => State.Scan(ct, true));
+    private async void Rescan_Click(object sender, RoutedEventArgs e) { Shell.SyncPagesIntoConfig(); await State.RefreshModelLibraryAsync(); }
+    private async void HashScan_Click(object sender, RoutedEventArgs e) { Shell.SyncPagesIntoConfig(); await State.RefreshModelLibraryAsync(true); }
     private async void Download_Click(object sender, RoutedEventArgs e)
     {
         Shell.SyncPagesIntoConfig();
         await State.StartSelectedModelDownloadsAsync();
     }
     private async void TestImage_Click(object sender, RoutedEventArgs e) => await RunModelTask(State.TestGenerationAsync);
+
+    private void AllDownloads_Click(object sender, RoutedEventArgs e) => Shell.OpenDownloads(2);
+    private async void ModelDownloadAction_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: ModelRow row }) await State.ActOnModelDownloadAsync(row);
+    }
+    private void ModelDownloadDetails_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: ModelRow row }) Shell.OpenDownloads(2, row.Download?.OwnerId, row.Status.Model.Id);
+    }
 
     private void SelectBase_Click(object sender, RoutedEventArgs e)
     {

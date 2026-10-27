@@ -7,12 +7,16 @@ using System.ComponentModel;
 
 namespace Anima.Launcher.Pages;
 
+internal sealed record DownloadsTarget(string? OwnerId = null, string? ModelId = null);
+
 public sealed partial class DownloadsPage : LauncherPage
 {
     private readonly ObservableCollection<TransferRow> rows = [];
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(1) };
     private bool active;
     private bool refreshing;
+    private bool applyTarget;
+    private DownloadsTarget target = new();
 
     public DownloadsPage()
     {
@@ -26,7 +30,7 @@ public sealed partial class DownloadsPage : LauncherPage
         base.OnNavigatedTo(e);
         active = true;
         State.DownloadsChanged += Changed;
-        Refresh();
+        ShowTarget(e.Parameter as DownloadsTarget ?? new());
         timer.Start();
     }
     protected override void OnNavigatedFrom(NavigationEventArgs e)
@@ -36,6 +40,14 @@ public sealed partial class DownloadsPage : LauncherPage
         State.DownloadsChanged -= Changed;
         base.OnNavigatedFrom(e);
     }
+    internal void ShowTarget(DownloadsTarget value)
+    {
+        target = value;
+        applyTarget = true;
+        ReturnButton.Content = Shell.DownloadsReturnText;
+        Refresh();
+    }
+    private void Return_Click(object sender, RoutedEventArgs e) => Shell.ReturnFromDownloads();
     private void Changed() => DispatcherQueue.TryEnqueue(() => { if (active) Refresh(); });
     private void Refresh()
     {
@@ -44,17 +56,24 @@ public sealed partial class DownloadsPage : LauncherPage
         try
         {
             if (State.DownloadTasks.RecoveryWarning is { } warning) Notice.Text = warning;
+            var snapshot = State.DownloadTasks.GetSnapshot();
             var owners = new[] { new DownloadOwnerRecord { Id = "", Title = "全部任务" } }
-                .Concat(State.DownloadTasks.Owners.OrderByDescending(o => o.CreatedAt)).ToArray();
-            var selectedOwner = (OwnerBox.SelectedItem as DownloadOwnerRecord)?.Id;
+                .Concat(snapshot.Owners.OrderByDescending(o => o.CreatedAt)).ToArray();
+            var selectedOwner = applyTarget ? target.OwnerId : (OwnerBox.SelectedItem as DownloadOwnerRecord)?.Id;
+            if (applyTarget && string.IsNullOrEmpty(selectedOwner) && target.ModelId is { } modelId)
+                selectedOwner = owners.FirstOrDefault(o => o.Kind == "models"
+                    && SamePath(o.EnvironmentRoot, State.Config.ComfyRoot) && o.Models.Any(m => m.Model.Id == modelId))?.Id;
             // Keep selection stable while transport progress changes.
-            if (OwnerBox.ItemsSource is not DownloadOwnerRecord[] old || !old.Select(o => o.Id).SequenceEqual(owners.Select(o => o.Id)))
+            if (applyTarget || OwnerBox.ItemsSource is not DownloadOwnerRecord[] old || !old.Select(o => o.Id).SequenceEqual(owners.Select(o => o.Id)))
             {
                 OwnerBox.ItemsSource = owners;
                 OwnerBox.SelectedItem = owners.FirstOrDefault(o => o.Id == selectedOwner) ?? owners.FirstOrDefault();
             }
+            applyTarget = false;
             selectedOwner = (OwnerBox.SelectedItem as DownloadOwnerRecord)?.Id;
-            var tasks = State.DownloadTasks.Tasks.Where(t => string.IsNullOrEmpty(selectedOwner) || t.OwnerIds.Contains(selectedOwner)).OrderBy(t => t.CreatedAt).ToArray();
+            var owner = owners.FirstOrDefault(o => o.Id == selectedOwner);
+            var tasks = snapshot.Tasks.Where(t => owner is null || owner.Id.Length == 0 || BelongsTo(t, owner, target.ModelId))
+                .OrderBy(t => t.CreatedAt).ToArray();
             var ids = tasks.Select(t => t.Id).ToHashSet();
             for (var i = rows.Count - 1; i >= 0; i--) if (!ids.Contains(rows[i].Id)) rows.RemoveAt(i);
             foreach (var task in tasks)
@@ -67,18 +86,27 @@ public sealed partial class DownloadsPage : LauncherPage
         }
         finally { refreshing = false; }
     }
-    private void Owner_Changed(object sender, SelectionChangedEventArgs e) { if (!refreshing) Refresh(); }
+    private void Owner_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (refreshing) return;
+        target = new((OwnerBox.SelectedItem as DownloadOwnerRecord)?.Id);
+        Refresh();
+    }
     private void Task_Changed(object sender, SelectionChangedEventArgs e) => ShowSelection();
     private TransferRow? Selected => TaskList.SelectedItem as TransferRow;
     private void ShowSelection()
     {
         SelectionText.Text = Selected is { } row
             ? row.Record.Destination + "\n" + (string.IsNullOrEmpty(row.Record.Error) ? row.Detail : row.Record.Error)
-            : "此批次尚无文件任务；安装步骤与解包完成后才会完成整个批次。";
+            : State.DownloadTasks.Tasks.Count == 0 && State.DownloadTasks.Owners.Count == 0
+                ? "还没有下载任务。返回模型资源、安装环境或设置后，可以按需开始下载。"
+                : "此任务尚无文件记录；模型发布和安装步骤完成后，整个任务才会完成。";
         var owner = SelectedOwner();
+        ContinueOwnerButton.Content = target.ModelId is not null && owner?.Kind == "models" ? "继续此模型" : "继续此批次";
         OwnerStatusText.Text = owner is null ? "文件校验与批次完成分别记录；包发布和安装步骤成功后批次才完成。"
             : owner.Title + " · " + (owner.Status switch { DownloadTaskStatus.Completed => "已完成", DownloadTaskStatus.Failed => "失败，需要重试",
-                DownloadTaskStatus.Running => "处理中", DownloadTaskStatus.Canceled => "已取消", DownloadTaskStatus.NeedsReview => "需要处理", _ => "待继续" })
+                DownloadTaskStatus.Running => "处理中", DownloadTaskStatus.Pausing => "正在保存断点", DownloadTaskStatus.Queued => "排队",
+                DownloadTaskStatus.Canceled => "已取消", DownloadTaskStatus.NeedsReview => "需要处理", _ => "待继续" })
                 + (string.IsNullOrEmpty(owner.Detail) ? "" : " · " + owner.Detail)
                 + (string.IsNullOrEmpty(owner.Error) ? "" : "\n" + owner.Error);
     }
@@ -86,12 +114,42 @@ public sealed partial class DownloadsPage : LauncherPage
     {
         var all = State.DownloadTasks.Owners;
         if (OwnerBox.SelectedItem is DownloadOwnerRecord { Id.Length: > 0 } chosen)
-            return all.FirstOrDefault(o => o.Id == chosen.Id);
+        {
+            var current = all.FirstOrDefault(o => o.Id == chosen.Id);
+            if (current is not null && target.ModelId is { } modelId && current.ResourceOwnerIds.TryGetValue(modelId, out var resourceId))
+                return all.FirstOrDefault(o => o.Id == resourceId) ?? current;
+            return current;
+        }
         if (Selected is not { } row) return null;
-        return all.Where(o => row.Record.OwnerIds.Contains(o.Id) && o.Kind != "file")
-            .OrderBy(o => o.Status is DownloadTaskStatus.Canceled or DownloadTaskStatus.Completed)
+        return all.Where(o => o.Kind != "file" && BelongsTo(row.Record, o, null))
+            .OrderBy(o => o.ResourceOwnerIds.Count > 0)
+            .ThenBy(o => o.Status is DownloadTaskStatus.Canceled or DownloadTaskStatus.Completed)
             .ThenByDescending(o => o.CreatedAt).FirstOrDefault();
     }
+
+    private static bool BelongsTo(DownloadTaskRecord task, DownloadOwnerRecord owner, string? modelId)
+    {
+        var intents = modelId is null ? owner.Models : owner.Models.Where(m => m.Model.Id == modelId);
+        var identities = intents.ToArray();
+        var related = task.OwnerIds.Contains(owner.Id) || task.OwnerIds.Any(owner.ResourceOwnerIds.ContainsValue);
+        // A derived single-model task may not yet have fetched a file. Match its frozen
+        // content to retained parent records, so detail views remain useful before resume.
+        if (owner.Kind == "models" && identities.Any(m => Matches(task, m))) return true;
+        return related && (modelId is null || identities.Any(m => Matches(task, m)));
+    }
+
+    private static bool Matches(DownloadTaskRecord task, ModelDownloadIntent intent)
+    {
+        if (!intent.Model.IsPackage)
+            return SamePath(task.Destination, intent.Destination) && task.Size == intent.Model.Size
+                && task.Sha256.Equals(intent.Model.Sha256, StringComparison.OrdinalIgnoreCase);
+        var staging = ModelPackages.Staging(intent.Model, intent.Destination);
+        return intent.Model.Files.Any(file => SamePath(task.Destination, Safety.Under(staging, file.Path))
+            && task.Size == file.Size && task.Sha256.Equals(file.Sha256, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool SamePath(string left, string right) => !string.IsNullOrWhiteSpace(left) && !string.IsNullOrWhiteSpace(right)
+        && Path.TrimEndingDirectorySeparator(Path.GetFullPath(left)).Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)), StringComparison.OrdinalIgnoreCase);
     private async Task Act(Func<Task> action)
     {
         try { Notice.Text = ""; await action(); }
@@ -128,7 +186,18 @@ public sealed partial class DownloadsPage : LauncherPage
     }
     private async void ContinueOwner_Click(object sender, RoutedEventArgs e)
     {
-        if (OwnerBox.SelectedItem is DownloadOwnerRecord { Id.Length: > 0 } owner) await Act(() => State.ResumeDownloadOwnerAsync(owner.Id));
+        if (OwnerBox.SelectedItem is DownloadOwnerRecord { Id.Length: > 0 } owner)
+            await Act(async () =>
+            {
+                if (owner.Kind == "models" && target.ModelId is { } modelId)
+                {
+                    var resources = State.DownloadTasks.EnsureResourceOwners(owner.Id);
+                    var resource = resources.FirstOrDefault(o => o.Models.Any(m => m.Model.Id == modelId));
+                    if (resource is null) throw new InvalidOperationException("原任务中已找不到此模型，请返回模型资源重新确认。");
+                    await State.ResumeDownloadOwnerAsync(resource.Id);
+                }
+                else await State.ResumeDownloadOwnerAsync(owner.Id);
+            });
         else await Act(State.ContinueAllDownloadsAsync);
     }
     private async Task ContinueSelected(bool newSources)

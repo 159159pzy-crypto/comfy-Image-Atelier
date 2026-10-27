@@ -253,7 +253,7 @@ internal sealed partial class LauncherState : IDisposable
         catch (OperationCanceledException) when (task.IsCancellationRequested)
         {
             retryable = true;
-            var message = cancelDownloads ? "任务已取消，已下载文件保留。需要释放空间时，请在下载页单独删除未完成文件。" : "任务已暂停，点击继续可从已完成步骤恢复。";
+            var message = cancelDownloads ? "任务已取消，已下载文件保留。需要释放空间时，请打开「查看全部下载」单独删除未完成文件。" : "任务已暂停，点击继续可从已完成步骤恢复。";
             SetSetupInterruption(message, true);
             SetStatus(message);
             AppendLog(message);
@@ -263,7 +263,7 @@ internal sealed partial class LauncherState : IDisposable
             retryable = true;
             if (ex.CancellationToken.IsCancellationRequested)
             {
-                const string message = "下载任务已停止，进度已保留。请在下载页选择继续或重试未完成的资源。";
+                const string message = "下载任务已停止，进度已保留。可在对应页面继续，或打开「查看全部下载」处理未完成的资源。";
                 SetSetupInterruption(message, true);
                 SetStatus(message);
                 AppendLog(message);
@@ -494,6 +494,8 @@ internal sealed partial class LauncherState : IDisposable
     public void RebuildRows(List<ModelStatus> scan)
     {
         ModelListProjection.Refresh(Rows, Groups, scan);
+        modelLibraryContext = ModelContext(Config);
+        RefreshModelDownloadRows();
     }
 
     public void SelectBaseGroup()
@@ -1037,7 +1039,7 @@ internal sealed partial class LauncherState : IDisposable
         if (string.IsNullOrWhiteSpace(Config.ComfyRoot)) throw new InvalidDataException("请先选择 ComfyUI 目录：新建选空目录，导入选含 main.py 的目录。");
     }
 
-    public void Dispose() { DisposeSoftwareUpdates(); Downloads.Dispose(); }
+    public void Dispose() { DisposeSoftwareUpdates(); modelInspectionLifetime.Dispose(); Downloads.Dispose(); }
 }
 
 public sealed record EnvironmentFields(string ComfyRoot, string Python, string SourceId, string GitMirror, string HfMirror, string PipIndex, string CustomRepository, bool Fresh = false, bool PythonExplicit = false);

@@ -1,0 +1,57 @@
+PASS: creating durable intent does not start networking
+PASS: same frozen owner deduplicates without a caller-maintained id
+PASS: UI owner snapshots cannot mutate persisted identities
+PASS: changing size or version cannot reuse an owner id
+PASS: signed input URLs are rejected before persistence
+PASS: opaque owner payload cannot persist credentials
+PASS: opaque owner payload cannot persist signed CDN URLs
+PASS: signed URLs in model display metadata are rejected before registration
+PASS: signed URLs in owner source configuration are rejected before registration
+PASS: rejected registrations do not poison the durable task database
+PASS: explicit source switch preserves environment, profile, destination and artifact identity
+PASS: source switch is a recorded transport revision
+PASS: completed file alone does not mark a model or package published
+PASS: coordinator records model completion only after final publication work
+PASS: owner captures frozen network policy instead of mutable defaults
+PASS: only successful owner coordination records completion
+PASS: task JSON contains neither rejected tokens nor signed URLs
+PASS: restart recovers interrupted list as paused without resuming any network request
+PASS: restart preserves exact artifact and destination
+PASS: restart preserves the actual last file and owner errors while marking them paused
+PASS: new explicit request does not silently reactivate a canceled owner
+PASS: corrupt task store is preserved with a readable recovery warning
+PASS: failed recovery does not overwrite the original task store
+PASS: tampered stored destination is rejected by immutable fingerprint
+PASS: display speed starts from the first sample without counting scheduler wait time
+PASS: display speed smooths a brief dip using elapsed-time weighting
+PASS: retry waiting clears display ETA and the resumed source starts a fresh speed window
+PASS: new attempts and final verification never reuse a previous transfer speed
+PASS: scheduler limits all file transfers to two active writers
+PASS: queued file uses released slot without exceeding global concurrency
+PASS: required model queued later starts before an optional queued resource
+PASS: historical required attempt can be canceled before a new optional attempt
+PASS: a reused historical required task is optional for its new execution and stays behind a currently required task
+PASS: one merged waiter may cancel independently
+PASS: same content and destination merge into one active transfer
+PASS: different content cannot write a destination with an unfinished task
+PASS: completed download returns only after releasing its execution and scheduler slot
+PASS: surviving merged waiter receives verified file
+PASS: canceling one file leaves unrelated files in its model batch running
+PASS: restart preserves child cancellation while its sibling was still running
+PASS: explicit child cancellation interrupts its owning coordinator
+PASS: canceled child cannot reappear through continue-all paused owners
+PASS: explicit file cancellation remains a canceled terminal intent
+PASS: new explicit owner after cancellation adopts its new transport settings for identical content
+PASS: derived resource owner preserves an explicit compatibility-engine recovery choice
+PASS: owner pause waits for child writer cancellation
+PASS: pause preserves a resumable owner and file
+PASS: owner file cannot bypass required package or installation finalization
+PASS: explicit compatibility and source changes preserve frozen identity
+PASS: cleanup preview enumerates exact owned temporary files and bytes
+PASS: explicit cleanup removes only this task's incomplete files
+Unhandled exception. System.TimeoutException: The operation has timed out.
+   at TaskServiceTests.Run(String work) in F:\comfyuishengtu\launcher\Anima.Launcher.Tests\TaskServiceTests.cs:line 179
+   at TaskServiceTests.Run(String work) in F:\comfyuishengtu\launcher\Anima.Launcher.Tests\TaskServiceTests.cs:line 222
+   at TaskServiceTests.Run(String work) in F:\comfyuishengtu\launcher\Anima.Launcher.Tests\TaskServiceTests.cs:line 352
+   at Program.<Main>$(String[] args) in F:\comfyuishengtu\launcher\Anima.Launcher.Tests\Program.cs:line 174
+   at Program.<Main>(String[] args)

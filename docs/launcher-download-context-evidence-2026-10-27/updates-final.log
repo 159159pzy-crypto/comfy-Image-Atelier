@@ -1,0 +1,84 @@
+PASS: current legacy release without new EXE contract is already up to date
+PASS: stable versions compare numerically
+PASS: invalid version rejected: v1.0.0
+PASS: invalid version rejected: 1.0
+PASS: invalid version rejected: 1.0.0-beta
+PASS: invalid version rejected: ../1.0.0
+PASS: invalid version rejected: 01.0.0
+PASS: duplicate executable checksum rejected
+PASS: official release binds EXE size and SHA to build metadata
+PASS: tampered cached release origin is revalidated before execution
+PASS: automatic checks reuse the 24 hour cache
+PASS: manual check bypasses release cache
+PASS: foreign release executable URL rejected before metadata download
+PASS: preview releases cannot enter the stable update channel
+PASS: GitHub rate limits remain retryable failures
+PASS: insecure metadata redirects are rejected
+PASS: current renamed EXE is preserved in immutable managed storage
+PASS: ordinary import preserves a corrupt cache for diagnosis
+PASS: verified same-version entry repairs cache while preserving corrupt backup
+PASS: durable transaction retains previous EXE, exact config and stopped workbench state
+PASS: preparation never switches config or active EXE
+PASS: transaction token mismatch rejected
+PASS: a second transaction cannot overwrite pending recovery
+PASS: transaction traversal rejected
+PASS: candidate path must match managed version and hash directory
+PASS: managed import does not alter original launcher
+PASS: launcher identity rejects recycled process IDs
+PASS: unknown durable state versions fail closed
+PASS: concurrent state mutations retain every entry without lost read-mod-write updates
+PASS: resumed onboarding follows the committed workbench without losing pending environment choices
+PASS: blank onboarding workbench follows the active version
+PASS: onboarding synchronization preserves explicit source workbench directories
+PASS: coordinator commits a verified candidate subprocess only after its ready receipt
+PASS: coordinator retains the previous executable and finalizes the committed transaction
+PASS: candidate commit preserves data paths and adopts the new bundle
+PASS: reopening a transaction after its commit repairs the receipt without rolling back
+PASS: reject candidate restores the previous executable without leaving a pending transaction
+PASS: reject rollback restores the complete original configuration bytes
+PASS: reject candidate is recorded so normal entries cannot repeat the failed upgrade
+PASS: reject rollback launches the immutable previous executable
+PASS: crash candidate restores the previous executable without leaving a pending transaction
+PASS: crash rollback restores the complete original configuration bytes
+PASS: crash candidate is recorded so normal entries cannot repeat the failed upgrade
+PASS: crash rollback launches the immutable previous executable
+PASS: interrupted update cooperatively closes its candidate before restoring the old pointer
+PASS: interrupted update preserves the original configuration and starts recovery
+PASS: rollback detects an unsaved candidate workbench and preserves it when its idle guard refuses
+PASS: busy recovery retains its transaction and leaves configuration untouched
+PASS: recovery can complete later after the protected workbench has stopped
+PASS: an offline automatic updater reuses its recent release cache without network access
+PASS: an explicit offline update check returns a retryable network error
+PASS: failed offline check preserves cached release information without activating anything
+PASS: pausing a software update propagates cancellation before package execution
+PASS: paused update retains resumable bytes without publishing a ready version
+PASS: paused software update preserves active executable, configuration and rollback pin
+PASS: software update resumes by Range and publishes readiness only after hash and package validation
+PASS: a downloaded and inspected update remains inactive until explicit restart
+PASS: tampering after a successful download is rejected before creating a restart transaction
+PASS: a corrupted downloaded candidate cannot change the active executable or configuration
+PASS: a damaged ready candidate is preserved separately and no longer blocks the download button
+PASS: a rejected damaged candidate can be downloaded and inspected again inside the updater
+PASS: downloading again repairs an existing damaged candidate while retaining both corrupt backups
+PASS: repairing the download cache never activates a version or edits user configuration
+PASS: damaged active executable cannot be replaced as a download cache
+PASS: download repair preserves the active executable and its durable recovery state
+PASS: damaged previous executable cannot be replaced as a download cache
+PASS: download repair preserves the previous executable and its durable recovery state
+PASS: damaged pending executable cannot be replaced as a download cache
+PASS: download repair preserves the pending executable and its durable recovery state
+PASS: software update rejects corrupt executable bytes before launching package inspection
+PASS: a bad update SHA never becomes an executable candidate or an inspected package
+PASS: a rejected executable download preserves the installed version and user configuration
+PASS: software updater rejects a valid EXE whose embedded build provenance differs from the release
+PASS: failed package provenance does not publish downloaded readiness
+PASS: package provenance rejection preserves the active executable and configuration
+PASS: update-only startup restores an offline workbench without starting stopped ComfyUI
+PASS: full workbench switch safely replaces only WebUI while stopped ComfyUI remains stopped
+PASS: software update never registers a newly started ComfyUI process
+PASS: updated offline workbench retains its token and can exit through the idle guard
+PASS: failed update startup preserves its live WebUI instead of force-killing it
+PASS: failed startup retains ownership and shutdown credentials without starting ComfyUI
+PASS: a failed live candidate remains recoverable through authenticated idle shutdown
+PASS: update bootstrap cancellation preserves the process and its service descendants
+83 software update checks passed; artifacts: F:\comfyuishengtu\output\launcher-tests\8adbd43580594e4c981635b10d25e12e

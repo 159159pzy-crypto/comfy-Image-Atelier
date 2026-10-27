@@ -1,0 +1,156 @@
+PASS: first unconfigured launch enters welcome
+PASS: legacy environment opens overview before its first successful workbench launch
+PASS: previously launched environment opens overview
+PASS: temporarily unavailable legacy root is not silently treated as a fresh installation
+PASS: review draft must be rechecked after restart
+PASS: explicit wizard draft resumes without using stale review approval
+PASS: welcome draft stays on welcome
+PASS: unconfigured location draft resumes
+PASS: unstarted installation screen cannot pretend an install has begun
+PASS: interrupted draft can recover even if active config was not saved
+PASS: matching interrupted installation enters recovery
+PASS: legacy pending flag takes priority without an onboarding receipt
+PASS: pending install takes priority over an ended wizard receipt
+PASS: pending current environment takes priority over a foreign receipt
+PASS: foreign onboarding receipt never hijacks an established environment
+PASS: installed but never launched wizard restores completion independently of SetupComplete
+PASS: finished install receipt repairs an out-of-date installing step
+PASS: later-open ends onboarding without changing the successful-launch marker
+PASS: ended receipt without any active environment does not hide welcome
+PASS: completion cannot be trusted without a matching active configuration
+PASS: deleted Python invalidates restored completion
+PASS: deleted ComfyUI entry point invalidates restored completion
+PASS: unknown onboarding schema is ignored without discarding current configuration
+PASS: unknown wizard step cannot be resumed
+PASS: malformed null draft safely falls back to welcome
+PASS: fresh draft install location expands to its actual ComfyUI target
+PASS: import never derives its target from a stale install-root field
+PASS: target identity accepts case and a trailing separator on Windows
+PASS: invalid target path cannot match another environment
+PASS: onboarding receipt persists import mode, location, source and interpreter
+PASS: editing and saving onboarding draft leaves active environment sources unchanged
+PASS: installation is disabled before any review
+PASS: successful current review enables install
+PASS: duplicate completion cannot overwrite an accepted review
+PASS: editing location invalidates successful review immediately
+PASS: source change rejects late success from previous review
+PASS: installation-mode change rejects late success from previous review
+PASS: overlapping older review cannot enable installation
+PASS: current failed review stays disabled
+PASS: retry can authorize installation after a failed review
+PASS: late failed review cannot replace a newer successful review
+PASS: stage tools emits stable running and complete events
+PASS: stage comfy emits stable running and complete events
+PASS: stage python emits stable running and complete events
+PASS: stage torch emits stable running and complete events
+PASS: stage dependencies emits stable running and complete events
+PASS: stage nodes emits stable running and complete events
+PASS: stage validation emits stable running and complete events
+PASS: typed progress preserves the legacy stage callback
+PASS: typed stage events retain the compatible completion journal
+PASS: stage failure preserves its original exception
+PASS: stage failure includes actionable details without claiming completion
+PASS: failed stage remains resumable in the existing installation journal
+PASS: pausing a stage preserves cancellation for the install task
+PASS: user pause is distinct from stage failure
+PASS: retry and multiple node substeps share a stable stage identity
+PASS: completion identifies only explicit required model downloads
+PASS: model preview includes sources, real destinations and remaining bytes
+PASS: previewing models never starts a download or creates model files
+PASS: empty and incomplete scans never report ready
+PASS: an empty required-model set cannot accidentally authorize readiness
+PASS: damaged existing single files are protected while safe missing models remain downloadable
+PASS: an ambiguous directory never becomes a guessed download location
+PASS: manual-only models remain actionable without exposing an unsafe download
+PASS: incomplete model packages can safely resume using their package directory
+PASS: unknown inventory states do not silently become usable models
+PASS: preview accounts for reusable partial downloads
+PASS: download confirmation captures only safe reviewed model identities
+PASS: model download plan preserves an imported environment without becoming a fresh installation
+PASS: source and runtime edits cannot mutate a confirmed model download snapshot
+PASS: resuming gets an independent copy of the reviewed runtime configuration
+PASS: model supplementation never treats an unfinished installation as complete
+PASS: failed model checks cannot authorize any downloads
+PASS: manual-only review does not create an empty download operation
+PASS: completion requires a visible review before offering the download action
+PASS: model recommendations never force downloads before opening the workbench
+PASS: mixed model issues offer safe downloads while manual-only issues offer recheck
+PASS: Unknown stays distinct from ready but permits explicit opening
+PASS: ScanFailed stays distinct from ready but permits explicit opening
+PASS: in-flight checks cannot expose a stale confirmation action
+PASS: paused and failed model tasks lead to the model resume path
+PASS: a failed explicit workbench start retries startup rather than downloading models
+PASS: verified required files change completion to opening the workbench
+PASS: required generation models bypass optional tagger discovery while tagger selections retain runtime probing
+PASS: fixture reproduces the duplicate optional-node failure of a full inventory scan
+PASS: completion model-only verification still succeeds with unrelated duplicate optional nodes
+PASS: same-size corruption is detected and the existing file remains intact
+PASS: restart during model preparation restores completion without marking startup successful or installing again
+PASS: onboarding catalog retains Krea and SeedVR2 pairs and all eight independent taggers
+PASS: tagger recommendation is metadata, not an automatic selection
+PASS: empty optional selection downloads only the profile's required models
+PASS: feature union deduplicates repeated choices and the shared Qwen VAE
+PASS: current Krea profile remains required and cannot be deselected as an optional feature
+PASS: stale saved model selection requires review instead of silently dropping a choice
+PASS: legacy import callers retain the existing nodes-only behavior
+PASS: explicit import selection snapshots required and optional IDs independently of UI edits
+PASS: unknown package target reserves bytes without inventing a download directory
+PASS: fresh setup previews all model choices before Python exists without guessing package targets
+PASS: post-install model phase requires a real path probe before any download
+PASS: missing runtime package registration blocks download destination resolution
+PASS: pre-install deferred package stays visible with an unconfirmed destination
+PASS: unchecked optional choices show actual status and paths without entering selected downloads or byte totals
+PASS: damaged unchecked model stays visible and untouched without changing disk budgets or blocking preflight
+PASS: unchecked installed models are discovered before the user selects them
+PASS: unreadable unchecked package paths stay pending without changing selected artifacts or adding deferred reserves
+PASS: unregistered unchecked taggers do not require package paths for the selected plan
+PASS: actual model paths and package staging files replace provisional download and volume estimates
+PASS: package partial downloads reduce the remaining batch estimate by actual staged bytes
+PASS: same-size corrupt package staging reserves a full replacement while preserving its original allocation
+PASS: repairable staged corruption passes preflight with full disk reserve and no mutation of the damaged file
+PASS: repairable package staging does not authorize replacing corrupt installed single-file models
+PASS: refresh clears replacement reserve once the staged file actually verifies
+PASS: verified installed packages are reused without staging a second copy
+PASS: model paths reported for a different ComfyUI root are rejected
+PASS: old setup receipts and numeric steps remain compatible
+PASS: interrupted model-only phase resumes without reinstalling completed dependencies
+PASS: new setup receipt routes to pending supplier configuration after models finish
+PASS: skipped supplier setup does not block the completed local environment
+PASS: configured supplier setup reaches completion
+PASS: a real empty venv reaches import review and schedules dependency repair without importing third-party packages
+PASS: existing node directories do not make a clean venv falsely ready
+PASS: without extra model YAML the real path probe inventories a pristine venv using only standard-library modules
+PASS: missing PyYAML defers configured model paths without blocking dependency installation
+PASS: the same missing PyYAML still blocks strict model download destination resolution
+PASS: module presence checks do not import torch or execute third-party initialization
+PASS: complete core modules still require repair when a declared node is missing
+PASS: an external interpreter missing core dependencies is rejected during review with dedicated-venv guidance
+PASS: a complete external interpreter remains eligible for import without dependency mutations
+PASS: an external interpreter needing a missing node is rejected before installation
+PASS: rechecking the frozen target notices dependency changes instead of reusing a previous ready decision
+PASS: cancelling import review propagates cancellation instead of accepting or repairing the environment
+PASS: batch deduplicates identities and starts from actual resume bytes
+PASS: existing partial bytes do not inflate transfer speed or create a false ETA
+PASS: completion is weighted by bytes rather than giving each model equal weight
+PASS: receiving the last package byte never claims verification and publication are complete
+PASS: only explicit successful model completion reaches 100 percent
+PASS: duplicate completion and late callbacks cannot double-count or undo verified models
+PASS: range restart resets actual bytes and speed without retaining invalid resume progress
+PASS: progress callbacks cannot change the reviewed batch total or exceed its size
+PASS: progress from an unselected model is rejected
+PASS: empty batch has no fabricated work
+PASS: all formerly manual optional models have verified immutable download metadata and source links
+PASS: merged model catalog has no unresolved manual downloads
+PASS: Krea community license and SeedVR2 Apache license remain explicit in the catalog
+PASS: rescan retains every manifest item including missing optional models and unresolved tagger directories
+PASS: already-bound model view receives every populated group on scan 1
+PASS: already-bound model view receives every populated group on scan 2
+PASS: already-bound model view receives every populated group on scan 3
+PASS: model group child changes notify an existing grouped view
+PASS: rescan preserves selected optional downloads by model identity
+PASS: rescan deselects completed, abnormal existing and unresolved downloads while retaining remaining choices
+PASS: rescan never leaves an unselectable model checked
+PASS: failed replacement keeps the previous model list and selection visible
+PASS: SeedVR2 VAE recognizes the upstream alternate filename
+PASS: existing SeedVR2 VAE alternate filename is verified and reused without duplicate download
+155 onboarding checks passed; artifacts: F:\comfyuishengtu\output\launcher-tests\9e9839d69f1f48bb963128360e203b8a

@@ -56,12 +56,11 @@
                     </Grid>
                     </ContentControl>
                     <TextBlock x:Name="EmptyNote" Text="还没有扫描模型。先导入或安装 ComfyUI，再点击「重新扫描」。" Style="{StaticResource StudioBodyStyle}" Margin="8,14" />
-                    <StackPanel x:Name="DownloadProgressPanel" Spacing="8" Visibility="Collapsed">
-                        <TextBlock x:Name="BatchText" Style="{StaticResource StudioBodyStyle}" AutomationProperties.AutomationId="ModelsBatchDetails" />
-                        <ProgressBar x:Name="ModelsBatchBar" Minimum="0" Maximum="100" AutomationProperties.AutomationId="ModelsBatchProgress" />
-                        <TextBlock x:Name="CurrentResourceText" Style="{StaticResource StudioBodyStyle}" />
-                        <ProgressBar x:Name="ModelsFileBar" Minimum="0" Maximum="100" />
-                    </StackPanel>
+                    <Grid ColumnSpacing="8">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <TextBlock x:Name="DownloadSummary" Style="{StaticResource StudioBodyStyle}" VerticalAlignment="Center" FontSize="11" />
+                        <HyperlinkButton Grid.Column="1" Content="查看全部下载" Click="AllDownloads_Click" AutomationProperties.AutomationId="ModelsAllDownloads" />
+                    </Grid>
                     <TextBlock Text="本地反推为可选功能，推荐 PixAI 0.9；只下载勾选的模型。每个模型包全部校验后才可识别，暂停或取消可保留进度续传。" Style="{StaticResource StudioBodyStyle}" FontSize="11" />
                     <ListView x:Name="ModelList" ItemsSource="{x:Bind ModelView.View, Mode=OneWay}"
                         SelectionMode="Single" MaxHeight="420" MinHeight="120"
@@ -75,16 +74,28 @@
                         </ListView.ItemContainerStyle>
                         <ListView.ItemTemplate>
                             <DataTemplate x:DataType="launch:ModelRow">
-                                <Grid ColumnSpacing="12">
+                                <Grid ColumnSpacing="12" RowSpacing="8">
+                                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                                     <CheckBox IsChecked="{x:Bind Selected, Mode=TwoWay}" IsEnabled="{x:Bind CanSelect, Mode=OneWay}" VerticalAlignment="Center" MinWidth="0" AutomationProperties.Name="{x:Bind Name}" />
                                     <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
                                         <TextBlock Text="{x:Bind Name}" FontSize="13" FontWeight="SemiBold" TextWrapping="Wrap" Foreground="{ThemeResource StudioTextBrush}" />
-                                        <TextBlock Text="{x:Bind PathText}" FontSize="11" TextTrimming="CharacterEllipsis" Foreground="{ThemeResource StudioTertiaryBrush}" ToolTipService.ToolTip="{x:Bind PathText}" />
+                                        <TextBlock Text="{x:Bind PathText, Mode=OneWay}" FontSize="11" TextTrimming="CharacterEllipsis" Foreground="{ThemeResource StudioTertiaryBrush}" ToolTipService.ToolTip="{x:Bind PathText, Mode=OneWay}" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Spacing="6" Visibility="{x:Bind HasDownload, Mode=OneWay}">
+                                        <StackPanel Spacing="5" Visibility="{x:Bind ShowTransfer, Mode=OneWay}">
+                                            <TextBlock Text="{x:Bind TransferText, Mode=OneWay}" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource StudioSecondaryBrush}" />
+                                            <ProgressBar Value="{x:Bind DownloadPercent, Mode=OneWay}" Minimum="0" Maximum="100" Height="4" AutomationProperties.Name="{x:Bind Name}" />
+                                            <TextBlock Text="{x:Bind DownloadError, Mode=OneWay}" Visibility="{x:Bind HasDownloadError, Mode=OneWay}" MaxLines="3" TextTrimming="CharacterEllipsis" TextWrapping="Wrap" FontSize="11" Foreground="{ThemeResource StudioDangerBrush}" ToolTipService.ToolTip="{x:Bind DownloadError, Mode=OneWay}" />
+                                        </StackPanel>
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <Button Content="{x:Bind DownloadActionText, Mode=OneWay}" Visibility="{x:Bind HasDownloadAction, Mode=OneWay}" IsEnabled="{x:Bind CanDownloadAction, Mode=OneWay}" Click="ModelDownloadAction_Click" AutomationProperties.Name="{x:Bind DownloadActionText, Mode=OneWay}" />
+                                            <HyperlinkButton Content="查看下载详情" Click="ModelDownloadDetails_Click" />
+                                        </StackPanel>
                                     </StackPanel>
                                     <StackPanel Grid.Column="2" Spacing="4" VerticalAlignment="Center" MaxWidth="170">
                                         <Border Background="{ThemeResource StudioMutedBrush}" CornerRadius="10" Padding="9,4">
-                                            <TextBlock Text="{x:Bind StateText}" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource StudioSecondaryBrush}" />
+                                            <TextBlock Text="{x:Bind StateText, Mode=OneWay}" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource StudioSecondaryBrush}" />
                                         </Border>
                                         <TextBlock Text="{x:Bind SizeText}" FontSize="11" HorizontalAlignment="Right" Foreground="{ThemeResource StudioTertiaryBrush}" />
                                     </StackPanel>

@@ -4,6 +4,7 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Navigation;
 using System.Drawing;
 using System.Runtime.InteropServices;
 using Windows.Graphics;
@@ -24,6 +25,15 @@ public sealed partial class MainWindow : Window
     private bool exiting;
     private bool minimizeNotified;
     private int selectedPage;
+    private int downloadsOriginPage;
+    private Page? downloadsOrigin;
+    private NavigationCacheMode downloadsOriginCache;
+    private Pages.DownloadsScrollPosition[] downloadsOriginScroll = [];
+    internal bool ReturningFromDownloads { get; private set; }
+    internal string DownloadsReturnText => "返回" + (downloadsOriginPage switch
+    {
+        1 => "安装环境", 2 => "模型资源", 3 => "日志", 4 => "设置", 5 => "安装向导", _ => "概览",
+    });
     private bool downloadCancelable;
     private string statusBrushKey = "StudioSecondaryBrush";
     private readonly DispatcherTimer updateTimer = new() { Interval = TimeSpan.FromHours(1) };
@@ -133,6 +143,9 @@ public sealed partial class MainWindow : Window
 
     internal void GoToPage(int index)
     {
+        if (index == 6) { OpenDownloads(); return; }
+        if (selectedPage == 6 && index == downloadsOriginPage) { ReturnFromDownloads(); return; }
+        ReleaseDownloadsOrigin();
         if (index == 1 && Anima.Launcher.Core.SetupRouting.OpenWizardFromEnvironmentPage(State.Config, State.SetupActive))
         {
             OpenSetup();
@@ -152,9 +165,68 @@ public sealed partial class MainWindow : Window
             _ => typeof(Pages.ServicesPage),
         };
         if (ContentFrame.CurrentSourcePageType != page) ContentFrame.Navigate(page);
+        ContentFrame.BackStack.Clear();
+        ContentFrame.ForwardStack.Clear();
         UpdateNavigation();
         UpdateSetupChrome();
     }
+
+    internal void OpenDownloads() => OpenDownloads(selectedPage == 6 ? downloadsOriginPage : selectedPage);
+
+    internal void OpenDownloads(int originPage, string? ownerId = null, string? modelId = null)
+    {
+        if (selectedPage != 6)
+        {
+            downloadsOriginPage = State.SetupActive ? 5 : Math.Clamp(originPage, 0, 5);
+            downloadsOrigin = ContentFrame.Content as Page;
+            downloadsOriginScroll = (downloadsOrigin as Pages.LauncherPage)?.CaptureDownloadsScroll() ?? [];
+            if (downloadsOrigin is not null)
+            {
+                downloadsOriginCache = downloadsOrigin.NavigationCacheMode;
+                downloadsOrigin.NavigationCacheMode = NavigationCacheMode.Required;
+            }
+            selectedPage = 6;
+            ContentFrame.Navigate(typeof(Pages.DownloadsPage), new Pages.DownloadsTarget(ownerId, modelId));
+        }
+        else if (ContentFrame.Content is Pages.DownloadsPage downloads)
+            downloads.ShowTarget(new(ownerId, modelId));
+        UpdateNavigation();
+        UpdateSetupChrome();
+    }
+
+    internal void ReturnFromDownloads()
+    {
+        var origin = State.SetupActive ? 5 : downloadsOriginPage;
+        var canReturn = downloadsOrigin is not null && ContentFrame.CanGoBack
+            && ContentFrame.BackStack[^1].SourcePageType == downloadsOrigin.GetType()
+            && origin == downloadsOriginPage;
+        selectedPage = origin;
+        ReturningFromDownloads = true;
+        try
+        {
+            if (canReturn) ContentFrame.GoBack();
+            else GoToPage(origin);
+            if (canReturn && ContentFrame.Content is Pages.LauncherPage page) page.RestoreDownloadsScroll(downloadsOriginScroll);
+        }
+        finally
+        {
+            ReturningFromDownloads = false;
+            ReleaseDownloadsOrigin();
+        }
+        ContentFrame.BackStack.Clear();
+        ContentFrame.ForwardStack.Clear();
+        UpdateNavigation();
+        UpdateSetupChrome();
+    }
+
+    private void ReleaseDownloadsOrigin()
+    {
+        if (downloadsOrigin is not null) downloadsOrigin.NavigationCacheMode = downloadsOriginCache;
+        downloadsOrigin = null;
+        downloadsOriginScroll = [];
+    }
+
+    private void Downloads_Click(object sender, RoutedEventArgs e) => OpenDownloads();
 
     private void UpdateSetupChrome()
     {
@@ -179,7 +251,11 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception ex) { State.AppendLog(ex.Message); State.SetStatus(ex.Message); }
     }
-    private void SetupReturn_Click(object sender, RoutedEventArgs e) => GoToPage(5);
+    private void SetupReturn_Click(object sender, RoutedEventArgs e)
+    {
+        if (selectedPage == 6) ReturnFromDownloads();
+        else GoToPage(5);
+    }
 
     internal void CancelSetup()
     {
@@ -198,10 +274,11 @@ public sealed partial class MainWindow : Window
 
     private void UpdateNavigation()
     {
-        var buttons = new[] { HomeNav, EnvironmentNav, ModelsNav, LogsNav, SettingsNav, DownloadsNav };
+        var buttons = new[] { HomeNav, EnvironmentNav, ModelsNav, LogsNav, SettingsNav };
+        var activePage = selectedPage == 6 ? downloadsOriginPage : selectedPage;
         for (var i = 0; i < buttons.Length; i++)
         {
-            var selected = int.Parse(buttons[i].Tag.ToString()!) == selectedPage;
+            var selected = int.Parse(buttons[i].Tag.ToString()!) == activePage;
             buttons[i].Background = selected ? ThemeBrush("StudioSurfaceBrush") : new SolidColorBrush(Colors.Transparent);
             buttons[i].Foreground = ThemeBrush(selected ? "StudioTextBrush" : "StudioSecondaryBrush");
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(buttons[i], selected ? "当前页面" : "");

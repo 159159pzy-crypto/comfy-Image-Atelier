@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace Anima.Launcher.Core;
 
 /// <summary>Durable intent and bounded file scheduling. Owners remain responsible for install/package transactions.</summary>
-public sealed class DownloadTaskService : IDownloadDispatcher, IAsyncDisposable
+public sealed partial class DownloadTaskService : IDownloadDispatcher, IAsyncDisposable
 {
     private readonly Downloads downloads;
     private readonly DownloadTaskStore store;
@@ -24,6 +24,7 @@ public sealed class DownloadTaskService : IDownloadDispatcher, IAsyncDisposable
     public string? RecoveryWarning => store.LoadError;
     public IReadOnlyList<DownloadTaskRecord> Tasks { get { lock (sync) return DownloadTaskIdentity.Copy(database.Tasks); } }
     public IReadOnlyList<DownloadOwnerRecord> Owners { get { lock (sync) return DownloadTaskIdentity.Copy(database.Owners); } }
+    public DownloadTaskDatabase GetSnapshot() { lock (sync) return DownloadTaskIdentity.Copy(database); }
     public bool HasRunningTasks { get { lock (sync) return executions.Count > 0 || ownerExecutions.Count > 0; } }
 
     public DownloadTaskService(Downloads downloads, string stateDirectory, int maxConcurrent = 2)
@@ -37,21 +38,30 @@ public sealed class DownloadTaskService : IDownloadDispatcher, IAsyncDisposable
         var recovered = false;
         foreach (var task in database.Tasks.Where(t => !DownloadTaskIdentity.Terminal(t.Status)))
         {
-            task.Status = task.CancellationRequested ? DownloadTaskStatus.Canceled : DownloadTaskStatus.Paused;
-            task.Phase = task.Status.ToString();
+            var interrupted = task.Status is DownloadTaskStatus.Queued or DownloadTaskStatus.Running or DownloadTaskStatus.Pausing;
+            if (task.CancellationRequested || interrupted)
+            {
+                task.Status = task.CancellationRequested ? DownloadTaskStatus.Canceled : DownloadTaskStatus.Paused;
+                task.Phase = task.Status.ToString();
+            }
             task.Speed = null; task.Connections = null; task.RetryAt = null;
             if (task.CancellationRequested) task.Error = "任务已取消，未完成文件保留。";
-            else if (string.IsNullOrWhiteSpace(task.Error)) task.Error = "上次下载尚未完成，点击继续后将检查已有文件和断点。";
+            else if (interrupted && string.IsNullOrWhiteSpace(task.Error)) task.Error = "上次下载尚未完成，点击继续后将检查已有文件和断点。";
             recovered = true;
         }
         foreach (var owner in database.Owners.Where(o => !DownloadTaskIdentity.Terminal(o.Status)))
         {
-            owner.Status = owner.CancellationRequested ? DownloadTaskStatus.Canceled : DownloadTaskStatus.Paused;
+            var interrupted = owner.Status is DownloadTaskStatus.Queued or DownloadTaskStatus.Running or DownloadTaskStatus.Pausing;
+            if (owner.CancellationRequested || interrupted)
+            {
+                owner.Status = owner.CancellationRequested ? DownloadTaskStatus.Canceled : DownloadTaskStatus.Paused;
+                owner.Phase = owner.Status.ToString();
+            }
             if (owner.CancellationRequested) owner.Error = "批次中的文件已取消；一键继续不会恢复此批次。";
-            else if (string.IsNullOrWhiteSpace(owner.Error)) owner.Error = "上次任务尚未完成，可手动继续原计划。";
+            else if (interrupted && string.IsNullOrWhiteSpace(owner.Error)) owner.Error = "上次任务尚未完成，可手动继续原计划。";
             recovered = true;
         }
-        if (recovered) store.Save(database);
+        if (recovered) Save();
         downloads.Dispatcher = this;
     }
 
@@ -110,6 +120,7 @@ public sealed class DownloadTaskService : IDownloadDispatcher, IAsyncDisposable
             EnsureWritable();
             if (ownerExecutions.ContainsKey(id)) throw new InvalidOperationException("此下载批次已经在运行。");
             var owner = Owner(id);
+            if (owner.IsResourceGroup) throw new InvalidOperationException("此旧批次已按模型拆分，请继续其中的模型任务。");
             var previous = DownloadTaskIdentity.Copy(owner);
             execution = new(CancellationTokenSource.CreateLinkedTokenSource(ct));
             ownerExecutions.Add(id, execution);
@@ -193,7 +204,7 @@ public sealed class DownloadTaskService : IDownloadDispatcher, IAsyncDisposable
             {
                 _ = Owner(current.Id);
                 if (record.OwnerIds.Count > 0 && !record.OwnerIds.Contains(current.Id) && !executions.ContainsKey(record.Id)
-                    && record.OwnerIds.All(id => DownloadTaskIdentity.Terminal(Owner(id).Status)))
+                    && record.OwnerIds.Where(id => !Owner(id).IsResourceGroup).All(id => DownloadTaskIdentity.Terminal(Owner(id).Status)))
                 {
                     // A new explicit owner after cancellation/completion uses its new
                     // transport snapshot while retaining the same verified content identity.
@@ -369,6 +380,13 @@ public sealed class DownloadTaskService : IDownloadDispatcher, IAsyncDisposable
     public Task CancelOwnerAsync(string id) => StopOwnerAsync(id, true);
     private async Task StopOwnerAsync(string id, bool cancel)
     {
+        string[] resources;
+        lock (sync) resources = Owner(id).ResourceOwnerIds.Values.Distinct(StringComparer.Ordinal).ToArray();
+        if (resources.Length > 0)
+        {
+            await Task.WhenAll(resources.Select(resource => StopOwnerAsync(resource, cancel))).ConfigureAwait(false);
+            return;
+        }
         Task? wait = null;
         lock (sync)
         {
@@ -506,7 +524,7 @@ public sealed class DownloadTaskService : IDownloadDispatcher, IAsyncDisposable
         if (database.Tasks.Any(other => other.Id != record.Id && other.Fingerprint != record.Fingerprint
             && DownloadTaskIdentity.PathKey(other.Destination) == target && !DownloadTaskIdentity.Terminal(other.Status)))
             throw new InvalidOperationException("同一目标有另一个未完成版本，不能从旧任务清理其断点。请先处理该版本的任务。");
-        if (record.OwnerIds.Count(id => !DownloadTaskIdentity.Terminal(Owner(id).Status)) > 1)
+        if (record.OwnerIds.Count(id => !Owner(id).IsResourceGroup && !DownloadTaskIdentity.Terminal(Owner(id).Status)) > 1)
             throw new InvalidOperationException("此下载由多个未完成批次共用。请先取消不再需要的批次，再清理未完成文件。");
         Downloads.ValidatePartialOwnership(record.Destination, record.Size, record.Sha256, HasSingleTargetIdentity(record));
     }
@@ -576,6 +594,7 @@ public sealed class DownloadTaskService : IDownloadDispatcher, IAsyncDisposable
             EnsureWritable();
             if (ownerExecutions.ContainsKey(id)) throw new InvalidOperationException("请先暂停此批次，再选择换源继续。");
             var owner = Owner(id);
+            if (owner.IsResourceGroup) throw new InvalidOperationException("请先选择此批次中的模型，再更换下载来源。");
             var next = owner.Configuration.Clone();
             next.SourceId = sourceConfig.SourceId; next.GitMirror = sourceConfig.GitMirror;
             next.ModelMirror = sourceConfig.ModelMirror; next.PipIndex = sourceConfig.PipIndex;
@@ -626,7 +645,7 @@ public sealed class DownloadTaskService : IDownloadDispatcher, IAsyncDisposable
         if (closing && !allowClosing) throw new InvalidOperationException("下载服务正在保存并关闭，不能开始新的任务。");
         if (store.LoadError is not null) throw new IOException(store.LoadError);
     }
-    private void Save() => store.Save(database);
+    private void Save() { RefreshResourceGroups(); store.Save(database); }
     private void Notify() { try { Changed?.Invoke(); } catch { /* A detached UI cannot corrupt a transfer. */ } }
     private static string SafeError(string message)
     {

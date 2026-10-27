@@ -11,6 +11,7 @@
             <RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
         <StackPanel Spacing="7">
+            <HyperlinkButton x:Name="ReturnButton" Content="返回" Click="Return_Click" HorizontalAlignment="Left" Padding="0,4" AutomationProperties.AutomationId="DownloadsReturn" />
             <TextBlock Text="下载任务" FontSize="28" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
             <TextBlock Text="重启后任务保持待继续。暂停和取消都保留文件，删除未完成文件需要单独操作。" Style="{StaticResource StudioBodyStyle}" />
             <StackPanel Orientation="Horizontal" Spacing="8">
@@ -23,7 +24,7 @@
             <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
             <ComboBox x:Name="OwnerBox" Header="批次" DisplayMemberPath="Title" HorizontalAlignment="Stretch" SelectionChanged="Owner_Changed" />
-            <Button Grid.Column="1" Content="继续此批次" Click="ContinueOwner_Click" VerticalAlignment="Bottom" />
+            <Button x:Name="ContinueOwnerButton" Grid.Column="1" Content="继续此批次" Click="ContinueOwner_Click" VerticalAlignment="Bottom" />
             <ScrollViewer Grid.Row="1" Grid.ColumnSpan="2" MaxHeight="62" Margin="0,6,0,0" HorizontalScrollMode="Disabled">
                 <TextBlock x:Name="OwnerStatusText" TextWrapping="Wrap" IsTextSelectionEnabled="True" Foreground="{ThemeResource StudioSecondaryBrush}" />
             </ScrollViewer>

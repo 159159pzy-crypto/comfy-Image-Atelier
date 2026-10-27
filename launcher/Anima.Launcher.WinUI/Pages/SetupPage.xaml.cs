@@ -70,7 +70,7 @@ public sealed partial class SetupPage : LauncherPage
         State.TaskProgressChanged -= OnProgress;
         State.ProgressChanged -= OnPercent;
         State.BatchProgressChanged -= OnChanged;
-        assistant.ClearSession();
+        if (e.SourcePageType != typeof(DownloadsPage)) assistant.ClearSession();
         base.OnNavigatedFrom(e);
     }
 
@@ -800,7 +800,14 @@ public sealed partial class SetupPage : LauncherPage
         });
     }
 
-    private void Downloads_Click(object sender, RoutedEventArgs e) => State.GoTo(6);
+    private void Downloads_Click(object sender, RoutedEventArgs e)
+    {
+        var owner = State.DownloadTasks.Owners.Where(o => o.Kind is "setup" or "install")
+            .Where(o => string.Equals(o.EnvironmentRoot.TrimEnd(Path.DirectorySeparatorChar),
+                State.Config.ComfyRoot.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(o => o.CreatedAt).FirstOrDefault();
+        Shell.OpenDownloads(5, owner?.Id);
+    }
 
     private void Logs_Click(object sender, RoutedEventArgs e)
     {

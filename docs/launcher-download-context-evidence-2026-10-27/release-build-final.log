@@ -1,0 +1,91 @@
+Exported 2 model profiles to F:\comfyuishengtu\dist\candidates\download-context-final-20261027\model-profiles.json.
+Verified uv 0.12.16: archive and executable SHA-256
+Verified aria2 1.37.0: archive and executable SHA-256
+Prepared download tool notices and corresponding source archives: F:\comfyuishengtu\dist\candidates\download-context-final-20261027\.bundle-content\DOWNLOAD-TOOLS-SOURCES.zip
+  正在确定要还原的项目…
+  所有项目均是最新的，无法还原。
+Exported license metadata and original notices for 24 packages.
+  Anima.Launcher.Core -> F:\comfyuishengtu\launcher\Anima.Launcher.Core\bin\Release\net8.0\Anima.Launcher.Core.dll
+  Anima.Launcher.WinUI -> F:\comfyuishengtu\launcher\Anima.Launcher.WinUI\bin\Release\net8.0-windows10.0.19041.0\win-x64\AnimaRandomStudio.dll
+  Inventoried 655 embedded files.
+  Anima.Launcher.WinUI -> F:\comfyuishengtu\dist\candidates\download-context-final-20261027\.publish-staging\
+Inno Setup 6 Command-Line Compiler
+Copyright (C) 1997-2026 Jordan Russell. All rights reserved.
+Portions Copyright (C) 2000-2026 Martijn Laan. All rights reserved.
+Portions Copyright (C) 2001-2004 Alex Yackimoff. All rights reserved.
+https://www.innosetup.com
+
+Compiler engine version: Inno Setup 6.7.3
+Non-commercial use only
+
+Preprocessing
+   Reading file: F:\comfyuishengtu\tools\inno-setup-6.7.3\ISPPBuiltins.iss
+Parsing [Setup] section, line 23
+Parsing [Setup] section, line 24
+Parsing [Setup] section, line 25
+Parsing [Setup] section, line 26
+Parsing [Setup] section, line 27
+Parsing [Setup] section, line 28
+Parsing [Setup] section, line 29
+Parsing [Setup] section, line 30
+Parsing [Setup] section, line 31
+Parsing [Setup] section, line 32
+Parsing [Setup] section, line 33
+Parsing [Setup] section, line 34
+Parsing [Setup] section, line 35
+Parsing [Setup] section, line 36
+Parsing [Setup] section, line 37
+Parsing [Setup] section, line 38
+Parsing [Setup] section, line 39
+Parsing [Setup] section, line 40
+Parsing [Setup] section, line 41
+Parsing [Setup] section, line 42
+Parsing [Setup] section, line 43
+Parsing [Setup] section, line 44
+Parsing [Setup] section, line 45
+Parsing [Setup] section, line 46
+Reading file (WizardImageFile)
+Reading file (WizardSmallImageFile)
+Preparing Setup program executable
+   Verification successful
+   Updating icons (Setup.e32)
+   Updating version info (Setup.e32)
+Determining language code pages
+   Reading file: F:\comfyuishengtu\tools\inno-setup-6.7.3\Default.isl
+   Messages in script file
+Reading default messages from Default.isl
+Parsing [LangOptions], [Messages], and [CustomMessages] sections
+   Reading file: F:\comfyuishengtu\tools\inno-setup-6.7.3\Default.isl
+   Messages in script file
+Reading [Code] section
+Parsing [Tasks] section, line 49
+Parsing [Icons] section, line 55
+Parsing [Icons] section, line 56
+Parsing [Run] section, line 59
+Parsing [Files] section, line 52
+Compiling [Code] section
+Creating setup files
+   Verification successful
+   Updating icons (Setup.exe)
+   Compressing: F:\comfyuishengtu\dist\candidates\download-context-final-20261027\AnimaRandomStudio.exe
+   Compressing Setup program executable
+   Updating version info (Setup.exe)
+   Updating manifest (Setup.exe)
+
+
+Successful compile (16.078 sec). Resulting Setup program filename is:
+F:\comfyuishengtu\dist\candidates\download-context-final-20261027\AnimaRandomStudio-Setup-win-x64.exe
+PASS: candidate 1.3.1; standalone EXE, EXE-only ZIP, Setup checksums and embedded files verified.
+{
+  "candidateDirectory": "F:\\comfyuishengtu\\dist\\candidates\\download-context-final-20261027",
+  "launcher": "F:\\comfyuishengtu\\dist\\candidates\\download-context-final-20261027\\AnimaRandomStudio.exe",
+  "archive": "F:\\comfyuishengtu\\dist\\candidates\\download-context-final-20261027\\AnimaRandomStudio-portable-win-x64.zip",
+  "setup": "F:\\comfyuishengtu\\dist\\candidates\\download-context-final-20261027\\AnimaRandomStudio-Setup-win-x64.exe",
+  "sha256": "c7dd0da46a5a0595a904382b1481b2212ebb723bbe54f00bcb5876e29f627bfd",
+  "fileCount": 1,
+  "version": "1.3.1",
+  "sourceCommit": "090af0d91d91780ceb3e7d0985eebec89eb212d2",
+  "sourceKind": "git-checkout",
+  "sourceDirty": true,
+  "payloadSha256": "c996cee77da4b29cb2bf7c68c7f73971501812012641ab633e89bcfb006f6a38"
+}

@@ -15,6 +15,7 @@ public sealed class SoftwareUpdatePanel : UserControl
     private readonly Button download = new() { Content = "下载更新" };
     private readonly Button install = new() { Content = "重启并更新" };
     private readonly Button pause = new() { Content = "暂停下载" };
+    private readonly HyperlinkButton details = new() { Content = "查看下载详情", HorizontalAlignment = HorizontalAlignment.Left };
     private readonly ProgressBar progress = new() { Minimum = 0, Maximum = 100, Height = 5 };
     private readonly Expander releaseNotes;
     private bool loading;
@@ -47,6 +48,7 @@ public sealed class SoftwareUpdatePanel : UserControl
         }
         body.Children.Add(buttons);
         body.Children.Add(progress);
+        body.Children.Add(details);
         releaseNotes = new Expander
         {
             Header = "更新说明",
@@ -60,6 +62,7 @@ public sealed class SoftwareUpdatePanel : UserControl
         check.Click += async (_, _) => await State.CheckSoftwareUpdatesAsync(true);
         download.Click += async (_, _) => await State.DownloadSoftwareUpdateAsync();
         pause.Click += async (_, _) => await State.PauseSoftwareDownloadAsync();
+        details.Click += (_, _) => App.Shell.OpenDownloads(4, State.SoftwareDownloadOwnerId);
         install.Click += async (_, _) =>
         {
             App.Shell.SyncPagesIntoConfig();
@@ -70,6 +73,7 @@ public sealed class SoftwareUpdatePanel : UserControl
             if (subscribed) return;
             subscribed = true;
             State.SoftwareUpdateChanged += RefreshRequested;
+            State.DownloadsChanged += RefreshRequested;
             State.BusyChanged += BusyChanged;
             Refresh();
         };
@@ -78,6 +82,7 @@ public sealed class SoftwareUpdatePanel : UserControl
             if (!subscribed) return;
             subscribed = false;
             State.SoftwareUpdateChanged -= RefreshRequested;
+            State.DownloadsChanged -= RefreshRequested;
             State.BusyChanged -= BusyChanged;
         };
         AutomationProperties.SetName(this, "软件更新");
@@ -99,7 +104,8 @@ public sealed class SoftwareUpdatePanel : UserControl
             check.Content = State.CheckingSoftwareUpdate ? "正在检查…" : "检查更新";
             download.Visibility = State.HasSoftwareRelease && !State.SoftwareUpdateReady ? Visibility.Visible : Visibility.Collapsed;
             download.IsEnabled = !State.Busy && !State.CheckingSoftwareUpdate && !State.DownloadingSoftwareUpdate;
-            download.Content = State.SoftwareDownloadPaused ? "继续下载" : "下载更新";
+            download.Content = State.SoftwareDownloadNeedsRetry ? "重试下载" : State.SoftwareDownloadPaused ? "继续下载" : "下载更新";
+            AutomationProperties.SetName(download, download.Content.ToString());
             pause.Visibility = State.DownloadingSoftwareUpdate ? Visibility.Visible : Visibility.Collapsed;
             pause.IsEnabled = State.DownloadingSoftwareUpdate;
             install.Visibility = State.SoftwareUpdateReady ? Visibility.Visible : Visibility.Collapsed;
@@ -107,6 +113,7 @@ public sealed class SoftwareUpdatePanel : UserControl
             progress.Visibility = State.DownloadingSoftwareUpdate || State.SoftwareDownloadPaused ? Visibility.Visible : Visibility.Collapsed;
             progress.IsIndeterminate = State.DownloadingSoftwareUpdate && State.SoftwareUpdatePercent < 0;
             progress.Value = Math.Clamp(State.SoftwareUpdatePercent, 0, 100);
+            details.Visibility = State.SoftwareDownloadOwnerId is not null ? Visibility.Visible : Visibility.Collapsed;
             notes.Text = State.SoftwareReleaseNotes;
             releaseNotes.Visibility = notes.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         }

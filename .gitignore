@@ -64,7 +64,10 @@ tools/
 !/docs/dependencies.md
 !/docs/launcher-model-onboarding-acceptance-2026-10-24.md
 !/docs/launcher-modelscope-acceptance-2026-10-24.md
+!/docs/launcher-download-context-acceptance-2026-10-27.md
+!/docs/launcher-download-context-evidence-2026-10-27/*.log
 /docs/screenshots/*
+!/docs/screenshots/download-context-2026-10-27/
 !/docs/screenshots/anima-studio-single-workbench.png
 !/docs/screenshots/anima-studio-common-parameters.png
 !/docs/screenshots/anima-studio-random-workbench.png

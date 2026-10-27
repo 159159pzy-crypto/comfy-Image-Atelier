@@ -12,6 +12,22 @@
                 <TextBlock Text="检查 ComfyUI、插件和自定义节点的更新，修复依赖并调整下载来源。新建或导入其他环境请打开安装向导。" Style="{StaticResource StudioBodyStyle}" />
                 <Button x:Name="OpenSetupButton" Content="新建 / 导入环境向导" Click="OpenSetup_Click" Margin="0,8,0,0" />
             </StackPanel>
+            <Border x:Name="InstallationProgressPanel" Visibility="Collapsed" Style="{StaticResource StudioPanelStyle}">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="环境安装任务" FontSize="18" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
+                    <TextBlock x:Name="InstallationStatusText" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="EnvironmentInstallationStatus" />
+                    <ProgressBar x:Name="InstallationProgressBar" Minimum="0" Maximum="100" Height="5" AutomationProperties.AutomationId="EnvironmentInstallationProgress" />
+                    <TextBlock x:Name="InstallationTransferText" Style="{StaticResource StudioBodyStyle}" FontSize="12" />
+                    <ScrollViewer MaxHeight="110" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled">
+                        <TextBlock x:Name="InstallationErrorText" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" />
+                    </ScrollViewer>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="PauseInstallationButton" Content="暂停安装" Click="PauseInstallation_Click" AutomationProperties.AutomationId="EnvironmentPauseInstallation" />
+                        <Button x:Name="ResumeInstallationButton" Content="继续安装" Click="ResumeInstallation_Click" AutomationProperties.AutomationId="EnvironmentResumeInstallation" />
+                        <HyperlinkButton Content="查看下载详情" Click="InstallationDetails_Click" AutomationProperties.AutomationId="EnvironmentDownloadDetails" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
             <Border x:Name="LegacySetupSteps" Visibility="Collapsed" Background="{ThemeResource StudioMutedBrush}" CornerRadius="18" Padding="18,14">
                 <Grid ColumnSpacing="8">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>

@@ -1,0 +1,40 @@
+PASS: eight complete tagger model packages validate
+PASS: PixAI 0.9 recommendation does not auto-select models
+PASS: all tagger downloads use immutable source revisions
+PASS: PixAI 1.0 custom architecture is locked in its package
+PASS: optional tagger never blocks generation startup
+PASS: duplicate package file rejected
+PASS: package file traversal rejected
+PASS: mutable package revision rejected
+PASS: runtime tagger path agrees with absolute entry script
+PASS: equivalent runtime paths deduplicate after normalization
+PASS: missing runtime wd_taggers registration never guesses from custom_nodes
+PASS: multiple runtime tagger roots are ambiguous
+PASS: runtime tagger root must match actual startup root
+PASS: relative entrypoint cannot establish runtime model root
+PASS: absolute models-directory confirms runtime tagger target
+PASS: attached absolute base-directory confirms runtime tagger target
+PASS: explicit models-directory takes precedence after both overrides validate
+PASS: relative directory override cannot be inferred from configured environment
+PASS: invalid lower-priority override still makes runtime path uncertain
+PASS: duplicate runtime directory flags are rejected
+PASS: missing runtime directory value is rejected
+PASS: non-string runtime argv is rejected
+PASS: other model config filenames never satisfy an exact model package
+PASS: unknown runtime directory prevents guessed download targets
+PASS: all package files verified before publishing complete directory
+PASS: successful staging directory atomically moved away
+PASS: valid complete package avoids network
+PASS: unlocked optional preprocess file cannot change tagger behavior
+PASS: repair publishes clean package while preserving extra-file original in backup
+PASS: missing architecture file disables complete model
+PASS: repair publishes complete package and retains damaged original directory
+PASS: equal-size changed package config fails hash verification
+PASS: bad package hash rejected
+PASS: failed package never becomes runtime-visible
+PASS: cancel interrupts package download
+PASS: cancel retains verified package files outside ComfyUI model directory
+PASS: retry resumes package partial and reuses verified prior files
+PASS: tagger ZIP aliases detected by node signature
+PASS: existing optional tagger install preserved without duplicate clone
+39 model package checks passed; artifacts: F:\comfyuishengtu\output\launcher-tests\86873ef353b64d9796955adcf1d6a9a0

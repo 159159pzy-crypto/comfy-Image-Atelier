@@ -151,9 +151,26 @@ internal sealed partial class LauncherState
         {
             var targets = await ResolveModelIdsAsync(plan.ModelIds.ToArray(), true, ct);
             foreach (var item in targets.Where(item => item.Missing)) ValidateDownload(item);
-            var owner = DownloadTasks.RegisterOwner("models", "基础模型", plan.CreateConfig(),
-                targets.Select(item => new ModelDownloadIntent(item.Model, item.Destination)), payload: CaptureModelContext(plan.CreateConfig()));
-            await DownloadTasks.RunOwnerAsync(owner.Id, token => DownloadFrozenModelsAsync(owner, token), ct);
+            var configuration = Config.Clone();
+            var context = CaptureModelContext(configuration);
+            var batch = new ModelBatchProgress(targets.Select(item => item.Model), targets.ToDictionary(
+                item => item.Model.Id, item => Math.Max(0, item.Model.Size - ModelRemaining(item))));
+            modelBatch = batch;
+            try
+            {
+                await Task.WhenAll(targets.Select(async item =>
+                {
+                    var owner = DownloadTasks.RegisterOwner("models", "模型 · " + item.Model.Name, configuration,
+                        [new ModelDownloadIntent(item.Model, item.Destination)], payload: context);
+                    var progress = new Progress<DownloadProgress>(value =>
+                    {
+                        if (ReferenceEquals(modelBatch, batch)) PublishBatch(batch.Report(item.Model.Id, value));
+                    });
+                    await DownloadTasks.RunOwnerAsync(owner.Id, token => DownloadFrozenModelsAsync(owner, token, progress), ct);
+                    PublishBatch(batch.Complete(item.Model.Id));
+                }));
+            }
+            finally { if (ReferenceEquals(modelBatch, batch)) modelBatch = null; }
             // A final required-model scan distinguishes safe downloads from any
             // remaining manual issues. Downloading never finishes onboarding.
             SetupModelsReadiness = SetupModelReadiness.Checking;

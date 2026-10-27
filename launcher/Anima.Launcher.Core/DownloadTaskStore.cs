@@ -47,7 +47,7 @@ public sealed class DownloadTaskStore
         {
             if (owner is null || !Guid.TryParseExact(owner.Id, "N", out _) || !ownerIds.Add(owner.Id)
                 || !Enum.IsDefined(owner.Status) || string.IsNullOrWhiteSpace(owner.Kind)
-                || owner.Configuration is null || owner.Models is null || owner.CompletedModelIds is null)
+                || owner.Configuration is null || owner.Models is null || owner.CompletedModelIds is null || owner.ResourceOwnerIds is null)
                 throw new InvalidDataException("下载批次记录无效。");
             if (owner.Models.Select(m => m.Model.Id).Distinct(StringComparer.Ordinal).Count() != owner.Models.Length
                 || owner.CompletedModelIds.Distinct(StringComparer.Ordinal).Count() != owner.CompletedModelIds.Count
@@ -59,6 +59,22 @@ public sealed class DownloadTaskStore
             foreach (var model in owner.Models) DownloadTaskIdentity.ValidateModel(model);
             DownloadTaskIdentity.ValidatePayload(System.Text.Json.JsonSerializer.SerializeToElement(owner.Models, JsonFile.Options));
             if (owner.Fingerprint != DownloadTaskIdentity.Owner(owner)) throw new InvalidDataException("下载批次固定内容发生变化，请重新确认。");
+        }
+        foreach (var owner in value.Owners.Where(owner => owner.IsResourceGroup))
+        {
+            if (owner.Kind != "models" || owner.Models.Length <= 1 || owner.ResourceOwnerIds.Count != owner.Models.Length
+                || owner.ResourceOwnerIds.Values.Distinct(StringComparer.Ordinal).Count() != owner.Models.Length)
+                throw new InvalidDataException("模型资源批次关联无效。");
+            foreach (var intent in owner.Models)
+            {
+                if (!owner.ResourceOwnerIds.TryGetValue(intent.Model.Id, out var childId))
+                    throw new InvalidDataException("模型资源批次缺少子任务关联。");
+                var child = value.Owners.SingleOrDefault(item => item.Id == childId);
+                var expected = new DownloadOwnerRecord { Kind = "models", EnvironmentRoot = owner.EnvironmentRoot,
+                    Configuration = owner.Configuration, Models = [intent], Payload = owner.Payload };
+                if (child is null || child.IsResourceGroup || child.Fingerprint != DownloadTaskIdentity.Owner(expected))
+                    throw new InvalidDataException("模型资源子任务与原批次的固定内容不一致。");
+            }
         }
         var ids = new HashSet<string>(StringComparer.Ordinal);
         foreach (var task in value.Tasks)

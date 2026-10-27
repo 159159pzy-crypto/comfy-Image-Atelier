@@ -172,6 +172,9 @@ if (args.Contains("--download-tasks-only"))
 {
     count += await TaskStoreTests.Run(work);
     count += await TaskServiceTests.Run(work);
+    count += await ResourceOwnerTests.Run(work);
+    count += ModelDownloadProjectionTests.Run(work);
+    count += DownloadContextPresentationTests.Run(work);
     count += DownloadOwnerRecoveryTests.Run(work);
     Console.WriteLine($"{count} durable download task checks passed; artifacts: {work}"); return;
 }
@@ -232,6 +235,19 @@ if (args.Contains("--updates-only"))
     Console.WriteLine($"{count} software update checks passed; artifacts: {work}");
     return;
 }
+if (args.Contains("--onboarding-only"))
+{
+    count += await OnboardingTests.Run(work, manifest);
+    count += await SetupCompletionTests.Run(work);
+    count += await SetupModelSelectionTests.Run(work, manifest, models,
+        JsonFile.Read<ModelProfilesManifest>(Path.Combine(manifestDir, "model-profiles.json")));
+    count += await SetupImportTests.Run(work, root, manifest, models,
+        JsonFile.Read<ModelProfilesManifest>(Path.Combine(manifestDir, "model-profiles.json")));
+    count += await ModelBatchProgressTests.Run();
+    await ModelLibraryTests.RunAsync(models, work, Check);
+    Console.WriteLine($"{count} onboarding checks passed; artifacts: {work}");
+    return;
+}
 if (args.Contains("--startup-only"))
 {
     count += await ServiceStartupTests.Run(work);
@@ -273,17 +289,15 @@ count += await SetupImportTests.Run(work, root, manifest, models,
 count += await ModelBatchProgressTests.Run();
 count += await DownloadEngineTests.Run(work);
 count += await TaskStoreTests.Run(work);
+count += await ResourceOwnerTests.Run(work);
+count += ModelDownloadProjectionTests.Run(work);
+count += DownloadContextPresentationTests.Run(work);
 count += await TaskServiceTests.Run(work);
 count += await ArtifactNetworkTests.Run(work);
 count += await EnvironmentOperationLeaseTests.Run(work);
 count += DownloadOwnerRecoveryTests.Run(work);
 }
 await ModelLibraryTests.RunAsync(models, work, Check);
-if (args.Contains("--onboarding-only"))
-{
-    Console.WriteLine($"{count} onboarding checks passed; artifacts: {work}");
-    return;
-}
 count += await ServiceStartupTests.Run(work);
 count += await ReleaseRecoveryTests.Run(work, manifest);
 count += await LauncherUpdateTests.Run(work);

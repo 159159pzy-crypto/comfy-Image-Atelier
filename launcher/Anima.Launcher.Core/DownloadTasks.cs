@@ -56,6 +56,11 @@ public sealed class DownloadOwnerRecord
     public LauncherConfig Configuration { get; set; } = new();
     public ModelDownloadIntent[] Models { get; set; } = [];
     public List<string> CompletedModelIds { get; set; } = [];
+    // Legacy multi-model owners become durable groups of independently controlled resources.
+    // This relationship is state, not part of the frozen artifact fingerprint.
+    public Dictionary<string, string> ResourceOwnerIds { get; set; } = new(StringComparer.Ordinal);
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool IsResourceGroup => ResourceOwnerIds.Count > 0;
     // Data for a known, explicitly registered UI coordinator. The service never executes payload commands.
     public JsonElement? Payload { get; set; }
     public string Fingerprint { get; set; } = "";

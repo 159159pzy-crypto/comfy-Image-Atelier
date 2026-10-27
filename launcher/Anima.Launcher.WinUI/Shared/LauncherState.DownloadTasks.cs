@@ -14,6 +14,7 @@ internal sealed partial class LauncherState
     private string? activeDownloadOwner;
     private LauncherConfig? savedDownloadSettings;
     private InstallationPlan? activeInstallationPlan;
+    private int downloadRefreshPending;
     private InstallationPlan? FrozenModelPlan => activeInstallationPlan ?? (SetupActive && Setup.InstallStarted ? SetupPlan : null);
     private RuntimeManifest OperationRuntime => DownloadIntegrationPolicy.ModelRuntime(FrozenModelPlan, Program.Runtime);
     private ModelManifest OperationModels => FrozenModelPlan is { FrozenModels.Length: > 0 } plan
@@ -31,26 +32,31 @@ internal sealed partial class LauncherState
         savedDownloadSettings = Config.Clone();
         DownloadTasks = new(Downloads, Program.StateDir);
         if (DownloadTasks.RecoveryWarning is { } warning) AppendLog(warning);
-        DownloadTasks.Changed += () => downloadUi.TryEnqueue(() =>
+        DownloadTasks.Changed += () =>
         {
-            UpdateDurableModelProgress();
-            DownloadsChanged?.Invoke();
-            TaskStateChanged?.Invoke();
-        });
+            if (Interlocked.Exchange(ref downloadRefreshPending, 1) != 0) return;
+            if (!downloadUi.TryEnqueue(() =>
+            {
+                Interlocked.Exchange(ref downloadRefreshPending, 0);
+                RefreshModelDownloadRows();
+                UpdateDurableModelProgress();
+                DownloadsChanged?.Invoke();
+                TaskStateChanged?.Invoke();
+            })) Interlocked.Exchange(ref downloadRefreshPending, 0);
+        };
     }
 
     private void UpdateDurableModelProgress()
     {
         if (Busy) return; // The installation coordinator publishes its own complete batch.
-        var owner = DownloadTasks.Owners.Where(o => o.Kind == "models").OrderByDescending(o => o.UpdatedAt).FirstOrDefault();
-        if (owner is null) return;
-        var records = DownloadTasks.Tasks.Where(t => t.OwnerIds.Contains(owner.Id)).ToArray();
-        var total = owner.Models.Sum(m => m.Model.Size);
-        var received = Math.Min(total, records.Sum(t => Math.Clamp(t.Received, 0, t.Size)));
-        var speed = records.Where(t => t.Status == DownloadTaskStatus.Running).Sum(t => t.Speed ?? 0);
-        var completed = owner.Status == DownloadTaskStatus.Completed ? owner.Models.Length : owner.CompletedModelIds.Count;
+        var items = Rows.Select(r => r.Download).Where(d => d is not null).Cast<ModelDownloadSnapshot>().ToArray();
+        if (!items.Any(i => i.Status is DownloadTaskStatus.Running or DownloadTaskStatus.Queued or DownloadTaskStatus.Pausing)) return;
+        var total = items.Sum(i => i.Total);
+        var received = items.Sum(i => i.Received);
+        var speed = items.Sum(i => i.Speed);
+        var completed = items.Count(i => i.IsCompleted);
         var remaining = speed > 0 ? TimeSpan.FromSeconds(Math.Min(359999, Math.Max(0, total - received) / speed)) : (TimeSpan?)null;
-        PublishBatch(new("模型任务", "逐项状态与恢复操作见下载页", received, total, received, total, speed, remaining, completed, owner.Models.Length));
+        PublishBatch(new("模型任务", "在模型条目中暂停或继续；更多操作可打开查看全部下载", received, total, received, total, speed, remaining, completed, items.Length));
     }
 
     public bool HasActiveDownloads => DownloadTasks.HasRunningTasks;
@@ -90,29 +96,61 @@ internal sealed partial class LauncherState
 
     public async Task StartSelectedModelDownloadsAsync()
     {
-        if (Busy || shuttingDown) return;
+        if (Busy || SetupActive || preparingModelDownloads || shuttingDown) return;
+        var inspection = TrackModelInspection();
+        DownloadOwnerRecord[] owners = [];
+        preparingModelDownloads = true;
         try
         {
+            RefreshModelDownloadRows();
+            DownloadsChanged?.Invoke();
             var ids = Rows.Where(r => r.Selected).Select(r => r.Status.Model.Id).Distinct().ToArray();
             if (ids.Length == 0) { SetStatus("请勾选需要下载的模型。"); return; }
-            DownloadOwnerRecord? owner = null;
-            await Run(async ct =>
-            {
-                var snapshot = Config.Clone();
-                var selected = await ResolveModelIdsAsync(ids, true, ct, snapshot);
-                foreach (var item in selected.Where(s => s.Missing)) ValidateDownload(item);
-                owner = DownloadTasks.RegisterOwner("models", "模型 · " + string.Join("、", selected.Select(s => s.Model.Name)), snapshot,
-                    selected.Select(item => new ModelDownloadIntent(item.Model, item.Destination)), payload: CaptureModelContext(snapshot));
-            });
-            if (owner is not null) { GoTo(6); await ResumeDownloadOwnerAsync(owner.Id); }
+            ApplyPendingFields();
+            var snapshot = Config.Clone();
+            var originalContext = ModelContext(Config);
+            ResolveModelConfiguration(snapshot);
+            var context = CaptureModelContext(snapshot);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(modelInspectionLifetime.Token);
+            timeout.CancelAfter(TimeSpan.FromMinutes(30));
+            using var lease = await EnvironmentOperationLease.AcquireAsync(snapshot.ComfyRoot, false, timeout.Token);
+            var selected = await ResolveModelIdsAsync(ids, true, timeout.Token, snapshot);
+            foreach (var item in selected.Where(s => s.Missing)) ValidateDownload(item);
+            await CheckModelSpaceAsync(selected.Where(s => s.Missing), timeout.Token);
+            if (Busy || originalContext != ModelContext(Config) || shuttingDown) return;
+            owners = selected.Select(item => DownloadTasks.RegisterOwner("models", "模型 · " + item.Model.Name, snapshot,
+                [new ModelDownloadIntent(item.Model, item.FoundPath ?? item.Destination)], payload: context)).ToArray();
         }
-        catch (Exception ex) { TaskFailed?.Invoke(ex); }
+        catch (OperationCanceledException) when (shuttingDown) { }
+        catch (Exception ex)
+        {
+            if (shuttingDown) AppendLog("模型预检：" + ex.Message);
+            else TaskFailed?.Invoke(ex);
+        }
+        finally
+        {
+            try
+            {
+                preparingModelDownloads = false;
+                if (!shuttingDown)
+                {
+                    RefreshModelDownloadRows();
+                    DownloadsChanged?.Invoke();
+                }
+            }
+            finally { CompleteModelInspection(inspection); }
+        }
+        await Task.WhenAll(owners.Select(owner => ResumeDownloadOwnerAsync(owner.Id)));
     }
 
     public async Task ContinueAllDownloadsAsync()
     {
+        foreach (var legacy in DownloadTasks.Owners.Where(o => o.Kind == "models" && o.Models.Length > 1
+            && o.Status is DownloadTaskStatus.Paused or DownloadTaskStatus.Failed or DownloadTaskStatus.NeedsReview))
+            DownloadTasks.EnsureResourceOwners(legacy.Id);
         var canceledFiles = DownloadTasks.Tasks.Where(t => t.Status == DownloadTaskStatus.Canceled).SelectMany(t => t.OwnerIds).ToHashSet();
-        var owners = DownloadTasks.Owners.Where(o => !canceledFiles.Contains(o.Id) && o.Status is DownloadTaskStatus.Paused or DownloadTaskStatus.Failed or DownloadTaskStatus.NeedsReview).ToArray();
+        var owners = DownloadTasks.Owners.Where(o => !o.IsResourceGroup && !canceledFiles.Contains(o.Id)
+            && o.Status is DownloadTaskStatus.Paused or DownloadTaskStatus.Failed or DownloadTaskStatus.NeedsReview).ToArray();
         var software = DownloadIntegrationPolicy.LatestSoftwareOwner(owners, Program.Version);
         var skippedSoftware = owners.Count(o => o.Kind == "software" && o.Id != software?.Id);
         // Installation coordinators own an environment gate. Software candidates share one ready-state slot.
@@ -131,6 +169,13 @@ internal sealed partial class LauncherState
         try
         {
             var owner = DownloadTasks.Owners.Single(o => o.Id == id);
+            if (owner.Kind == "models" && owner.Models.Length > 1)
+            {
+                var resources = DownloadTasks.EnsureResourceOwners(id);
+                await Task.WhenAll(resources.Where(o => o.Status is not (DownloadTaskStatus.Canceled or DownloadTaskStatus.Completed))
+                    .Select(o => ResumeDownloadOwnerAsync(o.Id, newSources)));
+                return;
+            }
             if (owner.Kind == "software")
             {
                 if (CheckingSoftwareUpdate || (softwareReservation = softwareDownloadGate.TryEnter()) is null)
@@ -175,7 +220,7 @@ internal sealed partial class LauncherState
         finally { softwareReservation?.Dispose(); }
     }
 
-    private async Task DownloadFrozenModelsAsync(DownloadOwnerRecord owner, CancellationToken ct)
+    private async Task DownloadFrozenModelsAsync(DownloadOwnerRecord owner, CancellationToken ct, IProgress<DownloadProgress>? progress = null)
     {
         // Setup already owns the exclusive lease for this environment on the UI coordinator.
         using var environmentLease = Busy && SamePath(owner.EnvironmentRoot, Config.ComfyRoot)
@@ -192,13 +237,14 @@ internal sealed partial class LauncherState
             {
                 using var scope = DownloadTasks.WithinOwner(owner.Id, intent.Required);
                 if (intent.Model.IsPackage)
-                    await ModelPackages.Fetch(Downloads, intent.Model, intent.Destination, owner.Configuration, null, token);
+                    await ModelPackages.Fetch(Downloads, intent.Model, intent.Destination, owner.Configuration, progress, token);
                 else
                     await Downloads.Fetch(intent.Model.Name, DownloadSources.ModelCandidates(intent.Model, owner.Configuration), intent.Destination,
-                        intent.Model.Size, intent.Model.Sha256, null, token);
+                        intent.Model.Size, intent.Model.Sha256, progress, token);
                 if (intent.Model.Category == "diffusion_models")
                     await ModelMetadata.EnsureDefaultAsync(owner.Configuration, frozen?.Runtime ?? Program.Runtime, catalog, profiles, intent.Destination, token, AppendLog);
                 DownloadTasks.MarkModelCompleted(owner.Id, intent.Model.Id);
+                PublishCompletedModel(owner.Configuration, intent);
             }
             catch (Exception ex) when (!intent.Required && ex is not OperationCanceledException)
             {
@@ -219,22 +265,8 @@ internal sealed partial class LauncherState
             ? m.Model.Files.Any(member => SamePath(Safety.Under(ModelPackages.Staging(m.Model, m.Destination), member.Path), file.Destination))
             : SamePath(m.Destination, file.Destination)) ?? throw new InvalidDataException("此文件无法对应到原模型身份。");
         // A file retry retains the whole package identity, but does not restart unrelated models in its former batch.
-        var resource = DownloadTasks.RegisterOwner("models", "模型 · " + intent.Model.Name, owner.Configuration, [intent with { Required = true }], payload: owner.Payload);
-        if (newSources)
-        {
-            DownloadTasks.UpdateOwnerSources(resource.Id, Config);
-            var sourceConfig = DownloadTasks.Owners.Single(o => o.Id == resource.Id).Configuration;
-            foreach (var record in DownloadTasks.Tasks.Where(t => intent.Model.IsPackage
-                ? intent.Model.Files.Any(member => SamePath(Safety.Under(ModelPackages.Staging(intent.Model, intent.Destination), member.Path), t.Destination))
-                : SamePath(intent.Destination, t.Destination)))
-            {
-                var urls = intent.Model.IsPackage ? DownloadSources.ModelCandidates(intent.Model.Files.Single(member =>
-                    SamePath(Safety.Under(ModelPackages.Staging(intent.Model, intent.Destination), member.Path), record.Destination)), sourceConfig)
-                    : DownloadSources.ModelCandidates(intent.Model, sourceConfig);
-                DownloadTasks.UpdateTaskSources(record.Id, urls, NetworkPolicySnapshot.Capture(sourceConfig));
-            }
-        }
-        await ResumeDownloadOwnerAsync(resource.Id);
+        var resource = DownloadTasks.EnsureResourceOwners(owner.Id).Single(o => o.Models.Any(m => m.Model.Id == intent.Model.Id));
+        await ResumeDownloadOwnerAsync(resource.Id, newSources);
     }
 
     private async Task DownloadFrozenSoftwareAsync(DownloadOwnerRecord owner, CancellationToken ct)
@@ -276,8 +308,10 @@ internal sealed partial class LauncherState
     public async Task PauseDownloadsAndExitAsync()
     {
         shuttingDown = true;
+        var inspections = StopModelInspectionsAsync();
         task?.Cancel();
         await DownloadTasks.PauseAllAsync();
+        await inspections;
         var running = ownerExecutions.Values.ToArray();
         if (running.Length > 0) { try { await Task.WhenAll(running); } catch { } }
         // Cancellation of install subprocesses is awaited by the existing environment coordinator.

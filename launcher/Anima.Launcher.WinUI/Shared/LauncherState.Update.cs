@@ -23,9 +23,9 @@ internal sealed partial class LauncherState
     public string SoftwareUpdateStatus { get; private set; } = "可检查启动器和工作台的新版本。便携版与安装版共用更新。";
     public bool HasSoftwareRelease => softwareRelease is not null;
     public bool SoftwareUpdateReady => downloadedSoftware is not null && !DownloadingSoftwareUpdate;
-    public string SoftwareReleaseNotes => softwareRelease?.Notes ?? "";
-    public string SoftwareVersionText => $"当前版本 {Program.Version}" + (softwareRelease is { } release ? $"  ·  新版本 {release.Version}（{release.Size / 1048576d:N1} MiB）"
-        : downloadedSoftware is { } downloaded ? $"  ·  已下载 {downloaded.Version}（{downloaded.Size / 1048576d:N1} MiB）" : "");
+    public string SoftwareReleaseNotes => downloadedSoftware is null || softwareRelease?.Version == downloadedSoftware.Version ? softwareRelease?.Notes ?? "" : "";
+    public string SoftwareVersionText => $"当前版本 {Program.Version}" + (downloadedSoftware is { } downloaded ? $"  ·  已下载 {downloaded.Version}（{downloaded.Size / 1048576d:N1} MiB）"
+        : softwareRelease is { } release ? $"  ·  新版本 {release.Version}（{release.Size / 1048576d:N1} MiB）" : "");
     public string SoftwareUpdateNotice => SoftwareUpdateReady ? "新版已准备好，可在设置中重启更新。"
         : HasSoftwareRelease ? $"发现新版本 {softwareRelease!.Version}，可在软件内下载更新。" : "";
 
@@ -36,6 +36,7 @@ internal sealed partial class LauncherState
         if (!softwareInitialized)
         {
             softwareInitialized = true;
+            DownloadsChanged += RefreshSoftwareDownloadPresentation;
             try
             {
                 softwareRelease = SoftwareUpdates.GetCachedRelease();
@@ -43,7 +44,7 @@ internal sealed partial class LauncherState
                 if (softwareRelease is not null && !IsNewerSoftwareVersion(softwareRelease.Version)) softwareRelease = null;
                 MatchDownloadedSoftware();
                 if (SoftwareUpdateReady) SoftwareUpdateStatus = "新版已下载并校验，可在空闲时重启更新。";
-                NotifySoftwareUpdate();
+                RefreshSoftwareDownloadPresentation();
             }
             catch (Exception ex) { AppendLog("读取更新状态失败：" + ex.Message); }
         }
@@ -96,15 +97,24 @@ internal sealed partial class LauncherState
             SoftwareUpdateStatus = "暂时无法检查更新，请稍后重试。";
             AppendLog("检查软件更新失败：" + ex.Message);
         }
-        finally { CheckingSoftwareUpdate = false; NotifySoftwareUpdate(); }
+        finally { CheckingSoftwareUpdate = false; RefreshSoftwareDownloadPresentation(); NotifySoftwareUpdate(); }
     }
 
     public async Task DownloadSoftwareUpdateAsync()
     {
-        if (softwareRelease is null || CheckingSoftwareUpdate || softwareDownloadGate.IsOccupied || DownloadingSoftwareUpdate) return;
+        if (CheckingSoftwareUpdate || softwareDownloadGate.IsOccupied || DownloadingSoftwareUpdate || SoftwareUpdateReady) return;
+        RefreshSoftwareDownloadPresentation();
+        if (softwareRecoveryOwnerId is { } pending)
+        {
+            await ResumeDownloadOwnerAsync(pending);
+            RefreshSoftwareDownloadPresentation();
+            return;
+        }
+        if (softwareRelease is null) return;
         var owner = DownloadTasks.RegisterOwner("software", "启动器更新 " + softwareRelease.Version, WithSavedDownloadSettings(Config),
             payload: System.Text.Json.JsonSerializer.SerializeToElement(softwareRelease, JsonFile.Options));
         await ResumeDownloadOwnerAsync(owner.Id);
+        RefreshSoftwareDownloadPresentation();
     }
 
     public async Task PauseSoftwareDownloadAsync()
@@ -119,6 +129,7 @@ internal sealed partial class LauncherState
     {
         DownloadingSoftwareUpdate = true;
         SoftwareDownloadPaused = false;
+        SoftwareDownloadNeedsRetry = false;
         SoftwareUpdatePercent = -1;
         SoftwareUpdateStatus = "正在下载新版；当前生图任务保持运行。";
         NotifySoftwareUpdate();
@@ -252,6 +263,7 @@ internal sealed partial class LauncherState
 
     private void DisposeSoftwareUpdates()
     {
+        DownloadsChanged -= RefreshSoftwareDownloadPresentation;
         softwareLifetime.Cancel();
         softwareUpdates?.Dispose();
         softwareLifetime.Dispose();
