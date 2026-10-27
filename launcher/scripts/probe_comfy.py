@@ -16,7 +16,6 @@ def probe(root, arguments=()):
         import comfy.options
         comfy.options.enable_args_parsing()
         import folder_paths
-        from utils.extra_config import load_extra_path_config
 
         # Prefer canonical destinations for new files before applying user paths.
         # Loading YAML afterwards preserves an explicit is_default legacy unet/clip
@@ -31,6 +30,10 @@ def probe(root, arguments=()):
                 )
         extra = root / "extra_model_paths.yaml"
         if extra.is_file():
+            # A clean venv can inspect default paths before dependencies are installed.
+            # When an extra config exists, keep failures strict so its paths are never ignored.
+            from utils.extra_config import load_extra_path_config
+
             load_extra_path_config(str(extra))
         paths = {key: list(value[0]) for key, value in folder_paths.folder_names_and_paths.items()}
     models = Path(folder_paths.models_dir)

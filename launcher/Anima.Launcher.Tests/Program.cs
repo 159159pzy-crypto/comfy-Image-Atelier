@@ -147,6 +147,12 @@ if (args.Contains("--download-sources-only"))
     count += await DownloadSourceTests.Run(work, models);
     Console.WriteLine($"{count} download source checks passed."); return;
 }
+if (args.Contains("--setup-import-only"))
+{
+    count += await SetupImportTests.Run(work, root, manifest, models,
+        JsonFile.Read<ModelProfilesManifest>(Path.Combine(manifestDir, "model-profiles.json")));
+    Console.WriteLine($"{count} setup import checks passed; artifacts: {work}"); return;
+}
 if (args.Contains("--download-engine-only"))
 {
     count += await DownloadEngineTests.Run(work);
@@ -261,6 +267,8 @@ if (args.Contains("--tagger-only"))
 count += await OnboardingTests.Run(work, manifest);
 count += await SetupCompletionTests.Run(work);
 count += await SetupModelSelectionTests.Run(work, manifest, models,
+    JsonFile.Read<ModelProfilesManifest>(Path.Combine(manifestDir, "model-profiles.json")));
+count += await SetupImportTests.Run(work, root, manifest, models,
     JsonFile.Read<ModelProfilesManifest>(Path.Combine(manifestDir, "model-profiles.json")));
 count += await ModelBatchProgressTests.Run();
 count += await DownloadEngineTests.Run(work);

@@ -127,6 +127,7 @@ internal sealed partial class LauncherState
         setupReview.Invalidate();
         SetupPlan = null;
         SetupPreflight = null;
+        setupImportNeedsRepair = true;
         setupRetryAvailable = false;
         PersistSetup();
         NotifySetup();
@@ -252,6 +253,7 @@ internal sealed partial class LauncherState
         SetupNotice = "";
         SetupPlan = null;
         SetupPreflight = null;
+        setupImportNeedsRepair = true;
         setupRetryAvailable = false;
         PersistSetup();
         NotifySetup();
@@ -270,10 +272,14 @@ internal sealed partial class LauncherState
             {
                 try
                 {
-                    var probe = await Inventory.Probe(draft.ComfyRoot, draft.Python, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
-                    UpdateSetupMissingModels(await Inventory.Scan(probe, Program.Models, false, ct));
-                    var nodes = await Inventory.Nodes(draft.ComfyRoot, Program.Runtime, Commands.Find("git.exe"), ct);
-                    setupImportNeedsRepair = nodes.Any(node => node.State == "缺失");
+                    // PreparePlanAsync already scanned the models and may have deferred
+                    // extra paths until PyYAML is installed. Do not repeat a strict probe.
+                    UpdateSetupMissingModels(plan.ModelInventory.ToList());
+                    var import = await SetupImportReview.InspectAsync(plan.CreateConfig(), plan.ResolvedRuntime ?? Program.Runtime, ct);
+                    setupImportNeedsRepair = import.NeedsRepair;
+                    if (import.MissingCoreModules.Length > 0)
+                        preflight = preflight with { Issues = preflight.Issues.Add(new("import_dependencies",
+                            "核心依赖尚未安装完整（" + string.Join("、", import.MissingCoreModules) + "），将在安装环境阶段补齐。", false)) };
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
@@ -288,7 +294,7 @@ internal sealed partial class LauncherState
             SetupPreflight = preflight;
             Setup.Draft = plan.CreateConfig();
             SetupNotice = fresh ? $"ComfyUI {plan.Release?.Tag}（{plan.Release?.Commit[..12]}）与 {plan.NodeVersions.Length} 个新装节点的提交已固定。继续安装会复用这些版本与依赖计划；已有节点源码保持原样。"
-                : setupImportNeedsRepair ? "将补齐缺失节点，保留已有节点版本和 GPU 运行环境。" : "现有节点齐全，可直接完成导入。";
+                : setupImportNeedsRepair ? "将补齐缺失节点与环境依赖，保留已有节点版本和 GPU 运行环境。" : "现有节点与核心依赖齐全，可直接完成导入。";
             SetupError = preflight.CanInstall ? "" : string.Join("\n", preflight.Issues.Where(i => i.Blocking).Select(i => i.Message));
             PersistSetup();
             SetStatus(preflight.CanInstall ? "检查完成，请确认安装内容。" : "检查发现需要处理的问题。");
@@ -331,7 +337,11 @@ internal sealed partial class LauncherState
         PersistSetup();
         if (!Setup.InstallFinished)
         {
-            if (!reviewed.Fresh && !setupImportNeedsRepair)
+            // Recheck this frozen owner's interpreter, including after restart/resume.
+            // The last UI review flag may belong to a different environment or be stale.
+            var import = reviewed.Fresh ? null
+                : await SetupImportReview.InspectAsync(Config, reviewed.ResolvedRuntime ?? Program.Runtime, ct);
+            if (import is { NeedsRepair: false })
             {
                 UpdateSetupProgress(new("verify", "检查已有环境", SetupStageStatus.Running));
                 Config.ComfyRoot = Inventory.NormalizeRoot(Config.ComfyRoot);
