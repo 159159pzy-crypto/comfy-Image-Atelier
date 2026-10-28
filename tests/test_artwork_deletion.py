@@ -12,6 +12,7 @@ from anima_webui.artwork_deletion import ArtworkDeletionService, deletion_image_
 from anima_webui.history import HistoryStore
 from anima_webui.image_location import ImageLocationError
 from anima_webui.workflow import WorkflowError
+from anima_webui.persistence import StorageReadOnlyError
 from test_artwork_collections import add_image, legacy_management_tables
 from test_storage_transactions import FailingConnection
 
@@ -57,90 +58,166 @@ class ArtworkDeletionTests(unittest.IsolatedAsyncioTestCase):
         await self.store._call(favorite)
         return image_id
 
-    async def test_record_only_keeps_original_cascades_favorites_and_missing_is_idempotent(self):
+    async def test_record_only_preserves_original_and_cascades_legacy_membership(self):
         image_id = await self.image()
-        result = await self.service.delete([image_id, 999])
+        result = await self.service.delete(image_id)
         self.assertEqual(result["deleted_count"], 1)
-        self.assertEqual(result["success_count"], 2)
+        self.assertEqual(result["success_count"], 1)
+        self.assertEqual(result["failed_count"], 0)
+        self.assertEqual(result["file_deleted_count"], 0)
+        self.assertEqual(len(result["results"]), 1)
         self.assertTrue((self.directory / "image.png").is_file())
         self.assertEqual(await self.membership_count(), 0)
-        self.assertEqual(result["results"][1]["code"], "already_missing")
+        repeated = await self.service.delete(image_id)
+        self.assertEqual(repeated["results"][0]["code"], "already_missing")
+        self.assertEqual((repeated["deleted_count"], repeated["success_count"]), (0, 1))
 
-    async def test_invalid_mode_has_no_effect(self):
+    async def test_invalid_id_or_mode_has_no_effect(self):
         image_id = await self.image()
+        for invalid in ([image_id], [image_id, 999], [], {}, True, False, None, "1", 1.0, 0, -1, 2**63):
+            with self.subTest(image_id=invalid), self.assertRaises(WorkflowError):
+                await self.service.delete(invalid)
         for mode in ([], {}, True, "unknown"):
             with self.assertRaises(WorkflowError):
-                await self.service.delete([image_id], mode)
+                await self.service.delete(image_id, mode)
         self.assertEqual(await self.memberships(image_id), ["default"])
         self.assertTrue((self.directory / "image.png").exists())
+        self.thumbnails.discard.assert_not_awaited()
 
-    async def test_shared_file_requires_all_references_and_unlinks_once(self):
+    async def test_shared_file_is_kept_until_other_record_is_removed(self):
         one, two = await self.image(), await self.image()
-        rejected = await self.service.delete([one], "file")
+        rejected = await self.service.delete(one, "file")
         self.assertEqual(rejected["results"][0]["code"], "file_shared")
         self.assertEqual(rejected["results"][0]["shared_ids"], [two])
+        self.assertEqual(rejected["failed_count"], 1)
         self.assertTrue((self.directory / "image.png").exists())
-        deleted = await self.service.delete([one, two], "file")
-        self.assertEqual(deleted["deleted_count"], 2)
+        await self.service.delete(two, "record")
+        deleted = await self.service.delete(one, "file")
+        self.assertEqual(deleted["deleted_count"], 1)
         self.assertEqual(deleted["file_deleted_count"], 1)
         self.assertFalse((self.directory / "image.png").exists())
+        self.assertEqual(await self.membership_count(), 0)
         self.assertNotIn("file_key", deleted["results"][0])
+
+    async def test_alias_of_shared_original_is_detected(self):
+        one, two = await self.image("one.png"), await self.image("alias.png")
+        with mock.patch.object(self.service, "_path", return_value=self.directory / "one.png"):
+            result = await self.service.delete(one, "file")
+        self.assertEqual(result["results"][0]["code"], "file_shared")
+        self.assertEqual(result["results"][0]["shared_ids"], [two])
+        self.assertTrue((self.directory / "one.png").exists())
+        self.assertTrue((self.directory / "alias.png").exists())
+        self.assertEqual((await self.store.list_images())["total"], 2)
 
     async def test_missing_file_completes_but_unavailable_root_preserves_record(self):
         image_id = await self.image(create=False)
-        result = await self.service.delete([image_id], "file")
+        result = await self.service.delete(image_id, "file")
         self.assertTrue(result["results"][0]["file_missing"])
         self.assertTrue(result["results"][0]["record_deleted"])
+        self.assertEqual(result["file_deleted_count"], 0)
         other = await self.image()
         with mock.patch("anima_webui.artwork_deletion.image_location.comfy_image_directory", return_value=self.directory / "unavailable"):
-            result = await self.service.delete([other], "file")
+            result = await self.service.delete(other, "file")
         self.assertEqual(result["results"][0]["code"], "image_directory_unavailable")
         self.assertEqual(await self.memberships(other), ["default"])
 
-    async def test_partial_filesystem_failure_preserves_failed_record_and_continues(self):
-        one, two = await self.image("denied.png"), await self.image("allowed.png")
-        original = Path.unlink
-        def unlink(path, *args, **kwargs):
-            if path.name == "denied.png":
-                raise PermissionError("locked")
-            return original(path, *args, **kwargs)
-        with mock.patch.object(Path, "unlink", autospec=True, side_effect=unlink):
-            result = await self.service.delete([one, two], "file")
-        self.assertEqual((result["deleted_count"], result["failed_count"]), (1, 1))
+    async def test_filesystem_failure_keeps_record_for_retry(self):
+        one, two = await self.image("denied.png"), await self.image("untouched.png")
+        with mock.patch.object(Path, "unlink", side_effect=PermissionError("locked")):
+            result = await self.service.delete(one, "file")
+        self.assertEqual((result["deleted_count"], result["failed_count"]), (0, 1))
+        self.assertEqual(result["results"][0]["code"], "image_delete_failed")
         self.assertEqual(await self.memberships(one), ["default"])
         self.assertTrue((self.directory / "denied.png").exists())
-        self.assertFalse((self.directory / "allowed.png").exists())
+        self.assertTrue((self.directory / "untouched.png").exists())
+        retry = await self.service.delete(one, "file")
+        self.assertTrue(retry["results"][0]["record_deleted"])
+        self.assertEqual((await self.store.get_image(two))["id"], two)
 
-    async def test_commit_failure_reports_unlinked_original_and_stops_later_groups(self):
-        one, two = await self.image("first.png"), await self.image("second.png")
+    async def test_commit_failure_reports_unlinked_file_and_record_retry_succeeds(self):
+        one, two = await self.image("first.png"), await self.image("untouched.png")
         await self.store._call(setattr, self.store.connection, "fail_commit", True)
-        result = await self.service.delete([one, two], "file")
-        first, second = result["results"]
-        self.assertEqual(first["code"], "database_error")
-        self.assertTrue(first["file_deleted"])
-        self.assertFalse(first["record_deleted"])
-        self.assertFalse(second["file_deleted"])
-        self.assertTrue((self.directory / "second.png").exists())
+        result = await self.service.delete(one, "file")
+        failed = result["results"][0]
+        self.assertEqual(failed["code"], "database_error")
+        self.assertTrue(failed["file_deleted"])
+        self.assertFalse(failed["record_deleted"])
+        self.assertEqual(result["file_deleted_count"], 1)
         self.assertEqual(await self.memberships(one), ["default"])
-        retry = await self.service.delete([one], "file")
+        self.assertEqual((await self.store.get_image(two))["id"], two)
+        self.assertTrue((self.directory / "untouched.png").exists())
+        retry = await self.service.delete(one, "record")
+        self.assertTrue(retry["results"][0]["record_deleted"])
+        self.assertFalse(retry["results"][0]["file_deleted"])
+
+    async def test_file_retry_after_failed_commit_accepts_missing_original(self):
+        image_id = await self.image()
+        await self.store._call(setattr, self.store.connection, "fail_commit", True)
+        await self.service.delete(image_id, "file")
+        retry = await self.service.delete(image_id, "file")
         self.assertTrue(retry["results"][0]["record_deleted"])
         self.assertTrue(retry["results"][0]["file_missing"])
 
-    async def test_record_commit_failure_rolls_back_entire_batch(self):
+    async def test_record_commit_failure_rolls_back_only_requested_record(self):
         one, two = await self.image("one.png"), await self.image("two.png")
         await self.store._call(setattr, self.store.connection, "fail_commit", True)
-        result = await self.service.delete([one, two])
-        self.assertEqual(result["failed_count"], 2)
+        result = await self.service.delete(one)
+        self.assertEqual(result["failed_count"], 1)
         self.assertEqual((await self.store.list_images())["total"], 2)
         self.assertEqual(await self.membership_count(), 2)
+        self.assertTrue((self.directory / "one.png").exists())
+        self.assertEqual((await self.store.get_image(two))["id"], two)
+
+    async def test_record_changed_before_transaction_keeps_both_files(self):
+        image_id = await self.image("before.png")
+        (self.directory / "after.png").write_bytes(b"other original")
+        original_path = self.service._path
+        calls = 0
+        def change_record(record, stats):
+            nonlocal calls
+            calls += 1
+            path = original_path(record, stats)
+            if calls == 1:
+                with self.store.connection:
+                    self.store.connection.execute("UPDATE images SET filename='after.png' WHERE id=?", (image_id,))
+            return path
+        with mock.patch.object(self.service, "_path", side_effect=change_record):
+            result = await self.service.delete(image_id, "file")
+        self.assertEqual(result["results"][0]["code"], "record_changed")
+        self.assertEqual((await self.store.get_image(image_id))["filename"], "after.png")
+        self.assertTrue((self.directory / "before.png").exists())
+        self.assertTrue((self.directory / "after.png").exists())
+
+    async def test_final_path_change_rolls_back_record_without_unlinking(self):
+        image_id = await self.image("before.png")
+        (self.directory / "after.png").write_bytes(b"other original")
+        before, after = self.directory / "before.png", self.directory / "after.png"
+        with mock.patch.object(self.service, "_path", side_effect=[before, before, after]):
+            result = await self.service.delete(image_id, "file")
+        self.assertEqual(result["results"][0]["code"], "image_location_changed")
+        self.assertEqual(await self.memberships(image_id), ["default"])
+        self.assertTrue(before.exists())
+        self.assertTrue(after.exists())
+
+    async def test_read_only_rechecked_after_waiting_for_delete_lock(self):
+        image_id = await self.image()
+        async with self.service._lock:
+            operation = asyncio.create_task(self.service.delete(image_id))
+            await asyncio.sleep(0)
+            self.store._protect_storage("test protection")
+        with self.assertRaises(StorageReadOnlyError):
+            await operation
+        self.assertTrue((self.directory / "image.png").exists())
+        self.assertEqual(await self.memberships(image_id), ["default"])
+        self.thumbnails.discard.assert_not_awaited()
 
     async def test_remote_verification_failure_and_unsafe_record_never_delete(self):
         image_id = await self.image()
         with mock.patch("anima_webui.artwork_deletion.image_location.verify_local_comfy", side_effect=ImageLocationError("remote")):
-            result = await self.service.delete([image_id], "file")
+            result = await self.service.delete(image_id, "file")
         self.assertEqual(result["failed_count"], 1)
         unsafe = (await add_image(self.store, "../outside.png"))["id"]
-        result = await self.service.delete([unsafe], "file")
+        result = await self.service.delete(unsafe, "file")
         self.assertEqual(result["results"][0]["code"], "invalid_image_location")
         self.assertTrue((self.directory / "image.png").is_file())
 
@@ -154,7 +231,7 @@ class ArtworkDeletionTests(unittest.IsolatedAsyncioTestCase):
                 raise TimeoutError("release")
             return original(*args)
         with mock.patch.object(self.service, "_delete", side_effect=paused):
-            task = asyncio.create_task(self.service.delete([image_id]))
+            task = asyncio.create_task(self.service.delete(image_id))
             try:
                 self.assertTrue(await asyncio.to_thread(entered.wait, 2))
                 task.cancel()

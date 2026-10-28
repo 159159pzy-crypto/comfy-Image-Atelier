@@ -100,7 +100,7 @@ class ArtworkApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(returned["results"][0]["code"], "file_shared")
             self.assertFalse(returned["deleted"])
             deletion.assert_awaited_once()
-            self.assertEqual(deletion.await_args.args[:2], ([self.ids[0]], "file"))
+            self.assertEqual(deletion.await_args.args[:2], (self.ids[0], "file"))
 
     async def upload(self, kind):
         buffer = io.BytesIO()

@@ -1606,7 +1606,7 @@ def create_app(
         state = await manager.start(settings, seeds=seeds, regeneration=regeneration)
         return web.json_response(state, status=201)
 
-    async def delete_artworks(request: web.Request, image_ids: Any, mode: Any) -> dict[str, Any]:
+    async def delete_artwork(request: web.Request, image_id: int, mode: Any) -> dict[str, Any]:
         if not isinstance(mode, str) or mode not in {"record", "file"}:
             raise WorkflowError("删除方式必须为 record 或 file")
         stats = None
@@ -1614,7 +1614,7 @@ def create_app(
             _require_local_file_request(request)
             stats = await client.status()
         deletion = asyncio.create_task(artwork_deletion.delete(
-            image_ids, mode, stats=stats, comfy_url=getattr(client, "base_url", ""),
+            image_id, mode, stats=stats, comfy_url=getattr(client, "base_url", ""),
         ))
         try:
             return await asyncio.shield(deletion)
@@ -1636,7 +1636,7 @@ def create_app(
         image_id = _image_id(request.match_info["image_id"])
         if set(request.query) - {"mode"}:
             raise WorkflowError("删除操作只接受 mode，不接受文件路径")
-        payload = await delete_artworks(request, [image_id], request.query.get("mode", "record"))
+        payload = await delete_artwork(request, image_id, request.query.get("mode", "record"))
         result = payload["results"][0]
         if result.get("code") == "already_missing":
             raise KeyError(image_id)

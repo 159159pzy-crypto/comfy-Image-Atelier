@@ -1,4 +1,4 @@
-"""Delete artwork records and explicitly requested, verified local originals."""
+"""Delete one history record and its explicitly requested local original."""
 from __future__ import annotations
 
 import asyncio
@@ -52,13 +52,14 @@ class ArtworkDeletionService:
         self.thumbnails = thumbnails
         self._lock = asyncio.Lock()
 
-    async def delete(self, image_ids: list[int], mode: str = "record", *,
+    async def delete(self, image_id: int, mode: str = "record", *,
                      stats: dict[str, Any] | None = None, comfy_url: str = "") -> dict[str, Any]:
-        ids = self.history.artwork_image_ids(image_ids)
+        if type(image_id) is not int or not 1 <= image_id <= 2**63 - 1:
+            raise WorkflowError("作品 ID 必须为正整数")
         if not isinstance(mode, str) or mode not in {"record", "file"}:
             raise WorkflowError("删除模式必须为 record 或 file")
         self.history.ensure_writable()
-        task = asyncio.create_task(self._run(ids, mode, stats or {}, comfy_url))
+        task = asyncio.create_task(self._run(image_id, mode, stats or {}, comfy_url))
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
@@ -75,7 +76,7 @@ class ArtworkDeletionService:
                 task.exception()
             raise
 
-    async def _run(self, ids: list[int], mode: str, stats: dict[str, Any], comfy_url: str) -> dict[str, Any]:
+    async def _run(self, image_id: int, mode: str, stats: dict[str, Any], comfy_url: str) -> dict[str, Any]:
         async with self._lock:
             if mode == "file":
                 try:
@@ -83,26 +84,22 @@ class ArtworkDeletionService:
                         raise ImageLocationError("删除原文件仅支持本机 Windows ComfyUI", code="image_delete_unsupported")
                     await asyncio.to_thread(image_location.verify_local_comfy, comfy_url, stats)
                 except ImageLocationError as error:
-                    return self._payload(mode, [_result(i, code=error.code, error=str(error)) for i in ids])
-            results = await self.history._call(self._delete, ids, mode, stats)
-            if self.thumbnails is not None:
-                for result in results:
-                    if result["record_deleted"] or result["code"] == "already_missing":
-                        try:
-                            await self.thumbnails.discard(result["id"])
-                        except Exception:
-                            result["warning"] = "记录已删除，缩略图缓存清理失败，将在后续维护时重试"
-            return self._payload(mode, results)
+                    return self._payload(mode, _result(image_id, code=error.code, error=str(error)))
+            result = await self.history._call(self._delete, image_id, mode, stats)
+            if self.thumbnails is not None and (result["record_deleted"] or result["code"] == "already_missing"):
+                try:
+                    await self.thumbnails.discard(image_id)
+                except Exception:
+                    result["warning"] = "记录已删除，缩略图缓存清理失败，将在后续维护时重试"
+            return self._payload(mode, result)
 
     @staticmethod
-    def _payload(mode: str, results: list[dict[str, Any]]) -> dict[str, Any]:
-        success = sum(result["record_deleted"] or result["code"] == "already_missing" for result in results)
-        file_count = len({result.get("file_key") for result in results if result["file_deleted"]})
-        for result in results:
-            result.pop("file_key", None)
-        return {"mode": mode, "results": results, "deleted_count": sum(result["record_deleted"] for result in results),
-                "success_count": success, "failed_count": len(results) - success,
-                "file_deleted_count": file_count}
+    def _payload(mode: str, result: dict[str, Any]) -> dict[str, Any]:
+        # Keep the single-delete HTTP response compatible with existing clients.
+        success = int(result["record_deleted"] or result["code"] == "already_missing")
+        return {"mode": mode, "results": [result], "deleted_count": int(result["record_deleted"]),
+                "success_count": success, "failed_count": 1 - success,
+                "file_deleted_count": int(result["file_deleted"])}
 
     def _rollback(self) -> None:
         try:
@@ -116,98 +113,75 @@ class ArtworkDeletionService:
         directory = image_location.comfy_image_directory(stats, record.get("file_type") or "output")
         return deletion_image_path(Path(directory), record)
 
-    def _delete(self, ids: list[int], mode: str, stats: dict[str, Any]) -> list[dict[str, Any]]:
+    def _delete(self, image_id: int, mode: str, stats: dict[str, Any]) -> dict[str, Any]:
         self.history.ensure_writable()
         connection = self.history.connection
-        placeholders = ",".join("?" for _ in ids)
-        records = {row["id"]: dict(row) for row in connection.execute(
-            f"SELECT id, filename, subfolder, file_type FROM images WHERE id IN ({placeholders})", ids)}
-        results = {image_id: _result(image_id, code="already_missing") for image_id in ids if image_id not in records}
         if mode == "record":
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                # Read under the write lock: another process may have deleted
-                # a record after the first snapshot.
-                present = {row[0] for row in connection.execute(f"SELECT id FROM images WHERE id IN ({placeholders})", ids)}
-                connection.execute(f"DELETE FROM images WHERE id IN ({placeholders})", ids)
+                deleted = connection.execute("DELETE FROM images WHERE id = ?", (image_id,)).rowcount > 0
                 connection.commit()
-                results.update({i: _result(i, record_deleted=i in present, code="deleted" if i in present else "already_missing") for i in ids})
+                return _result(image_id, record_deleted=deleted, code="deleted" if deleted else "already_missing")
             except sqlite3.Error:
                 self._rollback()
-                results.update({i: _result(i, code="database_error", error="历史记录写入失败，记录及收藏未删除") for i in records})
-            return [results[i] for i in ids]
+                return _result(image_id, code="database_error", error="历史记录写入失败，记录未删除")
 
-        groups: dict[str, tuple[Path, list[int]]] = {}
-        for image_id, record in records.items():
-            try:
-                path = self._path(record, stats)
-                key = os.path.normcase(str(path))
-                groups.setdefault(key, (path, []))[1].append(image_id)
-            except ImageLocationError as error:
-                results[image_id] = _result(image_id, code=error.code, error=str(error))
-        selected = set(ids)
-        database_failed = False
-        for key, (path, group_ids) in groups.items():
-            if database_failed:
-                results.update({i: _result(i, code="database_error", error="数据库写入失败，本项尚未处理") for i in group_ids})
-                continue
-            deleted_file = missing_file = False
-            try:
-                self.history.ensure_writable()
-                connection.execute("BEGIN IMMEDIATE")
-                # Re-resolve all references while holding the write lock. A
-                # filename may have aliases through directory junctions.
-                references, current = [], set()
-                for row in connection.execute("SELECT id, filename, subfolder, file_type FROM images"):
-                    record = dict(row)
-                    try:
-                        candidate = self._path(record, stats)
-                    except ImageLocationError:
-                        if record["id"] in group_ids:
-                            raise
-                        continue
-                    if os.path.normcase(str(candidate)) == key:
-                        references.append(record["id"])
-                        if record["id"] in group_ids:
-                            current.add(record["id"])
-                shared = sorted(set(references) - selected)
-                if shared:
-                    self._rollback()
-                    results.update({i: _result(i, code="file_shared", error="原文件仍被其他历史记录引用，未删除原文件或记录", shared_ids=shared) for i in group_ids})
-                    continue
-                if not current:
-                    self._rollback()
-                    results.update({i: _result(i, code="already_missing") for i in group_ids})
-                    continue
-                if current != set(group_ids):
-                    # A record changed its file reference after the snapshot;
-                    # never delete a file using stale selection information.
-                    self._rollback()
-                    results.update({i: _result(i, code="record_changed", error="作品记录已变化，请刷新后重试") for i in group_ids})
-                    continue
-                connection.executemany("DELETE FROM images WHERE id = ?", [(i,) for i in group_ids])
-                # Resolve once more immediately before unlinking to reject a
-                # junction changed since the initial snapshot.
-                confirmed = self._path(records[group_ids[0]], stats)
-                if os.path.normcase(str(confirmed)) != key:
-                    raise ImageLocationError("原图路径已变化，请刷新后重试", code="image_location_changed")
+        row = connection.execute("SELECT id, filename, subfolder, file_type FROM images WHERE id = ?", (image_id,)).fetchone()
+        if row is None:
+            return _result(image_id, code="already_missing")
+        try:
+            path = self._path(dict(row), stats)
+        except ImageLocationError as error:
+            return _result(image_id, code=error.code, error=str(error))
+        key = os.path.normcase(str(path))
+        deleted_file = missing_file = False
+        try:
+            self.history.ensure_writable()
+            connection.execute("BEGIN IMMEDIATE")
+            # Re-read the record under the write lock before using its file.
+            row = connection.execute("SELECT id, filename, subfolder, file_type FROM images WHERE id = ?", (image_id,)).fetchone()
+            if row is None:
+                self._rollback()
+                return _result(image_id, code="already_missing")
+            record = dict(row)
+            if os.path.normcase(str(self._path(record, stats))) != key:
+                self._rollback()
+                return _result(image_id, code="record_changed", error="作品记录已变化，请刷新后重试")
+            # A different record may reference the same original through a
+            # filename alias or directory junction. Resolve every reference.
+            shared = []
+            for row in connection.execute("SELECT id, filename, subfolder, file_type FROM images WHERE id != ?", (image_id,)):
                 try:
-                    confirmed.unlink()
-                    deleted_file = True
-                except FileNotFoundError:
-                    missing_file = True
-                connection.commit()
-                results.update({i: _result(i, record_deleted=True, file_deleted=deleted_file, file_missing=missing_file,
-                                           code="deleted", file_key=key) for i in group_ids})
-            except ImageLocationError as error:
+                    candidate = self._path(dict(row), stats)
+                except ImageLocationError:
+                    continue
+                if os.path.normcase(str(candidate)) == key:
+                    shared.append(row["id"])
+            if shared:
                 self._rollback()
-                results.update({i: _result(i, code=error.code, error=str(error)) for i in group_ids})
-            except (sqlite3.Error, StorageReadOnlyError):
-                self._rollback()
-                database_failed = True
-                message = "原文件已删除，但记录写入失败；记录及收藏仍保留，请重试删除记录" if deleted_file else "历史记录写入失败，记录及收藏未删除"
-                results.update({i: _result(i, file_deleted=deleted_file, file_missing=missing_file, code="database_error", error=message, file_key=key) for i in group_ids})
-            except OSError:
-                self._rollback()
-                results.update({i: _result(i, code="image_delete_failed", error="无法删除原文件，请检查文件占用或目录权限") for i in group_ids})
-        return [results[i] for i in ids]
+                return _result(image_id, code="file_shared", shared_ids=sorted(shared),
+                               error="原文件仍被其他历史记录引用，未删除原文件或记录")
+            connection.execute("DELETE FROM images WHERE id = ?", (image_id,))
+            # Reject a junction changed after either earlier resolution.
+            confirmed = self._path(record, stats)
+            if os.path.normcase(str(confirmed)) != key:
+                raise ImageLocationError("原图路径已变化，请刷新后重试", code="image_location_changed")
+            try:
+                confirmed.unlink()
+                deleted_file = True
+            except FileNotFoundError:
+                missing_file = True
+            connection.commit()
+            return _result(image_id, record_deleted=True, file_deleted=deleted_file,
+                           file_missing=missing_file, code="deleted")
+        except ImageLocationError as error:
+            self._rollback()
+            return _result(image_id, code=error.code, error=str(error))
+        except (sqlite3.Error, StorageReadOnlyError):
+            self._rollback()
+            message = "原文件已删除，但记录写入失败；记录仍保留，请重试删除记录" if deleted_file else "历史记录写入失败，记录未删除"
+            return _result(image_id, file_deleted=deleted_file, file_missing=missing_file,
+                           code="database_error", error=message)
+        except OSError:
+            self._rollback()
+            return _result(image_id, code="image_delete_failed", error="无法删除原文件，请检查文件占用或目录权限")

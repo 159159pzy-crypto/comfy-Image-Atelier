@@ -13,7 +13,7 @@ from typing import Any
 
 from .persistence import StorageProtection, backup_corrupt_file
 from .model_profiles import get_model_profile
-from .workflow import WorkflowError, migrate_settings, normalize_lora_path, validate_settings
+from .workflow import migrate_settings, normalize_lora_path, validate_settings
 
 
 logger = logging.getLogger(__name__)
@@ -628,14 +628,6 @@ class HistoryStore(StorageProtection):
             "next_before_id": int(rows[-1]["id"]) if rows else None,
             "has_more": has_more,
         }
-
-    @staticmethod
-    def artwork_image_ids(image_ids: Any) -> list[int]:
-        if not isinstance(image_ids, list) or not 1 <= len(image_ids) <= 200:
-            raise WorkflowError("请选择 1-200 张作品")
-        if any(type(value) is not int or not 1 <= value <= 2**63 - 1 for value in image_ids):
-            raise WorkflowError("作品 ID 必须为正整数")
-        return list(dict.fromkeys(image_ids))
 
     async def delete_image(self, image_id: int) -> bool:
         self.ensure_writable()
