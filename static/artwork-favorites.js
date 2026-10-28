@@ -9,6 +9,7 @@ const artworkFavoritesState = {
   externalPending: false, externalSyncing: false,
 };
 const ARTWORK_FAVORITES_EVENT = "anima-studio:artwork-favorites-updated";
+const artworkToolbarMotion = { initialized: false, selecting: false, expanded: false, width: 0, height: 0, observer: null, observedWidth: 0 };
 const ARTWORK_STAR = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.78 5.63L21 9.54l-4.5 4.38L17.56 20 12 17.13 6.44 20l1.06-6.08L3 9.54l6.22-.91Z"/></svg>';
 const ARTWORK_FOLDER = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7V5.8A1.8 1.8 0 0 1 5.3 4h4.1l2.3 2.5h7A1.8 1.8 0 0 1 20.5 8v9.2a1.8 1.8 0 0 1-1.8 1.8H5.3a1.8 1.8 0 0 1-1.8-1.8V7Z"/><path d="M3.5 9h17"/></svg>';
 const artworkElement = id => document.getElementById(id);
@@ -62,7 +63,8 @@ function decorateArtworkCard(article, record, mainButton = null) {
       event.stopPropagation(); openArtworkMembership(article.record, star);
     });
     star.setAttribute("aria-haspopup", "dialog"); star.setAttribute("aria-expanded", "false");
-    const mark = artworkNode("span", "artwork-selection-mark", "✓"); mark.setAttribute("aria-hidden", "true");
+    const mark = artworkNode("span", "artwork-selection-mark"); mark.setAttribute("aria-hidden", "true");
+    mark.append(artworkNode("span", "artwork-selection-check", "✓"));
     article.append(star, mark);
   }
   star.hidden = state.selecting; artworkStarState(star, record);
@@ -134,19 +136,112 @@ function artworkBuildToolbar() {
   });
   toggle.id = "artworkFoldersToggle"; toggle.setAttribute("aria-controls", "artworkFolderStrip");
   const strip = artworkNode("div", "artwork-folder-strip"); strip.id = "artworkFolderStrip"; strip.hidden = true;
+  const reveal = artworkNode("div", "artwork-folder-reveal"); reveal.id = "artworkFolderReveal"; reveal.inert = true; reveal.append(strip);
   const manage = artworkButton("···", "artwork-manage", event => openArtworkManager(event.currentTarget));
   manage.id = "artworkManage"; manage.title = "管理收藏夹"; manage.setAttribute("aria-label", "管理收藏夹"); manage.setAttribute("aria-haspopup", "dialog"); manage.setAttribute("aria-expanded", "false");
-  browser.append(toggle, strip, manage);
+  browser.append(toggle, reveal, manage);
   const actions = artworkNode("div", "artwork-selection-actions");
   const summary = artworkNode("span", "artwork-selection-summary"); summary.id = "artworkSelectionSummary"; summary.setAttribute("role", "status");
   const add = artworkButton("加入收藏夹", "artwork-action artwork-action-primary", () => artworkBatchMembership("add")); add.id = "artworkBatchAdd";
   const remove = artworkButton("移出此夹", "artwork-action", () => artworkBatchMembership("remove")); remove.id = "artworkBatchRemove";
   const clear = artworkButton("清空", "artwork-action", () => { if (!artworkFavoritesState.busy) { artworkFavoritesState.selected.clear(); artworkRenderCards(); artworkRenderToolbar(); } }); clear.id = "artworkClear";
   const select = artworkButton("选择", "artwork-action", () => artworkSetSelecting(!artworkFavoritesState.selecting)); select.id = "artworkSelect";
-  actions.append(summary, add, remove, clear, select); root.append(browser, actions);
+  actions.append(summary, add, remove, clear, select);
+  const layout = artworkNode("div", "artwork-toolbar-layout"); layout.id = "artworkToolbarLayout";
+  layout.append(browser, actions); root.append(layout);
+}
+function artworkCaptureToolbar() {
+  const root = artworkElement("artworkToolbar"), actions = root?.querySelector(".artwork-selection-actions");
+  if (!root?.getBoundingClientRect || !actions) return null;
+  return { height: root.getBoundingClientRect().height, width: artworkElement("artworkFolderReveal")?.getBoundingClientRect().width || 0, actions: actions.getBoundingClientRect() };
+}
+function artworkLayoutToolbar(before, { immediate = false } = {}) {
+  const root = artworkElement("artworkToolbar"), layout = artworkElement("artworkToolbarLayout"), reveal = artworkElement("artworkFolderReveal");
+  if (!root || !layout || !reveal || !root.getBoundingClientRect().width) return;
+  const state = artworkFavoritesState, motion = artworkToolbarMotion;
+  const strip = artworkElement("artworkFolderStrip"), toggle = artworkElement("artworkFoldersToggle"), manage = artworkElement("artworkManage");
+  const browser = layout.querySelector(".artwork-browser"), actions = layout.querySelector(".artwork-selection-actions");
+  const modeChanged = motion.initialized && motion.selecting !== state.selecting;
+  const expandedChanged = motion.initialized && motion.expanded !== state.expanded;
+  const instant = immediate || !motion.initialized || typeof StudioMotion === "undefined";
+  // Measure intrinsic layout once per update; animation frames only write sizes.
+  // The inner row stays at its natural height while its outer shell moves the gallery.
+  const available = Math.max(0, browser.getBoundingClientRect().width - toggle.getBoundingClientRect().width - manage.getBoundingClientRect().width - 4);
+  const targetWidth = state.expanded ? available : 0;
+  const oldHeight = before?.height ?? root.getBoundingClientRect().height;
+  strip.hidden = !state.expanded && !motion.expanded && !artworkMotionSnapshot(reveal, "artwork-width")?.active;
+  reveal.inert = !state.expanded;
+  strip.style.width = `${Math.max(0, available - 4)}px`;
+  const widthChanged = Math.abs(targetWidth - motion.width) > .5 || expandedChanged;
+  const finishWidth = () => {
+    strip.hidden = !artworkFavoritesState.expanded;
+    reveal.classList.toggle("is-expanded", artworkFavoritesState.expanded);
+    reveal.style.removeProperty("width"); reveal.style.removeProperty("opacity");
+    reveal.style.removeProperty("flex"); strip.style.removeProperty("width");
+    reveal.dataset.motionState = artworkFavoritesState.expanded ? "open" : "closed";
+    artworkFinishToolbarHeight(root, reveal);
+    positionArtworkPopover();
+  };
+  if (widthChanged || instant) {
+    const currentWidth = before?.width ?? reveal.getBoundingClientRect().width;
+    reveal.style.flex = "0 0 auto";
+    reveal.dataset.motionState = state.expanded ? "opening" : "closing";
+    const initial = { width: currentWidth, opacity: motion.expanded ? 1 : 0 };
+    const target = { width: targetWidth, opacity: state.expanded ? 1 : 0 };
+    if (typeof StudioMotion === "undefined") { finishWidth(); }
+    else StudioMotion.spring(reveal, "artwork-width", target, {
+      initial, immediate: instant, response: .3, damping: 1, precision: { width: .1, opacity: .001 },
+      onUpdate(value) {
+        reveal.style.width = `${Math.max(0, value.width)}px`; reveal.style.opacity = String(Math.max(0, Math.min(1, value.opacity)));
+        positionArtworkPopover();
+      }, onComplete: finishWidth,
+    });
+  } else if (!artworkMotionSnapshot(reveal, "artwork-width")?.active) strip.style.removeProperty("width");
+  root.style.removeProperty("height");
+  const presentedHidden = strip.hidden;
+  strip.hidden = !state.expanded;
+  const targetHeight = root.getBoundingClientRect().height;
+  strip.hidden = presentedHidden;
+  const heightChanged = Math.abs(targetHeight - motion.height) > .5;
+  // Preserve the presentation height even when a routine count refresh arrives mid-flight.
+  if (heightChanged || modeChanged || instant) {
+    const finishHeight = () => artworkFinishToolbarHeight(root, reveal);
+    root.classList.add("is-layout-moving");
+    if (typeof StudioMotion === "undefined") finishHeight();
+    else StudioMotion.spring(root, "artwork-height", { height: targetHeight }, {
+      initial: { height: oldHeight }, immediate: instant, response: .3, damping: 1, precision: .1,
+      onUpdate(value) { root.style.height = `${Math.max(0, value.height)}px`; }, onComplete: finishHeight,
+    });
+  } else {
+    const running = artworkMotionSnapshot(root, "artwork-height");
+    if (running?.active || artworkMotionSnapshot(reveal, "artwork-width")?.active) root.style.height = `${running?.value.height ?? targetHeight}px`;
+  }
+  if (modeChanged || instant) {
+    // Position belongs to this wrapper; the buttons retain their own press transforms.
+    const previous = typeof StudioMotion === "undefined" ? null : StudioMotion.freeze(actions, "artwork-actions");
+    actions.style.removeProperty("transform");
+    const next = actions.getBoundingClientRect();
+    if (typeof StudioMotion !== "undefined") StudioMotion.spring(actions, "artwork-actions", { x: 0, y: 0, opacity: 1 }, {
+      initial: { x: before ? before.actions.right - next.right : 0, y: before ? before.actions.bottom - next.bottom : 0, opacity: previous?.active ? previous.value.opacity : modeChanged && state.selecting ? .2 : 1 },
+      velocity: previous?.velocity, immediate: instant, response: .3, damping: 1, precision: { x: .1, y: .1, opacity: .001 },
+      onUpdate(value) { actions.style.transform = `translate3d(${value.x}px, ${value.y}px, 0)`; actions.style.opacity = String(Math.max(0, Math.min(1, value.opacity))); },
+      onComplete() { actions.style.removeProperty("transform"); actions.style.removeProperty("opacity"); },
+    });
+  }
+  motion.initialized = true; motion.selecting = state.selecting; motion.expanded = state.expanded; motion.width = targetWidth; motion.height = targetHeight;
+}
+function artworkMotionSnapshot(node, channel) {
+  return typeof StudioMotion === "undefined" ? null : StudioMotion.snapshot(node, channel);
+}
+function artworkFinishToolbarHeight(root, reveal) {
+  // A non-overlay horizontal scrollbar may keep the old row taller during exit.
+  // Release the shell only after both sizes have reached the latest layout.
+  if (artworkMotionSnapshot(root, "artwork-height")?.active || artworkMotionSnapshot(reveal, "artwork-width")?.active) return;
+  root.style.removeProperty("height"); root.classList.remove("is-layout-moving");
 }
 function artworkRenderToolbar() {
   const state = artworkFavoritesState, root = artworkElement("artworkToolbar"); if (!root || !state.ready) return;
+  const before = artworkCaptureToolbar();
   const strip = artworkElement("artworkFolderStrip"), toggle = artworkElement("artworkFoldersToggle"), active = artworkFolderQuery();
   toggle.textContent = state.selecting ? "收入收藏夹" : "收藏夹";
   toggle.setAttribute("aria-expanded", String(state.expanded));
@@ -170,7 +265,6 @@ function artworkRenderToolbar() {
     let empty = strip.querySelector(".artwork-folder-empty");
     if (!empty) { empty = artworkNode("span", "artwork-folder-empty", "还没有收藏夹"); strip.append(empty); }
   }
-  artworkPresence(strip, state.expanded, { from: { opacity: 0, x: -8, y: 0, scale: 1 }, manageInert: true });
   const ids = new Set((typeof historyItems !== "undefined" ? historyItems : []).map(record => String(record.id)));
   const hiddenCount = [...state.selected.keys()].filter(id => !ids.has(id)).length;
   const summary = artworkElement("artworkSelectionSummary");
@@ -182,6 +276,7 @@ function artworkRenderToolbar() {
   const select = artworkElement("artworkSelect"); select.textContent = state.selecting ? "取消" : "选择"; select.disabled = state.busy || !artworkWritable();
   artworkElement("artworkManage").disabled = state.busy || !artworkWritable();
   root.classList.toggle("is-selecting", state.selecting);
+  artworkLayoutToolbar(before);
 }
 async function artworkLoadFolders() {
   const state = artworkFavoritesState, token = ++state.loadToken, revision = state.revision;
@@ -632,7 +727,20 @@ function initializeArtworkFavorites() {
   document.addEventListener("keydown", event => {
     if (event.key === "Escape" && state.popover) { event.preventDefault(); event.stopPropagation(); closeArtworkPopovers(); }
   }, true);
-  window.addEventListener("resize", positionArtworkPopover);
+  window.addEventListener("resize", () => { artworkLayoutToolbar(artworkCaptureToolbar(), { immediate: true }); positionArtworkPopover(); });
+  if (typeof ResizeObserver !== "undefined") {
+    const root = artworkElement("artworkToolbar");
+    if (root) {
+      artworkToolbarMotion.observer = new ResizeObserver(entries => {
+        const width = entries[0]?.contentRect.width || 0;
+        if (Math.abs(width - artworkToolbarMotion.observedWidth) < .5) return;
+        artworkToolbarMotion.observedWidth = width;
+        if (width <= 0) return;
+        artworkLayoutToolbar(artworkCaptureToolbar(), { immediate: true });
+      });
+      artworkToolbarMotion.observer.observe(root);
+    }
+  }
   document.addEventListener("scroll", positionArtworkPopover, true);
   window.addEventListener("storage", event => {
     if (event.key !== ARTWORK_FAVORITES_EVENT) return;
