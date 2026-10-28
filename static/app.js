@@ -617,6 +617,7 @@ async function request(path, options = {}) {
     const error = new Error(payload.error || `请求失败 (${response.status})`);
     error.status = response.status;
     error.code = payload.code;
+    error.payload = payload;
     throw error;
   }
   if (path.startsWith("/api/favorites/") && options.method && options.method !== "GET") {
@@ -638,7 +639,7 @@ async function requestFavorites(path, options = {}) {
 // Protection lasts until restart. Observe new controls and later enable attempts
 // so asynchronous resource/history refreshes cannot re-enable protected writes.
 const STORAGE_CONTROLS = {
-  history: "#startButton, #confirmReplay, #confirmVariant, #deleteRecord, #artworkFolderSave, #artworkFolderDeleteSubmit, #artworkMembershipSave, #artworkDeleteSubmit, #artworkBatchFavorite, #artworkBatchRemove, #artworkBatchDelete, [data-artwork-write], .artwork-star, #detailArtworkFavorite",
+  history: "#startButton, #confirmReplay, #confirmVariant, #deleteRecord, #historyDeleteSubmit",
   style_presets: "#savePreset, .preset-actions button",
   custom_prompts: '#customForm button[type="submit"], #deleteCustom, #customGroupForm button[type="submit"], #deleteCustomGroup, #commitImport, [data-storage-write="custom_prompts"], [data-favorite-custom-write]',
   lora_triggers: '#loraTriggerForm button[type="submit"], #resetLoraTriggers',
@@ -2006,11 +2007,6 @@ function renderBatch(batch, queue = currentQueue) {
       if (typeof singleWorkbenchActive === "function" && singleWorkbenchActive()) historyDirty = true;
       else loadHistory(historyPage);
     } else loadHistory(1);
-    if (typeof artworkLibraryState !== "undefined" && artworkLibraryState.mount) {
-      const view = artworkLibraryState.mount;
-      artworkInvalidateHistory(view);
-      if (!artworkLibraryState.busy) void loadHistory(view.page, view);
-    }
   }
 }
 async function refreshConnection() {
@@ -2085,8 +2081,7 @@ function card(record, index, historyView = null) {
   button.setAttribute("aria-label", `查看 ${record.filename || "生成结果"}`);
   button.innerHTML = `<img loading="lazy" decoding="async" fetchpriority="low" src="/api/images/${record.id}/thumbnail" alt="Anima 生成结果"><span class="image-failure" hidden>图片加载失败</span><div class="card-copy"><strong>${escapeHtml(record.filename)}</strong><span>#${record.sequence} · Seed ${record.sample_seed}</span></div>`;
   button.addEventListener("click", () => {
-    if (typeof artworkCardActivate === "function") artworkCardActivate(article.record, article.historyView);
-    else openDetail(article.record, { historyView: article.historyView });
+    openDetail(article.record, { historyView: article.historyView });
   });
   const image = button.querySelector("img");
   const markLoaded = () => {
@@ -2105,7 +2100,6 @@ function card(record, index, historyView = null) {
     else markFailed({ target: image });
   }
   article.append(button);
-  if (typeof artworkDecorateCard === "function") artworkDecorateCard(article);
   if (typeof IntersectionObserver !== "undefined") {
     card.visibilityObserver ||= new IntersectionObserver(entries => {
       for (const entry of entries) entry.target.classList.toggle("is-offscreen", !entry.isIntersecting);
@@ -2119,7 +2113,7 @@ function historyViewState(view = null) {
   if (view) return view;
   return historyViewState.home ||= {
     kind: "home", queryEpoch: 0, total: 0,
-    get query() { return typeof artworkLibraryState === "undefined" ? { source: "", folder: "" } : artworkLibraryState.homeQuery; },
+    get query() { return typeof historyDetailState === "undefined" ? { source: "" } : historyDetailState.homeQuery; },
     get page() { return historyPage; }, set page(value) { historyPage = value; },
     get pages() { return historyPages; }, set pages(value) { historyPages = value; },
     get items() { return historyItems; }, set items(value) { historyItems = value; },
@@ -2131,9 +2125,9 @@ function historyViewState(view = null) {
 }
 function cacheHistoryPage(data, queryKey = null, historyView = null) {
   const view = historyViewState(historyView);
-  queryKey ??= typeof artworkHistoryKey === "function" ? artworkHistoryKey(view) : "";
+  queryKey ??= typeof historyQueryKey === "function" ? historyQueryKey(view) : "";
   if (!data || !Number.isFinite(Number(data.page))) return;
-  if (typeof artworkHistoryKey === "function" && queryKey !== artworkHistoryKey(view)) return;
+  if (typeof historyQueryKey === "function" && queryKey !== historyQueryKey(view)) return;
   data.historyQueryKey = queryKey;
   view.cache.set(Number(data.page), data);
 }
@@ -2187,7 +2181,6 @@ function renderHistoryPage(data, historyView = null) {
   elements.prevPage.disabled = view.page <= 1;
   elements.nextPage.disabled = view.page >= view.pages;
   elements.historyCount.textContent = historyUnavailable ? "历史存储不可用" : `${data.total || 0} 张图片`;
-  if (typeof artworkRenderSelection === "function") artworkRenderSelection();
   updatePreviewNavigation();
 }
 
@@ -2195,11 +2188,11 @@ async function loadHistory(page = historyPage, historyView = null) {
   const view = historyViewState(historyView);
   // 与 loadPool 相同的竞态守卫:快速翻页时丢弃乱序到达的旧响应。
   const requestId = ++view.requestId;
-  const queryKey = typeof artworkHistoryKey === "function" ? artworkHistoryKey(view) : "";
+  const queryKey = typeof historyQueryKey === "function" ? historyQueryKey(view) : "";
   try {
-    const params = typeof artworkHistoryParams === "function" ? artworkHistoryParams(view) : "";
+    const params = typeof historyQueryParams === "function" ? historyQueryParams(view) : "";
     const data = await request(`/api/history?page=${page}&limit=24${params}`);
-    if (view.closed || requestId !== view.requestId || (typeof artworkHistoryKey === "function" && queryKey !== artworkHistoryKey(view))) return;
+    if (view.closed || requestId !== view.requestId || (typeof historyQueryKey === "function" && queryKey !== historyQueryKey(view))) return;
     renderHistoryPage(data, view);
     return data;
   } catch (error) {
@@ -2234,7 +2227,6 @@ async function revealSelectedImageFile() {
 }
 
 function renderDetail(record) {
-  if (typeof artworkRenderDetail === "function") artworkRenderDetail(record);
   resetRevealImageFile();
   ui.detailImage.src = `/api/images/${record.id}`;
   ui.detailImage.alt = record.filename ? `生成结果：${record.filename}` : "生成结果";
@@ -2278,7 +2270,7 @@ function openDetail(record, { origin = "random", returnFocus = null, historyView
   if (!record) return;
   closeImagePreview({ immediate: true, restoreFocus: false });
   detailContext = { origin, returnFocus: returnFocus || document.activeElement, historyView: historyViewState(historyView) };
-  if (typeof artworkShowDetail === "function") artworkShowDetail();
+  if (typeof showHistoryDetail === "function") showHistoryDetail();
   updateDetailRecord(record);
   updatePreviewNavigation();
   motionDialog(ui.detailDialog, true);
@@ -2302,33 +2294,16 @@ function finishDetailClose() {
   detailContext = null;
   closeRegenerationDrawers(false, true);
   if (typeof closeDetailActionPanels === "function") closeDetailActionPanels({ immediate: true });
-  const fromLibrary = typeof artworkLibraryState !== "undefined" && Boolean(artworkLibraryState.mount);
-  if (typeof artworkCloseLibrary === "function") artworkCloseLibrary();
+  if (typeof resetHistoryDetail === "function") resetHistoryDetail();
   if (context?.origin === "single" && typeof singleGalleryDetailClosed === "function") singleGalleryDetailClosed();
-  if (fromLibrary) return;
   if (document.querySelector?.("dialog[open]")) return;
   if (context?.returnFocus?.isConnected && !context.returnFocus.disabled) context.returnFocus.focus({ preventScroll: true });
   else if (context?.returnFocus && context.origin === "single") document.getElementById("singlePreview")?.focus({ preventScroll: true });
   else if (context?.returnFocus && context.origin === "random") {
     // Crossing random archive pages replaces the original thumbnail element.
-    const target = ui.gallery.querySelector(`button[data-record-id="${selectedRecord?.id}"]`) || ui.gallery.querySelector("button") || document.querySelector("[data-artwork-open]");
+    const target = ui.gallery.querySelector(`button[data-record-id="${selectedRecord?.id}"]`) || ui.gallery.querySelector("button") || document.querySelector('#historyWorkbenchFilter [aria-checked="true"]');
     target?.focus({ preventScroll: true });
   }
-}
-
-function releaseDetailForLibrary() {
-  if (typeof singleWorkbenchState !== "undefined") singleWorkbenchState.historyTransferRequest = (singleWorkbenchState.historyTransferRequest || 0) + 1;
-  resetRevealImageFile();
-  closeImagePreview({ immediate: true, restoreFocus: false });
-  closeRegenerationDrawers(false, true);
-  closeDetailActionPanels({ immediate: true });
-  ui.detailImage.onload = ui.detailImage.onerror = null;
-  // Keep the outgoing pixels until the shared view transition finishes. The
-  // next detail replaces them, and the native dialog close releases the src.
-  ++regenerationRequest;
-  regenerationOptions = null;
-  selectedRecord = null;
-  detailContext = null;
 }
 
 function setDetailActionPanelVisible(panel, visible, immediate = false) {
@@ -2348,7 +2323,7 @@ function closeDetailActionPanels({ restoreFocus = false, immediate = false } = {
 }
 
 function toggleDetailActionPanel(name) {
-  if (typeof artworkDetailVisible === "function" && !artworkDetailVisible()) return;
+  if (typeof historyDetailVisible === "function" && !historyDetailVisible()) return;
   const trigger = document.querySelector(`[data-detail-action="${name}"]`);
   const panel = document.querySelector(`[data-detail-panel="${name}"]`);
   if (!trigger || !panel) return;
@@ -2360,7 +2335,7 @@ function toggleDetailActionPanel(name) {
   trigger.setAttribute("aria-expanded", "true");
 }
 
-function containArtworkFocus(event) {
+function containHistoryDetailFocus(event) {
   if (event.key !== "Tab" || !ui.detailDialog.open) return;
   const focusable = [...ui.detailDialog.querySelectorAll("button, a[href], input, select, textarea, summary, [tabindex]")].filter(element => {
     if (element.tabIndex < 0 || element.matches(":disabled") || !element.getClientRects().length || element.closest("[hidden], [inert]")) return false;
@@ -2530,12 +2505,12 @@ function preloadPreviewNeighbors() {
 
 async function loadHistoryPageForPreview(page, historyView = null) {
   const view = historyView || previewHistoryView();
-  const queryKey = typeof artworkHistoryKey === "function" ? artworkHistoryKey(view) : "";
+  const queryKey = typeof historyQueryKey === "function" ? historyQueryKey(view) : "";
   const cached = view.cache.get(page);
   if (cached && cached.historyQueryKey === queryKey) return cached;
-  const params = typeof artworkHistoryParams === "function" ? artworkHistoryParams(view) : "";
+  const params = typeof historyQueryParams === "function" ? historyQueryParams(view) : "";
   const data = await request(`/api/history?page=${page}&limit=24${params}`);
-  if (view.closed || (typeof artworkHistoryKey === "function" && queryKey !== artworkHistoryKey(view))) return null;
+  if (view.closed || (typeof historyQueryKey === "function" && queryKey !== historyQueryKey(view))) return null;
   cacheHistoryPage(data, queryKey, view);
   return data;
 }
@@ -3014,10 +2989,10 @@ async function openImagePreview(event, context = null) {
   if (context && imagePreview.phase === "closed") imagePreview.context = context;
   if (!imagePreview.context && imagePreview.phase === "closed") imagePreview.context = detailContext?.origin === "single" && typeof singleGalleryContext === "function"
     ? singleGalleryContext()
-    : { kind: "random", historyView: detailContext?.historyView, sourceElement: ui.detailImage, sourceContainer: ui.detailDialog, returnFocus: ui.detailImage, isValid: () => ui.detailDialog.open && (typeof artworkDetailVisible !== "function" || artworkDetailVisible()) };
+    : { kind: "random", historyView: detailContext?.historyView, sourceElement: ui.detailImage, sourceContainer: ui.detailDialog, returnFocus: ui.detailImage, isValid: () => ui.detailDialog.open && (typeof historyDetailVisible !== "function" || historyDetailVisible()) };
   const record = currentPreviewRecord();
   const source = imagePreview.context?.src || (record ? `/api/images/${record.id}` : "");
-  if (!record || !source || !ui.detailDialog.open || (typeof artworkDetailVisible === "function" && !artworkDetailVisible())) return;
+  if (!record || !source || !ui.detailDialog.open || (typeof historyDetailVisible === "function" && !historyDetailVisible())) return;
   // Reverse-reopen: if the exit animation is still in flight, bounce back from
   // the live frame instead of ignoring the click (previously felt like a hang).
   if (imagePreview.phase === "closing") {
@@ -6071,7 +6046,7 @@ ui.imagePreviewDialog.addEventListener("close", () => {
   restoreImagePreviewCloseFocus();
 });
 ui.detailDialog.addEventListener("close", finishDetailClose);
-ui.detailDialog.addEventListener("keydown", containArtworkFocus);
+ui.detailDialog.addEventListener("keydown", containHistoryDetailFocus);
 ui.revealImageFile.addEventListener("click", revealSelectedImageFile);
 new ResizeObserver(() => {
   if (imagePreview.phase === "open") {
@@ -6083,7 +6058,7 @@ new ResizeObserver(() => {
   } else if (imagePreview.phase === "closing") finishImagePreviewClose();
 }).observe(ui.imagePreviewStage);
 ui.closeDialog.addEventListener("click", () => {
-  if (typeof artworkLibraryState !== "undefined" && artworkLibraryState.busy) return;
+  if (typeof historyDetailState !== "undefined" && historyDetailState.busy) return;
   invalidateHistoryTransfer();
   closeImagePreview({ immediate: true, restoreFocus: false });
   closeRegenerationDrawers(false);
@@ -6092,7 +6067,7 @@ ui.closeDialog.addEventListener("click", () => {
 ui.detailDialog.addEventListener("click", (event) => {
   if (event.target === ui.detailDialog) {
     event.preventDefault(); // This host owns dismissal, including its busy guard.
-    if (typeof artworkLibraryState !== "undefined" && artworkLibraryState.busy) return;
+    if (typeof historyDetailState !== "undefined" && historyDetailState.busy) return;
     invalidateHistoryTransfer();
     closeImagePreview({ immediate: true, restoreFocus: false });
     closeRegenerationDrawers(false);
@@ -6100,7 +6075,7 @@ ui.detailDialog.addEventListener("click", (event) => {
     return;
   }
   if (
-    (typeof artworkDetailVisible !== "function" || artworkDetailVisible()) &&
+    (typeof historyDetailVisible !== "function" || historyDetailVisible()) &&
     !event.target.closest("#detailActionFold, .detail-primary-actions")
   ) {
     closeRegenerationDrawers(false);
@@ -6109,14 +6084,14 @@ ui.detailDialog.addEventListener("click", (event) => {
 });
 ui.detailDialog.addEventListener("cancel", (event) => {
   event.preventDefault();
-  if (typeof artworkLibraryState !== "undefined" && artworkLibraryState.busy) return;
-  const inDetail = typeof artworkDetailVisible !== "function" || artworkDetailVisible();
+  if (typeof historyDetailState !== "undefined" && historyDetailState.busy) return;
+  const inDetail = typeof historyDetailVisible !== "function" || historyDetailVisible();
   if (inDetail && [ui.replayDrawer, ui.variantDrawer].some(drawer => !drawer.hidden && drawer.dataset?.motionState !== "closing" && !drawer.classList?.contains("closing"))) {
     closeRegenerationDrawers();
     return;
   }
   if (inDetail && closeDetailActionPanels({ restoreFocus: true })) return;
-  if (typeof artworkBack === "function" && artworkBack()) return;
+  if (typeof historyDetailBack === "function" && historyDetailBack()) return;
   invalidateHistoryTransfer();
   motionDialog(ui.detailDialog, false);
 });
@@ -6132,35 +6107,12 @@ ui.restoreSettings.addEventListener("click", () => {
     closeImagePreview({ immediate: true, restoreFocus: false });
     motionDialog(ui.detailDialog, false);
     schedulePersist();
-    if (typeof artworkRevealWorkbench === "function") artworkRevealWorkbench();
+    if (typeof revealHistoryWorkbench === "function") revealHistoryWorkbench();
     toast("已载入历史参数，保留生成数量和卡池配置");
   } catch (error) { toast(`载入失败：${error.message}`); }
 });
-async function deleteSelectedHistoryRecord() {
-  if (typeof artworkOpenDelete === "function") { if (selectedRecord) artworkOpenDelete([selectedRecord]); return; }
-  if (!selectedRecord || !confirm("只删除 WebUI 历史记录，图片文件会保留。继续吗？")) return;
-  const deletedId = selectedRecord.id;
-  const owner = detailContext;
-  const fromSingleViewer = owner?.origin === "single";
-  ui.deleteRecord.disabled = true;
-  try {
-    await request(`/api/history/${deletedId}`, { method: "DELETE" });
-    if (detailContext === owner && String(selectedRecord?.id) === String(deletedId)) closeImagePreview({ immediate: true, restoreFocus: false });
-    const neighbor = typeof singleGalleryDeleted === "function" ? await singleGalleryDeleted(deletedId) : null;
-    if (detailContext === owner && String(selectedRecord?.id) === String(deletedId)) {
-      if (fromSingleViewer && neighbor && ui.detailDialog.open) {
-        updateDetailRecord(neighbor);
-        ui.detailImage.focus({ preventScroll: true });
-      } else { motionDialog(ui.detailDialog, false); selectedRecord = null; }
-    }
-    historyCache.clear();
-    if (fromSingleViewer) historyDirty = true;
-    else await loadHistory(historyPage);
-  } catch (error) {
-    toast(error.message);
-  } finally {
-    ui.deleteRecord.disabled = false;
-  }
+function deleteSelectedHistoryRecord() {
+  if (selectedRecord) openHistoryDelete(selectedRecord);
 }
 ui.deleteRecord.addEventListener("click", deleteSelectedHistoryRecord);
 ui.closePool.addEventListener("click", closePool);
@@ -6460,8 +6412,7 @@ async function initialize() {
       ui.draftStatus.textContent = "使用模板默认设置";
     }
     if (typeof initializeSingleWorkbench === "function") initializeSingleWorkbench({ legacyRestored: Boolean(restored) });
-    if (typeof initializeArtworkLibrary === "function") initializeArtworkLibrary();
-    if (typeof initializeImageCleanup === "function") initializeImageCleanup();
+    if (typeof initializeHistoryDetail === "function") initializeHistoryDetail();
     if (typeof StudioMotion !== "undefined") {
       StudioMotion.bindDisclosures(document);
       StudioMotion.bindDialogs(document);

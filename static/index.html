@@ -14,10 +14,10 @@
       document.documentElement.dataset.theme = theme;
     })();
   </script>
-  <link rel="stylesheet" href="/static/styles.css?v=20261027-artwork-polish">
+  <link rel="stylesheet" href="/static/styles.css?v=20261027-history-polish">
   <link rel="stylesheet" href="/static/single-layout.css?v=20261024-motion">
   <link rel="stylesheet" href="/static/single-details.css?v=20261024-motion">
-  <link rel="stylesheet" href="/static/artwork-library.css?v=20261027-artwork-polish">
+  <link rel="stylesheet" href="/static/history-detail.css?v=20261028-remove-artwork-management">
 </head>
 <body>
   <div class="ambient" aria-hidden="true"></div>
@@ -272,15 +272,15 @@
       <div id="randomArchive">
       <div class="history-header">
         <div class="history-title"><span class="kicker">GENERATED ARCHIVE</span><h1>作品库</h1><p id="historyCount">0 张图片</p></div>
-        <div class="history-heading-actions"><button class="artwork-entry" type="button" data-artwork-open>整理作品</button><div class="pager"><button id="prevPage" class="icon-button" type="button" title="上一页" aria-label="上一页">‹</button><span id="pageLabel">1 / 1</span><button id="nextPage" class="icon-button" type="button" title="下一页" aria-label="下一页">›</button></div></div>
+        <div class="history-heading-actions"><div class="pager"><button id="prevPage" class="icon-button" type="button" title="上一页" aria-label="上一页">‹</button><span id="pageLabel">1 / 1</span><button id="nextPage" class="icon-button" type="button" title="下一页" aria-label="下一页">›</button></div></div>
       </div>
-      <div class="artwork-home-toolbar">
-        <span class="artwork-source-label" id="artworkSourceLabel">作品来源</span>
-        <div id="historyWorkbenchFilter" class="artwork-source-switch" role="radiogroup" aria-label="作品来源">
-          <span class="artwork-source-thumb" aria-hidden="true"></span>
-          <button type="button" role="radio" aria-label="全部工作台" aria-checked="true" tabindex="0" data-artwork-source="">全部</button>
-          <button type="button" role="radio" aria-label="单图工作台" aria-checked="false" tabindex="-1" data-artwork-source="single">单图</button>
-          <button type="button" role="radio" aria-label="随机工作台" aria-checked="false" tabindex="-1" data-artwork-source="random">随机</button>
+      <div class="history-home-toolbar">
+        <span class="history-source-label">作品来源</span>
+        <div id="historyWorkbenchFilter" class="history-source-switch" role="radiogroup" aria-label="作品来源">
+          <span class="history-source-thumb" aria-hidden="true"></span>
+          <button type="button" role="radio" aria-label="全部工作台" aria-checked="true" tabindex="0" data-history-source="">全部</button>
+          <button type="button" role="radio" aria-label="单图工作台" aria-checked="false" tabindex="-1" data-history-source="single">单图</button>
+          <button type="button" role="radio" aria-label="随机工作台" aria-checked="false" tabindex="-1" data-history-source="random">随机</button>
         </div>
       </div>
       <div id="gallery" class="gallery" aria-live="polite"></div>
@@ -614,99 +614,28 @@
     </form>
   </dialog>
 
-  <dialog id="detailDialog" class="detail-dialog artwork-host" aria-label="作品">
-    <header class="artwork-host-header">
-      <button id="artworkBack" class="artwork-back" type="button" hidden><span aria-hidden="true">‹</span> 返回作品</button>
-      <h2 id="artworkViewTitle" tabindex="-1">作品详情</h2>
+  <dialog id="detailDialog" class="detail-dialog history-host" aria-label="作品">
+    <header class="history-host-header">
+      <button id="historyDetailBack" class="history-back" type="button" hidden><span aria-hidden="true">‹</span> 返回作品</button>
+      <h2 id="historyDetailTitle" tabindex="-1">作品详情</h2>
       <button id="closeDialog" class="dialog-close" type="button" title="关闭" aria-label="关闭">×</button>
     </header>
-    <div class="artwork-host-body">
-    <section id="artworkLibraryView" class="artwork-library-view" aria-labelledby="artworkLibraryTitle" hidden>
-      <header class="artwork-library-heading">
-        <h2 id="artworkLibraryTitle" class="sr-only">整理作品</h2>
-        <p id="artworkSourceSummary" class="artwork-source-summary">全部工作台的作品</p>
-        <div class="artwork-library-tools">
-          <button id="artworkSelectionToggle" class="artwork-text-button" type="button" aria-pressed="false">选择</button>
-        </div>
-      </header>
-      <div class="artwork-library-content">
-        <aside class="artwork-sidebar" aria-label="收藏夹">
-          <div class="artwork-folder-heading">
-            <h3>收藏夹</h3>
-            <label class="artwork-mobile-filter"><span class="sr-only">收藏夹</span><select id="artworkFolderFilter"><option value="">全部作品</option><option value="__all__">全部收藏</option></select></label>
-            <button id="artworkFolderEdit" class="artwork-text-button" type="button" aria-expanded="false">编辑</button>
-          </div>
-          <nav id="artworkFolderList" class="artwork-folder-list" aria-label="作品分类"></nav>
-          <form id="artworkFolderForm" class="artwork-folder-form" hidden>
-            <label class="field"><span>收藏夹名称</span><input id="artworkFolderName" maxlength="80" required autocomplete="off" placeholder="新收藏夹名称"></label>
-            <p id="artworkFolderError" class="field-error" role="alert"></p>
-            <div class="artwork-inline-actions"><button id="artworkFolderNew" class="artwork-text-button" type="button">新建</button><button id="artworkFolderCancel" class="artwork-text-button" type="button">取消</button><button id="artworkFolderSave" class="button primary compact" type="submit">新建收藏夹</button></div>
-          </form>
-          <section id="artworkFolderDeleteConfirm" class="artwork-folder-confirm" aria-label="删除收藏夹" hidden>
-            <p id="artworkFolderDeleteSummary"></p>
-            <div class="artwork-inline-actions"><button id="artworkFolderDeleteCancel" class="artwork-text-button" type="button">取消</button><button id="artworkFolderDeleteSubmit" class="artwork-text-button danger-text" type="button">删除收藏夹</button></div>
-          </section>
-          <div class="artwork-sidebar-footer"><button id="artworkCleanupOpen" class="artwork-text-button" type="button" aria-controls="artworkCleanupPanel">导入图片清理</button></div>
-        </aside>
-        <div id="artworkLibraryBody" class="artwork-library-body">
-          <div class="artwork-gallery-heading">
-            <p id="artworkHistoryCount" aria-live="polite">0 张图片</p>
-            <div class="pager"><button id="artworkPrevPage" class="icon-button" type="button" title="上一页" aria-label="整理作品上一页">‹</button><span id="artworkPageLabel">1 / 1</span><button id="artworkNextPage" class="icon-button" type="button" title="下一页" aria-label="整理作品下一页">›</button></div>
-          </div>
-          <div id="artworkGallery" class="gallery" aria-live="polite"></div>
-          <div id="artworkEmptyState" class="empty-state" hidden><span class="empty-mark">A</span><strong>等待第一张作品</strong><small>完成生成后会出现在这里</small></div>
-        </div>
-      </div>
-      <div id="artworkBatchToolbar" class="artwork-batch-toolbar" aria-label="作品批量操作" hidden>
-        <label><input id="artworkSelectPage" type="checkbox"> 本页全选</label>
-        <span id="artworkSelectionCount" aria-live="polite">已选 0 / 200 张</span>
-        <div id="artworkBatchActions" class="artwork-batch-actions" hidden>
-          <button id="artworkBatchFavorite" class="artwork-text-button" type="button" disabled>加入收藏夹</button>
-          <button id="artworkBatchRemove" class="artwork-text-button" type="button" disabled>移出当前收藏夹</button>
-          <button id="artworkBatchDelete" class="artwork-text-button danger-text" type="button" disabled>删除所选</button>
-          <button id="artworkSelectionClear" class="artwork-text-button" type="button" disabled>清空选择</button>
-        </div>
-      </div>
-    </section>
-    <section id="artworkCleanupPanel" class="artwork-internal-panel" aria-labelledby="artworkCleanupTitle" hidden>
-        <section id="imageCleanupSection" class="artwork-cleanup-section">
-          <h2 id="artworkCleanupTitle">导入图片清理</h2>
-          <form id="imageCleanupForm">
-            <p class="field-hint">只清理应用保存的闲置副本，正在使用的图片与原始导入文件会保留。</p>
-            <div class="artwork-cleanup-settings"><label class="artwork-setting-check"><input id="imageCleanupEnabled" type="checkbox" checked> 自动清理闲置副本</label><label class="artwork-retention"><span>闲置保留</span><input id="imageCleanupDays" type="number" min="1" max="365" value="7" required aria-label="闲置保留天数"><span>天</span></label></div>
-            <p id="imageCleanupStats" class="field-hint" role="status"></p>
-            <p id="imageCleanupResult" class="artwork-results" role="status"></p>
-            <details id="imageCleanupDetails" class="artwork-cleanup-details" hidden><summary>查看清理详情</summary><p id="imageCleanupDetailsText" class="artwork-results"></p></details>
-            <p id="imageCleanupError" class="field-error" role="alert"></p>
-            <div class="artwork-inline-actions"><button id="imageCleanupRun" class="artwork-text-button" type="button">立即清理到期副本</button><button id="imageCleanupSave" class="button primary compact" type="submit">保存设置</button></div>
-          </form>
-        </section>
-    </section>
-    <section id="artworkMembershipPanel" class="artwork-internal-panel" aria-labelledby="artworkMembershipHeading" hidden>
-      <form id="artworkMembershipForm">
-        <h2 id="artworkMembershipHeading">加入收藏夹</h2>
-        <p id="artworkMembershipHint" class="field-hint"></p>
-        <div id="artworkMembershipChoices" class="favorite-groups"></div>
-        <p id="artworkMembershipError" class="field-error" role="alert"></p>
-        <div class="artwork-panel-actions"><button class="button ghost" type="button" data-artwork-back>取消</button><button id="artworkMembershipSave" class="button primary" type="submit">保存</button></div>
+    <div class="history-host-body">
+    <section id="historyDeletePanel" class="history-internal-panel" aria-labelledby="historyDeleteTitle" hidden>
+      <form id="historyDeleteForm">
+        <h2 id="historyDeleteTitle">删除作品</h2>
+        <p id="historyDeleteSummary"></p>
+        <label class="field"><span>删除方式</span><select id="historyDeleteMode"><option value="record">只删除记录，保留原文件</option><option value="file">永久删除原文件及记录</option></select></label>
+        <p id="historyDeleteWarning" class="field-hint"></p>
+        <p id="historyDeleteResults" class="field-error history-results" role="status"></p>
+        <div class="history-panel-actions"><button type="button" class="button ghost" data-history-back>取消</button><button id="historyDeleteSubmit" type="submit" class="button danger">只删除记录</button></div>
       </form>
     </section>
-    <section id="artworkDeletePanel" class="artwork-internal-panel" aria-labelledby="artworkDeleteTitle" hidden>
-      <form id="artworkDeleteForm">
-        <h2 id="artworkDeleteTitle">删除作品</h2>
-        <p id="artworkDeleteSummary"></p>
-        <label class="field"><span>删除方式</span><select id="artworkDeleteMode"><option value="record">只删除记录，保留原文件</option><option value="file">永久删除原文件及记录</option></select></label>
-        <p id="artworkDeleteWarning" class="field-hint"></p>
-        <p id="artworkDeleteResults" class="field-error artwork-results" role="status"></p>
-        <div class="artwork-panel-actions"><button type="button" class="button ghost" data-artwork-back>取消</button><button id="artworkDeleteSubmit" type="submit" class="button danger">只删除记录</button></div>
-      </form>
-    </section>
-    <div id="artworkDetailView" class="detail-layout">
+    <div id="historyDetailView" class="detail-layout">
       <figure><img id="detailImage" tabindex="0" role="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="imagePreviewDialog" aria-label="展开全尺寸图片预览" title="点击查看全尺寸图片" alt="生成结果"></figure>
       <div class="detail-copy">
         <header class="detail-header">
           <div><span id="detailMeta" class="kicker"></span></div>
-          <button id="detailArtworkFavorite" class="artwork-star detail-artwork-star" type="button" aria-label="收藏作品" aria-pressed="false">☆</button>
         </header>
         <div id="detailScroll" class="detail-scroll">
         <div id="detailMain" class="detail-main">
@@ -719,10 +648,10 @@
         <div id="detailActionFold" class="detail-action-fold" hidden inert>
         <div id="detailActionFoldContent" class="detail-action-fold-content">
           <div id="detailMoreActions" class="detail-action-panel" data-detail-panel="more" hidden>
-            <button id="sendToSingle" class="artwork-action-row" type="button">送到单图工作台</button>
-            <button id="useAsInputImage" class="artwork-action-row" type="button">用作图生图</button>
-            <button id="revealImageFile" class="artwork-action-row" type="button" title="在资源管理器中选中原图">打开所在文件夹</button>
-            <button id="deleteRecord" class="artwork-action-row danger-text" type="button">删除作品</button>
+            <button id="sendToSingle" class="history-action-row" type="button">送到单图工作台</button>
+            <button id="useAsInputImage" class="history-action-row" type="button">用作图生图</button>
+            <button id="revealImageFile" class="history-action-row" type="button" title="在资源管理器中选中原图">打开所在文件夹</button>
+            <button id="deleteRecord" class="history-action-row danger-text" type="button">删除作品</button>
           </div>
         <div id="detailDrawerHome" class="detail-drawer-home">
         <section id="replayDrawer" class="regeneration-drawer replay-drawer" aria-labelledby="replayDrawerTitle" hidden>
@@ -810,19 +739,18 @@
   <div id="toast" role="status" aria-live="polite"></div>
   <script src="/static/motion.js?v=20261024-motion" defer></script>
   <script src="/static/workbench-parameters.js?v=20261024-workflow-parameters" defer></script>
-  <script src="/static/single-layout.js?v=20261027-artwork-polish" defer></script>
-  <script src="/static/single-gallery.js?v=20261026-artworks" defer></script>
+  <script src="/static/single-layout.js?v=20261027-history-polish" defer></script>
+  <script src="/static/single-gallery.js?v=20261028-remove-artwork-management" defer></script>
   <script src="/static/shared-favorites.js?v=20261024-favorite-confirm" defer></script>
-  <script src="/static/prompt-reverse.js?v=20261026-artworks" defer></script>
+  <script src="/static/prompt-reverse.js?v=20261028-remove-artwork-management" defer></script>
   <script src="/static/prompt-assistant.js?v=20261024-pools" defer></script>
-  <script src="/static/single-workbench.js?v=20261026-artwork-redesign" defer></script>
-  <script src="/static/single-input.js?v=20261026-artworks" defer></script>
+  <script src="/static/single-workbench.js?v=20261028-remove-artwork-management" defer></script>
+  <script src="/static/single-input.js?v=20261028-remove-artwork-management" defer></script>
   <script src="/static/single-compatibility.js?v=20261024-single-ui" defer></script>
-  <script src="/static/single-details.js?v=20261027-artwork-polish" defer></script>
+  <script src="/static/single-details.js?v=20261027-history-polish" defer></script>
   <script src="/static/krea-pool.js?v=20261024-favorite-confirm" defer></script>
-  <script src="/static/artwork-library.js?v=20261027-artwork-polish" defer></script>
-  <script src="/static/detail-actions.js?v=20261027-artwork-polish" defer></script>
-  <script src="/static/image-cleanup.js?v=20261027-artwork-motion" defer></script>
-  <script src="/static/app.js?v=20261027-artwork-polish" defer></script>
+  <script src="/static/history-detail.js?v=20261028-remove-artwork-management" defer></script>
+  <script src="/static/detail-actions.js?v=20261027-history-polish" defer></script>
+  <script src="/static/app.js?v=20261028-remove-artwork-management" defer></script>
 </body>
 </html>

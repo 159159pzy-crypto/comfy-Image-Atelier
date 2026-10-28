@@ -146,22 +146,3 @@ test('a local stop exposes unconfirmed remote cancellation and clears it for the
   assert.equal(ui.batchError.hidden, true);
   assert.equal(ui.batchError.textContent, '');
 });
-
-test('generation completion invalidates manager pagination without resetting its folder or page', () => {
-  for (const busy of [false, true]) {
-    const { ctx } = setup(), reads = [];
-    const query = { source: 'random', folder: 'trip' };
-    const view = { kind: 'library', query, page: 4, pages: 6, queryEpoch: 2, requestId: 3, dirty: false, cache: new Map([[1, { items: [1] }], [4, { items: [4] }]]) };
-    ctx.artworkLibraryState = { mount: view, busy };
-    ctx.loadHistory = (page, owner) => reads.push({ page, owner });
-    const artwork = fs.readFileSync(path.join(__dirname, '../static/artwork-library.js'), 'utf8');
-    const start = artwork.indexOf('function artworkInvalidateHistory(');
-    vm.runInContext(artwork.slice(start, artwork.indexOf('\n}', start) + 2), ctx);
-    ctx.renderBatch(batch({ status: 'completed', completed: 40 }));
-    assert.equal(view.cache.size, 0); assert.equal(view.queryEpoch, 3); assert.equal(view.requestId, 4); assert.equal(view.dirty, true);
-    assert.equal(view.query, query); assert.equal(view.page, 4); assert.equal(view.query.folder, 'trip');
-    assert.equal(reads[0].page, 1); assert.equal(reads[0].owner, undefined);
-    assert.equal(reads.length, busy ? 1 : 2);
-    if (!busy) { assert.equal(reads[1].page, 4); assert.equal(reads[1].owner, view); }
-  }
-});

@@ -87,7 +87,7 @@ class BatchManager:
         self.input_images = input_images
         self.prompt_images = prompt_images
         # Optional service attached by the HTTP application after construction.
-        self.asset_lifecycle = None
+        self.imported_images = None
         self.prompt_jobs = PromptJobStore(history)
         self.prompt_assistant = PromptAssistant(comfy)
         self.prompt_tagger = PromptTagger(comfy)
@@ -495,8 +495,8 @@ class BatchManager:
             kind, profile = request_identity(payload)
             if kind != "reverse" or self.prompt_images is None:
                 raise WorkflowError("图像反推服务不可用")
-            asset = (await self.asset_lifecycle.read("prompt", payload["image_id"])
-                     if self.asset_lifecycle is not None else
+            asset = (await self.imported_images.read("prompt", payload["image_id"])
+                     if self.imported_images is not None else
                      await asyncio.to_thread(self.prompt_images.get, payload["image_id"]))
             metadata = asset["metadata"]
             method = payload.get("method", "metadata")
@@ -590,16 +590,16 @@ class BatchManager:
                 method = settings.get("method", "vision")  # Old frozen visual jobs lack method.
                 snapshot = (await self.prompt_tagger.transport(settings) if method == "tagger"
                             else await self.prompt_assistant.transport(settings))
-                if self.asset_lifecycle is not None:
-                    body = await self.asset_lifecycle.read_bytes("prompt", settings["image_id"])
+                if self.imported_images is not None:
+                    body = await self.imported_images.read_bytes("prompt", settings["image_id"])
                 else:
                     path = await asyncio.to_thread(self.prompt_images.image_path, settings["image_id"])
                     body = await asyncio.to_thread(path.read_bytes)
                 if self.stop_requested:
                     raise ComfyAborted("收到停止请求")
                 filename = "reverse-" + settings["image_id"] + ".png"
-                image = (await self.asset_lifecycle.upload_comfy(body, filename)
-                         if self.asset_lifecycle is not None else await self.comfy.upload_image(body, filename))
+                image = (await self.imported_images.upload_comfy(body, filename)
+                         if self.imported_images is not None else await self.comfy.upload_image(body, filename))
                 graph = (build_tagger_graph(snapshot, self.client_id, image) if method == "tagger" else
                          build_reverse_graph(snapshot, self.client_id,
                                              int(settings.get("seed", secrets.randbelow(2**31))), image))
@@ -723,12 +723,12 @@ class BatchManager:
             asset_id = single["input_image_id"]
             self.input_images.get(asset_id)
             mode = single["resize_mode"]
-            body = (await self.asset_lifecycle.prepare(asset_id, settings["width"], settings["height"], mode)
-                    if self.asset_lifecycle is not None else
+            body = (await self.imported_images.prepare(asset_id, settings["width"], settings["height"], mode)
+                    if self.imported_images is not None else
                     await asyncio.to_thread(self.input_images.prepare, asset_id, settings["width"], settings["height"], mode))
             filename = hashlib.sha256(body).hexdigest() + ".png"
-            runtime["input_image"] = (await self.asset_lifecycle.upload_comfy(body, filename)
-                                      if self.asset_lifecycle is not None else await self.comfy.upload_image(body, filename))
+            runtime["input_image"] = (await self.imported_images.upload_comfy(body, filename)
+                                      if self.imported_images is not None else await self.comfy.upload_image(body, filename))
             runtime["input_image_id"] = asset_id
         self.state.update(stage="generating", prompt_id="")
         self._clear_preview()
@@ -770,10 +770,6 @@ class BatchManager:
                     )
                     normalized_overrides["lora_managed_triggers"] = managed["lora_managed_triggers"]
             settings = validate_settings(normalized_overrides)
-            # Cleanup takes this same start lock, so a source stays protected
-            # throughout resource validation and its transfer into the queue.
-            if self.asset_lifecycle is not None and settings.get("generation_mode") == "img2img":
-                await self.asset_lifecycle.touch("input", settings["single"]["input_image_id"])
             v2_workflow = self._uses_v2_workflow()
             if v2_workflow:
                 # Keep queue entries, batch snapshots and history on the v2

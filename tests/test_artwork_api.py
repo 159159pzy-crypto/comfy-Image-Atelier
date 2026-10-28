@@ -10,7 +10,7 @@ from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
 from PIL import Image
 
-from anima_webui.server import ARTWORK_DELETION_KEY, ASSET_LIFECYCLE_KEY, HISTORY_KEY, create_app
+from anima_webui.server import ARTWORK_DELETION_KEY, IMPORTED_IMAGES_KEY, HISTORY_KEY, create_app
 from test_server import APP_DIR, FakeComfy, _write_fake_tools
 
 
@@ -45,49 +45,42 @@ class ArtworkApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, status, payload)
         return payload
 
-    async def test_folder_membership_shared_across_profiles_and_filter_cursor(self):
-        payload = await self.json("POST", "/api/artwork-folders", {"name": "精选"}, status=201)
-        folder_id = payload["folder"]["id"]
-        await self.json("POST", "/api/artwork-folders/members", {
-            "image_ids": self.ids, "folder_ids": [folder_id], "action": "add",
-        })
-        first = await self.json("GET", f"/api/history?folder_id={folder_id}&workbench=single&limit=1")
+    async def test_removed_management_routes_are_unavailable(self):
+        routes = (("GET", "/api/artwork-folders"), ("POST", "/api/artwork-folders"),
+                  ("PATCH", "/api/artwork-folders/default"), ("DELETE", "/api/artwork-folders/default"),
+                  ("POST", "/api/artwork-folders/members"), ("POST", "/api/history/delete"),
+                  ("GET", "/api/image-cleanup"), ("PUT", "/api/image-cleanup"),
+                  ("POST", "/api/image-cleanup/run"), ("POST", "/api/image-cleanup/leases"))
+        for method, path in routes:
+            with self.subTest(method=method, path=path):
+                response = await self.client.request(method, path)
+                self.assertEqual(response.status, 404)
+        self.assertEqual((await self.history.list_images())["total"], 3)
+
+    async def test_history_retains_source_and_cursor_pagination_without_favorites(self):
+        first = await self.json("GET", "/api/history?workbench=single&limit=1")
         self.assertEqual(first["total"], 2)
         self.assertEqual(first["items"][0]["id"], self.ids[1])
-        self.assertIn(folder_id, first["items"][0]["folder_ids"])
-        second = await self.json("GET", f"/api/history?folder_id={folder_id}&workbench=single&limit=1&before_id={first['next_before_id']}")
+        self.assertNotIn("folder_ids", first["items"][0])
+        second = await self.json("GET", f"/api/history?workbench=single&limit=1&before_id={first['next_before_id']}")
         self.assertEqual(second["items"][0]["id"], self.ids[0])
         self.assertFalse(second["has_more"])
-        await self.json("PATCH", f"/api/artwork-folders/{folder_id}", {"name": "成品"})
-        await self.json("DELETE", f"/api/artwork-folders/{folder_id}")
-        kept = await self.json("GET", "/api/history?folder_id=default")
-        self.assertEqual(kept["total"], 3)
+        # Retired query parameters follow the existing unknown-query policy:
+        # they no longer filter or consult old artwork memberships.
+        unfiltered = await self.json("GET", "/api/history?folder_id=missing&favorites_only=true")
+        self.assertEqual(unfiltered["total"], 3)
 
-    async def test_batch_record_delete_removes_favorites_and_missing_is_idempotent(self):
-        await self.json("POST", "/api/artwork-folders/members", {
-            "image_ids": self.ids, "folder_ids": ["default"], "action": "add",
-        })
-        payload = await self.json("POST", "/api/history/delete", {"image_ids": self.ids[:2], "mode": "record"})
-        self.assertEqual(payload["deleted_count"], 2)
-        self.assertTrue(all(item["record_deleted"] for item in payload["results"]))
-        kept = await self.json("GET", "/api/history?favorites_only=true")
-        self.assertEqual([item["id"] for item in kept["items"]], self.ids[2:])
-        await self.json("DELETE", f"/api/history/{self.ids[2]}")
-        await self.json("DELETE", f"/api/history/{self.ids[2]}", status=404)
-        repeated = await self.json("POST", "/api/history/delete", {"image_ids": self.ids, "mode": "record"})
-        self.assertEqual(repeated["failed_count"], 0)
+    async def test_single_record_delete_and_missing_record(self):
+        payload = await self.json("DELETE", f"/api/history/{self.ids[0]}?mode=record")
+        self.assertTrue(payload["deleted"])
+        self.assertEqual(payload["deleted_count"], 1)
+        self.assertEqual(payload["file_deleted_count"], 0)
+        self.assertEqual((await self.history.list_images())["total"], 2)
+        await self.json("DELETE", f"/api/history/{self.ids[0]}", status=404)
 
-    async def test_validation_rejects_paths_bad_modes_and_oversized_batches(self):
-        for body in ({"image_ids": self.ids, "mode": "wipe"}, {"image_ids": [True]},
-                     {"image_ids": []}, {"image_ids": list(range(1, 202))},
-                     {"image_ids": self.ids, "path": "C:/file.png"}):
-            await self.json("POST", "/api/history/delete", body, status=400)
-        for body in ({"name": ""}, {"name": "x", "path": "bad"}):
-            await self.json("POST", "/api/artwork-folders", body, status=400)
-        await self.json("GET", "/api/history?favorites_only=maybe", status=400)
-        await self.json("POST", "/api/artwork-folders/members", {
-            "image_ids": self.ids, "folder_ids": ["missing"], "action": "add",
-        }, status=404)
+    async def test_single_delete_rejects_paths_and_invalid_modes(self):
+        for query in ("mode=wipe", "path=C:/file.png", "mode=file&path=x"):
+            await self.json("DELETE", f"/api/history/{self.ids[0]}?{query}", status=400)
         self.assertEqual((await self.history.list_images())["total"], 3)
 
     async def test_file_mode_requires_same_origin_direct_local_request(self):
@@ -95,57 +88,50 @@ class ArtworkApiTests(unittest.IsolatedAsyncioTestCase):
         result = {"results": [{"id": self.ids[0], "record_deleted": False,
                                "file_deleted": False, "file_missing": False, "code": "file_shared",
                                "error": "其他作品仍引用原图"}], "deleted_count": 0, "failed_count": 1}
+        path = f"/api/history/{self.ids[0]}?mode=file"
         with patch.object(service, "delete", new=AsyncMock(return_value=result)) as deletion:
-            await self.json("POST", "/api/history/delete", {"image_ids": self.ids[:1], "mode": "file"}, status=403)
+            await self.json("DELETE", path, status=403)
             deletion.assert_not_awaited()
             origin = str(self.client.make_url("/")).rstrip("/")
-            await self.json("POST", "/api/history/delete", {"image_ids": self.ids[:1], "mode": "file"},
+            await self.json("DELETE", path,
                             headers={"Origin": origin, "X-Forwarded-For": "127.0.0.1"}, status=403)
             deletion.assert_not_awaited()
-            returned = await self.json("POST", "/api/history/delete", {"image_ids": self.ids[:1], "mode": "file"},
-                                       headers={"Origin": origin})
+            returned = await self.json("DELETE", path, headers={"Origin": origin}, status=409)
             self.assertEqual(returned["results"][0]["code"], "file_shared")
+            self.assertFalse(returned["deleted"])
             deletion.assert_awaited_once()
+            self.assertEqual(deletion.await_args.args[:2], ([self.ids[0]], "file"))
 
-    async def test_cleanup_upload_read_lease_settings_and_missing_draft(self):
+    async def upload(self, kind):
         buffer = io.BytesIO()
-        Image.new("RGB", (24, 20), "green").save(buffer, format="PNG")
-        ids = {}
+        with Image.new("RGB", (24, 20), "green") as image:
+            image.save(buffer, format="PNG")
+        form = FormData()
+        form.add_field("image", buffer.getvalue(), filename="test.png", content_type="image/png")
+        return await self.client.post(f"/api/{kind}-images", data=form)
+
+    async def test_imported_image_upload_and_read_do_not_create_cleanup_tables(self):
         for kind in ("input", "prompt"):
-            form = FormData()
-            form.add_field("image", buffer.getvalue(), filename="test.png", content_type="image/png")
-            response = await self.client.post(f"/api/{kind}-images", data=form)
+            response = await self.upload(kind)
             self.assertEqual(response.status, 201)
             item = await response.json()
-            ids[kind] = item["id"]
+            saved = await self.json("GET", f"/api/{kind}-images/{item['id']}")
+            self.assertEqual(saved["id"], item["id"])
             content = await self.client.get(f"/api/{kind}-images/{item['id']}/image")
             self.assertEqual(content.status, 200)
             self.assertTrue((await content.read()).startswith(b"\x89PNG"))
-        missing = "f" * 64
-        lease = await self.json("POST", "/api/image-cleanup/leases", {
-            "session_id": "artwork-api-test", "input_image_ids": [ids["input"], missing],
-            "prompt_image_ids": [ids["prompt"]],
-        })
-        self.assertIn(ids["input"], lease["accepted"]["input_image_ids"])
-        self.assertIn(missing, lease["missing"]["input_image_ids"])
-        defaults = await self.json("GET", "/api/image-cleanup")
-        self.assertTrue(defaults["enabled"])
-        self.assertEqual(defaults["retention_days"], 7)
-        changed = await self.json("PUT", "/api/image-cleanup", {"enabled": False, "retention_days": 14})
-        self.assertFalse(changed["enabled"])
-        self.assertEqual(changed["retention_days"], 14)
-        for body in ({"retention_days": 0}, {"retention_days": True}, {"enabled": "yes"}, {"path": "x"}):
-            await self.json("PUT", "/api/image-cleanup", body, status=400)
-        await self.json("POST", "/api/image-cleanup/run", {"force": True}, status=400)
-        await self.json("POST", "/api/image-cleanup/run", {})
+        names = await self.history._call(lambda: {row[0] for row in self.history.connection.execute("SELECT name FROM sqlite_master")})
+        self.assertTrue(names.isdisjoint({"managed_image_files", "image_draft_leases", "image_cleanup_settings"}))
+        self.assertIsNotNone(self.app[IMPORTED_IMAGES_KEY])
 
-    async def test_read_only_history_blocks_cleanup_and_artwork_mutations(self):
+    async def test_read_only_history_blocks_upload_and_delete_but_keeps_image_readable(self):
+        item = await (await self.upload("input")).json()
         self.history._protect_storage("test protection")
-        status = await self.json("GET", "/api/image-cleanup")
-        self.assertTrue(status["read_only"])
-        await self.json("POST", "/api/artwork-folders", {"name": "blocked"}, status=503)
-        await self.json("POST", "/api/image-cleanup/run", {}, status=503)
-        self.assertIsNotNone(self.app[ASSET_LIFECYCLE_KEY])
+        self.assertEqual((await self.upload("input")).status, 503)
+        self.assertEqual((await self.upload("prompt")).status, 503)
+        await self.json("DELETE", f"/api/history/{self.ids[0]}", status=503)
+        await self.json("GET", f"/api/input-images/{item['id']}")
+        self.assertEqual((await self.client.get(f"/api/input-images/{item['id']}/image")).status, 200)
 
 
 if __name__ == "__main__":

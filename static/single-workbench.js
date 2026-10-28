@@ -180,7 +180,6 @@ function singleWorkbenchPersist() {
     localStorage.setItem(VIEW_KEY, JSON.stringify({ version: 1, activeSection, views: poolViews }));
     ui.draftStatus.textContent = `本地草稿已保存 ${formatSavedTime(savedAt)}`;
   } catch { ui.draftStatus.textContent = "浏览器未允许保存草稿"; }
-  if (typeof imageCleanupScheduleLeases === "function") imageCleanupScheduleLeases();
   return true;
 }
 function singleWorkbenchSwitch(mode, profile = currentProfile(), { save = true, settings = null, poolDraft = null } = {}) {
@@ -482,7 +481,7 @@ async function singleWorkbenchFromHistory(record, asImage = false) {
   closeImagePreview({ immediate: true, restoreFocus: false }); motionDialog(ui.detailDialog, false);
   singleWorkbenchShowSettings();
   singleWorkbenchPersist();
-  if (typeof artworkRevealWorkbench === "function") artworkRevealWorkbench();
+  if (typeof revealHistoryWorkbench === "function") revealHistoryWorkbench();
   toast(asImage ? "已送入单图工作台作为参考图" : "已载入最终提示词和生成参数");
 }
 function singleWorkbenchApplyPreset(item) {

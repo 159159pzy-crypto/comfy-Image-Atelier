@@ -790,11 +790,32 @@ test('a failed single bitmap preserves detail and supports retry without a sideb
   assert.equal(ctx.state.imageError, null);
 });
 
+function installHistoryDeletion(ctx) {
+  const detailSource = fs.readFileSync(require('node:path').join(__dirname, '../static/history-detail.js'), 'utf8');
+  ctx.historyDetailState = { busy: false, record: null, owner: null };
+  ctx.historyDetailWritable = () => true;
+  ctx.renderHistoryDelete = () => {};
+  ctx.historyDetailElement = id => ctx.document.getElementById(id);
+  ctx.historyDetailElement('historyDeleteMode').value = 'record';
+  ctx.historyViewState = () => ({ page: ctx.historyPage });
+  ctx.removeHistoryViewRecord = (_, record) => { ctx.historyCache.clear(); ctx.historyItems = ctx.historyItems.filter(item => item.id !== record.id); };
+  ctx.setHistoryDetailView = (_, options) => options?.focusTarget?.focus();
+  ctx.singleWorkbenchActive = () => true;
+  ctx.toast = () => {};
+  for (const name of ['applyHistoryDeleted', 'confirmHistoryDelete']) {
+    const start = detailSource.indexOf(`async function ${name}(`);
+    vm.runInContext(detailSource.slice(start, detailSource.indexOf('\n}', start) + 2), ctx);
+  }
+  return () => {
+    ctx.historyDetailState.record = ctx.selectedRecord;
+    ctx.historyDetailState.owner = ctx.detailContext;
+    return ctx.confirmHistoryDelete({ preventDefault() {} });
+  };
+}
+
 test('a deleted old detail cannot close or cancel a different image opened while DELETE awaited', async () => {
   const ctx = galleryContext(), response = deferred();
-  vm.runInContext(functionSource('deleteSelectedHistoryRecord'), ctx);
-  ctx.confirm = () => true;
-  ctx.toast = message => { throw new Error(message); };
+  const performDeletion = installHistoryDeletion(ctx);
   ctx.request = () => response.promise;
   ctx.ui.deleteRecord = { disabled: false };
   ctx.ui.detailDialog.close = () => { throw new Error('Closed a newer detail'); };
@@ -802,31 +823,30 @@ test('a deleted old detail cannot close or cancel a different image opened while
   ctx.loadHistory = () => { throw new Error('Changed random history'); };
   Object.assign(ctx.state, { loaded: true, items: [singleRecord(30), singleRecord(20)], total: 2, viewerRecord: singleRecord(20) });
   ctx.selectedRecord = ctx.state.viewerRecord;
-  const deleting = ctx.deleteSelectedHistoryRecord();
+  const deleting = performDeletion();
   ctx.detailContext = { origin: 'single' };
   ctx.selectedRecord = singleRecord(30); ctx.state.viewerRecord = ctx.selectedRecord;
   ctx.state.selectionRequest = 8;
-  response.resolve({ ok: true }); await deleting;
+  response.resolve({ deleted: true }); await deleting;
   assert.equal(ctx.selectedRecord.id, 30);
   assert.equal(ctx.state.viewerRecord.id, 30);
   assert.equal(ctx.state.selectionRequest, 8);
   assert.equal(ctx.historyDirty, true);
-  assert.equal(ctx.ui.deleteRecord.disabled, false);
+  assert.equal(ctx.historyDetailState.busy, false);
 });
 
 test('single delete updates its detail in place and closes only when no neighbor remains', async () => {
   const ctx = galleryContext();
-  vm.runInContext(functionSource('deleteSelectedHistoryRecord'), ctx);
-  ctx.confirm = () => true; ctx.toast = message => { throw new Error(message); };
-  ctx.request = async () => ({ ok: true }); ctx.ui.deleteRecord = {};
+  const performDeletion = installHistoryDeletion(ctx);
+  ctx.request = async () => ({ deleted: true }); ctx.ui.deleteRecord = {};
   ctx.ui.detailDialog.close = () => { ctx.ui.detailDialog.open = false; };
   Object.assign(ctx.state, { loaded: true, items: [singleRecord(30), singleRecord(20)], total: 2, viewerRecord: singleRecord(30) });
   ctx.selectedRecord = ctx.state.viewerRecord;
-  await ctx.deleteSelectedHistoryRecord();
+  await performDeletion();
   assert.equal(ctx.ui.detailDialog.open, true);
   assert.equal(ctx.selectedRecord.id, 20);
   assert.equal(ctx.ui.detailImage.focused, true);
-  await ctx.deleteSelectedHistoryRecord();
+  await performDeletion();
   assert.equal(ctx.ui.detailDialog.open, false);
   assert.equal(ctx.selectedRecord, null);
 });

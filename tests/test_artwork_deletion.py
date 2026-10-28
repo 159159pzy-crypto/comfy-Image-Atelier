@@ -12,7 +12,7 @@ from anima_webui.artwork_deletion import ArtworkDeletionService, deletion_image_
 from anima_webui.history import HistoryStore
 from anima_webui.image_location import ImageLocationError
 from anima_webui.workflow import WorkflowError
-from test_artwork_collections import add_image
+from test_artwork_collections import add_image, legacy_management_tables
 from test_storage_transactions import FailingConnection
 
 
@@ -24,6 +24,7 @@ class ArtworkDeletionTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch("anima_webui.history.sqlite3.connect", side_effect=lambda *a, **kw: connect(*a, factory=FailingConnection, **kw)):
             self.store = HistoryStore(self.directory / "history.sqlite3")
         await self.store.create_batch("test", 20, {"model_profile": "anima"})
+        await self.store._call(legacy_management_tables, self.store.connection)
         self.thumbnails = mock.Mock(discard=mock.AsyncMock())
         self.service = ArtworkDeletionService(self.store, self.thumbnails)
         self.patches = [mock.patch("anima_webui.artwork_deletion.image_location.IS_WINDOWS", True),
@@ -38,11 +39,22 @@ class ArtworkDeletionTests(unittest.IsolatedAsyncioTestCase):
         await self.store.close()
         self.temp.cleanup()
 
+    async def memberships(self, image_id):
+        return await self.store._call(lambda: [row[0] for row in self.store.connection.execute(
+            "SELECT folder_id FROM artwork_memberships WHERE image_id=?", (image_id,))])
+
+    async def membership_count(self):
+        return await self.store._call(lambda: self.store.connection.execute(
+            "SELECT COUNT(*) FROM artwork_memberships").fetchone()[0])
+
     async def image(self, filename="image.png", create=True):
         if create:
             (self.directory / filename).write_bytes(b"original")
         image_id = (await add_image(self.store, filename))["id"]
-        await self.store.update_artwork_memberships([image_id], ["default"])
+        def favorite():
+            with self.store.connection:
+                self.store.connection.execute("INSERT INTO artwork_memberships VALUES('default',?)", (image_id,))
+        await self.store._call(favorite)
         return image_id
 
     async def test_record_only_keeps_original_cascades_favorites_and_missing_is_idempotent(self):
@@ -51,7 +63,7 @@ class ArtworkDeletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["deleted_count"], 1)
         self.assertEqual(result["success_count"], 2)
         self.assertTrue((self.directory / "image.png").is_file())
-        self.assertEqual((await self.store.list_artwork_folders())["total"], 0)
+        self.assertEqual(await self.membership_count(), 0)
         self.assertEqual(result["results"][1]["code"], "already_missing")
 
     async def test_invalid_mode_has_no_effect(self):
@@ -59,7 +71,7 @@ class ArtworkDeletionTests(unittest.IsolatedAsyncioTestCase):
         for mode in ([], {}, True, "unknown"):
             with self.assertRaises(WorkflowError):
                 await self.service.delete([image_id], mode)
-        self.assertEqual((await self.store.get_image(image_id))["folder_ids"], ["default"])
+        self.assertEqual(await self.memberships(image_id), ["default"])
         self.assertTrue((self.directory / "image.png").exists())
 
     async def test_shared_file_requires_all_references_and_unlinks_once(self):
@@ -83,7 +95,7 @@ class ArtworkDeletionTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch("anima_webui.artwork_deletion.image_location.comfy_image_directory", return_value=self.directory / "unavailable"):
             result = await self.service.delete([other], "file")
         self.assertEqual(result["results"][0]["code"], "image_directory_unavailable")
-        self.assertEqual((await self.store.get_image(other))["folder_ids"], ["default"])
+        self.assertEqual(await self.memberships(other), ["default"])
 
     async def test_partial_filesystem_failure_preserves_failed_record_and_continues(self):
         one, two = await self.image("denied.png"), await self.image("allowed.png")
@@ -95,7 +107,7 @@ class ArtworkDeletionTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(Path, "unlink", autospec=True, side_effect=unlink):
             result = await self.service.delete([one, two], "file")
         self.assertEqual((result["deleted_count"], result["failed_count"]), (1, 1))
-        self.assertEqual((await self.store.get_image(one))["folder_ids"], ["default"])
+        self.assertEqual(await self.memberships(one), ["default"])
         self.assertTrue((self.directory / "denied.png").exists())
         self.assertFalse((self.directory / "allowed.png").exists())
 
@@ -109,7 +121,7 @@ class ArtworkDeletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(first["record_deleted"])
         self.assertFalse(second["file_deleted"])
         self.assertTrue((self.directory / "second.png").exists())
-        self.assertEqual((await self.store.get_image(one))["folder_ids"], ["default"])
+        self.assertEqual(await self.memberships(one), ["default"])
         retry = await self.service.delete([one], "file")
         self.assertTrue(retry["results"][0]["record_deleted"])
         self.assertTrue(retry["results"][0]["file_missing"])
@@ -120,7 +132,7 @@ class ArtworkDeletionTests(unittest.IsolatedAsyncioTestCase):
         result = await self.service.delete([one, two])
         self.assertEqual(result["failed_count"], 2)
         self.assertEqual((await self.store.list_images())["total"], 2)
-        self.assertEqual((await self.store.list_artwork_folders())["total"], 2)
+        self.assertEqual(await self.membership_count(), 2)
 
     async def test_remote_verification_failure_and_unsafe_record_never_delete(self):
         image_id = await self.image()

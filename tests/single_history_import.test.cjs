@@ -132,7 +132,7 @@ test('reference import finishes before committing the destination workbench', as
   const { ctx, imported } = setup(); let resolve; const events = [];
   ctx.request = () => new Promise(yes => { resolve = yes; });
   ctx.singleWorkbenchSetInput = image => events.push(`input:${image.id}`);
-  ctx.artworkRevealWorkbench = () => events.push('reveal');
+  ctx.revealHistoryWorkbench = () => events.push('reveal');
   const importing = ctx.singleWorkbenchFromHistory(historyRecord('random'), true);
   assert.equal(imported.length, 0);
   resolve({ id: 'managed-reference' }); await importing;

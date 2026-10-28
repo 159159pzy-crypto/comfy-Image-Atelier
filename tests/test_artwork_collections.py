@@ -1,16 +1,11 @@
+"""Compatibility with databases created before artwork management was removed."""
 from __future__ import annotations
 
-import sqlite3
 import tempfile
 import unittest
-from contextlib import closing
 from pathlib import Path
-from unittest import mock
 
 from anima_webui.history import HistoryStore
-from anima_webui.workflow import WorkflowError
-from anima_webui.persistence import StorageReadOnlyError
-from test_storage_transactions import FailingConnection
 
 
 async def add_image(store, filename="image.png", workbench="random", model="anima"):
@@ -19,117 +14,68 @@ async def add_image(store, filename="image.png", workbench="random", model="anim
                                  settings={"workbench": workbench, "model_profile": model})
 
 
-class ArtworkCollectionTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.path = Path(self.temp.name) / "history.sqlite3"
-        connect = sqlite3.connect
-        with mock.patch("anima_webui.history.sqlite3.connect", side_effect=lambda *a, **kw: connect(*a, factory=FailingConnection, **kw)):
-            self.store = HistoryStore(self.path)
-        await self.store.create_batch("test", 20, {"model_profile": "anima"})
+def legacy_management_tables(connection):
+    connection.executescript("""
+        CREATE TABLE artwork_folders(id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE artwork_memberships(
+            folder_id TEXT NOT NULL REFERENCES artwork_folders(id) ON DELETE CASCADE,
+            image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+            PRIMARY KEY(folder_id,image_id));
+        INSERT INTO artwork_folders VALUES('default','Saved favorites','before upgrade');
+        CREATE TABLE managed_image_files (
+            kind TEXT NOT NULL, asset_id TEXT NOT NULL, root TEXT NOT NULL,
+            relative_path TEXT NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL,
+            created_at REAL NOT NULL, last_used_at REAL NOT NULL, origin TEXT NOT NULL,
+            PRIMARY KEY(kind,asset_id,root));
+        INSERT INTO managed_image_files VALUES('input','old-asset','old-root','old.png','digest',10,1,1,'upload');
+        CREATE TABLE image_draft_leases (
+            session_id TEXT NOT NULL,kind TEXT NOT NULL,asset_id TEXT NOT NULL,expires_at REAL NOT NULL,
+            PRIMARY KEY(session_id,kind,asset_id));
+        INSERT INTO image_draft_leases VALUES('old-session','input','old-asset',1);
+        CREATE TABLE image_cleanup_settings (
+            id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL,
+            retention_days INTEGER NOT NULL,last_run TEXT);
+        INSERT INTO image_cleanup_settings VALUES(1,1,7,'{"deleted_files":3}');
+    """)
 
-    async def asyncTearDown(self):
-        await self.store.close()
-        self.temp.cleanup()
 
-    async def test_multiple_memberships_counts_filter_and_cursor(self):
-        folder = (await self.store.create_artwork_folder("精选"))["folder"]["id"]
-        images = [await add_image(self.store, f"{n}.png", "single" if n % 2 else "random", "krea2" if n % 2 else "anima") for n in range(6)]
-        ids = [image["id"] for image in images]
-        await self.store.update_artwork_memberships(ids, [folder, "default"])
-        await self.store.update_artwork_memberships(ids, [folder])
-        listing = await self.store.list_artwork_folders()
-        self.assertEqual(listing["total"], 6)
-        self.assertEqual([row["count"] for row in listing["folders"]], [6, 6])
-        first = await self.store.list_images(limit=2, workbench="single", folder_id=folder)
-        self.assertEqual(first["total"], 3)
-        self.assertEqual([row["id"] for row in first["items"]], [ids[5], ids[3]])
-        self.assertTrue(first["has_more"])
-        last = await self.store.list_images(limit=2, workbench="single", folder_id=folder, before_id=first["next_before_id"])
-        self.assertEqual([row["id"] for row in last["items"]], [ids[1]])
-        self.assertFalse(last["has_more"])
-        self.assertEqual(set(first["items"][0]["folder_ids"]), {folder, "default"})
+class LegacyArtworkDataTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reopen_preserves_retired_tables_without_exposing_favorites(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            store = HistoryStore(path)
+            await store.create_batch("test", 1, {"model_profile": "anima"})
+            image = await add_image(store)
+            await store._call(legacy_management_tables, store.connection)
 
-    async def test_delete_folder_moves_only_orphans_and_delete_record_cascades(self):
-        one = (await add_image(self.store))["id"]
-        two = (await add_image(self.store, "two.png"))["id"]
-        first = (await self.store.create_artwork_folder("第一"))["folder"]["id"]
-        second = (await self.store.create_artwork_folder("第二"))["folder"]["id"]
-        await self.store.update_artwork_memberships([one, two], [first])
-        await self.store.update_artwork_memberships([two], [second])
-        deleted = await self.store.delete_artwork_folder(first)
-        self.assertEqual(deleted["moved_count"], 1)
-        self.assertEqual((await self.store.get_image(one))["folder_ids"], ["default"])
-        self.assertEqual((await self.store.get_image(two))["folder_ids"], [second])
-        await self.store.delete_image(two)
-        self.assertEqual((await self.store.list_artwork_folders())["total"], 1)
-        self.assertEqual((await self.store.list_images(favorites_only=True))["total"], 1)
+            def seed():
+                with store.connection:
+                    store.connection.execute("INSERT INTO artwork_memberships VALUES('default',?)", (image["id"],))
 
-    async def test_remove_and_clear_are_explicit_unfavorite_and_survive_restart(self):
-        image_id = (await add_image(self.store))["id"]
-        folder = (await self.store.create_artwork_folder("持久化"))["folder"]["id"]
-        await self.store.update_artwork_memberships([image_id], [folder, "default"])
-        await self.store.close()
-        self.store = HistoryStore(self.path)
-        self.assertEqual(len((await self.store.get_image(image_id))["folder_ids"]), 2)
-        await self.store.update_artwork_memberships([image_id], [folder], "remove")
-        self.assertEqual((await self.store.get_image(image_id))["folder_ids"], ["default"])
-        await self.store.update_artwork_memberships([image_id], [], "clear")
-        self.assertEqual((await self.store.list_images(favorites_only=True))["total"], 0)
+            await store._call(seed)
+            names = ("artwork_folders", "artwork_memberships", "managed_image_files",
+                     "image_draft_leases", "image_cleanup_settings")
+            before = await store._call(lambda: {name: [tuple(row) for row in store.connection.execute(f"SELECT * FROM {name}")]
+                                                for name in names})
+            await store.close()
+            store = HistoryStore(path)
+            try:
+                records = await store.list_images()
+                self.assertEqual(records["total"], 1)
+                self.assertNotIn("folder_ids", records["items"][0])
+                after = await store._call(lambda: {name: [tuple(row) for row in store.connection.execute(f"SELECT * FROM {name}")]
+                                                   for name in names})
+                self.assertEqual(after, before)
+                self.assertEqual(list(Path(directory).glob("*.pre-artwork-collections*.bak")), [])
+            finally:
+                await store.close()
 
-    async def test_atomic_validation_system_folder_and_duplicate_names(self):
-        image_id = (await add_image(self.store))["id"]
-        for action in (lambda: self.store.rename_artwork_folder("default", "rename"), lambda: self.store.delete_artwork_folder("default")):
-            with self.assertRaises(WorkflowError):
-                await action()
-        await self.store.create_artwork_folder(" Shared ")
-        with self.assertRaises(WorkflowError):
-            await self.store.create_artwork_folder("shared")
-        with self.assertRaises(KeyError):
-            await self.store.update_artwork_memberships([image_id, 999], ["default"])
-        self.assertEqual((await self.store.get_image(image_id))["folder_ids"], [])
-        with self.assertRaises(KeyError):
-            await self.store.update_artwork_memberships([image_id], ["default", "missing"])
-        self.assertEqual((await self.store.list_artwork_folders())["total"], 0)
-        for ids in ([], [True], [0], [1] * 201):
-            with self.assertRaises(WorkflowError):
-                await self.store.update_artwork_memberships(ids, ["default"])
-        for action in ([], {}, True, "unknown"):
-            with self.assertRaises(WorkflowError):
-                await self.store.update_artwork_memberships([image_id], ["default"], action)
-
-    async def test_failed_commit_rolls_back_memberships_and_failed_rollback_protects(self):
-        image_id = (await add_image(self.store))["id"]
-        await self.store._call(setattr, self.store.connection, "fail_commit", True)
-        with self.assertRaises(sqlite3.Error):
-            await self.store.update_artwork_memberships([image_id], ["default"])
-        self.assertEqual((await self.store.get_image(image_id))["folder_ids"], [])
-        await self.store._call(setattr, self.store.connection, "fail_commit", True)
-        await self.store._call(setattr, self.store.connection, "fail_rollback", True)
-        with self.assertRaises(sqlite3.Error):
-            await self.store.create_artwork_folder("failed")
-        with self.assertRaises(StorageReadOnlyError):
-            await self.store.create_artwork_folder("blocked")
-
-    async def test_upgrade_snapshot_precedes_schema_creation(self):
-        image_id = (await add_image(self.store))["id"]
-        await self.store.close()
-        with closing(sqlite3.connect(self.path)) as connection:
-            connection.executescript("DROP TABLE artwork_memberships; DROP TABLE artwork_folders;")
-        self.store = HistoryStore(self.path)
-        backup = Path(f"{self.path}.pre-artwork-collections.bak")
-        self.assertTrue(backup.is_file())
-        with closing(sqlite3.connect(backup)) as connection:
-            self.assertEqual(connection.execute("SELECT id FROM images").fetchone()[0], image_id)
-            self.assertIsNone(connection.execute("SELECT name FROM sqlite_master WHERE name='artwork_folders'").fetchone())
-        self.assertEqual((await self.store.get_image(image_id))["folder_ids"], [])
-
-    async def test_failed_upgrade_backup_preserves_database(self):
-        await self.store.close()
-        with closing(sqlite3.connect(self.path)) as connection:
-            connection.executescript("DROP TABLE artwork_memberships; DROP TABLE artwork_folders;")
-        before = self.path.read_bytes()
-        with mock.patch.object(Path, "open", side_effect=PermissionError("no backup")):
-            self.store = HistoryStore(self.path)
-        self.assertFalse(self.store.available)
-        self.assertEqual(self.path.read_bytes(), before)
+    async def test_fresh_history_does_not_create_retired_management_tables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HistoryStore(Path(directory) / "history.sqlite3")
+            try:
+                names = await store._call(lambda: {row[0] for row in store.connection.execute("SELECT name FROM sqlite_master")})
+                self.assertTrue(names.isdisjoint({"artwork_folders", "artwork_memberships", "managed_image_files",
+                                                 "image_draft_leases", "image_cleanup_settings"}))
+            finally:
+                await store.close()

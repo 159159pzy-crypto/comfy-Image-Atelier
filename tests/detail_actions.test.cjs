@@ -42,7 +42,7 @@ function harness({ reduced = false, load = async () => ({}), copyHeight = 800, h
   const ctx = vm.createContext({ document, selectedRecord: { id: 7 }, regenerationTrigger: null,
     ui: { replayDrawer: replay, variantDrawer: variant, reproduceImage: replayButton, variantButton,
       detailDialog: { classList: classList() }, detailScroll: { scrollTop: 90 }, confirmReplay: replay.item },
-    artworkDetailVisible: () => true, loadRegenerationOptions: load,
+    historyDetailVisible: () => true, loadRegenerationOptions: load,
     performance: { now: () => now }, matchMedia: () => ({ matches: reduced, addEventListener() {} }),
     requestAnimationFrame: callback => { frames.set(++serial, callback); return serial; }, cancelAnimationFrame: id => frames.delete(id),
     ResizeObserver: class { constructor(callback) { this.callback = callback; this.nodes = []; observers.push(this); } observe(node) { this.connected = true; this.nodes.push(node); } disconnect() { this.connected = false; } },

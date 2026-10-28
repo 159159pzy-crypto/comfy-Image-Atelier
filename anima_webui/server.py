@@ -20,7 +20,7 @@ from aiohttp.web_protocol import RequestPayloadError
 
 from .comfy import ComfyClient, ComfyError
 from .artwork_deletion import ArtworkDeletionService
-from .asset_lifecycle import AssetLifecycle
+from .imported_images import ImportedImageService
 from .catalog import CatalogError, PromptCatalog, SECTIONS, resolve_history_selection
 from .persistence import StorageReadOnlyError
 from .custom_prompts import CustomPromptStore
@@ -72,7 +72,7 @@ PROMPT_POOLS_KEY: web.AppKey[Any] = web.AppKey("prompt_pools", object)
 INPUT_IMAGES_KEY: web.AppKey[Any] = web.AppKey("input_images", object)
 PROMPT_IMAGES_KEY: web.AppKey[Any] = web.AppKey("prompt_images", object)
 THUMBNAILS_KEY: web.AppKey[Any] = web.AppKey("thumbnails", object)
-ASSET_LIFECYCLE_KEY: web.AppKey[Any] = web.AppKey("asset_lifecycle", object)
+IMPORTED_IMAGES_KEY: web.AppKey[Any] = web.AppKey("imported_images", object)
 ARTWORK_DELETION_KEY: web.AppKey[Any] = web.AppKey("artwork_deletion", object)
 ALLOWED_HOSTNAMES_KEY: web.AppKey[frozenset[str]] = web.AppKey(
     "allowed_hostnames", frozenset
@@ -341,8 +341,8 @@ def create_app(
     manager = BatchManager(
         templates, history, client, catalog, prompt_rules, prompt_pools, input_images, prompt_images
     )
-    lifecycle = AssetLifecycle(history, input_images, prompt_images, client, manager)
-    manager.asset_lifecycle = lifecycle
+    imported_images = ImportedImageService(history, input_images, prompt_images, client)
+    manager.imported_images = imported_images
     artwork_deletion = ArtworkDeletionService(history, thumbnails)
 
     startup_warnings = [
@@ -376,7 +376,7 @@ def create_app(
     app[INPUT_IMAGES_KEY] = input_images
     app[PROMPT_IMAGES_KEY] = prompt_images
     app[THUMBNAILS_KEY] = thumbnails
-    app[ASSET_LIFECYCLE_KEY] = lifecycle
+    app[IMPORTED_IMAGES_KEY] = imported_images
     app[ARTWORK_DELETION_KEY] = artwork_deletion
     cleanup_task: asyncio.Task[None] | None = None
     shutdown_exit_handle: asyncio.TimerHandle | None = None
@@ -1244,19 +1244,19 @@ def create_app(
 
     async def upload_input_image(request: web.Request) -> web.Response:
         found = await read_uploaded_image(request)
-        result = await lifecycle.add("input", found[0], filename=found[1])
+        result = await imported_images.add("input", found[0], filename=found[1])
         return web.json_response(result, status=201)
 
     async def upload_prompt_image(request: web.Request) -> web.Response:
         found = await read_uploaded_image(request)
-        result = await lifecycle.add("prompt", found[0], filename=found[1])
+        result = await imported_images.add("prompt", found[0], filename=found[1])
         return web.json_response(result, status=201)
 
     async def prompt_image_metadata(request: web.Request) -> web.Response:
-        return web.json_response(await lifecycle.read("prompt", request.match_info["asset_id"]))
+        return web.json_response(await imported_images.read("prompt", request.match_info["asset_id"]))
 
     async def prompt_image_content(request: web.Request) -> web.Response:
-        content = await lifecycle.read_bytes("prompt", request.match_info["asset_id"])
+        content = await imported_images.read_bytes("prompt", request.match_info["asset_id"])
         return web.Response(body=content, content_type="image/png")
 
     async def input_image_from_history(request: web.Request) -> web.Response:
@@ -1267,64 +1267,15 @@ def create_app(
         image_id = _image_id(image_id)
         record = await history.get_image(image_id)
         content, _ = await client.image_bytes(record)
-        result = await lifecycle.add("input", content, filename=record["filename"], source_image_id=image_id)
+        result = await imported_images.add("input", content, filename=record["filename"], source_image_id=image_id)
         return web.json_response(result, status=201)
 
     async def input_image_metadata(request: web.Request) -> web.Response:
-        return web.json_response(await lifecycle.read("input", request.match_info["asset_id"]))
+        return web.json_response(await imported_images.read("input", request.match_info["asset_id"]))
 
     async def input_image_content(request: web.Request) -> web.Response:
-        content = await lifecycle.read_bytes("input", request.match_info["asset_id"])
+        content = await imported_images.read_bytes("input", request.match_info["asset_id"])
         return web.Response(body=content, content_type="image/png")
-
-    async def image_cleanup_status(_: web.Request) -> web.Response:
-        return web.json_response(await lifecycle.status())
-
-    async def image_cleanup_settings(request: web.Request) -> web.Response:
-        return web.json_response(await lifecycle.settings(await _json_body(request)))
-
-    async def image_cleanup_run(request: web.Request) -> web.Response:
-        if await _json_body(request):
-            raise WorkflowError("立即清理不接受额外参数")
-        return web.json_response(await lifecycle.run())
-
-    async def image_cleanup_leases(request: web.Request) -> web.Response:
-        body = await _json_body(request)
-        if set(body) - {"session_id", "input_image_ids", "prompt_image_ids"}:
-            raise WorkflowError("草稿图片引用包含未知参数")
-        assets = []
-        for key, kind in (("input_image_ids", "input"), ("prompt_image_ids", "prompt")):
-            values = body.get(key, [])
-            if not isinstance(values, list) or len(values) > 200 or any(not isinstance(value, str) for value in values):
-                raise WorkflowError(f"{key} 必须为最多 200 项的图片 ID 数组")
-            assets.extend({"kind": kind, "id": value} for value in values)
-        return web.json_response(await lifecycle.lease(body.get("session_id"), assets))
-
-    async def list_artwork_folders(_: web.Request) -> web.Response:
-        return web.json_response(await history.list_artwork_folders())
-
-    async def create_artwork_folder(request: web.Request) -> web.Response:
-        body = await _json_body(request)
-        if set(body) != {"name"}:
-            raise WorkflowError("收藏夹需要 name")
-        return web.json_response(await history.create_artwork_folder(body["name"]), status=201)
-
-    async def rename_artwork_folder(request: web.Request) -> web.Response:
-        body = await _json_body(request)
-        if set(body) != {"name"}:
-            raise WorkflowError("收藏夹需要 name")
-        return web.json_response(await history.rename_artwork_folder(request.match_info["folder_id"], body["name"]))
-
-    async def delete_artwork_folder(request: web.Request) -> web.Response:
-        return web.json_response(await history.delete_artwork_folder(request.match_info["folder_id"]))
-
-    async def update_artwork_members(request: web.Request) -> web.Response:
-        body = await _json_body(request)
-        if set(body) - {"image_ids", "folder_ids", "action"}:
-            raise WorkflowError("收藏请求包含未知参数")
-        return web.json_response(await history.update_artwork_memberships(
-            body.get("image_ids"), body.get("folder_ids", []), body.get("action"),
-        ))
 
     async def prompt_assistant_options(request: web.Request) -> web.Response:
         kind = request.query.get("kind", "rewrite")
@@ -1421,9 +1372,7 @@ def create_app(
         if workbench not in {None, "random", "single"}:
             raise WorkflowError("workbench 必须为 random 或 single")
         return web.json_response({
-            **await history.list_images(page, limit, workbench, before_id=before_id,
-                                        folder_id=request.query.get("folder_id") or None,
-                                        favorites_only=_query_bool(request, "favorites_only")),
+            **await history.list_images(page, limit, workbench, before_id=before_id),
             "available": history.available,
         })
 
@@ -1694,12 +1643,6 @@ def create_app(
         return web.json_response({"deleted": bool(result.get("record_deleted")), **payload},
                                  status=200 if result.get("record_deleted") else 409)
 
-    async def delete_history_batch(request: web.Request) -> web.Response:
-        body = await _json_body(request)
-        if set(body) - {"image_ids", "mode"}:
-            raise WorkflowError("删除操作只接受作品 ID 和 mode，不接受文件路径")
-        return web.json_response(await delete_artworks(request, body.get("image_ids"), body.get("mode", "record")))
-
     async def image(request: web.Request) -> web.Response:
         record = await history.get_image(_image_id(request.match_info["image_id"]))
         body, content_type = await client.image_bytes(record)
@@ -1839,15 +1782,6 @@ def create_app(
     app.router.add_put("/api/custom-groups/{section}/{group_id}", update_custom_group)
     app.router.add_delete("/api/custom-groups/{section}/{group_id}", delete_custom_group)
     app.router.add_post("/api/batches", start_batch)
-    app.router.add_get("/api/artwork-folders", list_artwork_folders)
-    app.router.add_post("/api/artwork-folders", create_artwork_folder)
-    app.router.add_post("/api/artwork-folders/members", update_artwork_members)
-    app.router.add_patch("/api/artwork-folders/{folder_id}", rename_artwork_folder)
-    app.router.add_delete("/api/artwork-folders/{folder_id}", delete_artwork_folder)
-    app.router.add_get("/api/image-cleanup", image_cleanup_status)
-    app.router.add_put("/api/image-cleanup", image_cleanup_settings)
-    app.router.add_post("/api/image-cleanup/run", image_cleanup_run)
-    app.router.add_post("/api/image-cleanup/leases", image_cleanup_leases)
     app.router.add_post("/api/input-images", upload_input_image)
     app.router.add_post("/api/input-images/from-history", input_image_from_history)
     app.router.add_get("/api/input-images/{asset_id}/image", input_image_content)
@@ -1864,7 +1798,6 @@ def create_app(
     app.router.add_post("/api/batches/{batch_id}/stop", stop_batch)
     app.router.add_delete("/api/batches/queue/{queue_id}", remove_queued_batch)
     app.router.add_get("/api/history", list_history)
-    app.router.add_post("/api/history/delete", delete_history_batch)
     app.router.add_get(
         r"/api/history/{image_id:\d+}/regeneration-options",
         regeneration_options,
@@ -1880,18 +1813,12 @@ def create_app(
     app.router.add_get("/favicon.ico", favicon)
     app.router.add_static("/static/", root / "static", show_index=False)
 
-    async def start_image_cleanup(_: web.Application) -> None:
-        await lifecycle.initialize()
-        lifecycle.start()
-
-    app.on_startup.append(start_image_cleanup)
-
     async def cleanup_resources() -> None:
         try:
             try:
-                await lifecycle.close()
-            finally:
                 await manager.shutdown()
+            finally:
+                await imported_images.close()
         finally:
             try:
                 await thumbnails.close()

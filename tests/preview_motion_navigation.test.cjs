@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const app = fs.readFileSync(path.join(__dirname, '../static/app.js'), 'utf8');
 const single = fs.readFileSync(path.join(__dirname, '../static/single-gallery.js'), 'utf8');
-const artwork = fs.readFileSync(path.join(__dirname, '../static/artwork-library.js'), 'utf8');
+const historyDetail = fs.readFileSync(path.join(__dirname, '../static/history-detail.js'), 'utf8');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const record = id => ({ id, filename: `${id}.png`, settings: { workbench: 'single' } });
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
@@ -52,16 +52,16 @@ test('a pending cursor cannot repaint after its dialog owner changes', async () 
   assert.deepEqual(h.displayed, []);
 });
 
-test('manager invalidation cancels an old page cursor and the next arrow uses refreshed ordering', async () => {
+test('history invalidation cancels an old page cursor and the next arrow uses refreshed ordering', async () => {
   const h = setup(), pending = deferred();
-  const view = { kind: 'library', queryEpoch: 0, requestId: 0, cache: new Map([[1, {}]]), page: 1, pages: 2, items: [record(4)] };
+  const view = { kind: 'home', queryEpoch: 0, requestId: 0, cache: new Map([[1, {}]]), page: 1, pages: 2, items: [record(4)] };
   h.ctx.imagePreview.context.historyView = view; h.ctx.selectedRecord = record(4); h.ctx.imagePreview.committedSrc = '/api/images/4';
   h.ctx.selectedHistoryLocation = () => ({ page: view.page, items: view.items, index: view.items.findIndex(item => item.id === h.ctx.selectedRecord.id) });
   h.ctx.loadHistoryPageForPreview = () => pending.promise; h.ctx.clearPreviewCache = () => {};
   for (const name of ['currentPreviewRecord', 'restorePreviewCommittedImage']) install(h.ctx, app, name);
-  install(h.ctx, artwork, 'artworkInvalidateHistory');
+  install(h.ctx, historyDetail, 'invalidateHistoryView');
   const old = h.ctx.navigatePreview(1); await flush();
-  h.ctx.artworkInvalidateHistory(view); await flush();
+  h.ctx.invalidateHistoryView(view); await flush();
   assert.equal(h.ctx.imagePreview.navigationCursor, null); assert.equal(h.ctx.imagePreview.phase, 'open');
   assert.equal(view.cache.size, 0); assert.equal(h.image.src, '/api/images/4'); assert.equal(h.image.style.opacity, '1');
   view.items = [record(4), record(9)];
@@ -71,14 +71,14 @@ test('manager invalidation cancels an old page cursor and the next arrow uses re
 });
 
 test('invalidating another list never cancels the current preview owner or single navigation', () => {
-  const h = setup(), manager = { kind: 'library', queryEpoch: 0, requestId: 0, cache: new Map() };
+  const h = setup(), archivedView = { kind: 'home', queryEpoch: 0, requestId: 0, cache: new Map() };
   const current = { kind: 'home' }, cursor = { promise: Promise.resolve({}) };
   h.ctx.imagePreview.context.historyView = current; h.ctx.imagePreview.navigationCursor = cursor;
-  install(h.ctx, artwork, 'artworkInvalidateHistory');
-  h.ctx.artworkInvalidateHistory(manager);
+  install(h.ctx, historyDetail, 'invalidateHistoryView');
+  h.ctx.invalidateHistoryView(archivedView);
   assert.equal(h.ctx.imagePreview.navigationCursor, cursor); assert.equal(h.ctx.imagePreview.navigationRequest, 0);
-  h.ctx.imagePreview.context = { kind: 'single', historyView: manager };
-  h.ctx.artworkInvalidateHistory(manager);
+  h.ctx.imagePreview.context = { kind: 'single', historyView: archivedView };
+  h.ctx.invalidateHistoryView(archivedView);
   assert.equal(h.ctx.imagePreview.navigationCursor, cursor); assert.equal(h.ctx.imagePreview.navigationRequest, 0);
 });
 test('failed latest decode resets intent and restores the last committed bitmap and detail together', async () => {

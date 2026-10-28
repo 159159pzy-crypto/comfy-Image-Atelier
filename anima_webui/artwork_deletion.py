@@ -173,7 +173,7 @@ class ArtworkDeletionService:
                 shared = sorted(set(references) - selected)
                 if shared:
                     self._rollback()
-                    results.update({i: _result(i, code="file_shared", error="原文件仍被其他历史记录引用，请一并选择后删除", shared_ids=shared) for i in group_ids})
+                    results.update({i: _result(i, code="file_shared", error="原文件仍被其他历史记录引用，未删除原文件或记录", shared_ids=shared) for i in group_ids})
                     continue
                 if not current:
                     self._rollback()

@@ -438,27 +438,6 @@ async function singleGalleryDeleted(id) {
   if (!state.items.length && state.hasMore && state.active) void singleGalleryLoad({ more: true });
   return neighbor;
 }
-async function singleGalleryDeletedMany(ids) {
-  const state = singleGalleryState, removed = new Set(ids.map(String));
-  singleGalleryInvalidate({ viewer: false });
-  const previous = state.viewerRecord || state.lastCompleted, before = state.items;
-  const index = before.findIndex(record => String(record.id) === String(previous?.id));
-  const older = index < 0 ? [] : before.slice(index + 1), newer = index < 0 ? before : before.slice(0, index).reverse();
-  let neighbor = [...older, ...newer].find(record => !removed.has(String(record.id))) || null;
-  state.items = before.filter(record => !removed.has(String(record.id)));
-  state.total = Math.max(0, state.total - (before.length - state.items.length));
-  for (const id of removed) { state.failedImages.delete(id); imagePreview.preloaded.delete(id); }
-  if (removed.has(String(state.lastCompleted?.id))) state.lastCompleted = state.items[0] || null;
-  if (removed.has(String(state.viewerRecord?.id))) state.viewerRecord = neighbor;
-  if (removed.has(String(state.imageError?.id))) state.imageError = null;
-  if (state.active) {
-    await singleGalleryLoad({ refresh: true });
-    neighbor ||= state.items.find(record => !removed.has(String(record.id))) || null;
-    if (!state.viewerRecord && state.viewerOpen) state.viewerRecord = neighbor;
-  } else state.loaded = false;
-  singleGalleryCanvas(); singleGalleryRender();
-  return neighbor;
-}
 async function singleGalleryRetryViewer() {
   const state = singleGalleryState;
   if (state.imageError) {
