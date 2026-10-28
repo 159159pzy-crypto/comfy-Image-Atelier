@@ -5,6 +5,9 @@ import functools
 import json
 import logging
 import sqlite3
+import time
+import unicodedata
+import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -13,7 +16,7 @@ from typing import Any
 
 from .persistence import StorageProtection, backup_corrupt_file
 from .model_profiles import get_model_profile
-from .workflow import migrate_settings, normalize_lora_path, validate_settings
+from .workflow import WorkflowError, migrate_settings, normalize_lora_path, validate_settings
 
 
 logger = logging.getLogger(__name__)
@@ -21,6 +24,18 @@ logger = logging.getLogger(__name__)
 
 class HistoryMigrationError(RuntimeError):
     """Raised when legacy history cannot be migrated without risking data."""
+
+
+class ArtworkCollectionConflict(WorkflowError):
+    """A complete collection mutation was rejected because its inputs changed."""
+
+    def __init__(self, message: str, *, missing_image_ids: list[int] | None = None,
+                 missing_folder_ids: list[str] | None = None, current_folder_ids: list[str] | None = None):
+        super().__init__(message)
+        self.payload = {"error": message, "code": "artwork_collection_changed",
+                        "missing_image_ids": missing_image_ids or [], "missing_folder_ids": missing_folder_ids or []}
+        if current_folder_ids is not None:
+            self.payload["current_folder_ids"] = current_folder_ids
 
 
 def _now() -> str:
@@ -106,6 +121,10 @@ class HistoryStore(StorageProtection):
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         if not tables.intersection({"batches", "images"}):
             return
+        if any(table not in tables or column not in {
+            row[1] for row in connection.execute(f"PRAGMA table_info({table})")
+        } for table, column in (("artwork_folders", "sort_position"), ("artwork_memberships", "added_at"))):
+            HistoryStore._backup_before_artwork_favorites(connection)
         needs_backup = not {"batches", "images"}.issubset(tables)
         needs_single_backup = "prompt_jobs" not in tables
         for table in ("batches", "images"):
@@ -134,6 +153,37 @@ class HistoryStore(StorageProtection):
             HistoryStore._backup_before_single_workbench(connection)
         if needs_backup:
             HistoryStore._backup_before_migration(connection)
+
+    @staticmethod
+    def _backup_before_artwork_favorites(connection: sqlite3.Connection) -> Path | None:
+        row = connection.execute("PRAGMA database_list").fetchone()
+        if not row or not row[2]:
+            return None
+        base = str(row[2])
+        number, reserved = 1, False
+        destination = Path(f"{base}.pre-artwork-favorites-v2.bak")
+        try:
+            while True:
+                try:
+                    with destination.open("xb"):
+                        reserved = True
+                    break
+                except FileExistsError:
+                    number += 1
+                    destination = Path(f"{base}.pre-artwork-favorites-v2-{number}.bak")
+            backup = sqlite3.connect(destination)
+            try:
+                connection.backup(backup)
+            finally:
+                backup.close()
+        except (OSError, sqlite3.Error) as error:
+            if reserved:
+                try:
+                    destination.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise HistoryMigrationError("作品收藏升级前无法创建数据库备份") from error
+        return destination
 
     @staticmethod
     def _backup_before_single_workbench(connection: sqlite3.Connection) -> Path | None:
@@ -241,6 +291,7 @@ class HistoryStore(StorageProtection):
         # Migrate before the normal restart-status update so the pre-migration
         # backup contains the exact legacy database state.
         HistoryStore._migrate_unprofiled_history(connection)
+        HistoryStore._initialize_artwork_collections(connection)
         # Match the legacy-aware filter exactly so both counts and descending
         # cursor pages avoid parsing every saved settings document. Build before
         # restart-status writes: an index failure must leave existing data intact.
@@ -257,6 +308,39 @@ class HistoryStore(StorageProtection):
             (_now(),),
         )
         connection.commit()
+
+    @staticmethod
+    def _initialize_artwork_collections(connection: sqlite3.Connection) -> None:
+        """Preserve legacy memberships; unknown collection times remain zero."""
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS artwork_folders (id TEXT PRIMARY KEY, name TEXT NOT NULL, "
+                "created_at TEXT NOT NULL, sort_position INTEGER NOT NULL DEFAULT 0)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS artwork_memberships ("
+                "folder_id TEXT NOT NULL REFERENCES artwork_folders(id) ON DELETE CASCADE, "
+                "image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE, "
+                "added_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(folder_id, image_id))"
+            )
+            if "sort_position" not in {row[1] for row in connection.execute("PRAGMA table_info(artwork_folders)")}:
+                connection.execute("ALTER TABLE artwork_folders ADD COLUMN sort_position INTEGER NOT NULL DEFAULT 0")
+                ids = [row[0] for row in connection.execute(
+                    "SELECT id FROM artwork_folders ORDER BY CASE WHEN id='default' THEN 0 ELSE 1 END, created_at, id"
+                )]
+                connection.executemany("UPDATE artwork_folders SET sort_position=? WHERE id=?", enumerate(ids))
+            if "added_at" not in {row[1] for row in connection.execute("PRAGMA table_info(artwork_memberships)")}:
+                connection.execute("ALTER TABLE artwork_memberships ADD COLUMN added_at INTEGER NOT NULL DEFAULT 0")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_artwork_memberships_image ON artwork_memberships(image_id, folder_id)")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_artwork_memberships_recent "
+                "ON artwork_memberships(folder_id, added_at DESC, image_id DESC)"
+            )
+            connection.commit()
+        except sqlite3.Error as error:
+            connection.rollback()
+            raise HistoryMigrationError("作品收藏升级失败，收藏数据已回滚") from error
 
     @staticmethod
     def _unprofiled_rows(
@@ -572,37 +656,46 @@ class HistoryStore(StorageProtection):
             raise KeyError(image_id)
         return self._image_row(row)
 
-    def _image_row(self, row: sqlite3.Row) -> dict[str, Any]:
+    def _image_row(self, row: sqlite3.Row, folder_ids: list[str] | None = None) -> dict[str, Any]:
         result = dict(row)
         result["settings"] = json.loads(result.pop("settings_json"))
         result["resolved_selection"] = json.loads(result.pop("resolved_selection_json", "{}") or "{}")
         result["bound_resources"] = json.loads(result.pop("bound_resources_json", "{}") or "{}")
         result["single_runtime"] = json.loads(result.pop("single_runtime_json", "{}") or "{}")
         result["workbench"] = result["settings"].get("workbench", "random")
+        result["folder_ids"] = folder_ids if folder_ids is not None else self._artwork_memberships([result["id"]])[result["id"]]
         return result
 
     async def list_images(
         self, page: int = 1, limit: int = 24, workbench: str | None = None,
-        *, before_id: int | None = None,
+        *, before_id: int | None = None, folder_id: str | None = None,
     ) -> dict[str, Any]:
-        return await self._call(self._list_images, page, limit, workbench, before_id=before_id)
+        return await self._call(self._list_images, page, limit, workbench, before_id=before_id, folder_id=folder_id)
 
     def _list_images(
         self, page: int = 1, limit: int = 24, workbench: str | None = None,
-        *, before_id: int | None = None,
+        *, before_id: int | None = None, folder_id: str | None = None,
     ) -> dict[str, Any]:
         if before_id is not None and (
             type(before_id) is not int or not 1 <= before_id <= 2**63 - 1
         ):
             raise ValueError("before_id 必须为正整数图片 ID")
+        if folder_id is not None and before_id is not None:
+            raise WorkflowError("收藏夹按收藏时间分页，不能与 before_id 同时使用")
         page = max(1, page)
         limit = min(60, max(1, limit))
         conditions, params = [], ()
+        collection_join = ""
+        if folder_id is not None:
+            self._require_artwork_folder(folder_id)
+            collection_join = " JOIN artwork_memberships membership ON membership.image_id=images.id"
+            conditions.append("membership.folder_id = ?")
+            params += (folder_id,)
         if workbench:
             conditions.append("COALESCE(json_extract(images.settings_json, '$.workbench'), 'random') = ?")
             params += (workbench,)
         where = " WHERE " + " AND ".join(conditions) if conditions else ""
-        total = int(self.connection.execute("SELECT COUNT(*) FROM images" + where, params).fetchone()[0])
+        total = int(self.connection.execute("SELECT COUNT(*) FROM images" + collection_join + where, params).fetchone()[0])
         if before_id is not None:
             where += (" AND " if where else " WHERE ") + "images.id < ?"
             params += (before_id,)
@@ -614,20 +707,206 @@ class HistoryStore(StorageProtection):
             """
             SELECT images.*, batches.total AS batch_total
             FROM images JOIN batches ON batches.id = images.batch_id
-            """ + where + " ORDER BY images.id DESC" + pagination,
+            """ + collection_join + where
+            + (" ORDER BY membership.added_at DESC, membership.image_id DESC" if folder_id is not None else " ORDER BY images.id DESC")
+            + pagination,
             (*params, *pagination_params),
         ).fetchall()
         has_more = len(rows) > limit
         rows = rows[:limit]
+        memberships = self._artwork_memberships([row["id"] for row in rows])
         return {
-            "items": [self._image_row(row) for row in rows],
+            "items": [self._image_row(row, memberships[row["id"]]) for row in rows],
             "page": page,
             "limit": limit,
             "total": total,
             "pages": max(1, (total + limit - 1) // limit),
-            "next_before_id": int(rows[-1]["id"]) if rows else None,
+            "next_before_id": int(rows[-1]["id"]) if rows and folder_id is None else None,
             "has_more": has_more,
         }
+
+    @staticmethod
+    def _artwork_id_chunks(values: list[Any]):
+        # Stay below older SQLite variable limits without splitting the transaction.
+        for offset in range(0, len(values), 500):
+            yield values[offset:offset + 500]
+
+    def _artwork_memberships(self, image_ids: list[int]) -> dict[int, list[str]]:
+        memberships: dict[int, list[str]] = {image_id: [] for image_id in image_ids}
+        for chunk in self._artwork_id_chunks(image_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            for row in self.connection.execute(
+                f"SELECT image_id,folder_id FROM artwork_memberships WHERE image_id IN ({placeholders}) ORDER BY folder_id", chunk
+            ):
+                memberships[row[0]].append(row[1])
+        return memberships
+
+    def _existing_artwork_image_ids(self, image_ids: list[int]) -> set[int]:
+        found: set[int] = set()
+        for chunk in self._artwork_id_chunks(image_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            found.update(row[0] for row in self.connection.execute(f"SELECT id FROM images WHERE id IN ({placeholders})", chunk))
+        return found
+
+    async def read_artwork_memberships(self, image_ids: list[int]) -> dict[str, Any]:
+        ids = [] if image_ids == [] else self.artwork_image_ids(image_ids)
+        return await self._call(self._read_artwork_memberships, ids)
+
+    def _read_artwork_memberships(self, image_ids: list[int]) -> dict[str, Any]:
+        found = self._existing_artwork_image_ids(image_ids)
+        memberships = self._artwork_memberships([image_id for image_id in image_ids if image_id in found])
+        return {**self._list_artwork_folders(),
+                "items": [{"id": image_id, "folder_ids": memberships[image_id]} for image_id in image_ids if image_id in found],
+                "missing_image_ids": [image_id for image_id in image_ids if image_id not in found]}
+
+    @staticmethod
+    def artwork_image_ids(image_ids: Any) -> list[int]:
+        if not isinstance(image_ids, list) or not image_ids:
+            raise WorkflowError("请至少选择一张作品")
+        if any(type(value) is not int or not 1 <= value <= 2**63 - 1 for value in image_ids):
+            raise WorkflowError("作品 ID 必须为正整数")
+        return list(dict.fromkeys(image_ids))
+
+    @staticmethod
+    def _artwork_folder_ids(folder_ids: Any, *, allow_empty: bool = False) -> list[str]:
+        if not isinstance(folder_ids, list) or (not folder_ids and not allow_empty):
+            raise WorkflowError("请至少选择一个收藏夹")
+        if any(not isinstance(value, str) or not value or len(value) > 100
+               or any(unicodedata.category(char) in {"Cc", "Cs"} for char in value) for value in folder_ids):
+            raise WorkflowError("收藏夹 ID 无效")
+        return list(dict.fromkeys(folder_ids))
+
+    def _require_artwork_folder(self, folder_id: str) -> sqlite3.Row:
+        self._artwork_folder_ids([folder_id])
+        row = self.connection.execute("SELECT * FROM artwork_folders WHERE id=?", (folder_id,)).fetchone()
+        if row is None:
+            raise KeyError(folder_id)
+        return row
+
+    def _artwork_folder_name(self, name: Any, folder_id: str | None = None) -> str:
+        if not isinstance(name, str) or not 1 <= len(name.strip()) <= 80 or any(unicodedata.category(char) in {"Cc", "Cs"} for char in name):
+            raise WorkflowError("收藏夹名称需要 1-80 个字符，不能包含控制字符")
+        name = name.strip()
+        if any(row["id"] != folder_id and row["name"].casefold() == name.casefold()
+               for row in self.connection.execute("SELECT id,name FROM artwork_folders")):
+            raise WorkflowError("已存在同名作品收藏夹")
+        return name
+
+    async def list_artwork_folders(self) -> dict[str, Any]:
+        return await self._call(self._list_artwork_folders)
+
+    def _list_artwork_folders(self) -> dict[str, Any]:
+        rows = self.connection.execute(
+            "SELECT f.*,COUNT(m.image_id) AS count FROM artwork_folders f "
+            "LEFT JOIN artwork_memberships m ON m.folder_id=f.id GROUP BY f.id ORDER BY f.sort_position,f.id"
+        )
+        return {"folders": [{**dict(row), "is_system": False} for row in rows],
+                "total": self.connection.execute("SELECT COUNT(DISTINCT image_id) FROM artwork_memberships").fetchone()[0]}
+
+    async def create_artwork_folder(self, name: str) -> dict[str, Any]:
+        self.ensure_writable()
+        return await self._call(self._create_artwork_folder, name)
+
+    def _create_artwork_folder(self, name: str) -> dict[str, Any]:
+        self.ensure_writable()
+        self.connection.execute("BEGIN IMMEDIATE")
+        name = self._artwork_folder_name(name)
+        folder_id = uuid.uuid4().hex
+        position = self.connection.execute("SELECT COALESCE(MAX(sort_position),-1)+1 FROM artwork_folders").fetchone()[0]
+        self.connection.execute("INSERT INTO artwork_folders(id,name,created_at,sort_position) VALUES(?,?,?,?)",
+                                (folder_id, name, _now(), position))
+        self.connection.commit()
+        payload = self._list_artwork_folders()
+        return {**payload, "folder": next(item for item in payload["folders"] if item["id"] == folder_id)}
+
+    async def rename_artwork_folder(self, folder_id: str, name: str) -> dict[str, Any]:
+        self.ensure_writable()
+        return await self._call(self._rename_artwork_folder, folder_id, name)
+
+    def _rename_artwork_folder(self, folder_id: str, name: str) -> dict[str, Any]:
+        self.ensure_writable()
+        self.connection.execute("BEGIN IMMEDIATE")
+        self._require_artwork_folder(folder_id)
+        name = self._artwork_folder_name(name, folder_id)
+        self.connection.execute("UPDATE artwork_folders SET name=? WHERE id=?", (name, folder_id))
+        self.connection.commit()
+        payload = self._list_artwork_folders()
+        return {**payload, "folder": next(item for item in payload["folders"] if item["id"] == folder_id)}
+
+    async def reorder_artwork_folders(self, folder_ids: list[str]) -> dict[str, Any]:
+        self.ensure_writable()
+        ids = self._artwork_folder_ids(folder_ids, allow_empty=True)
+        if len(ids) != len(folder_ids):
+            raise WorkflowError("收藏夹排序不能包含重复 ID")
+        return await self._call(self._reorder_artwork_folders, ids)
+
+    def _reorder_artwork_folders(self, folder_ids: list[str]) -> dict[str, Any]:
+        self.ensure_writable()
+        self.connection.execute("BEGIN IMMEDIATE")
+        current = [row[0] for row in self.connection.execute("SELECT id FROM artwork_folders ORDER BY sort_position,id")]
+        if set(current) != set(folder_ids):
+            raise ArtworkCollectionConflict("收藏夹列表已变化，请刷新后重新排序", current_folder_ids=current,
+                                            missing_folder_ids=[item for item in folder_ids if item not in set(current)])
+        self.connection.executemany("UPDATE artwork_folders SET sort_position=? WHERE id=?", enumerate(folder_ids))
+        self.connection.commit()
+        return self._list_artwork_folders()
+
+    async def delete_artwork_folder(self, folder_id: str) -> dict[str, Any]:
+        self.ensure_writable()
+        return await self._call(self._delete_artwork_folder, folder_id)
+
+    def _delete_artwork_folder(self, folder_id: str) -> dict[str, Any]:
+        self.ensure_writable()
+        self.connection.execute("BEGIN IMMEDIATE")
+        self._require_artwork_folder(folder_id)
+        affected = [row[0] for row in self.connection.execute(
+            "SELECT image_id FROM artwork_memberships WHERE folder_id=? ORDER BY image_id", (folder_id,)
+        )]
+        self.connection.execute("DELETE FROM artwork_folders WHERE id=?", (folder_id,))
+        self.connection.commit()
+        memberships = self._artwork_memberships(affected)
+        return {**self._list_artwork_folders(), "deleted": True, "affected_image_ids": affected,
+                "changed_image_ids": affected, "changed_count": len(affected),
+                "items": [{"id": image_id, "folder_ids": memberships[image_id]} for image_id in affected]}
+
+    async def update_artwork_memberships(self, image_ids: list[int], folder_ids: list[str], action: str = "add") -> dict[str, Any]:
+        self.ensure_writable()
+        ids = self.artwork_image_ids(image_ids)
+        folders = self._artwork_folder_ids(folder_ids)
+        if not isinstance(action, str) or action not in {"add", "remove"}:
+            raise WorkflowError("收藏操作必须为 add 或 remove")
+        return await self._call(self._update_artwork_memberships, ids, folders, action)
+
+    def _update_artwork_memberships(self, image_ids: list[int], folder_ids: list[str], action: str) -> dict[str, Any]:
+        self.ensure_writable()
+        self.connection.execute("BEGIN IMMEDIATE")
+        available_folders = {row[0] for row in self.connection.execute("SELECT id FROM artwork_folders")}
+        missing_folders = [folder_id for folder_id in folder_ids if folder_id not in available_folders]
+        found = self._existing_artwork_image_ids(image_ids)
+        missing_images = [image_id for image_id in image_ids if image_id not in found]
+        if missing_folders or missing_images:
+            raise ArtworkCollectionConflict("部分作品或收藏夹已不存在，本次收藏未修改，请刷新后重试",
+                                            missing_image_ids=missing_images, missing_folder_ids=missing_folders)
+        before = self._artwork_memberships(image_ids)
+        change_start = self.connection.total_changes
+        if action == "add":
+            latest = self.connection.execute("SELECT COALESCE(MAX(added_at),0) FROM artwork_memberships").fetchone()[0]
+            timestamp = max(time.time_ns() // 1000, latest + 1)
+            self.connection.executemany(
+                "INSERT INTO artwork_memberships(folder_id,image_id,added_at) VALUES(?,?,?) "
+                "ON CONFLICT(folder_id,image_id) DO NOTHING",
+                ((folder_id, image_id, timestamp) for folder_id in folder_ids for image_id in image_ids),
+            )
+        else:
+            self.connection.executemany("DELETE FROM artwork_memberships WHERE folder_id=? AND image_id=?",
+                                        ((folder_id, image_id) for folder_id in folder_ids for image_id in image_ids))
+        changed_count = self.connection.total_changes - change_start
+        self.connection.commit()
+        memberships = self._artwork_memberships(image_ids)
+        changed_image_ids = [image_id for image_id in image_ids if before[image_id] != memberships[image_id]]
+        return {**self._list_artwork_folders(), "items": [{"id": image_id, "folder_ids": memberships[image_id]} for image_id in image_ids],
+                "changed_count": changed_count, "updated_count": len(changed_image_ids),
+                "changed_image_ids": changed_image_ids}
 
     async def delete_image(self, image_id: int) -> bool:
         self.ensure_writable()

@@ -35,7 +35,7 @@ function element(tag = '') {
     },
     get innerHTML() { return this.markup || ''; },
     querySelector(selector) {
-      if (tag === 'article') return selector === 'button' ? this.children[0] : this.children[0]?.querySelector(selector);
+      if (tag === 'article') return ['button', '.image-card-open'].includes(selector) ? this.children[0] : this.children[0]?.querySelector(selector);
       return selector === 'img' ? this.image : selector === '.card-copy strong' ? this.title : selector === '.card-copy span' ? this.description : this.failure;
     },
     querySelectorAll(selector) { return selector === 'img' ? this.children.flatMap(article => article.children.map(button => button.image)) : []; },
@@ -78,6 +78,22 @@ test('history paging detaches old cards and keeps its rendered list bounded', ()
   assert.equal(gallery.children.length, 24);
   assert.ok(priorCards.every(card => !card.parentElement));
   assert.ok(gallery.querySelectorAll('img').every(image => image.src.endsWith('/thumbnail')));
+});
+
+test('selection handles the main card without opening details and decoration preserves its image', () => {
+  const { ctx, gallery, opened } = setup();
+  const picked = [], decorated = [];
+  ctx.artworkActivateCard = value => { picked.push(value.id); return true; };
+  ctx.decorateArtworkCard = (article, value, main) => decorated.push({ article, value, main });
+  const value = record(3);
+  ctx.renderHistoryPage({ page: 1, pages: 1, total: 1, items: [value] });
+  const node = gallery.children[0], image = node.children[0].image;
+  node.children[0].listeners.get('click')();
+  assert.deepEqual(picked, [3]); assert.equal(opened.length, 0);
+  ctx.renderHistoryPage({ page: 1, pages: 1, total: 1, items: [{ ...value, folder_ids: ['portrait'] }] });
+  assert.equal(gallery.children[0], node); assert.equal(node.children[0].image, image);
+  assert.equal(decorated.at(-1).main, node.children[0]);
+  assert.deepEqual(decorated.at(-1).value.folder_ids, ['portrait']);
 });
 
 test('unchanged refresh preserves image nodes and focus targets; metadata and click use newest record', () => {

@@ -1,7 +1,7 @@
 /* History filtering and the ordinary image detail/delete surface. */
 const historyDetailState = {
   ready: false, busy: false, view: "detail", record: null, owner: null,
-  homeQuery: { source: "" }, viewRevision: 0,
+  homeQuery: { source: "", folderId: "" }, viewRevision: 0,
   viewFocus: {}, viewFocusFallback: {}, viewOffsets: new Map(),
 };
 const historyDetailElement = id => document.getElementById(id);
@@ -28,12 +28,13 @@ function renderHistorySource({ immediate = false } = {}) {
   if (indicator && selected && typeof animateStudioIndicator === "function") animateStudioIndicator(indicator, { x: selected.offsetLeft - indicator.offsetLeft, width: selected.offsetWidth }, { immediate });
 }
 function historyQueryParams(view = historyViewState()) {
-  return view.query.source ? `&workbench=${encodeURIComponent(view.query.source)}` : "";
+  return (view.query.source ? `&workbench=${encodeURIComponent(view.query.source)}` : "")
+    + (view.query.folderId ? `&folder_id=${encodeURIComponent(view.query.folderId)}` : "");
 }
 function historyQueryKey(view = historyViewState()) { return `${view.kind}:${view.queryEpoch}:${historyQueryParams(view)}`; }
 function setHistorySource(source) {
   if (!HISTORY_SOURCES.has(source) || source === historyDetailState.homeQuery.source) return;
-  historyDetailState.homeQuery = { source };
+  historyDetailState.homeQuery = { ...historyDetailState.homeQuery, source };
   invalidateHistoryView(); renderHistorySource(); void loadHistory(1);
 }
 function historyDetailWritable() { return config?.storage_status?.history?.available !== false && !config?.storage_status?.history?.read_only; }
@@ -136,7 +137,8 @@ function renderHistoryDelete() {
 }
 function removeHistoryViewRecord(view, record) {
   const key = String(record.id), cached = [...view.cache.values()], elements = view.elements;
-  const matches = !view.query.source || (record.workbench || record.settings?.workbench || "random") === view.query.source;
+  const matches = (!view.query.source || (record.workbench || record.settings?.workbench || "random") === view.query.source)
+    && (!view.query.folderId || (record.folder_ids || []).includes(view.query.folderId));
   const present = view.items.some(item => String(item.id) === key);
   const total = Number(view.cache.get(view.page)?.total ?? view.total);
   view.items = view.items.filter(item => String(item.id) !== key);
@@ -158,6 +160,7 @@ function removeHistoryViewRecord(view, record) {
 async function applyHistoryDeleted(record, owner) {
   const id = String(record.id), view = historyViewState(), warnings = [];
   removeHistoryViewRecord(view, record);
+  if (typeof artworkRecordRemoved === "function") artworkRecordRemoved(record.id);
   const ownsDetail = () => detailContext === owner && String(selectedRecord?.id) === id;
   if (ownsDetail()) closeImagePreview({ immediate: true, restoreFocus: false });
   let neighbor = null;

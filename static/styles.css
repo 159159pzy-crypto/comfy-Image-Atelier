@@ -348,7 +348,7 @@ body[data-workbench="single"] [data-random-only], body[data-workbench="single"] 
   transition: background-color .16s ease, border-color .16s ease, color .16s ease, transform .22s var(--spring), filter .16s ease, opacity .16s ease;
 }
 @media (hover: hover) and (pointer: fine) { .button:hover:not(:disabled) { transform: translateY(-1px); } }
-.button:active:not(:disabled), .icon-button:active:not(:disabled), .dimension-mode button:active, .image-card button:active { transform: scale(.975); transition-duration: 80ms; }
+.button:active:not(:disabled), .icon-button:active:not(:disabled), .dimension-mode button:active, .image-card-open:active { transform: scale(.975); transition-duration: 80ms; }
 .button:disabled, .icon-button:disabled { cursor: not-allowed; opacity: .4; }
 .button.primary {
   color: #fff;
@@ -686,7 +686,7 @@ input:disabled, select:disabled { opacity: .5; cursor: not-allowed; }
   font-size: 10px;
   pointer-events: none;
 }
-.image-card button { width: 100%; padding: 0; color: inherit; text-align: left; background: none; border: 0; }
+.image-card .image-card-open { width: 100%; padding: 0; color: inherit; text-align: left; background: none; border: 0; }
 .image-card img { display: block; width: 100%; aspect-ratio: 3 / 4; object-fit: cover; background: var(--surface-muted); border-radius: calc(var(--r-md) - 6px); opacity: .28; transition: transform var(--motion-slow) var(--spring), opacity var(--motion-fast) ease, filter var(--motion-fast) ease; }
 .image-card img.image-loaded { opacity: 1; }
 @media (hover: hover) and (pointer: fine) { .image-card:hover img { transform: scale(1.015); } }
@@ -1408,7 +1408,7 @@ html[data-motion-paused] .progress-track div::after { animation-play-state: paus
 /* Press feedback starts on pointer-down and wins over the hovered state. */
 .button:active:not(:disabled), .icon-button:active:not(:disabled),
 .dialog-heading .icon-button:active:not(:disabled), .drawer-header .icon-button:active:not(:disabled),
-.dialog-close:active, .dimension-mode button:active, .image-card button:active,
+.dialog-close:active, .dimension-mode button:active, .image-card-open:active,
 .manage-pool:active, .artist-chip:active, .item-tools button:active:not(:disabled) {
   transform: scale(.975);
   transition-duration: 80ms;
@@ -1421,7 +1421,7 @@ html[data-motion-paused] .progress-track div::after { animation-play-state: paus
   .dialog-close:hover, .dialog-close:active, .brand:hover .brand-mark,
   .dimension-row:hover, .dimension-mode button:active, .manage-pool:hover, .manage-pool:active, .artist-chip:hover, .artist-chip:active,
   .lora-catalog-item:hover:not(:disabled), .pool-item:hover, .image-card:hover,
-  .image-card:hover img, .image-card button:active, .item-tools button:hover:not(:disabled), .item-tools button:active:not(:disabled) { transform: none; }
+  .image-card:hover img, .image-card-open:active, .item-tools button:hover:not(:disabled), .item-tools button:active:not(:disabled) { transform: none; }
 }
 @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
   .glass, .topbar, .mobile-tabs, .pool-drawer, .command-deck, .queue-panel,

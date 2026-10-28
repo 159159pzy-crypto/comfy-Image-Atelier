@@ -14,10 +14,11 @@
       document.documentElement.dataset.theme = theme;
     })();
   </script>
-  <link rel="stylesheet" href="/static/styles.css?v=20261027-history-polish">
+  <link rel="stylesheet" href="/static/styles.css?v=20261029-artwork-favorites">
   <link rel="stylesheet" href="/static/single-layout.css?v=20261024-motion">
   <link rel="stylesheet" href="/static/single-details.css?v=20261024-motion">
   <link rel="stylesheet" href="/static/history-detail.css?v=20261028-remove-artwork-management">
+  <link rel="stylesheet" href="/static/artwork-favorites.css?v=20261029-artwork-favorites">
 </head>
 <body>
   <div class="ambient" aria-hidden="true"></div>
@@ -271,10 +272,9 @@
       </div>
       <div id="randomArchive">
       <div class="history-header">
-        <div class="history-title"><span class="kicker">GENERATED ARCHIVE</span><h1>作品库</h1><p id="historyCount">0 张图片</p></div>
-        <div class="history-heading-actions"><div class="pager"><button id="prevPage" class="icon-button" type="button" title="上一页" aria-label="上一页">‹</button><span id="pageLabel">1 / 1</span><button id="nextPage" class="icon-button" type="button" title="下一页" aria-label="下一页">›</button></div></div>
-      </div>
-      <div class="history-home-toolbar">
+        <div class="history-title"><span class="kicker">GENERATED ARCHIVE</span><h1 id="artworkHistoryTitle">作品库</h1><p id="historyCount">0 张图片</p></div>
+        <div class="history-heading-actions">
+        <div class="history-source-control">
         <span class="history-source-label">作品来源</span>
         <div id="historyWorkbenchFilter" class="history-source-switch" role="radiogroup" aria-label="作品来源">
           <span class="history-source-thumb" aria-hidden="true"></span>
@@ -282,7 +282,11 @@
           <button type="button" role="radio" aria-label="单图工作台" aria-checked="false" tabindex="-1" data-history-source="single">单图</button>
           <button type="button" role="radio" aria-label="随机工作台" aria-checked="false" tabindex="-1" data-history-source="random">随机</button>
         </div>
+        </div>
+        <div class="pager"><button id="prevPage" class="icon-button" type="button" title="上一页" aria-label="上一页">‹</button><span id="pageLabel">1 / 1</span><button id="nextPage" class="icon-button" type="button" title="下一页" aria-label="下一页">›</button></div>
+        </div>
       </div>
+      <div id="artworkToolbar" class="history-home-toolbar artwork-toolbar"></div>
       <div id="gallery" class="gallery" aria-live="polite"></div>
       <div id="emptyState" class="empty-state"><span class="empty-mark">A</span><strong>等待第一张作品</strong><small>完成生成后会出现在这里</small></div>
       </div>
@@ -636,6 +640,7 @@
       <div class="detail-copy">
         <header class="detail-header">
           <div><span id="detailMeta" class="kicker"></span></div>
+          <button id="detailFavorite" class="artwork-star" type="button" aria-label="选择收藏夹" aria-haspopup="dialog" aria-expanded="false"></button>
         </header>
         <div id="detailScroll" class="detail-scroll">
         <div id="detailMain" class="detail-main">
@@ -739,7 +744,7 @@
   <div id="toast" role="status" aria-live="polite"></div>
   <script src="/static/motion.js?v=20261024-motion" defer></script>
   <script src="/static/workbench-parameters.js?v=20261024-workflow-parameters" defer></script>
-  <script src="/static/single-layout.js?v=20261027-history-polish" defer></script>
+  <script src="/static/single-layout.js?v=20261029-artwork-favorites" defer></script>
   <script src="/static/single-gallery.js?v=20261028-remove-artwork-management" defer></script>
   <script src="/static/shared-favorites.js?v=20261024-favorite-confirm" defer></script>
   <script src="/static/prompt-reverse.js?v=20261028-remove-artwork-management" defer></script>
@@ -749,8 +754,9 @@
   <script src="/static/single-compatibility.js?v=20261024-single-ui" defer></script>
   <script src="/static/single-details.js?v=20261027-history-polish" defer></script>
   <script src="/static/krea-pool.js?v=20261024-favorite-confirm" defer></script>
-  <script src="/static/history-detail.js?v=20261028-remove-artwork-management" defer></script>
+  <script src="/static/history-detail.js?v=20261029-artwork-favorites" defer></script>
+  <script src="/static/artwork-favorites.js?v=20261029-artwork-favorites" defer></script>
   <script src="/static/detail-actions.js?v=20261027-history-polish" defer></script>
-  <script src="/static/app.js?v=20261028-remove-artwork-management" defer></script>
+  <script src="/static/app.js?v=20261029-artwork-favorites" defer></script>
 </body>
 </html>

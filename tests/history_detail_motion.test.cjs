@@ -98,9 +98,21 @@ test('rapid source changes retain the latest radiogroup value and query', () => 
   assert.equal(h.sources[0].getAttribute('aria-checked'), 'true'); assert.equal(h.sources[0].tabIndex, 0);
   assert.equal(h.sources[2].getAttribute('aria-checked'), 'false'); assert.ok(before.active);
   h.ctx.setHistorySource('single');
-  assert.deepEqual(plain(h.state.homeQuery), { source: 'single' });
+  assert.deepEqual(plain(h.state.homeQuery), { source: 'single', folderId: '' });
   assert.equal(h.ctx.historyQueryParams(), '&workbench=single');
   h.drain(); assert.equal(h.thumb.style.transform, 'translateX(100px)'); assert.deepEqual(h.loads, [1, 1, 1, 1]);
+});
+
+test('changing sources preserves the active collection in requests and cache identity', () => {
+  const h = harness();
+  h.state.homeQuery.folderId = 'portraits & sketches';
+  h.ctx.setHistorySource('single');
+  assert.equal(h.state.homeQuery.folderId, 'portraits & sketches');
+  assert.equal(h.ctx.historyQueryParams(), '&workbench=single&folder_id=portraits%20%26%20sketches');
+  const key = h.ctx.historyQueryKey();
+  h.ctx.setHistorySource('random');
+  assert.notEqual(h.ctx.historyQueryKey(), key);
+  assert.equal(h.state.homeQuery.folderId, 'portraits & sketches');
 });
 
 test('detail/delete reversals retain presentation and velocity and only the latest view stays interactive', () => {

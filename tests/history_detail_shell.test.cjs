@@ -38,6 +38,31 @@ test('a pending full-size neighbor read cannot poison another filter cache', asy
   assert.equal(await old, null); assert.equal(ctx.historyCache.size, 0);
 });
 
+test('removing the last item on a collection page loads the last remaining page', async () => {
+  const requests = [], shown = [];
+  const ctx = vm.createContext({ historyPage: 3, historyRequest: 0,
+    historyQueryKey: () => 'home:collection', historyQueryParams: () => '&folder_id=portraits',
+    request: async url => { requests.push(url); return requests.length === 1
+      ? { page: 3, pages: 2, total: 48, items: [] }
+      : { page: 2, pages: 2, total: 48, items: [{ id: 9 }] }; },
+    renderHistoryPage: data => shown.push(data), toast() {} });
+  install(ctx, 'historyViewState'); install(ctx, 'loadHistory');
+  await ctx.loadHistory(3);
+  assert.equal(requests.length, 2); assert.match(requests[1], /page=2.*folder_id=portraits/);
+  assert.equal(shown.length, 1); assert.equal(shown[0].page, 2);
+});
+
+test('an image removed from the active collection cannot navigate into an unrelated page', () => {
+  const view = { page: 2, pages: 5, items: [{ id: 1, folder_ids: ['portrait'] }],
+    query: { folderId: 'portrait' }, cache: new Map([[1, { items: [{ id: 9, folder_ids: ['portrait'] }] }]]) };
+  const ctx = vm.createContext({ imagePreview: {}, selectedRecord: { id: 9, folder_ids: [] },
+    previewHistoryView: () => view });
+  for (const name of ['previewRecordIndex', 'selectedHistoryLocation', 'previewNeighborAvailable', 'previewNeighbor']) install(ctx, name);
+  assert.equal(ctx.selectedHistoryLocation().index, -1);
+  assert.equal(ctx.previewNeighborAvailable(1), false); assert.equal(ctx.previewNeighborAvailable(-1), false);
+  assert.equal(ctx.previewNeighbor(1), null);
+});
+
 test('one detail action group is exposed at a time and closes without hiding historical data', () => {
   let closes = 0, focusInPanel = null;
   const names = ['use', 'generate', 'more'];
@@ -138,6 +163,12 @@ test('Tab stays in the active detail view and excludes controls inside closed di
   ctx.document.activeElement = first;
   ctx.containHistoryDetailFocus({ key: 'Tab', shiftKey: true, preventDefault() {} });
   assert.equal(focused, 'advanced');
+});
+
+test('the detail focus boundary respects Tab already handled by its collection popover', () => {
+  const ctx = vm.createContext({ ui: { detailDialog: { open: true, querySelectorAll() { throw new Error('nested focus was already handled'); } } } });
+  install(ctx, 'containHistoryDetailFocus');
+  ctx.containHistoryDetailFocus({ key: 'Tab', defaultPrevented: true });
 });
 
 test('Escape ignores a drawer already exiting and returns the next active level', () => {

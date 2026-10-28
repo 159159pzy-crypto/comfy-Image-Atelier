@@ -2002,11 +2002,18 @@ function renderBatch(batch, queue = currentQueue) {
         onComplete: () => ui.progressCount.style.removeProperty("opacity"),
       });
     }
+    // New output can shift every page boundary, including a page being read
+    // by the fullscreen viewer. Preserve selections, invalidate only reads.
+    if (typeof invalidateHistoryView === "function") invalidateHistoryView();
+    else if (typeof historyCache !== "undefined") historyCache.clear();
     if (batch.settings?.workbench === "single") {
-      historyCache.clear();
       if (typeof singleWorkbenchActive === "function" && singleWorkbenchActive()) historyDirty = true;
       else loadHistory(historyPage);
-    } else loadHistory(1);
+    } else {
+      const keepPosition = (typeof artworkSelectionActive === "function" && artworkSelectionActive())
+        || (typeof historyDetailState !== "undefined" && historyDetailState.homeQuery.folderId);
+      loadHistory(keepPosition ? historyPage : 1);
+    }
   }
 }
 async function refreshConnection() {
@@ -2077,10 +2084,12 @@ function card(record, index, historyView = null) {
   article.historyView = historyView;
   const button = document.createElement("button");
   button.type = "button";
+  button.className = "image-card-open";
   button.dataset.recordId = String(record.id);
   button.setAttribute("aria-label", `查看 ${record.filename || "生成结果"}`);
   button.innerHTML = `<img loading="lazy" decoding="async" fetchpriority="low" src="/api/images/${record.id}/thumbnail" alt="Anima 生成结果"><span class="image-failure" hidden>图片加载失败</span><div class="card-copy"><strong>${escapeHtml(record.filename)}</strong><span>#${record.sequence} · Seed ${record.sample_seed}</span></div>`;
   button.addEventListener("click", () => {
+    if (typeof artworkActivateCard === "function" && artworkActivateCard(article.record)) return;
     openDetail(article.record, { historyView: article.historyView });
   });
   const image = button.querySelector("img");
@@ -2100,6 +2109,7 @@ function card(record, index, historyView = null) {
     else markFailed({ target: image });
   }
   article.append(button);
+  if (typeof decorateArtworkCard === "function") decorateArtworkCard(article, record, button);
   if (typeof IntersectionObserver !== "undefined") {
     card.visibilityObserver ||= new IntersectionObserver(entries => {
       for (const entry of entries) entry.target.classList.toggle("is-offscreen", !entry.isIntersecting);
@@ -2149,10 +2159,11 @@ function renderHistoryPage(data, historyView = null) {
     if (!node) node = card(record, index, view);
     node.record = record;
     node.historyView = view;
-    const button = node.querySelector("button");
+    const button = node.querySelector(".image-card-open");
     button.setAttribute("aria-label", `查看 ${record.filename || "生成结果"}`);
     node.querySelector(".card-copy strong").textContent = record.filename || "生成结果";
     node.querySelector(".card-copy span").textContent = `#${record.sequence} · Seed ${record.sample_seed}`;
+    if (typeof decorateArtworkCard === "function") decorateArtworkCard(node, record, button);
     retained.add(node);
     if (elements.gallery.children[index] !== node) elements.gallery.insertBefore(node, elements.gallery.children[index] || null);
     if (fresh && previousPage === view.page && existing.size && typeof StudioMotion !== "undefined") {
@@ -2181,6 +2192,7 @@ function renderHistoryPage(data, historyView = null) {
   elements.prevPage.disabled = view.page <= 1;
   elements.nextPage.disabled = view.page >= view.pages;
   elements.historyCount.textContent = historyUnavailable ? "历史存储不可用" : `${data.total || 0} 张图片`;
+  if (typeof artworkHistoryRendered === "function") artworkHistoryRendered(view);
   updatePreviewNavigation();
 }
 
@@ -2193,6 +2205,9 @@ async function loadHistory(page = historyPage, historyView = null) {
     const params = typeof historyQueryParams === "function" ? historyQueryParams(view) : "";
     const data = await request(`/api/history?page=${page}&limit=24${params}`);
     if (view.closed || requestId !== view.requestId || (typeof historyQueryKey === "function" && queryKey !== historyQueryKey(view))) return;
+    // Removing a collection's last page must land on a valid page, not an empty
+    // offset beyond the new total. The nested read owns a fresh request token.
+    if (Number(data.page) > Number(data.pages) && Number(data.pages) > 0) return loadHistory(Number(data.pages), view);
     renderHistoryPage(data, view);
     return data;
   } catch (error) {
@@ -2227,6 +2242,7 @@ async function revealSelectedImageFile() {
 }
 
 function renderDetail(record) {
+  if (typeof renderArtworkDetail === "function") renderArtworkDetail(record);
   resetRevealImageFile();
   ui.detailImage.src = `/api/images/${record.id}`;
   ui.detailImage.alt = record.filename ? `生成结果：${record.filename}` : "生成结果";
@@ -2258,6 +2274,7 @@ function renderDetail(record) {
 }
 
 function updateDetailRecord(record) {
+  if (typeof closeArtworkPopovers === "function") closeArtworkPopovers({ restoreFocus: false, immediate: true });
   selectedRecord = record;
   ++regenerationRequest;
   regenerationOptions = null;
@@ -2283,6 +2300,7 @@ function invalidateHistoryTransfer() {
 }
 function finishDetailClose() {
   if (ui.detailDialog.open) return;
+  if (typeof closeArtworkPopovers === "function") closeArtworkPopovers({ restoreFocus: false, immediate: true });
   if (typeof singleWorkbenchState !== "undefined") singleWorkbenchState.historyTransferRequest = (singleWorkbenchState.historyTransferRequest || 0) + 1;
   resetRevealImageFile();
   const context = detailContext;
@@ -2336,7 +2354,7 @@ function toggleDetailActionPanel(name) {
 }
 
 function containHistoryDetailFocus(event) {
-  if (event.key !== "Tab" || !ui.detailDialog.open) return;
+  if (event.defaultPrevented || event.key !== "Tab" || !ui.detailDialog.open) return;
   const focusable = [...ui.detailDialog.querySelectorAll("button, a[href], input, select, textarea, summary, [tabindex]")].filter(element => {
     if (element.tabIndex < 0 || element.matches(":disabled") || !element.getClientRects().length || element.closest("[hidden], [inert]")) return false;
     if (getComputedStyle(element).visibility === "hidden") return false;
@@ -2379,6 +2397,9 @@ function previewRecordIndex(record, items = previewHistoryView().items) {
 function selectedHistoryLocation() {
   if (imagePreview.context?.kind === "single") return imagePreview.context.history.location();
   const view = previewHistoryView();
+  if (view.query?.folderId && !(selectedRecord?.folder_ids || []).includes(view.query.folderId)) {
+    return { page: view.page, items: view.items, index: -1 };
+  }
   const currentIndex = previewRecordIndex(selectedRecord);
   if (currentIndex >= 0) return { page: view.page, items: view.items, index: currentIndex };
   for (const [page, data] of view.cache) {
@@ -2392,6 +2413,7 @@ function selectedHistoryLocation() {
 function previewNeighborAvailable(direction) {
   if (imagePreview.context?.kind === "single") return imagePreview.context.history.available(direction);
   const location = selectedHistoryLocation();
+  if (location.index < 0) return false;
   if (location.index >= 0 && location.index + direction >= 0 && location.index + direction < location.items.length) return true;
   const targetPage = location.page + (direction > 0 ? 1 : -1);
   return targetPage >= 1 && targetPage <= previewHistoryView().pages;
@@ -2516,6 +2538,7 @@ async function loadHistoryPageForPreview(page, historyView = null) {
 }
 
 function previewNeighbor(direction, location = selectedHistoryLocation()) {
+  if (location.index < 0) return null;
   const index = location.index + direction;
   if (location.index >= 0 && index >= 0 && index < location.items.length) {
     return { record: location.items[index], page: location.page, data: null };
@@ -6059,6 +6082,7 @@ new ResizeObserver(() => {
 }).observe(ui.imagePreviewStage);
 ui.closeDialog.addEventListener("click", () => {
   if (typeof historyDetailState !== "undefined" && historyDetailState.busy) return;
+  if (typeof closeArtworkPopovers === "function") closeArtworkPopovers({ restoreFocus: false, immediate: true });
   invalidateHistoryTransfer();
   closeImagePreview({ immediate: true, restoreFocus: false });
   closeRegenerationDrawers(false);
@@ -6068,6 +6092,7 @@ ui.detailDialog.addEventListener("click", (event) => {
   if (event.target === ui.detailDialog) {
     event.preventDefault(); // This host owns dismissal, including its busy guard.
     if (typeof historyDetailState !== "undefined" && historyDetailState.busy) return;
+    if (typeof closeArtworkPopovers === "function" && closeArtworkPopovers({ restoreFocus: true })) return;
     invalidateHistoryTransfer();
     closeImagePreview({ immediate: true, restoreFocus: false });
     closeRegenerationDrawers(false);
@@ -6085,6 +6110,7 @@ ui.detailDialog.addEventListener("click", (event) => {
 ui.detailDialog.addEventListener("cancel", (event) => {
   event.preventDefault();
   if (typeof historyDetailState !== "undefined" && historyDetailState.busy) return;
+  if (typeof closeArtworkPopovers === "function" && closeArtworkPopovers({ restoreFocus: true })) return;
   const inDetail = typeof historyDetailVisible !== "function" || historyDetailVisible();
   if (inDetail && [ui.replayDrawer, ui.variantDrawer].some(drawer => !drawer.hidden && drawer.dataset?.motionState !== "closing" && !drawer.classList?.contains("closing"))) {
     closeRegenerationDrawers();
@@ -6413,6 +6439,7 @@ async function initialize() {
     }
     if (typeof initializeSingleWorkbench === "function") initializeSingleWorkbench({ legacyRestored: Boolean(restored) });
     if (typeof initializeHistoryDetail === "function") initializeHistoryDetail();
+    if (typeof initializeArtworkFavorites === "function") initializeArtworkFavorites();
     if (typeof StudioMotion !== "undefined") {
       StudioMotion.bindDisclosures(document);
       StudioMotion.bindDialogs(document);

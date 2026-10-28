@@ -302,6 +302,7 @@ function singleWorkbenchLayout() {
   const focusSnapshot = active !== state.active || nextPlacement !== state.categoryPlacement || state.command?.node.parentElement !== commandTarget
     ? singleWorkbenchCaptureLayoutFocus() : null;
   if (active !== state.active) {
+    if (typeof artworkLeaveWorkbench === "function") artworkLeaveWorkbench();
     if (active) {
       for (const [field, disabled] of state.singleDisabled) field.disabled = disabled;
       for (const record of state.shared) {

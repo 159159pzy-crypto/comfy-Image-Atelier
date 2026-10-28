@@ -123,6 +123,16 @@ test('committed deletion removes local rows and fixes counts even if refreshes f
   assert.equal(h.ctx.historyPages, 1);
 });
 
+test('deleting a work outside the current collection does not decrement its count', () => {
+  const item = { ...record(9), folder_ids: ['other'] };
+  const h = setup({ historyItems: [{ ...record(1), folder_ids: ['current'] }] });
+  h.state.homeQuery.folderId = 'current';
+  const view = h.ctx.historyViewState(); view.total = 8;
+  h.ctx.ui.historyCount.textContent = '8 张图片';
+  h.ctx.removeHistoryViewRecord(view, item);
+  assert.equal(view.total, 8); assert.equal(h.ctx.ui.historyCount.textContent, '8 张图片');
+});
+
 test('successful deletion still announces its result when both history refreshes fail', async () => {
   const item = record(1), owner = { origin: 'random' }, h = setup({ selectedRecord: item, detailContext: owner,
     loadHistory: async () => { throw new Error('history offline'); }, singleGalleryDeleted: async () => { throw new Error('single offline'); } });

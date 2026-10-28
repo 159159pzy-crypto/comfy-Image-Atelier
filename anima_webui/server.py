@@ -29,7 +29,7 @@ from .input_images import InputImageStore, MAX_IMAGE_BYTES
 from .image_location import ImageLocationError, reveal_image
 from .prompt_images import PromptImageStore
 from .single_workbench import SINGLE_DEFAULTS, active_lora_pipelines
-from .history import HistoryStore
+from .history import ArtworkCollectionConflict, HistoryStore
 from .http_security import (
     SQLITE_MAX_INTEGER,
     LimitedMultipartStream,
@@ -199,6 +199,8 @@ async def error_middleware(request: web.Request, handler: Any) -> web.StreamResp
         )
     except StorageReadOnlyError as error:
         response = web.json_response({"error": str(error), "code": error.code, "store": error.store, "path": str(error.path)}, status=503)
+    except ArtworkCollectionConflict as error:
+        response = web.json_response(error.payload, status=409)
     except WorkflowError as error:
         response = web.json_response({"error": str(error)}, status=400)
     except CatalogError as error:
@@ -1349,6 +1351,42 @@ def create_app(
         headers["X-Preview-Id"] = str(seq)
         return web.Response(body=body, content_type=content_type, headers=headers)
 
+    async def list_artwork_folders(_: web.Request) -> web.Response:
+        return web.json_response(await history.list_artwork_folders())
+
+    async def create_artwork_folder(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        if set(body) != {"name"}:
+            raise WorkflowError("收藏夹只接受 name")
+        return web.json_response(await history.create_artwork_folder(body["name"]), status=201)
+
+    async def rename_artwork_folder(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        if set(body) != {"name"}:
+            raise WorkflowError("收藏夹只接受 name")
+        return web.json_response(await history.rename_artwork_folder(request.match_info["folder_id"], body["name"]))
+
+    async def delete_artwork_folder(request: web.Request) -> web.Response:
+        return web.json_response(await history.delete_artwork_folder(request.match_info["folder_id"]))
+
+    async def reorder_artwork_folders(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        if set(body) != {"folder_ids"}:
+            raise WorkflowError("收藏夹排序只接受 folder_ids")
+        return web.json_response(await history.reorder_artwork_folders(body["folder_ids"]))
+
+    async def update_artwork_members(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        if set(body) != {"image_ids", "folder_ids", "action"}:
+            raise WorkflowError("收藏请求需要 image_ids、folder_ids 和 action")
+        return web.json_response(await history.update_artwork_memberships(body["image_ids"], body["folder_ids"], body["action"]))
+
+    async def read_artwork_members(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        if set(body) != {"image_ids"}:
+            raise WorkflowError("收藏归属查询只接受 image_ids")
+        return web.json_response(await history.read_artwork_memberships(body["image_ids"]))
+
     async def list_history(request: web.Request) -> web.Response:
         try:
             page = int(request.query.get("page", "1"))
@@ -1371,8 +1409,11 @@ def create_app(
         workbench = request.query.get("workbench") or None
         if workbench not in {None, "random", "single"}:
             raise WorkflowError("workbench 必须为 random 或 single")
+        folder_id = request.query.get("folder_id")
+        if folder_id is not None and before_id is not None:
+            raise WorkflowError("收藏夹按收藏时间分页，不能与 before_id 同时使用")
         return web.json_response({
-            **await history.list_images(page, limit, workbench, before_id=before_id),
+            **await history.list_images(page, limit, workbench, before_id=before_id, folder_id=folder_id),
             "available": history.available,
         })
 
@@ -1782,6 +1823,13 @@ def create_app(
     app.router.add_put("/api/custom-groups/{section}/{group_id}", update_custom_group)
     app.router.add_delete("/api/custom-groups/{section}/{group_id}", delete_custom_group)
     app.router.add_post("/api/batches", start_batch)
+    app.router.add_get("/api/artwork-folders", list_artwork_folders)
+    app.router.add_post("/api/artwork-folders", create_artwork_folder)
+    app.router.add_post("/api/artwork-folders/reorder", reorder_artwork_folders)
+    app.router.add_post("/api/artwork-folders/members/query", read_artwork_members)
+    app.router.add_post("/api/artwork-folders/members", update_artwork_members)
+    app.router.add_patch("/api/artwork-folders/{folder_id}", rename_artwork_folder)
+    app.router.add_delete("/api/artwork-folders/{folder_id}", delete_artwork_folder)
     app.router.add_post("/api/input-images", upload_input_image)
     app.router.add_post("/api/input-images/from-history", input_image_from_history)
     app.router.add_get("/api/input-images/{asset_id}/image", input_image_content)

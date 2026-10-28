@@ -146,3 +146,25 @@ test('a local stop exposes unconfirmed remote cancellation and clears it for the
   assert.equal(ui.batchError.hidden, true);
   assert.equal(ui.batchError.textContent, '');
 });
+
+test('completed generation preserves the current page while selecting or browsing a collection', () => {
+  for (const mode of ['selection', 'collection', 'ordinary']) {
+    const { ctx } = setup(), reads = [];
+    ctx.historyPage = 4;
+    ctx.artworkSelectionActive = () => mode === 'selection';
+    ctx.historyDetailState = { homeQuery: { source: '', folderId: mode === 'collection' ? 'portrait' : '' } };
+    ctx.loadHistory = page => reads.push(page);
+    ctx.renderBatch(batch({ status: 'completed', completed: 40 }));
+    assert.deepEqual(reads, [mode === 'ordinary' ? 1 : 4]);
+  }
+});
+
+test('new completed output invalidates stale page and fullscreen reads once per batch', () => {
+  const { ctx } = setup(); let invalidations = 0;
+  ctx.invalidateHistoryView = () => invalidations++;
+  const completed = batch({ status: 'completed', completed: 40 });
+  ctx.renderBatch(completed); ctx.renderBatch(completed);
+  assert.equal(invalidations, 1);
+  ctx.renderBatch({ ...completed, id: 'next' });
+  assert.equal(invalidations, 2);
+});
