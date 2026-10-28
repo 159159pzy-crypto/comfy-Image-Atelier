@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="242" viewBox="0 0 1120 242" role="img" aria-labelledby="title desc">
+  <title id="title">一次受控随机的组合</title>
+  <desc id="desc">固定角色与服装，姿势、背景和表情随机变化。</desc>
+  <rect width="1120" height="242" rx="16" fill="#151a24"/>
+  <g font-family="'Segoe UI', 'Microsoft YaHei', sans-serif">
+    <text x="32" y="42" fill="#eaf1fa" font-size="20" font-weight="600">同一个角色，同一套服装，新的动作与场景。</text>
+    <path d="M130 123H990" stroke="#414b5c" stroke-width="2"/>
+    <g fill="#202c40" stroke="#4279ae">
+      <rect x="32" y="72" width="192" height="104" rx="12"/>
+      <rect x="248" y="72" width="192" height="104" rx="12"/>
+    </g>
+    <g fill="#1c2d2d" stroke="#468479">
+      <rect x="464" y="72" width="192" height="104" rx="12"/>
+      <rect x="680" y="72" width="192" height="104" rx="12"/>
+      <rect x="896" y="72" width="192" height="104" rx="12"/>
+    </g>
+    <g fill="#d9e9ff" font-size="25" font-weight="600" text-anchor="middle">
+      <text x="128" y="114">角色</text><text x="344" y="114">服装</text>
+      <text x="560" y="114">姿势</text><text x="776" y="114">背景</text><text x="992" y="114">表情</text>
+    </g>
+    <g font-size="16" text-anchor="middle">
+      <g fill="#94c7ff"><text x="128" y="148">固定</text><text x="344" y="148">固定</text></g>
+      <g fill="#96d8c4"><text x="560" y="148">随机池</text><text x="776" y="148">随机池</text><text x="992" y="148">随机池</text></g>
+    </g>
+    <text x="32" y="212" fill="#aebacb" font-size="16">示例组合 · 每个维度独立选择关闭、随机或固定，词池范围由你决定。</text>
+  </g>
+</svg>

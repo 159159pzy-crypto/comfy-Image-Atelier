@@ -8,7 +8,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_MARKDOWN = {
     "README.md", "CHANGELOG.md", "RELEASE_NOTES.md",
-    "launcher/README.md", "docs/dependencies.md",
+    "launcher/README.md", "docs/guide.md", "docs/dependencies.md",
     "CONTRIBUTING.md", "SECURITY.md", ".github/pull_request_template.md",
     "launcher/tests/fixtures/prompt-assistant/README.md",
 }

@@ -62,6 +62,7 @@ tools/
 
 # Internal notes, review reports and unused local screenshots
 /docs/*.md
+!/docs/guide.md
 !/docs/dependencies.md
 !/docs/launcher-model-onboarding-acceptance-2026-10-24.md
 !/docs/launcher-modelscope-acceptance-2026-10-24.md
