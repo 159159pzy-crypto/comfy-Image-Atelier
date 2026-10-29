@@ -23,7 +23,6 @@ $candidate = [System.IO.Path]::TrimEndingDirectorySeparator([System.IO.Path]::Ge
 if (Test-Path -LiteralPath $candidate) { throw "Use a new candidate directory; existing output is preserved: $candidate" }
 [System.IO.Directory]::CreateDirectory($candidate) | Out-Null
 $staging = Join-Path $candidate '.publish-staging'
-$output = $candidate
 $content = Join-Path $candidate '.bundle-content'
 [System.IO.Directory]::CreateDirectory($content) | Out-Null
 [System.IO.Directory]::CreateDirectory($staging) | Out-Null
@@ -104,6 +103,10 @@ $sumLines = @($exe, $zipPath, $setup) | ForEach-Object { '{0}  {1}' -f (Get-File
 $result = [ordered]@{ candidateDirectory = $candidate; launcher = $exe; archive = $zipPath; setup = $setup; sha256 = $package.Sha256; fileCount = 1; version = $version; sourceCommit = $head; sourceKind = $sourceKind; sourceDirty = $buildInfo.sourceDirty; payloadSha256 = $payloadHash }
 [System.IO.File]::WriteAllText((Join-Path $candidate 'candidate.json'), ($result | ConvertTo-Json) + "`n", [System.Text.UTF8Encoding]::new($false))
 & (Join-Path $repo 'launcher\scripts\Test-LauncherCandidate.ps1') -CandidateDirectory $candidate -ExpectedVersion $version
+# Candidate verification saves its inventory and size report before removing its own extraction.
+# Retain staging on any build/verification failure; only this successful build owns these paths.
+Remove-LauncherCandidateTemporaryDirectory -CandidateDirectory $candidate -Path $staging
+Remove-LauncherCandidateTemporaryDirectory -CandidateDirectory $candidate -Path $content
 if ($InstallRootEntry) {
     & (Join-Path $repo 'launcher\scripts\Install-LauncherEntry.ps1') -CandidateDirectory $candidate -TargetDirectory $repo
 }

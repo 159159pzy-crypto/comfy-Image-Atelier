@@ -262,6 +262,7 @@ public sealed class LauncherUpdates : IDisposable
     }
     public async Task<InstalledLauncher> DownloadAsync(LauncherRelease release, Downloads downloads, IProgress<DownloadProgress>? progress, CancellationToken ct, LauncherConfig? config = null)
     {
+        using var cacheUse = await LauncherCache.AcquireUseAsync(Store.StateDirectory, ct);
         ValidateRelease(release);
         if (ParseVersion(release.Version) <= ParseVersion(CurrentVersion)) throw new InvalidOperationException("此发行版不比当前启动器更新。");
         var candidate = new InstalledLauncher(release.Version, Store.CandidatePath(release.Version, release.Sha256), release.Size, release.Sha256);
@@ -275,6 +276,8 @@ public sealed class LauncherUpdates : IDisposable
             || package.BuildInfo.GetProperty("payloadSha256").GetString() != release.BuildInfo.GetProperty("payloadSha256").GetString())
             throw new InvalidDataException("下载的启动器内容与官方构建信息不一致。");
         Store.Mutate(state => { state.Downloaded = candidate; return true; });
+        // Fetch verified the release size/SHA and InspectPackage verified its embedded provenance.
+        await RegisterVerifiedCacheAsync(candidate, ct);
         return candidate;
     }
     private void QuarantineInvalidCandidate(InstalledLauncher candidate)
@@ -337,10 +340,11 @@ public sealed class LauncherUpdates : IDisposable
     }
     public async Task<InstalledLauncher> ImportAsync(string executable, string version, CancellationToken ct, bool allowRepair = false)
     {
+        using var cacheUse = await LauncherCache.AcquireUseAsync(Store.StateDirectory, ct);
         var source = await IdentifyAsync(executable, version, ct);
         var target = Store.CandidatePath(version, source.Sha256);
         Store.ValidateInstalled(source with { Executable = target }, true);
-        if (LauncherUpdateStore.SamePath(executable, target)) return source;
+        if (LauncherUpdateStore.SamePath(executable, target)) { await RegisterVerifiedCacheAsync(source, ct); return source; }
         if (!await Downloads.Verify(target, source.Size, source.Sha256, ct))
         {
             if (File.Exists(target) && !allowRepair) throw new IOException("受管启动器已存在但校验失败，原文件保持不变。");
@@ -353,10 +357,14 @@ public sealed class LauncherUpdates : IDisposable
             if (File.Exists(target)) File.Move(target, target + ".corrupt-" + Guid.NewGuid().ToString("N"), false);
             File.Move(temporary, target, false);
         }
-        return source with { Executable = target };
+        var installed = source with { Executable = target };
+        // Both branches verified target bytes: existing target above, or temporary file before atomic publication.
+        await RegisterVerifiedCacheAsync(installed, ct);
+        return installed;
     }
     public async Task<UpdateTransaction> PrepareAsync(InstalledLauncher installed, LauncherConfig config, bool workbenchWasRunning, CancellationToken ct)
     {
+        using var cacheUse = await LauncherCache.AcquireUseAsync(Store.StateDirectory, ct);
         Store.ValidateInstalled(installed, true);
         if (!await Downloads.Verify(installed.Executable, installed.Size, installed.Sha256, ct))
         {
@@ -379,6 +387,13 @@ public sealed class LauncherUpdates : IDisposable
             Store.WriteTransaction(transaction); current.PendingTransactionId = transaction.Id; return true;
         });
         return transaction;
+    }
+    private async Task RegisterVerifiedCacheAsync(InstalledLauncher package, CancellationToken ct)
+    {
+        try { await new LauncherCache(Store.StateDirectory, log).RegisterVerifiedPackageAsync(package, ct); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException or JsonException)
+        { log("启动器包保留，缓存登记已跳过：" + error.Message); }
     }
     public bool StartCoordinator(UpdateTransaction transaction)
     {

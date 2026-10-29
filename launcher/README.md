@@ -139,6 +139,18 @@ dotnet run -c Release --project launcher/Anima.Launcher.Tests -- --tagger-only
 dotnet run -c Release --project launcher/Anima.Launcher.Tests -- --tagger-download <ComfyUI目录> <该环境python.exe> pixai-tagger-v0.9-timm
 ```
 
+## 启动器占用与缓存
+
+启动器保留单 EXE、自包含运行及内置 aria2、uv。发布时排除界面没有使用的三个 Windows ML 原生运行库；模型下载、本地反推及其他现有功能继续使用原有运行环境。
+
+概览仅在窗口可见且未最小化时定时检查服务；恢复窗口立即刷新。下载和安装继续在后台运行，展示进度最多每 250 毫秒合并更新一次。日志页保留最近最多 2000 行、24 万字符，完整日志仍写入日志目录。
+
+窗口就绪 30 秒后会在空闲时检查已登记的工作台版本与启动器更新包，每 24 小时最多清理一次。至少七天未使用、没有当前或回退引用、也没有运行进程占用的目录才会清理。当前版本、固定回退、待应用更新及未完成事务保持可用；安装、下载和版本切换期间延后。检查结果写入配置目录的 `cache-maintenance.json`，记录实际释放字节数和跳过原因；`cache-index.json` 为内部索引，不应手工编辑。
+
+旧版未登记目录、归属或内容无法确认的目录，以及默认或自定义 `.NET` 解压缓存保持原样。模型、Python、工具缓存、下载断点、环境备份与用户数据不参与此维护。清理失败保留剩余内容，下次安全重试。
+
+候选目录额外保留 `package-info.json`、`FILES.sha256` 和 `package-size-report.json`，可检查内嵌文件与实际包体。构建全部验证成功后删除本次 staging、bundle-content、verification 临时目录；失败现场、历史候选与预览状态继续保留。启动性能可用 `launcher/scripts/Measure-LauncherPerformance.ps1 -ExecutablePath <候选EXE> -OutputDirectory <新目录>` 在隔离配置下复测；报告会注明冷启动、热启动与空闲测量口径。
+
 ## 开发与构建
 
 需要 .NET 8 SDK、Python 3.11+、Node.js 和 PowerShell 7，在仓库根目录运行：

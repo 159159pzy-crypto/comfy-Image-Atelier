@@ -163,6 +163,21 @@ if (args.Contains("--download-engine-only"))
     count += await DownloadEngineTests.Run(work);
     Console.WriteLine($"{count} download engine checks passed; artifacts: {work}"); return;
 }
+if (args.Contains("--native-process-only"))
+{
+    var total = await WindowsProcessInspectionTests.Run(work);
+    Console.WriteLine($"{total} native process checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--cache-only"))
+{
+    var total = await LauncherCacheTests.Run(work);
+    Console.WriteLine($"{total} cache checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--presentation-only"))
+{
+    var total = PresentationPerformanceTests.Run(work);
+    Console.WriteLine($"{total} presentation checks passed; artifacts: {work}"); return;
+}
 if (args.Contains("--download-performance-only"))
 {
     count += await DownloadPerformanceTests.Run(work);
@@ -220,7 +235,10 @@ if (args.Contains("--node-releases-only"))
 }
 if (args.Contains("--node-updates-only"))
 {
-    count += await NodeUpdateTests.Run(work, manifest);
+    count += await WindowsProcessInspectionTests.Run(work);
+count += await LauncherCacheTests.Run(work);
+count += PresentationPerformanceTests.Run(work);
+count += await NodeUpdateTests.Run(work, manifest);
     Console.WriteLine($"{count} node update and rollback checks passed."); return;
 }
 if (args.Contains("--launch-arguments-only"))

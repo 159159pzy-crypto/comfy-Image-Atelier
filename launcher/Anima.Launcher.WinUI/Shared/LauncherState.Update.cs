@@ -29,14 +29,14 @@ internal sealed partial class LauncherState
     public string SoftwareUpdateNotice => SoftwareUpdateReady ? "新版已准备好，可在设置中重启更新。"
         : HasSoftwareRelease ? $"发现新版本 {softwareRelease!.Version}，可在软件内下载更新。" : "";
 
-    private void NotifySoftwareUpdate() => SoftwareUpdateChanged?.Invoke();
+    private void NotifySoftwareUpdate() => RequestPresentation(DisplayChange.Software);
 
     public async Task InitializeSoftwareUpdatesAsync()
     {
         if (!softwareInitialized)
         {
             softwareInitialized = true;
-            DownloadsChanged += RefreshSoftwareDownloadPresentation;
+            DownloadsChanged += RefreshSoftwareDownloadView;
             try
             {
                 softwareRelease = SoftwareUpdates.GetCachedRelease();
@@ -226,6 +226,7 @@ internal sealed partial class LauncherState
         BusyChanged?.Invoke(true);
         try
         {
+            using var cacheUse = await LauncherCache.AcquireUseAsync(Program.StateDir, task.Token);
             SetStatus(Program.IsUpdateRecovery ? "正在恢复上一版本…" : "正在验证并应用新版…");
             if (Program.IsUpdateRecovery)
                 await RecoverSoftwareUpdateAsync(context.PreviousConfig, context.WorkbenchWasRunning, task.Token);
@@ -233,6 +234,7 @@ internal sealed partial class LauncherState
                 await ApplySoftwareUpdateAsync(context.PreviousConfig, context.WorkbenchWasRunning, task.Token);
             await Program.CompleteUpdateAsync(true);
             SynchronizeSetupVersion();
+            ScheduleCacheMaintenance();
             SetStatus(Program.IsUpdateRecovery ? "已恢复上一版本，配置和历史数据保持不变。" : "更新完成。启动器和工作台已切换到新版。");
         }
         catch (Exception ex)
@@ -263,7 +265,7 @@ internal sealed partial class LauncherState
 
     private void DisposeSoftwareUpdates()
     {
-        DownloadsChanged -= RefreshSoftwareDownloadPresentation;
+        DownloadsChanged -= RefreshSoftwareDownloadView;
         softwareLifetime.Cancel();
         softwareUpdates?.Dispose();
         softwareLifetime.Dispose();

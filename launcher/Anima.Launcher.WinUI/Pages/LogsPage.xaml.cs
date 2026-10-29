@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+using Anima.Launcher.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -9,69 +9,77 @@ namespace Anima.Launcher.Pages;
 
 public sealed partial class LogsPage : LauncherPage
 {
-    private const int MaxLines = 2000;
-    private readonly ConcurrentQueue<string> pending = new();
-    private readonly Queue<string> visible = new();
+    private long clearedThrough;
+    private int flushQueued;
     private readonly DispatcherTimer flushTimer;
     private volatile bool active;
+    private BoundedLogSnapshot rendered = new("", 0);
 
     public LogsPage()
     {
         InitializeComponent();
         flushTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
-        flushTimer.Tick += (_, _) => Flush();
+        flushTimer.Tick += (_, _) => { flushTimer.Stop(); Flush(); };
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
     {
         base.OnNavigatedTo(e);
         active = true;
-        visible.Clear();
-        lock (State.LogLines)
-            foreach (var line in State.LogLines.TakeLast(MaxLines)) visible.Enqueue(line);
-        Render();
+        clearedThrough = 0;
         State.LogAppended += OnLog;
-        flushTimer.Start();
+        Render();
+        State.PresentationVisibilityChanged += VisibilityChanged;
     }
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
         active = false;
         State.LogAppended -= OnLog;
+        State.PresentationVisibilityChanged -= VisibilityChanged;
         flushTimer.Stop();
-        while (pending.TryDequeue(out _)) { }
+        Interlocked.Exchange(ref flushQueued, 0);
         base.OnNavigatedFrom(e);
     }
 
-    // No UI access from process-output threads. A timer batches bursts and bounds
-    // work per frame, avoiding a dispatcher item and full string copy per line.
+    private void VisibilityChanged(bool shown)
+    {
+        flushTimer.Stop();
+        Interlocked.Exchange(ref flushQueued, 0);
+        if (!active || !shown) return;
+        Render();
+    }
+
+    // The event is only a dirty signal. Rendering one authoritative bounded tail avoids
+    // racing a snapshot against an independently appended pending queue.
     private void OnLog(string line)
     {
-        if (!active) return;
-        pending.Enqueue(line.Length > 20000 ? line[..20000] + " …" : line);
-        while (pending.Count > MaxLines * 2) pending.TryDequeue(out _);
+        if (!active || !State.PresentationVisible) return;
+        if (Interlocked.Exchange(ref flushQueued, 1) != 0) return;
+        if (!DispatcherQueue.TryEnqueue(() =>
+        {
+            if (active && State.PresentationVisible) flushTimer.Start();
+            else Interlocked.Exchange(ref flushQueued, 0);
+        })) Interlocked.Exchange(ref flushQueued, 0);
     }
 
     private void Flush()
     {
-        var changed = false;
-        while (pending.TryDequeue(out var line))
-        {
-            visible.Enqueue(line);
-            changed = true;
-        }
-        while (visible.Count > MaxLines) visible.Dequeue();
-        if (changed) Render();
+        Interlocked.Exchange(ref flushQueued, 0);
+        if (!active || !State.PresentationVisible) return;
+        Render();
     }
 
     private void Render()
     {
-        var text = string.Join("\r\n", visible);
-        // A very verbose single command must not make the text editor unbounded.
-        if (text.Length > 240000) text = text[^240000..];
+        var snapshot = State.LogLines.Capture(clearedThrough);
+        if (snapshot == rendered) return;
+        var selection = snapshot.RebaseSelection(rendered, LogBox.SelectionStart, LogBox.SelectionLength);
         var scroller = FindScroller(LogBox);
         var oldOffset = scroller?.VerticalOffset;
-        LogBox.Text = text;
+        LogBox.Text = snapshot.Text;
+        LogBox.Select(selection.Start, selection.Length);
+        rendered = snapshot;
         if (scroller is not null)
             DispatcherQueue.TryEnqueue(() => scroller.ChangeView(null, FollowTailBox.IsChecked == true ? scroller.ExtentHeight : oldOffset, null, true));
     }
@@ -109,8 +117,9 @@ public sealed partial class LogsPage : LauncherPage
 
     private void Clear_Click(object sender, RoutedEventArgs e)
     {
-        while (pending.TryDequeue(out _)) { }
-        visible.Clear();
+        Interlocked.Exchange(ref flushQueued, 0);
+        clearedThrough = State.LogLines.Sequence;
+        rendered = State.LogLines.Capture(clearedThrough);
         LogBox.Text = "";
     }
 }

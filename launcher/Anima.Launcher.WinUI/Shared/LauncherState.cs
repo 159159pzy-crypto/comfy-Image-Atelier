@@ -103,24 +103,20 @@ internal sealed partial class LauncherState : IDisposable
     }
 
     /// <summary>In-memory copy of the session log for the log page.</summary>
-    public List<string> LogLines { get; } = [];
+    public BoundedLogBuffer LogLines { get; } = new();
 
     public void SetStatus(string text)
     {
         SetupStatusText = text;
-        StatusChanged?.Invoke(text);
+        displayedStatus = text;
+        RequestPresentation(DisplayChange.Status);
         if (SetupActive) NotifySetup();
     }
     public void AppendLog(string text)
     {
         Program.Log(text);
-        var line = DateTime.Now.ToString("HH:mm:ss ") + (text.Length > 20000 ? text[..20000] + " …" : text);
-        // Called from worker threads (process output callbacks); keep the list and UI event safe.
-        lock (LogLines)
-        {
-            LogLines.Add(line);
-            if (LogLines.Count > 2000) LogLines.RemoveRange(0, LogLines.Count - 2000);
-        }
+        var line = DateTime.Now.ToString("HH:mm:ss ") + text;
+        LogLines.Add(line);
         LogAppended?.Invoke(line);
     }
     public void Save()
@@ -230,9 +226,10 @@ internal sealed partial class LauncherState : IDisposable
         ResetTransferProgress();
         ClearBatchProgress();
         BusyChanged?.Invoke(true);
-        TaskStateChanged?.Invoke();
+        RequestPresentation(DisplayChange.Tasks);
         try
         {
+            using var cacheUse = await LauncherCache.AcquireUseAsync(Program.StateDir, task.Token);
             if (resumeConfig is not null)
             {
                 Config = WithSavedDownloadSettings(resumeConfig.Clone());
@@ -280,7 +277,7 @@ internal sealed partial class LauncherState : IDisposable
             task.Dispose();
             task = null;
             BusyChanged?.Invoke(false);
-            TaskStateChanged?.Invoke();
+            RequestPresentation(DisplayChange.Tasks);
             Reloaded();
             NotifySetup();
         }
@@ -303,14 +300,14 @@ internal sealed partial class LauncherState : IDisposable
         progressName = "";
         progressBytes = 0;
         progressAt = DateTime.UtcNow;
-        TaskProgressChanged?.Invoke(ProgressText);
+        RequestPresentation(DisplayChange.ProgressText);
     }
 
     private void InstallStageChanged(string stage)
     {
         if (activeDownloadOwner is not null) DownloadTasks.SetOwnerPhase(activeDownloadOwner, "Installing", stage);
         ResetTransferProgress();
-        ProgressChanged?.Invoke(-1); // Dependency stages have no byte total.
+        PublishPercent(-1); // Dependency stages have no byte total.
         SetStatus(stage);
     }
 
@@ -318,14 +315,14 @@ internal sealed partial class LauncherState : IDisposable
     {
         var percent = (int)Math.Clamp(p.Received * 100d / Math.Max(1, p.Total), 0, p.Phase == "Completed" ? 100 : 99);
         SetupDownloadPercent = percent;
-        ProgressChanged?.Invoke(percent);
+        PublishPercent(percent);
         var now = DateTime.UtcNow;
         var seconds = (now - progressAt).TotalSeconds;
         var speed = progressName == p.Name && p.Received >= progressBytes && seconds > 0
             ? (p.Received - progressBytes) / seconds / 1048576d : 0;
         ProgressText = $"{p.Received / 1048576d:N1} / {p.Total / 1048576d:N1} MiB" + (speed > 0 ? $" · {speed:N1} MiB/s" : "");
         progressAt = now; progressBytes = p.Received; progressName = p.Name;
-        TaskProgressChanged?.Invoke(ProgressText);
+        RequestPresentation(DisplayChange.ProgressText);
         SetStatus($"{p.Name} · {p.Stage}");
     });
     public event Action<int>? ProgressChanged;
@@ -703,6 +700,7 @@ internal sealed partial class LauncherState : IDisposable
 
     private async Task TransitionVersionAsync(string target, string pin, CancellationToken ct)
     {
+        using var cacheUse = await LauncherCache.AcquireUseAsync(Program.StateDir, ct);
         if (!File.Exists(Path.Combine(target, "run.py"))) throw new IOException("目标工作台版本资源不存在。");
         ResolvePaths();
         // A pending Comfy argument change must fail before stopping the current workbench.
@@ -737,6 +735,7 @@ internal sealed partial class LauncherState : IDisposable
             Save();
             UpgradePending = false;
             Reloaded();
+            ScheduleCacheMaintenance();
         }
         catch
         {
@@ -818,13 +817,14 @@ internal sealed partial class LauncherState : IDisposable
     }
 
     /// <summary>Reachability and ownership are separate; a live PID is not ready.</summary>
-    public async Task<ServiceInfo> ProbeComfyAsync()
+    public async Task<ServiceInfo> ProbeComfyAsync(CancellationToken ct = default)
     {
         var info = new ServiceInfo { Url = Config.ComfyUrl };
         if (string.IsNullOrWhiteSpace(Config.ComfyRoot)) return info;
         info.Configured = true;
         info.Managed = Services.IsOwnedRunning("ComfyUI");
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromSeconds(4));
         try
         {
             var comparison = await ServiceManager.InspectComfyReuseAsync(Config, timeout.Token);
@@ -841,17 +841,19 @@ internal sealed partial class LauncherState : IDisposable
             }
             else info.Status = startingRole is "ComfyUI" or "WebUI" ? "starting" : info.Managed ? "error" : "stopped";
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex) { info.Status = startingRole is not null ? "starting" : "error"; info.Detail = ex.Message; }
         return info;
     }
 
-    public async Task<ServiceInfo> ProbeWebUIAsync()
+    public async Task<ServiceInfo> ProbeWebUIAsync(CancellationToken ct = default)
     {
         var info = new ServiceInfo { Url = Config.WebUrl };
         if (string.IsNullOrWhiteSpace(Config.ComfyRoot)) return info;
         info.Configured = true;
         info.Managed = Services.IsOwnedRunning("WebUI");
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromSeconds(4));
         try
         {
             if (await ServiceManager.PortOpen(Config.WebPort, timeout.Token))
@@ -868,6 +870,7 @@ internal sealed partial class LauncherState : IDisposable
             }
             else info.Status = startingRole == "WebUI" ? "starting" : info.Managed ? "error" : "stopped";
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex) { info.Status = startingRole is not null ? "starting" : "error"; info.Detail = ex.Message; }
         return info;
     }
@@ -1050,7 +1053,7 @@ internal sealed partial class LauncherState : IDisposable
         if (string.IsNullOrWhiteSpace(Config.ComfyRoot)) throw new InvalidDataException("请先选择 ComfyUI 目录：新建选空目录，导入选含 main.py 的目录。");
     }
 
-    public void Dispose() { DisposeSoftwareUpdates(); modelInspectionLifetime.Dispose(); Downloads.Dispose(); }
+    public void Dispose() { DisposeCacheMaintenance(); DisposePresentation(); DisposeSoftwareUpdates(); modelInspectionLifetime.Dispose(); Downloads.Dispose(); }
 }
 
 public sealed record EnvironmentFields(string ComfyRoot, string Python, string SourceId, string GitMirror, string HfMirror, string PipIndex, string CustomRepository, bool Fresh = false, bool PythonExplicit = false);

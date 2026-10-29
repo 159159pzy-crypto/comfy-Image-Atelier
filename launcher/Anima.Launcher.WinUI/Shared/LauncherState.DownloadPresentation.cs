@@ -8,7 +8,7 @@ internal sealed partial class LauncherState
     {
         get
         {
-            var snapshot = DownloadTasks.GetSnapshot();
+            var snapshot = DownloadView;
             var owner = DownloadContextPresentation.InstallationOwner(snapshot, Config.ComfyRoot);
             return owner is null ? null : DownloadContextPresentation.Progress(snapshot, owner);
         }
@@ -30,7 +30,7 @@ internal sealed partial class LauncherState
     {
         get
         {
-            var snapshot = DownloadTasks.GetSnapshot();
+            var snapshot = DownloadView;
             var active = snapshot.Owners.Where(owner => owner.Kind == "software"
                     && owner.Status is DownloadTaskStatus.Running or DownloadTaskStatus.Pausing)
                 .OrderByDescending(owner => owner.UpdatedAt).FirstOrDefault();
@@ -44,7 +44,9 @@ internal sealed partial class LauncherState
         }
     }
 
-    private void RefreshSoftwareDownloadPresentation()
+    private void RefreshSoftwareDownloadPresentation() => RefreshSoftwareDownloadPresentation(DownloadTasks.GetSnapshot());
+    private void RefreshSoftwareDownloadView() => RefreshSoftwareDownloadPresentation(DownloadView);
+    private void RefreshSoftwareDownloadPresentation(DownloadTaskDatabase snapshot)
     {
         if (!softwareInitialized || DownloadingSoftwareUpdate || CheckingSoftwareUpdate) return;
         if (SoftwareUpdateReady)
@@ -56,7 +58,6 @@ internal sealed partial class LauncherState
             NotifySoftwareUpdate();
             return;
         }
-        var snapshot = DownloadTasks.GetSnapshot();
         var owner = DownloadContextPresentation.RecoverableSoftwareOwner(snapshot, Program.Version, softwareRelease);
         var release = DownloadContextPresentation.SoftwareRelease(owner);
         var previous = softwareRecoveryOwnerId;

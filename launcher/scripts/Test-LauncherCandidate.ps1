@@ -50,8 +50,13 @@ try {
     foreach ($required in @('AnimaRandomStudio.dll', 'Anima.Launcher.Core.dll', 'AnimaRandomStudio.deps.json', 'AnimaRandomStudio.runtimeconfig.json', 'AnimaRandomStudio.pri', 'Microsoft.UI.Xaml.dll', 'System.Private.CoreLib.dll', 'README.md', 'LICENSE', 'THIRD-PARTY-NOTICES.txt', 'third-party-packages.json', 'build-info.json', 'Microsoft.AspNetCore.Server.Kestrel.Core.dll', 'Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.dll', 'DOWNLOAD-TOOLS-NOTICES.txt', 'DOWNLOAD-TOOLS-SOURCES.zip')) {
         if ($package.files.path -notcontains $required) { throw "Required embedded file missing: $required" }
     }
+    Assert-LauncherSlimBundle $package.files
+    Copy-Item -LiteralPath $report -Destination (Join-Path $candidate 'package-info.json') -Force
+    Copy-Item -LiteralPath (Join-Path $package.bundleDirectory 'FILES.sha256') -Destination (Join-Path $candidate 'FILES.sha256') -Force
+    Write-LauncherPackageSizeReport -CandidateDirectory $candidate -Package $package
 } finally {
     $env:ANIMA_LAUNCHER_HOME = $previousHome
     $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR = $previousExtract
 }
+Remove-LauncherCandidateTemporaryDirectory -CandidateDirectory $candidate -Path $verify
 Write-Output "PASS: candidate $($info.version); standalone EXE, EXE-only ZIP, Setup checksums and embedded files verified."

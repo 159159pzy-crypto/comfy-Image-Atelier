@@ -350,10 +350,17 @@ internal static class Program
                 var result = RouteInstalledVersion(updates, args);
                 if (result.HasValue) return result.Value;
             }
+            var first = true;
+            using var earlyInstance = !diagnose && UpdateContext is null ? AcquireInstanceMutex(out first) : null;
+            if (earlyInstance is not null)
+            {
+                if (!first) { WakeRunningInstance(); return 0; }
+                ShowSignal = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
+            }
             Directory.CreateDirectory(StateDir);
             Log("启动器初始化");
-            // Resource extraction is serialized across GUI launches and concurrent --diagnose
-            // runs before the single-instance mutex decides who owns the window.
+            // Diagnostics and update candidates still serialize resource preparation.
+            // Ordinary duplicate launches have already signaled the existing window.
             using var extract = new Mutex(false, "Local\\AnimaRandomStudioExtract" + InstanceSuffix);
             var acquired = false;
             try { acquired = extract.WaitOne(TimeSpan.FromSeconds(60)); }
@@ -361,18 +368,19 @@ internal static class Program
             try
             {
                 if (!acquired) throw new IOException("等待资源提取锁超时，请关闭其他实例后重试。");
+                using var cacheUse = LauncherCache.AcquireUseAsync(StateDir).GetAwaiter().GetResult();
                 ExtractResources();
             }
             finally { if (acquired) extract.ReleaseMutex(); }
             Log("应用资源就绪");
             if (diagnose) return Diagnose(args).GetAwaiter().GetResult();
-            using var mutex = AcquireInstanceMutex(out var first);
+            using var mutex = earlyInstance is null ? AcquireInstanceMutex(out first) : null;
             if (!first)
             {
                 WakeRunningInstance();
                 return 0;
             }
-            ShowSignal = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
+            ShowSignal ??= new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
             // Retry a prior registry write failure on ordinary startup. Candidate
             // versions synchronize only after the update transaction commits.
             if (UpdateContext is null) SyncInstalledVersion(Version);
@@ -416,6 +424,12 @@ internal static class Program
         }
         var bundleId = Convert.ToHexString(identityHash.GetHashAndReset())[..16].ToLowerInvariant();
         Assets = Path.Combine(StateDir, "versions", Version + "-" + bundleId);
+        var assetsExisted = Directory.Exists(Assets);
+        var cache = new LauncherCache(StateDir, Log);
+        var repairSnapshot = false;
+        try { repairSnapshot = cache.HasPendingSnapshotRepairAsync(Assets).GetAwaiter().GetResult(); }
+        catch (Exception error) when (error is IOException or InvalidDataException or JsonException or UnauthorizedAccessException)
+        { Log("无法读取缓存维护索引，本次保留资源并跳过缓存维护登记：" + error.Message); }
         Directory.CreateDirectory(Assets);
         foreach (var resource in assembly.GetManifestResourceNames())
         {
@@ -459,6 +473,7 @@ internal static class Program
                 Installer.ExtractZip(zip, staging);
                 Directory.Move(staging, bundled);
             }
+            else if (repairSnapshot) RepairMissingWorkbench(zip, bundled);
             AppRoot = bundled;
         }
         else
@@ -466,6 +481,51 @@ internal static class Program
             var directory = new DirectoryInfo(AppContext.BaseDirectory);
             while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "run.py"))) directory = directory.Parent;
             AppRoot = directory?.FullName ?? throw new FileNotFoundException("发布文件缺少工作台资源，请使用 Build-Launcher.ps1 构建。");
+        }
+        if (Directory.Exists(AppRoot) && Path.GetFullPath(AppRoot).StartsWith(Path.GetFullPath(Assets) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        {
+            // A known interrupted deletion must be completely repaired before this version can run.
+            // Existing modified files are never overwritten; verification rejects an ambiguous tree.
+            if (repairSnapshot) cache.CompleteSnapshotRepairAsync(Assets).GetAwaiter().GetResult();
+            try
+            {
+                var state = new LauncherUpdateStore(StateDir).Load();
+                var packageHash = new[] { state.Active, state.Previous, state.Downloaded }
+                    .FirstOrDefault(item => item is not null && LauncherUpdateStore.SamePath(item.Executable, Environment.ProcessPath!))?.Sha256;
+                new LauncherCache(StateDir, Log).RegisterSnapshotAsync(Version, Assets, AppRoot,
+                    newlyCreated: !assetsExisted, packageSha256: packageHash).GetAwaiter().GetResult();
+            }
+            catch (Exception error) { Log("缓存登记已跳过：" + error.Message); }
+        }
+
+    }
+
+    private static void RepairMissingWorkbench(string archive, string destination)
+    {
+        var staging = Path.Combine(StateDir, ".cache-repair-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Installer.ExtractZip(archive, staging);
+            foreach (var source in Directory.EnumerateFiles(staging, "*", SearchOption.AllDirectories))
+            {
+                var target = Safety.Under(destination, Path.GetRelativePath(staging, source));
+                LauncherUpdateStore.RequireNoLinks(target);
+                if (File.Exists(target)) continue;
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                File.Move(source, target); // Never overwrite an existing user-modified file.
+            }
+        }
+        finally
+        {
+            // Only this unique, freshly extracted staging tree is owned by this invocation.
+            if (!LauncherUpdateStore.SamePath(Path.GetDirectoryName(staging)!, StateDir)) throw new IOException("资源修复目录超出状态目录。");
+            if (Directory.Exists(staging))
+            {
+                LauncherUpdateStore.RequireNoLinks(staging);
+                foreach (var entry in Directory.EnumerateFileSystemEntries(staging, "*", SearchOption.AllDirectories))
+                    if ((File.GetAttributes(entry) & FileAttributes.ReparsePoint) != 0) throw new IOException("资源修复目录中出现链接，已保留。");
+                Directory.Delete(staging, recursive: true);
+            }
         }
     }
 

@@ -124,8 +124,9 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
         catch { return false; }
     }
     /// <summary>One read-only snapshot for start paths and service status; null means stopped.</summary>
-    public static async Task<ComfyArgumentComparison?> InspectComfyReuseAsync(LauncherConfig config, CancellationToken ct)
+    public static async Task<ComfyArgumentComparison?> InspectComfyReuseAsync(LauncherConfig config, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         config.Validate();
         ComfyLaunchArguments.ValidateForRoot(config.ComfyArguments, config.ComfyRoot);
         if (!await PortOpen(config.ComfyPort, ct)) return null;
@@ -193,19 +194,12 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
 
     private static async Task<(OwnedProcess? Process, OwnedProcess? Launcher)> ReadComfyProcessIdentity(LauncherConfig config, int pid, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         var process = ReadProcessIdentity(pid, "ComfyUI");
         if (process is null || SameExecutable(process.Executable, config.Python)
             || VenvBasePython(config.Python) is not { } basePython || !SameExecutable(process.Executable, basePython)) return (process, null);
-        var powershell = Commands.Find("powershell.exe");
-        if (powershell is null) return (process, null);
-        try
-        {
-            var result = await Commands.Run(powershell, ["-NoProfile", "-NonInteractive", "-Command", $"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').ParentProcessId"],
-                Environment.CurrentDirectory, null, ct, timeout: TimeSpan.FromSeconds(5));
-            return (process, int.TryParse(result.Trim(), out var parent) ? ReadProcessIdentity(parent, "ComfyUI launcher") : null);
-        }
-        catch (OperationCanceledException) { throw; }
-        catch { return (process, null); }
+        var parent = await WindowsProcessInspection.FindParentProcessIdAsync(pid, ct);
+        return (process, parent > 0 ? ReadProcessIdentity(parent, "ComfyUI launcher") : null);
     }
 
     private static OwnedProcess? ReadProcessIdentity(int pid, string role)
@@ -825,25 +819,7 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
     }
 
     /// <summary>Owning PID of a 127.0.0.1 LISTEN socket on <paramref name="port"/>; 0 when unknown.</summary>
-    private static async Task<int> FindPortOwner(int port, CancellationToken ct)
-    {
-        try
-        {
-            // netstat is the simplest reliable owner lookup available everywhere;
-            // lines look like: "  TCP    127.0.0.1:8190    0.0.0.0:0    LISTENING    16728".
-            var output = await Commands.Run("netstat.exe", ["-ano"], Environment.CurrentDirectory, null, ct, timeout: TimeSpan.FromSeconds(5));
-            var owners = new HashSet<int>();
-            foreach (var line in output.Split('\n'))
-            {
-                var parts = line.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length >= 5 && parts[0] == "TCP" && parts[^2] == "LISTENING" && (parts[1] == "127.0.0.1:" + port || parts[1] == "0.0.0.0:" + port || parts[1] == "[::]:" + port) && int.TryParse(parts[^1], out var pid)) owners.Add(pid);
-            }
-            return owners.Count == 1 ? owners.Single() : 0;
-        }
-        catch (OperationCanceledException) { throw; }
-        catch { }
-        return 0;
-    }
+    private static Task<int> FindPortOwner(int port, CancellationToken ct) => WindowsProcessInspection.FindLoopbackListenerAsync(port, ct);
 
     /// <summary>Keep the UI responsive while waiting for owned processes to exit.</summary>
     public async Task StopOwnedAsync(string? role = null, CancellationToken ct = default)

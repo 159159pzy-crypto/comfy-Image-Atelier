@@ -12,19 +12,19 @@ internal sealed partial class LauncherState
     {
         BatchProgress = update;
         SetupDownloadPercent = (int)update.Percent;
-        ProgressChanged?.Invoke((int)update.Percent);
+        PublishPercent((int)update.Percent);
         ProgressText = $"整批 {update.CompletedItems}/{update.TotalItems} 项 · {update.Received / 1048576d:N1} / {update.Total / 1048576d:N1} MiB"
             + (update.BytesPerSecond > 0 ? $" · {update.BytesPerSecond / 1048576d:N1} MiB/s" : "")
             + (update.RemainingTime is { } remaining ? $" · 剩余 {remaining:hh\\:mm\\:ss}" : "");
-        TaskProgressChanged?.Invoke(ProgressText);
-        BatchProgressChanged?.Invoke();
+        RequestPresentation(DisplayChange.ProgressText);
+        RequestPresentation(DisplayChange.Batch);
     }
 
     private void ClearBatchProgress()
     {
         modelBatch = null;
         BatchProgress = null;
-        BatchProgressChanged?.Invoke();
+        RequestPresentation(DisplayChange.Batch);
     }
 
     private static long ModelRemaining(ModelStatus item) => item.Model.IsPackage

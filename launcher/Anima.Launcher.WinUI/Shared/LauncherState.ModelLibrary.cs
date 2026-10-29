@@ -24,9 +24,9 @@ internal sealed partial class LauncherState
         configuration.Python = Inventory.FindPython(configuration.ComfyRoot, configuration.Python);
     }
 
-    public void RefreshModelDownloadRows()
+    public void RefreshModelDownloadRows(bool live = false)
     {
-        var snapshot = DownloadTasks.GetSnapshot();
+        var snapshot = live ? DownloadTasks.GetSnapshot() : DownloadView;
         var environment = CurrentModelRoot();
         foreach (var row in Rows)
             row.UpdateDownload(ModelDownloadProjection.ForModel(environment, row.Status.Model, row.Status.Destination,
@@ -71,7 +71,7 @@ internal sealed partial class LauncherState
             else RebuildRows(scan);
             modelLibraryContext = context;
             RefreshModelDownloadRows();
-            DownloadsChanged?.Invoke();
+            NotifyDownloads();
             SetStatus($"已扫描：模型 {scan.Count(s => !s.Missing)}/{scan.Count}。勾选后才下载。");
         }
         catch (OperationCanceledException) when (shuttingDown) { }
@@ -110,7 +110,7 @@ internal sealed partial class LauncherState
         if (Busy || preparingModelDownloads || shuttingDown) return;
         try
         {
-            RefreshModelDownloadRows();
+            RefreshModelDownloadRows(live: true);
             if (row.Download is not { } state) return;
             var owners = DownloadTasks.EnsureResourceOwners(state.OwnerId);
             var owner = owners.Single(o => o.Models.Any(m => m.Model.Id == row.Status.Model.Id));
@@ -118,7 +118,7 @@ internal sealed partial class LauncherState
             else if (state.CanResume || state.CanRetry) await ResumeDownloadOwnerAsync(owner.Id);
         }
         catch (Exception ex) { AppendLog(ex.Message); SetStatus("模型操作未完成：" + ex.Message); }
-        finally { RefreshModelDownloadRows(); DownloadsChanged?.Invoke(); }
+        finally { RefreshModelDownloadRows(live: true); NotifyDownloads(); }
     }
 
     private void PublishCompletedModel(LauncherConfig configuration, ModelDownloadIntent intent)
@@ -132,7 +132,7 @@ internal sealed partial class LauncherState
             if (row is null) return;
             row.UpdateStatus(new(intent.Model, "已校验", intent.Destination, intent.Destination));
             RefreshModelDownloadRows();
-            DownloadsChanged?.Invoke();
+            NotifyDownloads();
         });
     }
 }

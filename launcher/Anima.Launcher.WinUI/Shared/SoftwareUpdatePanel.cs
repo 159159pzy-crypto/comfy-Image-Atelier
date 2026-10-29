@@ -20,6 +20,7 @@ public sealed class SoftwareUpdatePanel : UserControl
     private readonly Expander releaseNotes;
     private bool loading;
     private bool subscribed;
+    private bool refreshQueued;
     private LauncherState State => App.Shared;
 
     public SoftwareUpdatePanel()
@@ -89,7 +90,12 @@ public sealed class SoftwareUpdatePanel : UserControl
     }
 
     private void BusyChanged(bool _) => RefreshRequested();
-    private void RefreshRequested() => DispatcherQueue.TryEnqueue(() => { if (subscribed) Refresh(); });
+    private void RefreshRequested()
+    {
+        if (refreshQueued) return;
+        refreshQueued = true;
+        if (!DispatcherQueue.TryEnqueue(() => { refreshQueued = false; if (subscribed && State.PresentationVisible) Refresh(); })) refreshQueued = false;
+    }
 
     private void Refresh()
     {

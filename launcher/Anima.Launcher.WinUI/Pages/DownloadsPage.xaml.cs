@@ -12,6 +12,7 @@ internal sealed record DownloadsTarget(string? OwnerId = null, string? ModelId =
 public sealed partial class DownloadsPage : LauncherPage
 {
     private readonly ObservableCollection<TransferRow> rows = [];
+    private readonly Dictionary<string, TransferRow> rowIndex = new();
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(1) };
     private bool active;
     private bool refreshing;
@@ -22,7 +23,7 @@ public sealed partial class DownloadsPage : LauncherPage
     {
         InitializeComponent();
         TaskList.ItemsSource = rows;
-        timer.Tick += (_, _) => Refresh();
+        timer.Tick += (_, _) => RefreshCountdowns();
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
@@ -31,13 +32,14 @@ public sealed partial class DownloadsPage : LauncherPage
         active = true;
         State.DownloadsChanged += Changed;
         ShowTarget(e.Parameter as DownloadsTarget ?? new());
-        timer.Start();
+        State.PresentationVisibilityChanged += VisibilityChanged;
     }
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
         active = false;
         timer.Stop();
         State.DownloadsChanged -= Changed;
+        State.PresentationVisibilityChanged -= VisibilityChanged;
         base.OnNavigatedFrom(e);
     }
     internal void ShowTarget(DownloadsTarget value)
@@ -48,15 +50,22 @@ public sealed partial class DownloadsPage : LauncherPage
         Refresh();
     }
     private void Return_Click(object sender, RoutedEventArgs e) => Shell.ReturnFromDownloads();
-    private void Changed() => DispatcherQueue.TryEnqueue(() => { if (active) Refresh(); });
+    private void Changed() { if (active && State.PresentationVisible) Refresh(); }
+    private void VisibilityChanged(bool visible) { timer.Stop(); if (active && visible) Refresh(); }
+    private void RefreshCountdowns()
+    {
+        if (!active || !State.PresentationVisible) { timer.Stop(); return; }
+        foreach (var row in rows) row.RefreshCountdown();
+        if (!rows.Any(row => row.Record.RetryAt > DateTimeOffset.UtcNow)) timer.Stop();
+    }
     private void Refresh()
     {
-        if (!active || refreshing) return;
+        if (!active || !State.PresentationVisible || refreshing) return;
         refreshing = true;
         try
         {
             if (State.DownloadTasks.RecoveryWarning is { } warning) Notice.Text = warning;
-            var snapshot = State.DownloadTasks.GetSnapshot();
+            var snapshot = State.DownloadView;
             var owners = new[] { new DownloadOwnerRecord { Id = "", Title = "全部任务" } }
                 .Concat(snapshot.Owners.OrderByDescending(o => o.CreatedAt)).ToArray();
             var selectedOwner = applyTarget ? target.OwnerId : (OwnerBox.SelectedItem as DownloadOwnerRecord)?.Id;
@@ -75,14 +84,15 @@ public sealed partial class DownloadsPage : LauncherPage
             var tasks = snapshot.Tasks.Where(t => owner is null || owner.Id.Length == 0 || BelongsTo(t, owner, target.ModelId))
                 .OrderBy(t => t.CreatedAt).ToArray();
             var ids = tasks.Select(t => t.Id).ToHashSet();
-            for (var i = rows.Count - 1; i >= 0; i--) if (!ids.Contains(rows[i].Id)) rows.RemoveAt(i);
+            for (var i = rows.Count - 1; i >= 0; i--) if (!ids.Contains(rows[i].Id)) { rowIndex.Remove(rows[i].Id); rows.RemoveAt(i); }
             foreach (var task in tasks)
             {
-                var row = rows.FirstOrDefault(r => r.Id == task.Id);
-                if (row is null) rows.Add(new(task)); else row.Update(task);
+                if (!rowIndex.TryGetValue(task.Id, out var row)) { row = new(task); rowIndex.Add(task.Id, row); rows.Add(row); }
+                else row.Update(task);
             }
             if (TaskList.SelectedItem is null && rows.Count > 0) TaskList.SelectedIndex = 0;
             ShowSelection();
+            if (rows.Any(row => row.Record.RetryAt > DateTimeOffset.UtcNow)) timer.Start(); else timer.Stop();
         }
         finally { refreshing = false; }
     }
@@ -98,7 +108,7 @@ public sealed partial class DownloadsPage : LauncherPage
     {
         SelectionText.Text = Selected is { } row
             ? row.Record.Destination + "\n" + (string.IsNullOrEmpty(row.Record.Error) ? row.Detail : row.Record.Error)
-            : State.DownloadTasks.Tasks.Count == 0 && State.DownloadTasks.Owners.Count == 0
+            : State.DownloadView.Tasks.Count == 0 && State.DownloadView.Owners.Count == 0
                 ? "还没有下载任务。返回模型资源、安装环境或设置后，可以按需开始下载。"
                 : "此任务尚无文件记录；模型发布和安装步骤完成后，整个任务才会完成。";
         var owner = SelectedOwner();
@@ -110,9 +120,9 @@ public sealed partial class DownloadsPage : LauncherPage
                 + (string.IsNullOrEmpty(owner.Detail) ? "" : " · " + owner.Detail)
                 + (string.IsNullOrEmpty(owner.Error) ? "" : "\n" + owner.Error);
     }
-    private DownloadOwnerRecord? SelectedOwner()
+    private DownloadOwnerRecord? SelectedOwner(bool live = false)
     {
-        var all = State.DownloadTasks.Owners;
+        IReadOnlyList<DownloadOwnerRecord> all = live ? State.DownloadTasks.Owners : State.DownloadView.Owners;
         if (OwnerBox.SelectedItem is DownloadOwnerRecord { Id.Length: > 0 } chosen)
         {
             var current = all.FirstOrDefault(o => o.Id == chosen.Id);
@@ -203,7 +213,7 @@ public sealed partial class DownloadsPage : LauncherPage
     private async Task ContinueSelected(bool newSources)
     {
         if (Selected is not { } row) return;
-        var owner = SelectedOwner();
+        var owner = SelectedOwner(live: true);
         if (owner is not null) await State.ResumeDownloadResourceAsync(row.Id, owner.Id, newSources);
         else
         {
@@ -272,6 +282,12 @@ public sealed partial class DownloadsPage : LauncherPage
         };
         public event PropertyChangedEventHandler? PropertyChanged;
         public override string ToString() => Name + " · " + Label(Record);
-        public void Update(DownloadTaskRecord value) { Record = value; PropertyChanged?.Invoke(this, new("")); }
+        public void Update(DownloadTaskRecord value)
+        {
+            var before = (Name, Summary, Percent, Detail);
+            Record = value;
+            if (before != (Name, Summary, Percent, Detail)) PropertyChanged?.Invoke(this, new(""));
+        }
+        public void RefreshCountdown() { if (Record.RetryAt is not null) PropertyChanged?.Invoke(this, new(nameof(Detail))); }
     }
 }

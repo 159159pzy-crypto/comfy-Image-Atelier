@@ -55,6 +55,15 @@
     <PackageReference Include="H.NotifyIcon.WinUI" Version="2.1.0" />
     <PackageReference Include="System.Drawing.Common" Version="8.0.10" />
   </ItemGroup>
+  <!-- The launcher delegates inference to ComfyUI/Python and never calls Windows ML.
+       Keep the SDK/projections intact; omit only its unused native inference engines. -->
+  <Target Name="_ExcludeUnusedWindowsMLPayload" BeforeTargets="AddMicrosoftWindowsAppSDKPayloadFilesFromMsix"
+          DependsOnTargets="GetExtractMicrosoftWindowsAppSDKMsixFilesInputs"
+          Condition="'$(WindowsAppSDKSelfContained)' == 'true'">
+    <ItemGroup>
+      <MicrosoftWindowsAppSDKFilesExcluded Include="$(MicrosoftWindowsAppSDKMsixContent)\DirectML.dll;$(MicrosoftWindowsAppSDKMsixContent)\onnxruntime.dll;$(MicrosoftWindowsAppSDKMsixContent)\onnxruntime_providers_shared.dll" />
+    </ItemGroup>
+  </Target>
   <!--
     WinExe sets $(TargetExt)=.exe but MarkupCompilePass1 emits a .dll under intermediatexaml;
     @(XamlIntermediateAssembly) therefore never Exists() and LocalAssembly stays empty (WMC1509),

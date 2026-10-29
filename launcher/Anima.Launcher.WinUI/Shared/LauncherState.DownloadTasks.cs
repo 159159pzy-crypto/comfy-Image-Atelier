@@ -14,7 +14,6 @@ internal sealed partial class LauncherState
     private string? activeDownloadOwner;
     private LauncherConfig? savedDownloadSettings;
     private InstallationPlan? activeInstallationPlan;
-    private int downloadRefreshPending;
     private InstallationPlan? FrozenModelPlan => activeInstallationPlan ?? (SetupActive && Setup.InstallStarted ? SetupPlan : null);
     private RuntimeManifest OperationRuntime => DownloadIntegrationPolicy.ModelRuntime(FrozenModelPlan, Program.Runtime);
     private ModelManifest OperationModels => FrozenModelPlan is { FrozenModels.Length: > 0 } plan
@@ -32,18 +31,8 @@ internal sealed partial class LauncherState
         savedDownloadSettings = Config.Clone();
         DownloadTasks = new(Downloads, Program.StateDir);
         if (DownloadTasks.RecoveryWarning is { } warning) AppendLog(warning);
-        DownloadTasks.Changed += () =>
-        {
-            if (Interlocked.Exchange(ref downloadRefreshPending, 1) != 0) return;
-            if (!downloadUi.TryEnqueue(() =>
-            {
-                Interlocked.Exchange(ref downloadRefreshPending, 0);
-                RefreshModelDownloadRows();
-                UpdateDurableModelProgress();
-                DownloadsChanged?.Invoke();
-                TaskStateChanged?.Invoke();
-            })) Interlocked.Exchange(ref downloadRefreshPending, 0);
-        };
+        InitializePresentation();
+        DownloadTasks.Changed += NotifyDownloads;
     }
 
     private void UpdateDurableModelProgress()
@@ -97,13 +86,14 @@ internal sealed partial class LauncherState
     public async Task StartSelectedModelDownloadsAsync()
     {
         if (Busy || SetupActive || preparingModelDownloads || shuttingDown) return;
+        using var cacheUse = await LauncherCache.AcquireUseAsync(Program.StateDir, modelInspectionLifetime.Token);
         var inspection = TrackModelInspection();
         DownloadOwnerRecord[] owners = [];
         preparingModelDownloads = true;
         try
         {
             RefreshModelDownloadRows();
-            DownloadsChanged?.Invoke();
+            NotifyDownloads();
             var ids = Rows.Where(r => r.Selected).Select(r => r.Status.Model.Id).Distinct().ToArray();
             if (ids.Length == 0) { SetStatus("请勾选需要下载的模型。"); return; }
             ApplyPendingFields();
@@ -135,7 +125,7 @@ internal sealed partial class LauncherState
                 if (!shuttingDown)
                 {
                     RefreshModelDownloadRows();
-                    DownloadsChanged?.Invoke();
+                    NotifyDownloads();
                 }
             }
             finally { CompleteModelInspection(inspection); }
@@ -168,6 +158,7 @@ internal sealed partial class LauncherState
         IDisposable? softwareReservation = null;
         try
         {
+            using var cacheUse = await LauncherCache.AcquireUseAsync(Program.StateDir, modelInspectionLifetime.Token);
             var owner = DownloadTasks.Owners.Single(o => o.Id == id);
             if (owner.Kind == "models" && owner.Models.Length > 1)
             {

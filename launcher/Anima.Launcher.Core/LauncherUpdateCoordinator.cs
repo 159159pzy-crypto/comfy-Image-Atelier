@@ -13,6 +13,7 @@ public sealed class LauncherUpdateCoordinator(LauncherUpdates updates, Action<st
     // Windows mutex ownership is thread-affine: keep acquisition/release on this synchronous thread.
     public int Run(string id, string token, bool recoverOnly = false)
     {
+        using var cacheUse = LauncherCache.AcquireUseAsync(Store.StateDirectory).GetAwaiter().GetResult();
         using var mutex = new Mutex(false, Store.MutexName);
         bool acquired;
         try { acquired = mutex.WaitOne(TimeSpan.FromSeconds(10)); } catch (AbandonedMutexException) { acquired = true; }

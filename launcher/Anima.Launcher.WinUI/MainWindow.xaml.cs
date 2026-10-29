@@ -16,6 +16,8 @@ public sealed partial class MainWindow : Window
 {
     [DllImport("user32.dll")]
     private static extern uint GetDpiForWindow(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd);
 
     internal LauncherState State { get; }
 
@@ -66,7 +68,7 @@ public sealed partial class MainWindow : Window
         State = new LauncherState(() => Content?.XamlRoot, ShowWindow)
         {
             ForceShow = forceShow,
-            HideWindow = () => { try { if (tray is not null) AppWindow.Hide(); } catch { } },
+            HideWindow = () => { try { if (tray is not null) AppWindow.Hide(); } catch { } RefreshPresentationVisibility(); },
         };
         app.State = State; // Pages resolve state via App.Shared during navigation.
         WireState();
@@ -81,9 +83,11 @@ public sealed partial class MainWindow : Window
         CreateTray();
         StartShowSignalListener();
         AppWindow.Closing += OnClosing;
+        AppWindow.Changed += (_, _) => RefreshPresentationVisibility();
         Activated += OnActivated;
         ApplyTheme();
         Program.Log("原生窗口就绪");
+        State.ScheduleCacheMaintenance();
     }
 
     private void WireState()
@@ -290,6 +294,7 @@ public sealed partial class MainWindow : Window
     private bool firstActivate = true;
     private async void OnActivated(object sender, WindowActivatedEventArgs args)
     {
+        RefreshPresentationVisibility();
         if (!firstActivate) return;
         firstActivate = false;
         try
@@ -341,6 +346,7 @@ public sealed partial class MainWindow : Window
         }
         args.Cancel = true;
         try { AppWindow.Hide(); } catch { }
+        RefreshPresentationVisibility();
         if (minimizeNotified) return;
         minimizeNotified = true;
         try { tray?.ShowNotification("Comfy Image Atelier", "已最小化到托盘，任务继续运行。"); } catch { }
@@ -352,6 +358,12 @@ public sealed partial class MainWindow : Window
         try { AppWindow.Show(); } catch { }
         try { AppWindow.MoveInZOrderAtTop(); } catch { }
         try { Activate(); } catch { }
+        RefreshPresentationVisibility();
+    }
+
+    private void RefreshPresentationVisibility()
+    {
+        State.SetPresentationVisible(AppWindow.IsVisible && !IsIconic(Win32Interop.GetWindowFromWindowId(AppWindow.Id)));
     }
 
     private async void Exit(bool stop)

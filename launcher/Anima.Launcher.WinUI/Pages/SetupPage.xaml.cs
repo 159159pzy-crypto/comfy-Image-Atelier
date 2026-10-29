@@ -15,6 +15,7 @@ public sealed partial class SetupPage : LauncherPage
 {
     private bool loading = true;
     private bool active;
+    private bool refreshQueued;
     private bool pythonExplicit;
     private bool pauseRequested;
     private string localError = "";
@@ -74,7 +75,12 @@ public sealed partial class SetupPage : LauncherPage
         base.OnNavigatedFrom(e);
     }
 
-    private void OnChanged() => DispatcherQueue.TryEnqueue(() => { if (active) Refresh(); });
+    private void OnChanged()
+    {
+        if (refreshQueued) return;
+        refreshQueued = true;
+        if (!DispatcherQueue.TryEnqueue(() => { refreshQueued = false; if (active && State.PresentationVisible) Refresh(); })) refreshQueued = false;
+    }
     private void OnBusy(bool _) => OnChanged();
     private void OnProgress(string _) => OnChanged();
     private void OnPercent(int _) => OnChanged();

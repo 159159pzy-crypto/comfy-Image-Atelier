@@ -103,7 +103,7 @@ internal sealed partial class LauncherState
         catch { return ""; }
     }
 
-    public void NotifySetup() => SetupChanged?.Invoke();
+    public void NotifySetup() => RequestPresentation(DisplayChange.Setup);
 
     private void SynchronizeSetupVersion() => RuntimePolicies.SynchronizeManagedSetupVersion(Setup.Draft, Config, Path.Combine(Program.StateDir, "versions"));
 

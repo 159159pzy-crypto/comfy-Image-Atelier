@@ -69,3 +69,66 @@ function New-LauncherPackage {
     $count = Test-LauncherPackageIntegrity -ZipPath $ZipPath -ExecutablePath $ExecutablePath
     return [pscustomobject]@{ ZipPath = $ZipPath; Sha256 = (Get-FileHash -LiteralPath $ZipPath -Algorithm SHA256).Hash.ToLowerInvariant(); FileCount = $count }
 }
+
+function Assert-LauncherSlimBundle($Files) {
+    foreach ($name in @('DirectML.dll', 'onnxruntime.dll', 'onnxruntime_providers_shared.dll')) {
+        if (@($Files | Where-Object { [System.IO.Path]::GetFileName($_.path) -ieq $name }).Count -gt 0) {
+            throw "Unused Windows ML runtime must not be bundled: $name"
+        }
+    }
+}
+
+function Write-LauncherPackageSizeReport {
+    param([Parameter(Mandatory)][string]$CandidateDirectory, [Parameter(Mandatory)]$Package)
+    Assert-LauncherSlimBundle $Package.files
+    $assets = foreach ($name in @('AnimaRandomStudio.exe', 'AnimaRandomStudio-portable-win-x64.zip', 'AnimaRandomStudio-Setup-win-x64.exe')) {
+        $path = Join-Path $CandidateDirectory $name
+        [ordered]@{ path = $name; bytes = (Get-Item -LiteralPath $path).Length; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() }
+    }
+    $files = @($Package.files)
+    $inventoryBytes = (Get-Item -LiteralPath (Join-Path $CandidateDirectory 'FILES.sha256')).Length
+    $result = [ordered]@{
+        schemaVersion = 1
+        version = $Package.version
+        sourceCommit = $Package.buildInfo.sourceCommit
+        verifiedAtUtc = [DateTime]::UtcNow.ToString('o')
+        assets = @($assets)
+        embeddedFileCount = $files.Count + 1
+        extractedBytes = [long]($files | Measure-Object -Property size -Sum).Sum + $inventoryBytes
+        excludedNativeFiles = @('DirectML.dll', 'onnxruntime.dll', 'onnxruntime_providers_shared.dll')
+        largestEmbeddedFiles = @($files | Sort-Object -Property size -Descending | Select-Object -First 20 path, size)
+        inventory = 'FILES.sha256'
+        verification = 'package-info.json'
+    }
+    [System.IO.File]::WriteAllText((Join-Path $CandidateDirectory 'package-size-report.json'), ($result | ConvertTo-Json -Depth 8) + "`n", [System.Text.UTF8Encoding]::new($false))
+}
+
+function Remove-LauncherCandidateTemporaryDirectory {
+    param([Parameter(Mandatory)][string]$CandidateDirectory, [Parameter(Mandatory)][string]$Path)
+    $root = [System.IO.Path]::TrimEndingDirectorySeparator([System.IO.Path]::GetFullPath($CandidateDirectory))
+    $target = [System.IO.Path]::TrimEndingDirectorySeparator([System.IO.Path]::GetFullPath($Path))
+    $parent = [System.IO.Path]::GetDirectoryName($target)
+    if (-not $parent.Equals($root, [System.StringComparison]::OrdinalIgnoreCase) -or
+        [System.IO.Path]::GetFileName($target) -cnotmatch '^\.(publish-staging|bundle-content|verification-[a-f0-9]{32})$') {
+        throw "Refusing to clean a path outside this candidate's known temporary directories: $target"
+    }
+    # Check every ancestor and every descendant before deletion. Enumerate one directory at
+    # a time so a junction is rejected before traversal, including links inside hidden folders.
+    for ($ancestor = $target; $ancestor; $ancestor = [System.IO.Path]::GetDirectoryName($ancestor)) {
+        if (Test-Path -LiteralPath $ancestor) {
+            if ((Get-Item -LiteralPath $ancestor -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                throw "Refusing to clean through a filesystem link: $ancestor"
+            }
+        }
+    }
+    if (-not (Test-Path -LiteralPath $target -PathType Container)) { return }
+    $pending = [System.Collections.Generic.Queue[string]]::new()
+    $pending.Enqueue($target)
+    while ($pending.Count -gt 0) {
+        foreach ($item in Get-ChildItem -LiteralPath $pending.Dequeue() -Force) {
+            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { throw "Refusing to clean a filesystem link: $($item.FullName)" }
+            if ($item.PSIsContainer) { $pending.Enqueue($item.FullName) }
+        }
+    }
+    Remove-Item -LiteralPath $target -Recurse -Force
+}

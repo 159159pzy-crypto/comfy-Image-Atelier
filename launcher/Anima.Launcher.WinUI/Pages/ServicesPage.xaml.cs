@@ -11,6 +11,8 @@ public sealed partial class ServicesPage : LauncherPage
     private ServiceInfo studio = new();
     private bool probing;
     private bool active;
+    private CancellationTokenSource? probe;
+    private int visibilityRevision;
 
     public ServicesPage()
     {
@@ -26,33 +28,47 @@ public sealed partial class ServicesPage : LauncherPage
         State.BusyChanged += OnBusy;
         State.FieldsReloaded += OnReloaded;
         State.SoftwareUpdateChanged += OnReloaded;
+        State.PresentationVisibilityChanged += VisibilityChanged;
         Apply();
         await Refresh();
-        if (active) timer.Start();
+        if (active && State.PresentationVisible) timer.Start();
     }
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
         active = false;
         timer.Stop();
+        probe?.Cancel();
         State.BusyChanged -= OnBusy;
         State.FieldsReloaded -= OnReloaded;
         State.SoftwareUpdateChanged -= OnReloaded;
+        State.PresentationVisibilityChanged -= VisibilityChanged;
         base.OnNavigatedFrom(e);
     }
 
     private void OnBusy(bool busy) => DispatcherQueue.TryEnqueue(() => { if (active) Apply(); });
     private void OnReloaded() => DispatcherQueue.TryEnqueue(() => { if (active) Apply(); });
 
+    private void VisibilityChanged(bool visible)
+    {
+        visibilityRevision++;
+        timer.Stop();
+        probe?.Cancel();
+        if (active && visible) { _ = Refresh(); timer.Start(); }
+    }
+
     private async Task Refresh()
     {
-        if (probing || !active) return;
+        if (probing || !active || !State.PresentationVisible) return;
         probing = true;
+        var revision = visibilityRevision;
+        using var lifetime = new CancellationTokenSource();
+        probe = lifetime;
         try
         {
             // These probes are independent; a slow backend should not delay the other.
-            var comfyTask = State.ProbeComfyAsync();
-            var studioTask = State.ProbeWebUIAsync();
+            var comfyTask = State.ProbeComfyAsync(lifetime.Token);
+            var studioTask = State.ProbeWebUIAsync(lifetime.Token);
             await Task.WhenAll(comfyTask, studioTask);
             comfy = await comfyTask;
             studio = await studioTask;
@@ -61,10 +77,16 @@ public sealed partial class ServicesPage : LauncherPage
                 studio.Status = "needs_restart";
                 studio.Detail = comfy.Detail;
             }
-            if (active) Apply();
+            if (active && State.PresentationVisible && !lifetime.IsCancellationRequested) Apply();
         }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
         catch (Exception ex) { State.AppendLog("服务状态检测：" + ex.Message); }
-        finally { probing = false; }
+        finally
+        {
+            probe = null;
+            probing = false;
+            if (active && State.PresentationVisible && revision != visibilityRevision) _ = Refresh();
+        }
     }
 
     private void Apply()
