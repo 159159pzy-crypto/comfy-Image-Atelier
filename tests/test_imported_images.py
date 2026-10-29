@@ -176,3 +176,40 @@ class ImportedImageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service._workers, set())
         with self.assertRaises(WorkflowError):
             await self.service.add("prompt", png())
+
+    async def test_cancelled_prompt_upload_finishes_cache_registration_before_unlocking(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        original_register = self.service.prompt_cache.register_local
+        asset_id = None
+
+        async def paused_register(value, *, uploaded=False):
+            nonlocal asset_id
+            asset_id = value
+            entered.set()
+            await release.wait()
+            await original_register(value, uploaded=uploaded)
+
+        with patch.object(self.service.prompt_cache, "register_local", side_effect=paused_register):
+            upload = asyncio.create_task(self.service.add("prompt", png()))
+            await asyncio.wait_for(entered.wait(), 2)
+            upload.cancel()
+            read = asyncio.create_task(self.service.read("prompt", asset_id))
+            try:
+                await asyncio.sleep(0.02)
+                self.assertFalse(upload.done())
+                self.assertFalse(read.done())
+            finally:
+                release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await upload
+            self.assertEqual((await read)["id"], asset_id)
+        self.assertEqual(self.service._workers, set())
+
+    async def test_cache_registration_failure_preserves_successful_prompt_upload(self):
+        cache = self.service.prompt_cache
+        with patch.object(cache, "register_local", side_effect=OSError("cache index unavailable")), \
+                patch.object(cache, "suspend", wraps=cache.suspend) as suspend:
+            asset = await self.service.add("prompt", png())
+            suspend.assert_called_once_with("cache index unavailable")
+        self.assertEqual((await self.service.read("prompt", asset["id"]))["id"], asset["id"])
+        self.assertTrue(await self.service.read_bytes("prompt", asset["id"]))

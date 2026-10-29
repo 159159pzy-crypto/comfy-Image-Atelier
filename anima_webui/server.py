@@ -1254,6 +1254,10 @@ def create_app(
         result = await imported_images.add("prompt", found[0], filename=found[1])
         return web.json_response(result, status=201)
 
+    async def lease_prompt_images(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        return web.json_response(await imported_images.prompt_cache.lease(request.match_info["client_id"], body))
+
     async def prompt_image_metadata(request: web.Request) -> web.Response:
         return web.json_response(await imported_images.read("prompt", request.match_info["asset_id"]))
 
@@ -1835,6 +1839,7 @@ def create_app(
     app.router.add_get("/api/input-images/{asset_id}/image", input_image_content)
     app.router.add_get("/api/input-images/{asset_id}", input_image_metadata)
     app.router.add_post("/api/prompt-images", upload_prompt_image)
+    app.router.add_put("/api/prompt-images/leases/{client_id}", lease_prompt_images)
     app.router.add_get("/api/prompt-images/{asset_id}/image", prompt_image_content)
     app.router.add_get("/api/prompt-images/{asset_id}", prompt_image_metadata)
     app.router.add_get("/api/prompt-assistant/options", prompt_assistant_options)
@@ -1861,10 +1866,16 @@ def create_app(
     app.router.add_get("/favicon.ico", favicon)
     app.router.add_static("/static/", root / "static", show_index=False)
 
+    async def start_resources(_: web.Application) -> None:
+        await imported_images.start(manager)
+
     async def cleanup_resources() -> None:
         try:
             try:
-                await manager.shutdown()
+                try:
+                    await imported_images.prompt_cache.stop()
+                finally:
+                    await manager.shutdown()
             finally:
                 await imported_images.close()
         finally:
@@ -1887,6 +1898,7 @@ def create_app(
         # A disconnected shutdown caller must not cancel resource cleanup.
         await asyncio.shield(cleanup_task)
 
+    app.on_startup.append(start_resources)
     app.on_cleanup.append(cleanup)
     return app
 

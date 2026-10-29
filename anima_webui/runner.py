@@ -572,6 +572,7 @@ class BatchManager:
                       "status": "running", "total": 1, "current": 1, "completed": 0,
                       "prompt_id": "", "error": "", "settings": job["settings"]}
         self.task = asyncio.create_task(self._run_prompt_preview(job))
+        self.task.add_done_callback(lambda _: self._wake_prompt_cache())
         self._ensure_monitor()
 
     async def _process_prompt(self, job: dict[str, Any]) -> dict[str, Any]:
@@ -689,7 +690,14 @@ class BatchManager:
 
     async def cancel_prompt_preview(self, job_id: str) -> dict[str, Any]:
         async with self._start_lock:
-            return await self._cancel_prompt_preview(job_id)
+            result = await self._cancel_prompt_preview(job_id)
+            self._wake_prompt_cache()
+            return result
+
+    def _wake_prompt_cache(self) -> None:
+        cache = getattr(self.imported_images, "prompt_cache", None)
+        if cache is not None:
+            cache.wake()
 
     async def _cancel_prompt_preview(self, job_id: str) -> dict[str, Any]:
         job = await self.prompt_jobs.get(job_id)
@@ -949,6 +957,7 @@ class BatchManager:
                 if entry.get("kind") == "prompt_preview":
                     await self.prompt_jobs.update(entry["job_id"], status="cancelled", error="队列已清空")
             self.queue.clear()
+            self._wake_prompt_cache()
         if self.active() and self.state.get("status") in {"running", "stopping"}:
             self.stop_requested = True
             self.state["status"] = "stopping"
@@ -1131,6 +1140,7 @@ class BatchManager:
         clearQueue=false(只停当前)则应继续接续,_begin_batch 会复位该标志。
         """
         self._clear_preview()
+        self._wake_prompt_cache()
         async with self._start_lock:
             while not self.shutting_down and self.queue:
                 entry = self.queue.pop(0)

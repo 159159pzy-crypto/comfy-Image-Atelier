@@ -1,15 +1,19 @@
-"""Durable image access without retention settings or background deletion."""
+"""Serialized image access, with bounded retention for reverse-prompt copies."""
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from pathlib import Path
 from typing import Any
 
 from .workflow import WorkflowError
+from .prompt_image_cache import PromptImageCache
 
 
 ASSET_ID = re.compile(r"^[a-f0-9]{64}$")
+REVERSE_UPLOAD = re.compile(r"^reverse-([a-f0-9]{64})\.png$")
+logger = logging.getLogger(__name__)
 
 
 class ImportedImageService:
@@ -22,6 +26,24 @@ class ImportedImageService:
         self._lock = asyncio.Lock()
         self._workers: set[asyncio.Task] = set()
         self._closed = False
+        self.prompt_cache = PromptImageCache(self)
+
+    async def start(self, manager: Any) -> None:
+        self.prompt_cache.manager = manager
+        async with self._lock:
+            try:
+                await self._finish(self.prompt_cache.initialize())
+            except Exception as error:
+                self.prompt_cache.suspend(str(error))
+                logger.warning("反推缓存初始化失败，已暂停自动清理: %s", error)
+        self.prompt_cache.start()
+
+    async def _register_prompt(self, asset_id: str, *, uploaded: bool = False) -> None:
+        try:
+            await self.prompt_cache.register_local(asset_id, uploaded=uploaded)
+        except Exception as error:
+            self.prompt_cache.suspend(str(error))
+            logger.warning("反推缓存登记失败，已暂停自动清理: %s", error)
 
     def _store(self, kind: str, asset_id: str | None = None) -> Any:
         if self._closed:
@@ -73,7 +95,16 @@ class ImportedImageService:
             kwargs = {"filename": filename}
             if kind == "input":
                 kwargs["source_image_id"] = source_image_id
-            return await self._thread(store.add, body, **kwargs)
+
+            async def add() -> dict[str, Any]:
+                result = await self._thread(store.add, body, **kwargs)
+                if kind == "prompt":
+                    await self._register_prompt(result["id"], uploaded=True)
+                return result
+
+            # Keep ownership registration inside the same cancellation-safe
+            # operation as the write, including when the HTTP caller leaves.
+            return await self._finish(add())
 
     async def read(self, kind: str, asset_id: str) -> dict[str, Any]:
         async with self._lock:
@@ -83,7 +114,13 @@ class ImportedImageService:
                 self._checked_path(store, asset_id)
                 return store.get(asset_id)
 
-            return await self._thread(read)
+            async def operation() -> dict[str, Any]:
+                result = await self._thread(read)
+                if kind == "prompt":
+                    await self._register_prompt(asset_id)
+                return result
+
+            return await self._finish(operation())
 
     async def read_bytes(self, kind: str, asset_id: str) -> bytes:
         async with self._lock:
@@ -94,7 +131,13 @@ class ImportedImageService:
                 store.get(asset_id)
                 return path.read_bytes()
 
-            return await self._thread(read)
+            async def operation() -> bytes:
+                result = await self._thread(read)
+                if kind == "prompt":
+                    await self._register_prompt(asset_id)
+                return result
+
+            return await self._finish(operation())
 
     async def prepare(self, asset_id: str, width: int, height: int, fit: str) -> bytes:
         async with self._lock:
@@ -109,11 +152,18 @@ class ImportedImageService:
     async def upload_comfy(self, body: bytes, filename: str) -> str:
         if self._closed:
             raise WorkflowError("图片服务正在关闭")
+        reverse = REVERSE_UPLOAD.fullmatch(filename)
+        if reverse:
+            async with self._lock:
+                self._store("prompt", reverse[1])
+                return await self._finish(self.prompt_cache.upload_comfy(body, filename, reverse[1]))
         return await self._finish(self.comfy.upload_image(body, filename))
 
     async def close(self) -> None:
         self._closed = True
+        await self.prompt_cache.stop()
         async with self._lock:
             pass
         if self._workers:
             await asyncio.gather(*self._workers, return_exceptions=True)
+        await self.prompt_cache.close()

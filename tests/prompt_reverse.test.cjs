@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const crypto = require('node:crypto').webcrypto;
 const read = file => fs.readFileSync(path.join(__dirname, '../static', file), 'utf8');
 const plain = value => JSON.parse(JSON.stringify(value));
 const tick = () => new Promise(setImmediate);
@@ -24,28 +25,39 @@ function target(id = '') {
     dispatchEvent(event) { this.emit(event.type); },
   };
 }
-function setup({ saved = null, request, fetch } = {}) {
-  const elements = {}, element = id => elements[id] ||= target(id), calls = [], uploads = [], storage = new Map(), timers = [];
+function setup({ saved = null, request, fetch, leaseRequest } = {}) {
+  const elements = {}, element = id => elements[id] ||= target(id), calls = [], uploads = [], storage = new Map(), timers = [], leaseTimers = [], leases = [];
   if (saved) storage.set(`anima-studio:prompt-reverse:v${saved.version || 1}`, JSON.stringify(saved));
   element('single_positive_prompt').value = 'current body'; element('singleNegative').value = 'current negative';
   const options = { available: true, services: [{ id: 'service', name: 'Service', models: [{ name: 'vision' }] }], templates: ['anima', 'krea2'].map(profile => ({ id: `builtin:reverse:${profile}`, name: profile })), defaults: { anima: 'builtin:reverse:anima', krea2: 'builtin:reverse:krea2' }, methods: { metadata: { available: true }, vision: { available: true }, tagger: { available: true, models: [{ name: 'pixai-tagger-v0.9-timm', state: 'ready' }] } } };
   const document = Object.assign(target(), { getElementById: element, createElement: tag => ({ ...target(), tagName: tag.toUpperCase() }), hidden: false, querySelector: () => null });
-  const ctx = vm.createContext({ console, document, window: target(), AbortController, Event: function(type) { this.type = type; },
+  const ctx = vm.createContext({ console, document, window: target(), crypto, AbortController, AbortSignal, Event: function(type) { this.type = type; },
     profile: 'anima', currentProfile: () => ctx.profile, singleWorkbenchActive: () => true, imagePreview: { phase: 'closed' },
     singleWorkbenchState: { mode: 'single', single: { input_image_id: 'reference-untouched' }, generationMode: 'img2img' },
     localStorage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
-    setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout() {}, schedulePersist() {},
+    setTimeout: (fn, delay) => { const timer = { fn, delay, cancelled: false }; if (delay === 60_000) leaseTimers.push(timer); else timers.push(fn); return timer; }, clearTimeout(timer) { if (timer) timer.cancelled = true; }, schedulePersist() {},
     Option: function(name, id) { this.text = name; this.value = id; }, FormData: class { append(name, value) { this.name = name; this.file = value; } },
     navigator: { clipboard: { writeText: async text => { ctx.copied = text; } } },
     request: async (url, init) => { calls.push({ url, init }); if (request) return request(url, init); if (url.includes('/options')) return plain(options); if (url.startsWith('/api/prompt-images/')) return asset(url.split('/').at(-1)); return { id: 'job', status: 'completed', result: metadata() }; },
     fetch: async (url, init) => { uploads.push({ url, init }); return fetch ? fetch(url, init) : response(asset()); },
+  });
+  let businessRequest = ctx.request;
+  Object.defineProperty(ctx, 'request', {
+    get: () => async (url, init) => {
+      if (url.startsWith('/api/prompt-images/leases/') && init?.method === 'PUT') {
+        const call = { url, init, payload: JSON.parse(init.body) }; calls.push(call); leases.push(call);
+        return leaseRequest ? leaseRequest(call) : { revision: call.payload.revision, expires_at: 600, missing_image_ids: [] };
+      }
+      return businessRequest(url, init);
+    },
+    set: value => { businessRequest = value; },
   });
   for (const name of ['single-input.js', 'prompt-reverse.js', 'prompt-assistant.js']) vm.runInContext(read(name), ctx);
   ctx.initializePromptReverse();
   const state = vm.runInContext('promptReverseState', ctx);
   ctx.promptReverseSetMode('reverse');
   const configure = (image = asset(), profile = ctx.profile) => { const draft = ctx.promptReverseDraft(profile); Object.assign(draft, { imageId: image.id, image, method: image.metadata?.source === 'none' ? 'vision' : 'metadata', service: 'service', model: 'vision', template: `builtin:reverse:${profile}` }); return draft; };
-  return { ctx, elements, element, state, configure, calls, uploads, storage, timers, options, document };
+  return { ctx, elements, element, state, configure, calls, uploads, storage, timers, leaseTimers, leases, options, document };
 }
 
 test('metadata upload extracts automatically without AI configuration and keeps generation untouched', async () => {
@@ -82,7 +94,7 @@ test('unconfigured AI retains the image and gives an actionable message without 
   await tick(); await ctx.promptReverseAcceptInput([file()]);
   ctx.promptReverseSetMethod('vision'); await ctx.promptReverseStart();
   assert.equal(ctx.promptReverseDraft().imageId, 'plain'); assert.match(ctx.promptReverseDraft().status, /配置视觉服务/);
-  assert.equal(calls.filter(item => item.init).length, 1);
+  assert.equal(calls.filter(item => item.url === '/api/prompt-jobs' && item.init?.method === 'POST').length, 1);
 });
 
 test('unavailable vision bridge blocks AI with its reason while metadata remains readable', async () => {
@@ -190,7 +202,7 @@ test('replacement during pending job create prevents that old task from taking o
   assert.equal(draft.imageId, ''); assert.equal(draft.jobId, ''); assert.equal(draft.result, '');
 });
 
-test('persisted desk/profile drafts restore with GET only and keep rewrite v1 data unchanged', async () => {
+test('persisted desk/profile drafts restore without creating jobs and keep rewrite v1 data unchanged', async () => {
   const imageId = 'saved-image', fingerprint = JSON.stringify([imageId, 'service', 'vision', 'builtin:reverse:krea2']);
   const saved = { version: 1, mode: 'reverse', drafts: { krea2: { imageId, service: 'service', model: 'vision', template: 'builtin:reverse:krea2', jobId: 'saved-job', jobRevision: 4, revision: 4, jobFingerprint: fingerprint, busy: true } } };
   const { ctx, calls, elements, storage, state } = setup({ saved, request: async url => url.includes('/options') ? { services: [], templates: [] } : url.startsWith('/api/prompt-images/') ? asset(imageId, { source: 'none' }) : { status: 'completed', result: metadata({ source: 'ai', text: 'recovered AI' }) } });
@@ -322,7 +334,7 @@ test('editing a method then switching away protects its result from late complet
   ctx.promptReverseSetMethod('vision'); assert.equal(draft.result, 'keep my changes'); assert.match(draft.status, /未覆盖/);
 });
 
-test('v2 persisted active job resumes into its own method with GET only', async () => {
+test('v2 persisted active job resumes into its own method without creating jobs', async () => {
   const initial = setup(); await tick(); const draft = initial.configure(asset('plain', { source: 'none' }));
   initial.ctx.promptReverseApplyResult(draft, metadata({ source: 'ai', text: 'previous vision' }));
   draft.busy = true; draft.jobId = 'existing-job'; draft.jobRevision = 7; draft.revision = 7;
@@ -334,7 +346,7 @@ test('v2 persisted active job resumes into its own method with GET only', async 
   await tick(); await tick();
   assert.equal(restored.ctx.promptReverseDraft().result, 'local result'); assert.equal(restored.ctx.promptReverseDraft().method, 'tagger');
   restored.ctx.promptReverseSetMethod('vision'); assert.equal(restored.ctx.promptReverseDraft().result, 'restored vision');
-  assert.equal(restored.calls.filter(item => item.init).length, 0);
+  assert.equal(restored.calls.filter(item => item.url === '/api/prompt-jobs' && item.init?.method === 'POST').length, 0);
 });
 
 test('replacing an image resets results to metadata while retaining model preferences', async () => {
@@ -412,4 +424,146 @@ test('format failure retains previous visual prompt without adopting JSON or sta
   assert.equal(elements.reverseResult.value, item.prompt);
   assert.match(elements.reverseStatus.textContent, /格式无效/);
   assert.equal(elements.single_positive_prompt.value, 'current body');
+});
+
+test('lease heartbeat protects both profiles while their panels are hidden and deduplicates shared images', async () => {
+  const { ctx, configure, leases, leaseTimers, state } = setup(); await tick();
+  assert.equal(leases.length, 0);
+  configure(asset('anima-image'), 'anima'); configure(asset('krea-image'), 'krea2');
+  ctx.promptReverseSetMode('rewrite'); ctx.profile = 'krea2';
+  leaseTimers.at(-1).fn(); await tick();
+  assert.deepEqual(leases.at(-1).payload.image_ids, ['anima-image', 'krea-image']);
+  assert.match(leases.at(-1).url, /\/leases\/[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
+  assert.equal(state.mode, 'rewrite');
+  configure(asset('anima-image'), 'krea2');
+  leaseTimers.at(-1).fn(); await tick();
+  assert.deepEqual(leases.at(-1).payload.image_ids, ['anima-image']);
+  assert.equal(leases.at(-1).payload.revision, leases[0].payload.revision + 1);
+  assert.equal(leaseTimers.filter(timer => !timer.cancelled).length, 1);
+});
+
+test('separate pages never share a lease identity and clearing only releases that page snapshot', async () => {
+  const saved = { version: 2, drafts: { anima: { imageId: 'shared-image', result: 'saved text' } } };
+  const first = setup({ saved }), second = setup({ saved }); await tick(); await tick();
+  assert.notEqual(first.leases[0].url, second.leases[0].url);
+  assert.deepEqual(first.leases[0].payload.image_ids, ['shared-image']);
+  assert.deepEqual(second.leases[0].payload.image_ids, ['shared-image']);
+  first.ctx.promptReverseClear(); await tick();
+  assert.deepEqual(first.leases.at(-1).payload.image_ids, []);
+  assert.equal(first.leases.at(-1).url, first.leases[0].url);
+  assert.ok(first.leases.at(-1).payload.revision > first.leases[0].payload.revision);
+  assert.equal(second.ctx.promptReverseDraft().imageId, 'shared-image');
+  assert.equal(second.ctx.promptReverseDraft().result, 'saved text');
+  assert.equal(second.leases.length, 1);
+  assert.equal(JSON.stringify([...second.storage.values()]).includes(second.state.lease.clientId), false);
+});
+
+test('saved images are leased before restore reads and a lease outage does not discard saved results', async () => {
+  const gate = deferred(), saved = { version: 2, drafts: { anima: { imageId: 'saved-image', result: 'keep this' } } };
+  const first = setup({ saved, leaseRequest: () => gate.promise }); await tick();
+  assert.equal(first.leases.length, 1);
+  assert.equal(first.calls.some(item => item.url === '/api/prompt-images/saved-image'), false);
+  gate.resolve({ revision: first.leases[0].payload.revision, missing_image_ids: [] }); await tick();
+  assert.equal(first.ctx.promptReverseDraft().image.id, 'saved-image');
+  assert.equal(first.ctx.promptReverseDraft().result, 'keep this');
+  const second = setup({ saved, leaseRequest: async () => { throw new Error('offline'); } }); await tick(); await tick();
+  assert.equal(second.ctx.promptReverseDraft().result, 'keep this');
+  assert.equal(second.ctx.promptReverseDraft().image.id, 'saved-image');
+  assert.equal(second.calls.some(item => item.url === '/api/prompt-jobs' && item.init?.method === 'POST'), false);
+});
+
+test('adopted uploads renew protection without waiting for the lease response and abandoned uploads never acquire a page lease', async () => {
+  const leaseGate = deferred(), oldUpload = deferred(), newUpload = deferred(); let uploads = 0;
+  const ui = setup({ leaseRequest: () => leaseGate.promise, fetch: () => ++uploads === 1 ? oldUpload.promise : newUpload.promise }); await tick();
+  const first = ui.ctx.promptReverseAcceptInput([file('old.png')]);
+  const second = ui.ctx.promptReverseAcceptInput([file('new.png')]);
+  newUpload.resolve(response(asset('new-image'))); assert.equal(await second, true);
+  assert.equal(ui.ctx.promptReverseDraft().result, 'a quiet forest');
+  assert.deepEqual(ui.leases.at(-1).payload.image_ids, ['new-image']);
+  oldUpload.resolve(response(asset('abandoned-image'))); assert.equal(await first, false);
+  assert.equal(ui.leases.some(call => call.payload.image_ids.includes('abandoned-image')), false);
+  const cancelled = deferred(); ui.ctx.fetch = () => cancelled.promise;
+  const pending = ui.ctx.promptReverseAcceptInput([file('cancelled.png')]);
+  await ui.ctx.promptReverseCancel(); cancelled.resolve(response(asset('cancelled-image'))); await pending;
+  assert.equal(ui.leases.some(call => call.payload.image_ids.includes('cancelled-image')), false);
+  assert.equal(ui.ctx.promptReverseDraft().imageId, 'new-image');
+  leaseGate.resolve({ revision: ui.leases.at(-1).payload.revision, missing_image_ids: [] }); await tick();
+});
+
+test('late lease results cannot clear a newer image, a newer revision of the same image, or cleared drafts', async () => {
+  const pending = [];
+  const ui = setup({ leaseRequest: call => { const gate = deferred(); pending.push({ ...gate, revision: call.payload.revision }); return gate.promise; } }); await tick();
+  const draft = ui.configure(asset('same-image')); draft.result = 'edited result';
+  const older = ui.ctx.promptReverseRenewLease(), newer = ui.ctx.promptReverseRenewLease();
+  pending[1].resolve({ revision: pending[1].revision, missing_image_ids: [] }); await newer;
+  pending[0].resolve({ revision: pending[0].revision, missing_image_ids: ['same-image'] }); await older;
+  assert.equal(draft.image.id, 'same-image'); assert.equal(draft.result, 'edited result');
+  const staleImage = ui.ctx.promptReverseRenewLease();
+  ui.configure(asset('replacement'));
+  pending[2].resolve({ revision: pending[2].revision, missing_image_ids: ['same-image'] }); await staleImage;
+  assert.equal(draft.image.id, 'replacement');
+  const staleClear = ui.ctx.promptReverseRenewLease(); ui.ctx.promptReverseClear();
+  assert.deepEqual(ui.leases.at(-1).payload.image_ids, []);
+  pending[4].resolve({ revision: pending[4].revision, missing_image_ids: [] }); await tick();
+  pending[3].resolve({ revision: pending[3].revision, missing_image_ids: ['replacement'] }); await staleClear;
+  assert.equal(ui.ctx.promptReverseDraft().imageId, ''); assert.equal(ui.ctx.promptReverseDraft().result, '');
+});
+
+test('failed renewals retry silently and waking pages check missing images without resubmitting jobs', async () => {
+  let fail = true, missing = [];
+  const ui = setup({ leaseRequest: async call => { if (fail) throw new Error('offline'); return { revision: call.payload.revision, missing_image_ids: missing }; } }); await tick();
+  const draft = ui.configure(asset('sleeping-image')); draft.result = 'keep positive'; draft.negative = 'keep negative'; draft.status = 'edited status';
+  await ui.ctx.promptReverseRenewLease();
+  assert.equal(draft.status, 'edited status'); assert.equal(draft.image.id, 'sleeping-image');
+  fail = false; ui.leaseTimers.at(-1).fn(); await tick();
+  assert.equal(ui.leases.length, 2);
+  assert.equal(ui.leases.at(-1).payload.revision, 2);
+  missing = ['sleeping-image']; ui.ctx.window.emit('pageshow'); await tick();
+  assert.equal(draft.image, null); assert.equal(draft.imageId, 'sleeping-image');
+  assert.equal(draft.result, 'keep positive'); assert.equal(draft.negative, 'keep negative');
+  assert.match(draft.status, /重新添加/);
+  assert.equal(ui.calls.some(call => call.url === '/api/prompt-jobs' && call.init?.method === 'POST'), false);
+  const count = ui.leases.length;
+  ui.document.hidden = true; ui.document.emit('visibilitychange'); await tick();
+  assert.equal(ui.leases.length, count);
+  missing = []; ui.document.hidden = false; ui.document.emit('visibilitychange'); await tick(); await tick();
+  assert.equal(draft.image.id, 'sleeping-image');
+  ui.ctx.window.emit('online'); await tick();
+  assert.equal(ui.leases.length, count + 2);
+  assert.equal(draft.result, 'keep positive');
+});
+
+test('a late image check cannot undo a newer successful restore or missing-image lease response', async () => {
+  let missing = [];
+  const ui = setup({ leaseRequest: async call => ({ revision: call.payload.revision, missing_image_ids: missing }) }); await tick();
+  const draft = ui.configure(asset('image-a')), old = deferred(); let reads = 0;
+  ui.ctx.request = async () => ++reads === 1 ? old.promise : asset('image-a');
+  const older = ui.ctx.promptReverseRestore('anima', { poll: false });
+  await ui.ctx.promptReverseRestore('anima', { poll: false });
+  old.reject(new Error('stale network error')); await older;
+  assert.equal(draft.image.id, 'image-a');
+  const late = deferred(); ui.ctx.request = () => late.promise;
+  const lateRestore = ui.ctx.promptReverseRestore('anima', { poll: false });
+  missing = ['image-a']; await ui.ctx.promptReverseRenewLease();
+  late.resolve(asset('image-a')); await lateRestore;
+  assert.equal(draft.image, null); assert.match(draft.status, /重新添加/);
+});
+
+test('a visibility image check cannot swallow restoration of a persisted recognition job', async () => {
+  const firstRead = deferred(); let imageReads = 0;
+  const saved = { version: 2, drafts: { anima: { imageId: 'saved-image', jobId: 'saved-job', busy: true,
+    method: 'metadata', jobMethod: 'metadata', jobImageId: 'saved-image', jobRevision: 1, revision: 1,
+    jobFingerprint: JSON.stringify(['saved-image']), jobViewRevision: 0 } } };
+  const ui = setup({ saved, request: async url => {
+    if (url.includes('/options')) return {};
+    if (url === '/api/prompt-images/saved-image') return ++imageReads === 1 ? firstRead.promise : asset('saved-image');
+    if (url === '/api/prompt-jobs/saved-job') return { id: 'saved-job', status: 'completed', result: metadata() };
+    throw new Error(`Unexpected request: ${url}`);
+  } });
+  await tick(); assert.equal(imageReads, 1);
+  ui.ctx.window.emit('pageshow'); await tick(); assert.equal(imageReads, 2);
+  firstRead.resolve(asset('saved-image')); await tick();
+  assert.equal(ui.ctx.promptReverseDraft().busy, false);
+  assert.equal(ui.ctx.promptReverseDraft().result, 'a quiet forest');
+  assert.equal(ui.calls.filter(call => call.url === '/api/prompt-jobs/saved-job').length, 1);
 });

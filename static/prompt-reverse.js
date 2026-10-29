@@ -3,11 +3,12 @@ const PROMPT_REVERSE_KEY = "anima-studio:prompt-reverse:v2";
 const PROMPT_REVERSE_LEGACY_KEY = "anima-studio:prompt-reverse:v1";
 const PROMPT_REVERSE_METHODS = ["metadata", "vision", "tagger"];
 const PROMPT_REVERSE_LABELS = { metadata: "元数据提取", vision: "视觉 AI", tagger: "本地标签" };
+const PROMPT_REVERSE_LEASE_INTERVAL = 60_000;
 const PROMPT_REVERSE_VIEW_KEYS = ["result", "negative", "parameters", "recognition", "candidates", "candidate", "source", "format", "warnings", "resultFor", "status", "viewRevision", "poolItem"];
 function promptReverseEmptyView() {
   return { result: "", negative: "", parameters: {}, recognition: {}, candidates: [], candidate: "", source: "", format: "", warnings: [], resultFor: "", status: "", viewRevision: 0, poolItem: null };
 }
-const promptReverseState = { ready: false, mode: "rewrite", options: null, optionsRequest: 0, drafts: {}, runtime: {}, epoch: 0 };
+const promptReverseState = { ready: false, mode: "rewrite", options: null, optionsRequest: 0, drafts: {}, runtime: {}, epoch: 0, lease: null };
 function promptReverseDraft(profile = currentProfile()) {
   return promptReverseState.drafts[profile] ||= {
     imageId: "", image: null, method: "metadata", service: "", model: "", template: `builtin:reverse:${profile}`, seed: "random", fixedSeed: "0",
@@ -32,7 +33,48 @@ function promptReverseSetMethod(method, focus = false, profile = currentProfile(
   if (focus) document.getElementById(`reverseMethod-${method}`).focus();
 }
 function promptReverseRuntime(profile = currentProfile()) {
-  return promptReverseState.runtime[profile] ||= { request: 0, abort: null, uploading: false, timer: null };
+  return promptReverseState.runtime[profile] ||= { request: 0, restoreRequest: 0, abort: null, uploading: false, timer: null };
+}
+function promptReverseLease() {
+  if (!promptReverseState.lease) {
+    // A fresh identity per document keeps independent tabs and refreshes from
+    // releasing one another's images. Never persist this in shared storage.
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
+    const hex = Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");
+    promptReverseState.lease = { clientId: `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`, revision: 0, timer: null };
+  }
+  return promptReverseState.lease;
+}
+async function promptReverseRenewLease({ restore = false } = {}) {
+  if (!promptReverseState.ready) return;
+  const lease = promptReverseLease(), epoch = promptReverseState.epoch;
+  clearTimeout(lease.timer);
+  // Schedule before awaiting the network so a stalled request cannot stop
+  // future renewals. The server rejects older revisions arriving out of order.
+  lease.timer = setTimeout(() => { void promptReverseRenewLease(); }, PROMPT_REVERSE_LEASE_INTERVAL);
+  const snapshots = Object.entries(promptReverseState.drafts).filter(([, draft]) => draft.imageId).map(([profile, draft]) => ({ profile, draft, imageId: draft.imageId, token: promptReverseRuntime(profile).request }));
+  const imageIds = [...new Set(snapshots.map(item => item.imageId))].sort();
+  if (!imageIds.length && !lease.revision) return;
+  const revision = ++lease.revision;
+  try {
+    const result = await request(`/api/prompt-images/leases/${encodeURIComponent(lease.clientId)}`, {
+      method: "PUT", body: JSON.stringify({ revision, image_ids: imageIds }),
+      signal: typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(10_000) : undefined,
+    });
+    if (epoch !== promptReverseState.epoch || revision !== lease.revision || result.revision !== revision) return;
+    const missing = new Set(Array.isArray(result.missing_image_ids) ? result.missing_image_ids : []), restores = [];
+    let changed = false;
+    for (const { profile, draft, imageId, token } of snapshots) {
+      if (draft !== promptReverseState.drafts[profile] || draft.imageId !== imageId || promptReverseRuntime(profile).request !== token) continue;
+      if (missing.has(imageId)) {
+        promptReverseRuntime(profile).restoreRequest++;
+        draft.image = null; draft.status = "原图片不可用，请重新添加；已保存的结果仍可查看。"; changed = true;
+      } else if (restore) restores.push(promptReverseRestore(profile, { poll: false }));
+    }
+    if (changed) { promptReversePersist(); promptReverseRender(); }
+    await Promise.all(restores);
+  } catch { /* A later heartbeat retries without disturbing prompts or jobs. */ }
 }
 function promptReverseMarkup() {
   return `<div id="promptReversePanel" class="prompt-desk-panel" role="tabpanel" aria-labelledby="promptDeskReverse" hidden>
@@ -319,6 +361,7 @@ async function promptReverseAcceptInput(files) {
     Object.assign(draft, promptReverseEmptyView());
     runtime.abort = null;
     promptReversePersist();
+    void promptReverseRenewLease();
     if (!current()) return false;
     runtime.uploading = false;
     await promptReverseStart(profile);
@@ -417,6 +460,7 @@ function promptReverseRemove() {
   promptReverseInvalidate(profile);
   draft.imageId = ""; draft.image = null; draft.status = "已移除图片，现有预览保留供参考。";
   promptReversePersist(); promptReverseRender();
+  void promptReverseRenewLease();
 }
 function promptReverseAdopt(mode, negative = false) {
   const draft = promptReverseDraft(), text = (negative ? draft.negative : draft.result).trim();
@@ -448,24 +492,29 @@ async function promptReverseCopy(negative = false) {
   catch { draft.status = "浏览器未允许复制，请在结果框中选中文本后复制。"; }
   promptReverseRender();
 }
-async function promptReverseRestore(profile) {
+async function promptReverseRestore(profile, { poll = true } = {}) {
   const draft = promptReverseDraft(profile), runtime = promptReverseRuntime(profile), token = runtime.request, epoch = promptReverseState.epoch, imageId = draft.imageId;
+  const restoreToken = ++runtime.restoreRequest;
+  const job = { id: draft.jobId, revision: draft.jobRevision, fingerprint: draft.jobFingerprint };
+  const sameDraft = () => epoch === promptReverseState.epoch && draft === promptReverseState.drafts[profile] && imageId === draft.imageId && token === runtime.request;
+  const current = () => sameDraft() && restoreToken === runtime.restoreRequest;
   if (imageId) {
     try {
-      if (epoch !== promptReverseState.epoch || draft !== promptReverseState.drafts[profile] || imageId !== draft.imageId || token !== runtime.request) return;
       const asset = await request(`/api/prompt-images/${encodeURIComponent(imageId)}`);
-      if (epoch !== promptReverseState.epoch || draft !== promptReverseState.drafts[profile] || imageId !== draft.imageId || token !== runtime.request) return;
-      if (asset.id !== imageId) throw new Error("图片记录不匹配");
-      draft.image = asset;
+      if (current()) {
+        if (asset.id !== imageId) throw new Error("图片记录不匹配");
+        draft.image = asset;
+      }
     } catch (error) {
-      if (epoch !== promptReverseState.epoch || draft !== promptReverseState.drafts[profile] || imageId !== draft.imageId || token !== runtime.request) return;
-      draft.image = null; draft.status = `原图片不可用：${error.message}；请重新添加图片。`;
+      if (current()) { draft.image = null; draft.status = `原图片不可用：${error.message}；请重新添加图片。`; }
     }
-    promptReversePersist(); if (profile === currentProfile()) promptReverseRender();
+    if (current()) { promptReversePersist(); if (profile === currentProfile()) promptReverseRender(); }
   }
-  if (draft.jobId) {
-    if (draft.cancelRequested) await promptReverseCancelJob(profile, draft, draft.jobId);
-    await promptReversePoll(profile, draft.jobId, draft.jobRevision, draft.jobFingerprint, epoch);
+  // A newer visibility check may supersede only the image read; it must not
+  // swallow the initial recovery of an existing recognition job.
+  if (poll && sameDraft() && job.id && draft.jobId === job.id && draft.jobRevision === job.revision) {
+    if (draft.cancelRequested) await promptReverseCancelJob(profile, draft, job.id);
+    await promptReversePoll(profile, job.id, job.revision, job.fingerprint, epoch);
   }
 }
 function promptReverseClear() {
@@ -473,6 +522,7 @@ function promptReverseClear() {
   for (const runtime of Object.values(promptReverseState.runtime)) { runtime.abort?.abort(); clearTimeout(runtime.timer); }
   promptReverseState.drafts = {}; promptReverseState.runtime = {}; promptReverseState.mode = "rewrite";
   localStorage.removeItem(PROMPT_REVERSE_KEY); localStorage.removeItem(PROMPT_REVERSE_LEGACY_KEY); promptReverseRender();
+  void promptReverseRenewLease();
 }
 function promptReverseReadView(value) {
   const view = promptReverseEmptyView();
@@ -551,6 +601,19 @@ function initializePromptReverse() {
   for (const [id, key] of [["single_positive_prompt", "undo"], ["singleNegative", "negativeUndo"]]) get(id).addEventListener("input", () => {
     const draft = promptReverseDraft(); if (draft[key] && draft[key].after !== get(id).value) { draft[key] = null; promptReverseRender(); }
   });
+  const resumeImages = () => { void promptReverseRenewLease({ restore: true }); };
+  window.addEventListener("online", resumeImages);
+  window.addEventListener("pageshow", resumeImages);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) resumeImages(); });
   promptReverseRender(); promptReverseState.optionsPromise = promptReverseLoadOptions();
-  for (const profile of ["anima", "krea2"]) if (promptReverseDraft(profile).imageId || promptReverseDraft(profile).jobId) void promptReverseRestore(profile);
+  const epoch = promptReverseState.epoch;
+  const savedDrafts = ["anima", "krea2"].map(profile => ({ profile, draft: promptReverseDraft(profile), token: promptReverseRuntime(profile).request }));
+  // Protect persisted references before reading them; startup cleanup may run
+  // concurrently. The server gives new uploads a separate short grace period.
+  void promptReverseRenewLease().then(() => {
+    if (epoch !== promptReverseState.epoch) return;
+    for (const { profile, draft, token } of savedDrafts) {
+      if (draft === promptReverseState.drafts[profile] && token === promptReverseRuntime(profile).request && (draft.imageId || draft.jobId)) void promptReverseRestore(profile);
+    }
+  });
 }
