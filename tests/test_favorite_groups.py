@@ -1,9 +1,13 @@
 import asyncio
 import copy
+import tempfile
 import unittest
+from pathlib import Path
+
+from aiohttp.test_utils import TestClient, TestServer
 
 from anima_webui.catalog import CatalogError
-from anima_webui.favorites import FavoritesService, _group_stats, normalize_section
+from anima_webui.favorites import FavoritesService, _group_stats, normalize_section, sync_source_fields
 
 
 class FakeComfy:
@@ -42,6 +46,31 @@ def custom_item(item_id, title):
 
 
 class FavoriteNormalizationTests(unittest.TestCase):
+    def test_source_sync_updates_default_names_and_preserves_aliases(self):
+        old = {"id": "custom:one", "title": "Old", "prompt": "old text"}
+        new = {"id": "custom:one", "title": "New", "prompt": "new text", "subtitle": "New subtitle"}
+        for nickname, expected in (("", "New"), ("Old", "New"), ("My alias", "My alias")):
+            with self.subTest(nickname=nickname):
+                saved = {"id": "custom:one", "nickname": nickname, "groupIds": ["private"]}
+                sync_source_fields(saved, new, old)
+                self.assertEqual(saved["nickname"], expected)
+                self.assertEqual(saved["customContent"], "new text")
+                self.assertEqual(saved["subtitle"], "New subtitle")
+                self.assertEqual(saved["groupIds"], ["private"])
+
+    def test_legacy_source_sync_preserves_unknown_alias_and_favorite_identity(self):
+        saved = {"id": "favorite_kept", "name": "favorite_kept", "title": "Legacy title",
+                 "nickname": "Legacy alias", "groupIds": ["private"], "text": "old"}
+        sync_source_fields(saved, {"id": "prompt_source", "title": "Current", "text": "new"}, prompt=True)
+        self.assertEqual(saved["id"], "favorite_kept")
+        self.assertEqual(saved["name"], "favorite_kept")
+        self.assertEqual(saved["title"], "Legacy title")
+        self.assertEqual(saved["nickname"], "Legacy alias")
+        self.assertEqual(saved["source_item_id"], "prompt_source")
+        self.assertEqual(saved["text"], saved["customContent"])
+        self.assertEqual(saved["text"], "new")
+        self.assertEqual(saved["groupIds"], ["private"])
+
     def test_legacy_groups_and_corrupt_hierarchy_are_repaired_without_data_loss(self):
         current = normalize_section(
             {
@@ -94,6 +123,18 @@ class FavoriteNormalizationTests(unittest.TestCase):
 
 
 class FavoriteServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sync_custom_preserves_alias_and_all_group_memberships(self):
+        item = custom_item("custom:one", "Old")
+        comfy = FakeComfy({"pose": {"groups": [{"id": "default", "name": "Default"}], "items": [
+            {"id": item["id"], "isCustom": True, "nickname": "My alias", "groupIds": ["default"]},
+        ]}})
+        service = FavoritesService(comfy, FakeCatalog([item]))
+        await service.sync_custom("pose", {**item, "title": "New", "prompt": "new prompt"}, item)
+        saved = (await service.get("pose"))["items"][0]
+        self.assertEqual(saved["nickname"], "My alias")
+        self.assertEqual(saved["customContent"], "new prompt")
+        self.assertEqual(saved["groupIds"], ["default"])
+
     async def test_batch_favorite_selection_creates_and_appends_groups(self):
         first = custom_item("custom:first", "First")
         second = custom_item("custom:second", "Second")
@@ -317,7 +358,7 @@ class FavoriteServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["id"] for item in payload["items"]], ["shared"])
         self.assertEqual(payload["items"][0]["groupIds"], ["other"])
 
-    async def test_removing_last_item_prunes_only_the_affected_empty_child_leaf(self):
+    async def test_removing_last_item_preserves_all_groups(self):
         item = custom_item("custom:one", "One")
         comfy = FakeComfy(
             {
@@ -336,9 +377,103 @@ class FavoriteServiceTests(unittest.IsolatedAsyncioTestCase):
             "pose", {"id": "custom:one", "favorite": False}
         )
         group_ids = {group["id"] for group in payload["groups"]}
-        self.assertNotIn("leaf", group_ids)
-        self.assertIn("unrelated", group_ids)
-        self.assertIn("parent", group_ids)
+        self.assertEqual(group_ids, {"default", "parent", "leaf", "unrelated"})
+        self.assertEqual(payload["items"], [])
+
+    async def test_source_cancellation_maps_builtin_key_and_removes_all_references(self):
+        source = {"id": "character:one", "favorite_key": "one||series", "section": "character"}
+        comfy = FakeComfy({"character": {
+            "groups": [{"id": "default", "name": "Default"}, {"id": "parent", "name": "Parent"},
+                       {"id": "leaf", "name": "Leaf", "parentId": "parent"}],
+            "items": [{"id": "alias1", "name": "one||series", "groupIds": ["leaf"]},
+                      {"id": "alias2", "name": "one||series", "groupIds": ["default"]},
+                      {"id": "other", "name": "other||series", "groupIds": ["leaf"]}],
+        }})
+        service = FavoritesService(comfy, FakeCatalog([source]))
+        result = await service.update_item("character", {"source_item_id": source["id"], "favorite": False})
+        self.assertEqual(result["removedCount"], 2)
+        self.assertEqual(result["source_item_id"], source["id"])
+        self.assertEqual([item["id"] for item in result["items"]], ["other"])
+        self.assertEqual({group["id"] for group in result["groups"]}, {"default", "parent", "leaf"})
+        again = await service.update_item("character", {"source_item_id": source["id"], "favorite": False})
+        self.assertEqual(again["removedCount"], 0)
+        self.assertEqual(again["items"], result["items"])
+
+    async def test_source_cancellation_can_remove_missing_custom_source(self):
+        comfy = FakeComfy({"pose": {"groups": [{"id": "default", "name": "Default"}],
+                                   "items": [{"id": "custom:gone", "groupIds": ["default"], "isCustom": True}]}})
+        service = FavoritesService(comfy, FakeCatalog())
+        result = await service.update_item("pose", {"source_item_id": "custom:gone", "favorite": False})
+        self.assertEqual(result["removedCount"], 1)
+        self.assertEqual(result["items"], [])
+
+
+class FavoriteTargetApiTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        from anima_webui.server import create_app
+        from test_server import APP_DIR, FakeComfy as ServerComfy, _write_fake_tools
+
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.comfy = ServerComfy()
+        self.app = create_app(app_dir=APP_DIR, data_dir=root / "data", comfy=self.comfy,
+                              anima_tools_dir=_write_fake_tools(root))
+        self.client = TestClient(TestServer(self.app))
+        await self.client.start_server()
+
+    async def asyncTearDown(self):
+        await self.client.close()
+        self.temp.cleanup()
+
+    async def test_source_target_is_exclusive_idempotent_and_keeps_empty_groups(self):
+        from anima_webui.server import CUSTOM_PROMPTS_KEY
+
+        parent = await (await self.client.post("/api/favorites/pose/groups", json={"name": "Parent"})).json()
+        leaf = await (await self.client.post("/api/favorites/pose/groups",
+                                           json={"name": "Leaf", "parentId": parent["group"]["id"]})).json()
+        saved = await (await self.client.post("/api/favorites/pose/text",
+                                            json={"title": "One", "text": "standing", "groupIds": [leaf["group"]["id"]]})).json()
+        source_id = saved["item_id"]
+        original = copy.deepcopy(self.comfy.favorites_data)
+        invalid = [
+            {"source_item_id": source_id, "id": source_id, "favorite": False},
+            {"source_item_id": source_id, "favorite": True},
+            {"source_item_id": source_id},
+            {"source_item_id": source_id, "favorite": False, "groupIds": []},
+            {"source_item_id": None, "favorite": False},
+            {"source_item_id": " ", "favorite": False},
+            {"source_item_id": source_id, "favorite": 0},
+        ]
+        for payload in invalid:
+            with self.subTest(payload=payload):
+                response = await self.client.put("/api/favorites/pose/item", json=payload)
+                self.assertEqual(response.status, 400, await response.json())
+                self.assertEqual(self.comfy.favorites_data, original)
+        for expected in (1, 0):
+            response = await self.client.put("/api/favorites/pose/item",
+                                             json={"source_item_id": source_id, "favorite": False})
+            result = await response.json()
+            self.assertEqual(response.status, 200, result)
+            self.assertEqual(result["source_item_id"], source_id)
+            self.assertEqual(result["removedCount"], expected)
+            self.assertEqual(result["items"], [])
+            self.assertEqual({group["id"] for group in result["groups"]},
+                             {group["id"] for group in saved["groups"]})
+            self.assertEqual(self.app[CUSTOM_PROMPTS_KEY].list("pose")[0]["id"], source_id)
+
+    async def test_krea_cancel_single_favorite_preserves_child_group(self):
+        prefix = "/api/favorites/prompt"
+        query = "?model_profile=krea2"
+        parent = await (await self.client.post(prefix + "/groups" + query, json={"name": "Parent"})).json()
+        leaf = await (await self.client.post(prefix + "/groups" + query,
+                                           json={"name": "Leaf", "parentId": parent["group"]["id"]})).json()
+        saved = await (await self.client.post(prefix + "/text" + query,
+                                            json={"title": "One", "text": "A quiet scene", "groupIds": [leaf["group"]["id"]]})).json()
+        response = await self.client.put(prefix + "/item" + query, json={"id": saved["item_id"], "favorite": False})
+        result = await response.json()
+        self.assertEqual(response.status, 200, result)
+        self.assertEqual(result["items"], [])
+        self.assertEqual({group["id"] for group in result["groups"]}, {group["id"] for group in saved["groups"]})
 
 
 class SlowComfy(FakeComfy):

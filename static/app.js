@@ -523,6 +523,8 @@ let poolQueryCount = null;
 const poolSelectionStats = new Map();
 let poolTotalsRequest = 0;
 let editingCustom = null;
+let customEditorSession = 0;
+let customWriteBusy = false;
 let editingCustomGroup = null;
 let editingFavoriteItem = null;
 let loraInventory = [];
@@ -620,8 +622,11 @@ async function request(path, options = {}) {
     error.payload = payload;
     throw error;
   }
-  if (path.startsWith("/api/favorites/") && options.method && options.method !== "GET") {
-    if (typeof singleWorkbenchFavoritesChanged === "function") singleWorkbenchFavoritesChanged({ model_profile: favoriteProfile, section: favoriteSection });
+  if (path.startsWith("/api/favorites/") && !path.split("?")[0].endsWith("/reconcile") && options.method && options.method !== "GET") {
+    if (typeof singleWorkbenchFavoritesChanged === "function") singleWorkbenchFavoritesChanged({
+      model_profile: favoriteProfile, section: favoriteSection,
+      ...Object.fromEntries(["updatedItemIds", "deletedItemIds", "favoritesSync"].filter(key => payload[key] !== undefined).map(key => [key, payload[key]])),
+    });
     if (favoriteProfile !== currentProfile() || (typeof sharedFavoritesState !== "undefined" && favoriteEpoch !== sharedFavoritesState.epoch)) {
       throw new Error("已切换模型，收藏操作已在原模型完成");
     }
@@ -1361,7 +1366,7 @@ function selectedCount(section) {
     : new Set(selection.ids).size;
 }
 
-async function refreshPoolSelectionTotals() {
+async function refreshPoolSelectionTotals({ throwOnError = false } = {}) {
   const requestId = ++poolTotalsRequest;
   // Workbench/history restoration finishes restoring its complete editor draft
   // synchronously after applySettings; count that final state, not its interim one.
@@ -1386,6 +1391,7 @@ async function refreshPoolSelectionTotals() {
   renderDimensions();
   updatePoolOverview();
   if (ui.poolDrawer.classList.contains("open")) updatePoolSelectionControls();
+  if (throwOnError && results.some(result => result.status === "rejected")) throw results.find(result => result.status === "rejected").reason;
 }
 
 function renderDimensions() {
@@ -3632,7 +3638,7 @@ function isFavorite(item) {
 }
 
 let favoritesRequest = 0;
-async function loadFavorites(section = activeSection) {
+async function loadFavorites(section = activeSection, { throwOnError = false } = {}) {
   const requestId = ++favoritesRequest;
   const profile = currentProfile();
   if (profile !== "anima") { favoritesData = { groups: [], items: [], favorite_keys: [] }; favoritesAvailable = false; return; }
@@ -3648,10 +3654,11 @@ async function loadFavorites(section = activeSection) {
     if (currentView().filters.collection) currentView().filters.collection = "";
     if (currentView().sort === "favorite-first") currentView().sort = "";
     toast(`收藏不可用：${error.message}`);
+    if (throwOnError) throw error;
   }
   updateFavoriteSelectionButton();
 }
-async function loadCustomGroups(section = activeSection) {
+async function loadCustomGroups(section = activeSection, { throwOnError = false } = {}) {
   const requestedProfile = currentProfile();
   const requestId = ++customGroupsRequest;
   try {
@@ -3678,6 +3685,7 @@ async function loadCustomGroups(section = activeSection) {
     if (requestId !== customGroupsRequest || requestedProfile !== currentProfile() || section !== activeSection) return;
     customGroups = [];
     toast(`自定义分组不可用：${error.message}`);
+    if (throwOnError) throw error;
   }
 }
 
@@ -3706,6 +3714,10 @@ async function openPool(section) {
   ui.selectedOnly.checked = view.selectedOnly;
   ui.poolSearch.focus({ preventScroll: true });
   updatePoolSelectionControls();
+  if (typeof ensurePoolReconciled === "function") {
+    try { await ensurePoolReconciled(currentProfile(), section); }
+    catch (error) { toast(poolMutationError(error, { model_profile: currentProfile(), section })); return; }
+  }
   await Promise.all([loadFavorites(section), loadCustomGroups(section)]);
   if (revision !== poolContextRevision || section !== activeSection) return;
   await loadPool();
@@ -3793,10 +3805,10 @@ function poolQueryBody() {
     series: view.filters.series,
   };
 }
-async function loadPool() {
+async function loadPool({ throwOnError = false } = {}) {
   const requestedProfile = currentProfile();
   if (requestedProfile === "krea2") {
-    await loadKreaPromptPool();
+    await loadKreaPromptPool({ throwOnError });
     return;
   }
   invalidatePoolContext();
@@ -3839,6 +3851,7 @@ async function loadPool() {
   } catch (error) {
     if (!current()) return;
     toast(error.message);
+    if (throwOnError) throw error;
   }
 }
 
@@ -4432,7 +4445,7 @@ async function toggleFavorite(item, favorite) {
   try {
     favoritesData = await requestFavorites(`/api/favorites/${activeSection}/item`, {
       method: "PUT",
-      body: JSON.stringify({ id: item.id, favorite }),
+      body: JSON.stringify({ ...(favorite ? { id: item.id } : { source_item_id: item.id }), favorite }),
     });
     favoritesAvailable = true;
     const resetCollection = reconcileFavoriteCollection();
@@ -4589,7 +4602,7 @@ async function removeFavorite() {
   try {
     favoritesData = await requestFavorites(`/api/favorites/${activeSection}/item`, {
       method: "PUT",
-      body: JSON.stringify({ id: editingFavoriteItem.id, favorite: false }),
+      body: JSON.stringify({ source_item_id: editingFavoriteItem.id, favorite: false }),
     });
     motionDialog(ui.favoriteDialog, false);
     reconcileFavoriteCollection();
@@ -4752,6 +4765,8 @@ async function confirmGroupDelete(event) {
   event.preventDefault();
   if (!pendingGroupDelete || ui.confirmDeleteGroup.disabled) return;
   const { kind, group } = pendingGroupDelete;
+  const context = { model_profile: currentProfile(), section: activeSection };
+  const session = pendingGroupDelete;
   const deleteItems = !ui.deleteGroupItemsOption.hidden && ui.deleteGroupItems.checked;
   const deleteMode = ui.deleteGroupAll.checked ? "all" : deleteItems ? "exclusive" : "keep";
   ui.confirmDeleteGroup.disabled = true;
@@ -4777,9 +4792,11 @@ async function confirmGroupDelete(event) {
       );
     } else {
       const payload = await request(
-        `/api/custom-groups/${activeSection}/${encodeURIComponent(group.id)}?deleteMode=${deleteMode}&model_profile=${encodeURIComponent(currentProfile())}`,
+        `/api/custom-groups/${context.section}/${encodeURIComponent(group.id)}?deleteMode=${deleteMode}&model_profile=${encodeURIComponent(context.model_profile)}`,
         { method: "DELETE" },
       );
+      if (typeof poolSourceChanged === "function") poolSourceChanged({ ...context, ...payload });
+      if (context.model_profile !== currentProfile() || context.section !== activeSection || session !== pendingGroupDelete) return;
       customGroups = payload.groups || [];
       const deletedIds = new Set(payload.deletedItemIds || []);
       const selection = draft.pools[activeSection];
@@ -4803,12 +4820,14 @@ async function confirmGroupDelete(event) {
     }
     motionDialog(ui.deleteGroupDialog, false);
     pendingGroupDelete = null;
-    await loadPool();
-    renderPoolSidebar();
-    renderDimensions();
-    updatePoolOverview();
+    if (kind === "favorite" || typeof poolSourceChanged !== "function") {
+      await loadPool();
+      renderPoolSidebar();
+      renderDimensions();
+      updatePoolOverview();
+    }
   } catch (error) {
-    ui.deleteGroupError.textContent = error.message;
+    ui.deleteGroupError.textContent = typeof poolMutationError === "function" ? poolMutationError(error, context) : error.message;
     ui.deleteGroupError.hidden = false;
   } finally {
     ui.confirmDeleteGroup.disabled = false;
@@ -4834,6 +4853,9 @@ function selectCurrentPage(checked) {
 }
 
 function openCustom(item = null) {
+  ++customEditorSession;
+  const error = document.getElementById("customMutationError");
+  if (error) { error.hidden = true; error.textContent = ""; }
   invalidatePromptNormalization();
   editingCustom = item;
   ui.customDialogTitle.textContent = item ? "编辑自定义项" : "新增自定义项";
@@ -4868,11 +4890,15 @@ function openCustom(item = null) {
 }
 async function saveCustom(event) {
   event.preventDefault();
+  if (customWriteBusy) return;
+  const context = { model_profile: currentProfile(), section: activeSection }, session = customEditorSession, previousId = editingCustom?.id;
+  customWriteBusy = true;
   try {
     await normalizePromptFields({ custom_prompt: ui.customPrompt.value });
+    if (session !== customEditorSession || context.model_profile !== currentProfile() || context.section !== activeSection) return;
     const payload = {
-      section: activeSection,
-      model_profile: currentProfile(),
+      section: context.section,
+      model_profile: context.model_profile,
       title: ui.customTitle.value,
       subtitle: ui.customSubtitle.value,
       prompt: ui.customPrompt.value,
@@ -4887,33 +4913,44 @@ async function saveCustom(event) {
         .filter(Boolean),
       groupIds: [...ui.customGroupChecks.querySelectorAll("input:checked")].map((input) => input.value),
     };
-    const item = editingCustom
-      ? await request(`/api/custom-prompts/${editingCustom.id}?model_profile=${encodeURIComponent(currentProfile())}`, { method: "PUT", body: JSON.stringify(payload) })
+    const item = previousId
+      ? await request(`/api/custom-prompts/${previousId}?model_profile=${encodeURIComponent(context.model_profile)}`, { method: "PUT", body: JSON.stringify(payload) })
       : await request("/api/custom-prompts", { method: "POST", body: JSON.stringify(payload) });
-    if (!selectionHas(activeSection, item.id)) toggleSelection(activeSection, item.id, true);
+    if (session === customEditorSession && context.model_profile === currentProfile() && context.section === activeSection && !selectionHas(activeSection, item.id)) toggleSelection(activeSection, item.id, true);
+    if (typeof poolSourceChanged === "function") poolSourceChanged({ ...context, ...item, updatedItemIds: item.updatedItemIds || [item.id] });
+    if (session !== customEditorSession || context.model_profile !== currentProfile() || context.section !== activeSection) return;
     motionDialog(ui.customDialog, false);
-    await loadCustomGroups();
-    await loadPool();
-    toast(editingCustom ? "自定义项已更新" : "自定义项已加入随机池");
+    toast(previousId ? "自定义项及关联收藏已更新" : "自定义项已加入随机池");
   } catch (error) {
-    toast(error.message);
+    const message = typeof poolMutationError === "function" ? poolMutationError(error, context) : error.message;
+    if (session === customEditorSession) {
+      const target = document.getElementById("customMutationError");
+      if (target) { target.textContent = message; target.hidden = false; }
+    }
+    toast(message);
+  } finally {
+    customWriteBusy = false;
   }
 }
 async function deleteCustomItem() {
-  if (!editingCustom || !confirm("删除这个自定义项？")) return;
+  if (customWriteBusy || !editingCustom || !confirm("删除这个自定义项，并同步移除关联收藏？收藏分组会保留。")) return;
+  const context = { model_profile: currentProfile(), section: activeSection }, id = editingCustom.id, session = customEditorSession;
+  customWriteBusy = true;
   try {
-    await request(`/api/custom-prompts/${editingCustom.id}?model_profile=${encodeURIComponent(currentProfile())}`, { method: "DELETE" });
-    const selection = draft.pools[activeSection];
-    selection.ids = selection.ids.filter((id) => id !== editingCustom.id);
-    selection.excluded_ids = selection.excluded_ids.filter((id) => id !== editingCustom.id);
+    const result = await request(`/api/custom-prompts/${id}?model_profile=${encodeURIComponent(context.model_profile)}`, { method: "DELETE" });
+    if (typeof poolSourceChanged === "function") poolSourceChanged({ ...context, ...result, deletedItemIds: result.deletedItemIds || [id] });
+    if (session !== customEditorSession || context.model_profile !== currentProfile() || context.section !== activeSection) return;
     motionDialog(ui.customDialog, false);
-    await loadPool();
-    renderDimensions();
-    updatePoolOverview();
-    schedulePersist();
-    toast("自定义项已删除");
+    toast("自定义项及关联收藏已删除，收藏分组已保留");
   } catch (error) {
-    toast(error.message);
+    const message = typeof poolMutationError === "function" ? poolMutationError(error, context) : error.message;
+    if (session === customEditorSession) {
+      const target = document.getElementById("customMutationError");
+      if (target) { target.textContent = message; target.hidden = false; }
+    }
+    toast(message);
+  } finally {
+    customWriteBusy = false;
   }
 }
 
@@ -5059,26 +5096,28 @@ function renderImportPreview() {
 }
 async function commitCustomImport() {
   if (!importPreview) return;
+  const preview = importPreview, context = { model_profile: currentProfile(), section: activeSection };
   ui.commitImport.disabled = true;
   try {
     const result = await request("/api/custom-prompts/import", {
       method: "POST",
       body: JSON.stringify({
-        rows: importPreview.rows,
-        section: activeSection,
-        model_profile: currentProfile(),
+        rows: preview.rows,
+        section: context.section,
+        model_profile: context.model_profile,
         targetGroupIds: selectedImportGroupIds(),
         bundleName: ui.importBundleName.value,
       }),
     });
+    if (typeof poolSourceChanged === "function") poolSourceChanged({ ...context, ...result });
+    if (preview !== importPreview || context.model_profile !== currentProfile() || context.section !== activeSection) return;
     motionDialog(ui.importDialog, false);
-    await loadCustomGroups();
-    await loadPool();
-    renderDimensions();
     toast(`${result.bundleName}：新增 ${result.imported}，更新 ${result.updated}，跳过 ${result.skipped}`);
   } catch (error) {
     ui.commitImport.disabled = false;
-    toast(error.message);
+    const message = typeof poolMutationError === "function" ? poolMutationError(error, context) : error.message;
+    if (preview === importPreview) ui.importHint.textContent = message;
+    toast(message);
   }
 }
 

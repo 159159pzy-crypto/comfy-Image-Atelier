@@ -131,6 +131,37 @@ test('new custom prompt is saved without being selected or enabling the pool', a
   assert.deepEqual(plain(ui.ctx.kreaPromptPoolSelection), ['existing']); assert.equal(ui.ui.krea_prompt_pool_enabled.checked, false);
 });
 
+test('legacy favorites are selected using actual ensured source IDs rather than favorite or text hashes', async () => {
+  const ui = setup({ request: call => call.url === '/api/prompt-pools/items/ensure-many'
+    ? { items: [{ id: 'stable-source', text: 'Legacy prose.', created: true }] } : undefined });
+  ui.selection(['existing']);
+  await ui.ctx.selectKreaItems([{ id: 'legacy-hash', text: 'Legacy prose.', title: 'Legacy', in_pool: false }]);
+  assert.deepEqual(plain(ui.ctx.kreaPromptPoolSelection), ['existing', 'stable-source']);
+  assert.equal(ui.ui.krea_prompt_pool_enabled.checked, true);
+});
+
+test('editing text with a stable source ID keeps selection and broadcasts the committed lifecycle result', async () => {
+  const notices = [], ui = setup({ request: call => call.url === '/api/prompt-pools/items'
+    ? { id: 'stable', model_profile: 'krea2', section: 'prompt', updatedItemIds: ['stable'], deletedItemIds: [], favoritesSync: { state: 'complete', updatedCount: 2, deletedCount: 0 } } : undefined });
+  ui.ctx.poolSourceChanged = message => notices.push(plain(message));
+  ui.selection(['stable', 'other']); ui.ui.krea_prompt_pool_enabled.checked = false;
+  ui.ctx.openKreaPromptItemDialog({ id: 'stable', title: 'Original', text: 'Original prose.' });
+  ui.ui.kreaPromptItemText.value = 'Different prose.';
+  await ui.ctx.saveKreaPromptItem({ preventDefault() {} });
+  assert.deepEqual(plain(ui.ctx.kreaPromptPoolSelection), ['stable', 'other']); assert.equal(ui.ui.krea_prompt_pool_enabled.checked, false);
+  assert.equal(notices.length, 1); assert.deepEqual(notices[0].updatedItemIds, ['stable']);
+});
+
+test('one source-card unfavorite request removes every favorite association', async () => {
+  const item = { id: 'source', source_item_id: 'source', title: 'Card', text: 'Prose.', in_pool: true, favorite: true, favorite_ids: ['f1', 'f2'], favorite_id: 'f1' };
+  const ui = setup({ request: call => call.url === '/api/prompt-pools/query' ? { items: [item], count: 1, pool_count: 1, pages: 1 } : undefined });
+  await ui.ctx.loadKreaPromptPool();
+  const favorite = ui.ui.kreaPromptPoolList.children[0].children[2].children[0];
+  await favorite.click();
+  const writes = ui.calls.filter(call => call.url.includes('/favorites/prompt/item'));
+  assert.equal(writes.length, 1); assert.deepEqual(writes[0].body, { source_item_id: 'source', favorite: false });
+});
+
 test('changing import content invalidates preview and ignores its late response', async () => {
   const gate = deferred(), ui = setup({ request: call => call.url.endsWith('/import/preview') ? gate.promise : undefined }); importDraft(ui.ui);
   const pending = ui.ctx.previewKreaPromptImport(); ui.ui.kreaPromptPoolText.value = 'different'; await ui.ui.kreaPromptPoolText.emit('input');

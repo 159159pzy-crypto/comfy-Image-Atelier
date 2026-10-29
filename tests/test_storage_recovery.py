@@ -39,9 +39,10 @@ VALID_EMPTY = {
     "style_presets": {"version": 2, "items": []},
     "lora_triggers": {"version": 2, "overrides": {}},
     "prompt_rules": {"version": 1, "disabledBuiltins": [], "rules": []},
-    "prompt_pools": {"version": 2, "profiles": {}},
+    "prompt_pools": {"version": 4, "profiles": {}},
     "resource_profiles": {"version": 1, "assignments": {}, "initialized": []},
 }
+REFERENCED_SOURCE_STORES = {"custom_prompts", "prompt_pools"}
 
 
 def memory_state(store):
@@ -107,10 +108,12 @@ class StorageRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 path = self.root / f"{name}.json"
                 original = b'{ damaged json with irreplaceable user data'
                 path.write_bytes(original)
-                with patch("anima_webui.persistence.os.replace", side_effect=PermissionError("locked source")):
+                operation = "shutil.copy2" if name in REFERENCED_SOURCE_STORES else "os.replace"
+                with patch(f"anima_webui.persistence.{operation}", side_effect=PermissionError("locked source")) as backup:
                     store = factory(path)
+                backup.assert_called()
                 self.assertTrue(store.storage_status()["read_only"])
-                self.assertIn("备份失败", store.read_only_reason)
+                self.assertIn("读取失败" if name == "custom_prompts" else "备份失败", store.read_only_reason)
                 self.assertEqual(path.read_bytes(), original)
                 self.assertFalse(list(self.root.glob(f"{path.name}.corrupt*")))
                 before = memory_state(store)
@@ -145,24 +148,37 @@ class StorageRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 path = self.root / f"{name}.json"
                 original = json.dumps(VALID_EMPTY[name]).encode()
                 path.write_bytes(original)
-                with patch.object(Path, "read_text", side_effect=PermissionError("read denied")), patch(
+                read_method = "read_bytes" if name in REFERENCED_SOURCE_STORES else "read_text"
+                with patch.object(Path, read_method, side_effect=PermissionError("read denied")), patch(
                     "anima_webui.persistence.backup_corrupt_file"
                 ) as backup:
                     store = factory(path)
                 backup.assert_not_called()
-                self.assertIn("文件读取失败", store.read_only_reason)
+                self.assertIn("读取失败", store.read_only_reason)
                 self.assertEqual(path.read_bytes(), original)
+                if name in REFERENCED_SOURCE_STORES:
+                    self.assertFalse(store.load_trusted)
+                    self.assertEqual(store.load_state, "unreadable")
 
-    async def test_successful_quarantine_allows_writing_a_new_store(self):
+    async def test_referenced_sources_remain_read_only_while_other_stores_can_recover_empty(self):
         for name, factory in FACTORIES.items():
             with self.subTest(store=name):
                 path = self.root / f"{name}.json"
                 path.write_bytes(b"{broken")
                 store = factory(path)
-                self.assertIsNone(store.read_only_reason)
-                self.assertEqual(path.with_name(path.name + ".corrupt.bak").read_bytes(), b"{broken")
-                await mutations(store)[0]()
-                self.assertIsInstance(json.loads(path.read_text(encoding="utf-8")), dict)
+                suffix = ".v4.bak" if name == "custom_prompts" else ".corrupt.bak"
+                self.assertEqual(path.with_name(path.name + suffix).read_bytes(), b"{broken")
+                if name in REFERENCED_SOURCE_STORES:
+                    for current in (store, factory(path)):
+                        self.assertFalse(current.load_trusted)
+                        self.assertEqual(current.load_state, "invalid")
+                        with self.assertRaises(StorageReadOnlyError):
+                            await mutations(current)[0]()
+                        self.assertEqual(path.read_bytes(), b"{broken")
+                else:
+                    self.assertIsNone(store.read_only_reason)
+                    await mutations(store)[0]()
+                    self.assertIsInstance(json.loads(path.read_text(encoding="utf-8")), dict)
 
     async def test_migration_backup_or_write_failure_preserves_valid_source_and_read_view(self):
         legacy = {

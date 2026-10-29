@@ -911,21 +911,21 @@ class BatchManager:
             if pool.get("enabled"):
                 if self.prompt_pools is None:
                     raise WorkflowError("Krea 2 自然语言提示词池服务不可用")
-                candidates = self.prompt_pools.resolve("krea2", pool.get("ids"))
+                candidates = self.prompt_pools.resolve_records("krea2", pool.get("ids"))
                 if not candidates:
                     raise WorkflowError("Krea 2 自然语言提示词池为空，请先导入提示词")
                 chosen = random.Random(prompt_seed).choice(candidates)
-                effective = chosen
+                effective = chosen["text"]
                 if self.prompt_rules is not None:
                     effective, _ = self.prompt_rules.normalize_text(
-                        chosen, "positive", model_profile="krea2",
+                        chosen["text"], "positive", model_profile="krea2",
                         protected_lora_words=settings.get("lora_managed_triggers", []),
                     )
                 resolved["composer_prompt"] = effective
                 resolved["full_prompt"] = effective
                 resolved["selected"] = {
                     "krea_prompt_pool": [
-                        {"id": self.prompt_pools.item_id(chosen), "text": chosen}
+                        {"id": chosen["id"], "text": chosen["text"]}
                     ]
                 }
             else:

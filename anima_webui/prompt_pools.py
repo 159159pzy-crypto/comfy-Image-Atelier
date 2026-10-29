@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import tempfile
 import uuid
 from pathlib import Path
@@ -15,7 +16,7 @@ from typing import Any
 
 from .async_utils import serialized_mutation
 from .model_profiles import DEFAULT_MODEL_PROFILE, ModelProfileError, normalize_model_profile
-from .persistence import StorageProtection, backup_for_migration
+from .persistence import StorageProtection, _discard_incomplete_backup, _reserve_backup, backup_for_migration
 from .pool_entries import normalize_krea_entry, normalize_group_names
 from .workflow import WorkflowError
 
@@ -90,11 +91,36 @@ class PromptPoolStore(StorageProtection):
 
     @staticmethod
     def item_id(text: str) -> str:
+        """Legacy content identifier, used only while migrating pre-v4 records."""
         return "prompt_" + hashlib.sha256(text.casefold().encode("utf-8")).hexdigest()[:20]
 
     @classmethod
     def _public(cls, item: dict[str, Any]) -> dict[str, Any]:
-        return {**copy.deepcopy(item), "id": cls.item_id(item["text"]), "prompt": item["text"]}
+        return {**copy.deepcopy(item), "prompt": item["text"]}
+
+    @staticmethod
+    def _new_id() -> str:
+        return f"prompt_{uuid.uuid4().hex}"
+
+    @classmethod
+    def _read_items(cls, values: Any, version: int) -> list[dict[str, Any]]:
+        """Validate persisted records without silently discarding duplicate rows."""
+        if not isinstance(values, list) or len(values) > MAX_PROMPTS:
+            raise WorkflowError("提示词池 items 必须是数组且不能超过 50000 项")
+        result, seen_ids, seen_texts = [], set(), set()
+        for raw in values:
+            if version == 4 and not isinstance(raw, dict):
+                raise WorkflowError("提示词池 v4 条目必须包含持久标识")
+            item = _entry(raw)
+            item_id = raw.get("id") if version == 4 and isinstance(raw, dict) else cls.item_id(item["text"])
+            if not isinstance(item_id, str) or not item_id.startswith("prompt_") or item_id.strip() != item_id or len(item_id) <= 7:
+                raise WorkflowError("提示词池条目标识无效")
+            if item_id in seen_ids or item["text"].casefold() in seen_texts:
+                raise WorkflowError("提示词池包含重复条目标识或正文，请修复后重试")
+            seen_ids.add(item_id)
+            seen_texts.add(item["text"].casefold())
+            result.append({"id": item_id, **item})
+        return result
 
     @staticmethod
     def _group_name(value: Any) -> str:
@@ -139,12 +165,17 @@ class PromptPoolStore(StorageProtection):
 
     def reload(self) -> None:
         self.load_warnings, self.read_only_reason = [], None
+        self.load_trusted = False
+        self.load_state = "missing"
+        self.disk_digest: str | None = None
         self.items, self.groups = {DEFAULT_MODEL_PROFILE: []}, {DEFAULT_MODEL_PROFILE: []}
         if not self.path.is_file():
+            self.load_trusted = True
             return
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict) or type(payload.get("version")) is not int or payload["version"] not in {1, 2, 3}:
+            source_bytes = self.path.read_bytes()
+            payload = json.loads(source_bytes.decode("utf-8"))
+            if not isinstance(payload, dict) or type(payload.get("version")) is not int or payload["version"] not in {1, 2, 3, 4}:
                 raise WorkflowError("自然语言提示词池文件版本无效")
             version = payload["version"]
             raw = payload.get("profiles", payload.get("items", {}))
@@ -155,34 +186,58 @@ class PromptPoolStore(StorageProtection):
             profiles, all_groups = {}, {}
             for name, value in raw.items():
                 profile = self._profile(name)
-                if version == 3:
+                if version >= 3:
                     if not isinstance(value, dict) or set(value) - {"items", "groups"}:
                         raise WorkflowError("自然语言提示词池档案无效")
-                    groups, records = self._read_groups(value.get("groups", [])), _entries(value.get("items", []))
+                    groups, records = self._read_groups(value.get("groups", [])), self._read_items(value.get("items", []), version)
                     for item in records:
                         self._validate_groups(item["groupIds"], groups)
                 else:
-                    records, groups = _entries(normalize_prompt_items(value)), []
+                    records, groups = self._read_items(value, version), []
+                if profile in profiles:
+                    raise WorkflowError("自然语言提示词池包含重复模型档案")
                 profiles[profile], all_groups[profile] = records, groups
             profiles.setdefault(DEFAULT_MODEL_PROFILE, [])
             all_groups.setdefault(DEFAULT_MODEL_PROFILE, [])
             self.items, self.groups = profiles, all_groups
+            self.disk_digest = hashlib.sha256(source_bytes).hexdigest()
+            self.load_trusted = True
+            self.load_state = "loaded"
         except (OSError, UnicodeError, json.JSONDecodeError, WorkflowError) as error:
-            self._recover_load_failure(error)
+            self.load_state = "unreadable" if isinstance(error, OSError) else "invalid"
+            self._preserve_load_failure(error)
             return
-        if version < 3:
+        if version < 4:
             try:
-                backup = backup_for_migration(self.path, 3)
+                backup = backup_for_migration(self.path, 4)
                 self._write_text(self._serialize(self.items, self.groups))
                 if backup:
                     self.load_warnings.append(f"提示词池已迁移，原文件备份为 {backup.name}")
             except OSError as error:
                 self._protect_storage(f"提示词池已在内存迁移，但迁移备份或写回失败({error})")
 
+    def _preserve_load_failure(self, error: Exception) -> None:
+        """An invalid source must never become a trusted empty pool on restart."""
+        if isinstance(error, OSError):
+            self._protect_storage(f"文件读取失败({error})，原文件未改动")
+            return
+        backup = None
+        try:
+            backup = _reserve_backup(self.path, "corrupt")
+            shutil.copy2(self.path, backup)
+            with backup.open("r+b") as stream:
+                os.fsync(stream.fileno())
+        except OSError as backup_error:
+            if backup is not None:
+                _discard_incomplete_backup(backup)
+            self._protect_storage(f"文件内容无法读取({error})，备份失败({backup_error})，原文件未改动")
+            return
+        self._protect_storage(f"文件内容无法读取({error})，已备份为 {backup.name}，原文件保留待修复")
+
     @staticmethod
     def _serialize(items: dict[str, Any], groups: dict[str, Any]) -> str:
         profiles = {profile: {"items": values, "groups": groups.get(profile, [])} for profile, values in items.items()}
-        return json.dumps({"version": 3, "profiles": profiles}, ensure_ascii=False, indent=2) + "\n"
+        return json.dumps({"version": 4, "profiles": profiles}, ensure_ascii=False, indent=2) + "\n"
 
     async def _save(self, profiles: dict[str, Any], groups: dict[str, Any] | None = None) -> None:
         self.ensure_writable()
@@ -200,6 +255,7 @@ class PromptPoolStore(StorageProtection):
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temp_name, self.path)
+            self.disk_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         finally:
             if os.path.exists(temp_name):
                 os.unlink(temp_name)
@@ -208,9 +264,12 @@ class PromptPoolStore(StorageProtection):
         return [self._public(item) for item in self.items.get(self._profile(model_profile), [])]
 
     def resolve(self, model_profile: Any, selected_ids: list[str] | None = None) -> list[str]:
+        return [item["text"] for item in self.resolve_records(model_profile, selected_ids)]
+
+    def resolve_records(self, model_profile: Any, selected_ids: list[str] | None = None) -> list[dict[str, Any]]:
         selected = set(selected_ids or [])
-        return [item["text"] for item in self.items.get(self._profile(model_profile), [])
-                if not selected_ids or self.item_id(item["text"]) in selected]
+        return [self._public(item) for item in self.items.get(self._profile(model_profile), [])
+                if not selected_ids or item["id"] in selected]
 
     def group_filter_ids(self, model_profile: Any, group_id: str) -> set[str]:
         groups = self.groups.get(self._profile(model_profile), [])
@@ -262,32 +321,21 @@ class PromptPoolStore(StorageProtection):
                 if more <= collection_ids:
                     break
                 collection_ids.update(more)
-        def favorite_text(item: dict[str, Any]) -> str:
-            return str(item.get("text") or item.get("customContent") or "").strip()
-        favorite_by_text = {favorite_text(item).casefold(): item for item in saved if favorite_text(item)}
-        actual = {item["text"].casefold(): item for item in self.items.get(profile, [])}
-        selection_total = sum(self.item_id(item["text"]) in selected for item in actual.values())
+        favorites_by_source: dict[str, list[dict[str, Any]]] = {}
+        for favorite in saved:
+            source_id = favorite.get("source_item_id")
+            if isinstance(source_id, str) and source_id:
+                favorites_by_source.setdefault(source_id, []).append(favorite)
+        actual = {item["id"]: item for item in self.items.get(profile, [])}
+        selection_total = sum(item_id in selected for item_id in actual)
         values = []
-        if collection:
-            candidates = [item for item in saved if collection == "__all__" or collection_ids.intersection(item.get("groupIds", []))]
-            seen = set()
-            for saved_item in candidates:
-                text = favorite_text(saved_item)
-                key = text.casefold()
-                if not text or key in seen:
-                    continue
-                seen.add(key)
-                original = actual.get(key)
-                value = _entry({"text": text, "title": saved_item.get("title") or saved_item.get("nickname") or text.splitlines()[0][:200],
-                                "subtitle": saved_item.get("subtitle") or ""})
-                value["groupIds"] = list(original["groupIds"]) if original else []
-                values.append({**self._public(value), "in_pool": original is not None,
-                               "favorite": True, "favorite_id": saved_item["id"]})
-        else:
-            for item in actual.values():
-                favorite = favorite_by_text.get(item["text"].casefold())
-                values.append({**self._public(item), "in_pool": True, "favorite": favorite is not None,
-                               "favorite_id": favorite.get("id", "") if favorite else ""})
+        for item in actual.values():
+            linked = favorites_by_source.get(item["id"], [])
+            if collection and not any(collection == "__all__" or collection_ids.intersection(favorite.get("groupIds", [])) for favorite in linked):
+                continue
+            favorite_ids = list(dict.fromkeys(favorite["id"] for favorite in linked if favorite.get("id")))
+            values.append({**self._public(item), "in_pool": True, "favorite": bool(linked),
+                           "favorite_ids": favorite_ids, "favorite_id": favorite_ids[0] if favorite_ids else ""})
         group_ids = self.group_filter_ids(profile, custom_group) if custom_group else None
         needle = str(query or "").strip().casefold()
         values = [item for item in values if (group_ids is None or group_ids.intersection(item["groupIds"]))
@@ -330,12 +378,16 @@ class PromptPoolStore(StorageProtection):
         profile, mode = self._profile(model_profile), self._normalize_import_mode(mode)
         incoming = _entries(values)
         self.ensure_writable()
+        previous_by_text = {item["text"].casefold(): item for item in self.items.get(profile, [])}
         existing = self.items.get(profile, []) if mode == "append" else []
         next_groups = copy.deepcopy(self.groups)
         if mode == "replace":
             next_groups[profile] = []
         seen = {item["text"].casefold() for item in existing}
         added = [item for item in incoming if item["text"].casefold() not in seen]
+        for item in added:
+            previous = previous_by_text.get(item["text"].casefold())
+            item["id"] = previous["id"] if previous else self._new_id()
         groups = next_groups.setdefault(profile, [])
         imported_group_names = {}
         for raw in values:
@@ -363,8 +415,8 @@ class PromptPoolStore(StorageProtection):
         if len(result_items) > MAX_PROMPTS:
             raise WorkflowError(f"提示词池不能超过 {MAX_PROMPTS} 项")
         await self._save({**self.items, profile: result_items}, next_groups)
-        return {**self.list(profile), "imported_ids": [self.item_id(item["text"]) for item in added],
-                "valid_ids": [self.item_id(item["text"]) for item in result_items]}
+        return {**self.list(profile), "imported_ids": [item["id"] for item in added],
+                "valid_ids": [item["id"] for item in result_items]}
 
     @staticmethod
     def _make_item(text: Any, title: Any, subtitle: Any, group_ids: Any) -> dict[str, Any]:
@@ -372,7 +424,7 @@ class PromptPoolStore(StorageProtection):
         for key, field in (("title", title), ("subtitle", subtitle), ("groupIds", group_ids)):
             if field is not None:
                 value[key] = field
-        return _entry(value)
+        return {"id": PromptPoolStore._new_id(), **_entry(value)}
 
     @serialized_mutation
     async def create_item(self, model_profile: Any, text: Any, *, title: Any = None,
@@ -416,6 +468,7 @@ class PromptPoolStore(StorageProtection):
             self._validate_groups(item["groupIds"], self.groups.get(profile, []))
             found = by_text.get(item["text"].casefold())
             if found is None:
+                item["id"] = self._new_id()
                 added.append(item)
                 by_text[item["text"].casefold()] = item
             result.append({**self._public(found or item), "created": found is None})
@@ -424,7 +477,7 @@ class PromptPoolStore(StorageProtection):
         if added:
             await self._save({**self.items, profile: [*existing, *added]})
         return {"model_profile": profile, "items": result,
-                "created_ids": [self.item_id(item["text"]) for item in added], "count": len(by_text)}
+                "created_ids": [item["id"] for item in added], "count": len(by_text)}
 
     @serialized_mutation
     async def update_item(self, model_profile: Any, item_id: Any, text: Any, *, title: Any = None,
@@ -435,13 +488,14 @@ class PromptPoolStore(StorageProtection):
         if not target:
             raise WorkflowError("提示词池 item_id 不能为空")
         values = self.items.get(profile, [])
-        index = next((i for i, value in enumerate(values) if self.item_id(value["text"]) == target), None)
+        index = next((i for i, value in enumerate(values) if value["id"] == target), None)
         if index is None:
             raise KeyError(target)
         old = values[index]
         item = self._make_item(text, old["title"] if title is None else title,
                                old["subtitle"] if subtitle is None else subtitle,
                                old["groupIds"] if group_ids is None else group_ids)
+        item["id"] = old["id"]
         self._validate_groups(item["groupIds"], self.groups.get(profile, []))
         if any(i != index and value["text"].casefold() == item["text"].casefold() for i, value in enumerate(values)):
             raise WorkflowError("提示词池中已存在相同文本")
@@ -461,7 +515,7 @@ class PromptPoolStore(StorageProtection):
         if not target:
             raise WorkflowError("提示词池 item_id 不能为空")
         values = self.items.get(profile, [])
-        remaining = [item for item in values if self.item_id(item["text"]) != target]
+        remaining = [item for item in values if item["id"] != target]
         if len(remaining) == len(values):
             raise KeyError(target)
         await self._save({**self.items, profile: remaining})
@@ -473,9 +527,9 @@ class PromptPoolStore(StorageProtection):
         targets = set(_ids(item_ids, "ids"))
         self.ensure_writable()
         values = self.items.get(profile, [])
-        deleted = [self.item_id(item["text"]) for item in values if self.item_id(item["text"]) in targets]
+        deleted = [item["id"] for item in values if item["id"] in targets]
         if deleted:
-            await self._save({**self.items, profile: [item for item in values if self.item_id(item["text"]) not in targets]})
+            await self._save({**self.items, profile: [item for item in values if item["id"] not in targets]})
         return {"model_profile": profile, "deleted": deleted, "count": len(self.items.get(profile, []))}
 
     @classmethod
@@ -528,7 +582,7 @@ class PromptPoolStore(StorageProtection):
             item, current = copy.deepcopy(original), set(original["groupIds"])
             if current.intersection(ids):
                 if delete_mode == "all" or (delete_mode == "exclusive" and not (current - ids)):
-                    deleted.append(self.item_id(item["text"]))
+                    deleted.append(item["id"])
                     continue
                 item["groupIds"] = [gid for gid in item["groupIds"] if gid not in ids]
                 detached += 1
@@ -590,7 +644,7 @@ class PromptPoolStore(StorageProtection):
                 for group_name in item["groups"] or ["未分组"]:
                     names.setdefault(group_name.casefold(), group_name)
                 rows.append({"row": index, "status": "conflict" if conflict else "new",
-                             "action": "skip" if conflict else "create", "existingId": self.item_id(item["prompt"]) if conflict else "",
+                             "action": "skip" if conflict else "create", "existingId": current_by_text[key]["id"] if conflict else "",
                              "item": item, "groups": item["groups"], "error": ""})
             except (ValueError, WorkflowError) as error:
                 rows.append({"row": index, "status": "error", "action": "skip", "existingId": "",
@@ -612,6 +666,7 @@ class PromptPoolStore(StorageProtection):
                                        target_group_ids: Any = None, mode: str = "append") -> dict[str, Any]:
         profile, name = self._profile(model_profile), self._group_name(bundle_name)
         current, groups, targets = self._import_state(profile, mode, target_group_ids)
+        previous_by_text = {item["text"].casefold(): item for item in self.items.get(profile, [])}
         if not isinstance(rows, list) or len(rows) > MAX_IMPORT_ROWS:
             raise WorkflowError("导入确认数据无效")
         bundle = self._bundle(groups, name)
@@ -636,7 +691,10 @@ class PromptPoolStore(StorageProtection):
             if key in processed:
                 raise WorkflowError("同一导入确认中存在重复正文")
             processed.add(key)
-            index, item_id = by_text.get(key), self.item_id(item["text"])
+            index = by_text.get(key)
+            previous = current[index] if index is not None else previous_by_text.get(key)
+            item_id = previous["id"] if previous else self._new_id()
+            item["id"] = item_id
             if action == "overwrite":
                 if index is None or row.get("existingId") != item_id:
                     raise WorkflowError("可覆盖的原条目已变化，请重新预览")
@@ -665,7 +723,7 @@ class PromptPoolStore(StorageProtection):
             raise WorkflowError("导入后提示词或自定义分组数量超过上限")
         await self._save({**self.items, profile: current}, {**self.groups, profile: groups})
         return {"model_profile": profile, "imported": len(imported), "updated": len(updated), "skipped": skipped,
-                "imported_ids": imported, "updated_ids": updated, "valid_ids": [self.item_id(item["text"]) for item in current],
+                "imported_ids": imported, "updated_ids": updated, "valid_ids": [item["id"] for item in current],
                 "count": len(current), "groups": self.list_groups(profile)["groups"]}
 
 

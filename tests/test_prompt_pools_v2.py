@@ -18,6 +18,7 @@ class PromptPoolPaginationTests(unittest.IsolatedAsyncioTestCase):
             await store.import_items(
                 "krea2", ["A forest at dusk", "A portrait in a studio", "Forest with rain"]
             )
+            ids = {item["text"]: item["id"] for item in store.all_items("krea2")}
 
             result = store.list("krea2", query="forest", page=1, limit=1)
             self.assertEqual(result["total"], 2)
@@ -28,7 +29,7 @@ class PromptPoolPaginationTests(unittest.IsolatedAsyncioTestCase):
                 "krea2",
                 page=2,
                 limit=1,
-                selected_ids=[PromptPoolStore.item_id("A forest at dusk")],
+                selected_ids=[ids["A forest at dusk"]],
             )
             self.assertFalse(selected["items"][0]["selected"])
             self.assertEqual(selected["page"], 2)
@@ -40,8 +41,8 @@ class PromptPoolPaginationTests(unittest.IsolatedAsyncioTestCase):
                 page=1,
                 limit=1,
                 selected_ids=[
-                    PromptPoolStore.item_id("A forest at dusk"),
-                    PromptPoolStore.item_id("A portrait in a studio"),
+                    ids["A forest at dusk"],
+                    ids["A portrait in a studio"],
                 ],
                 selected_only=True,
             )
@@ -54,7 +55,7 @@ class PromptPoolPaginationTests(unittest.IsolatedAsyncioTestCase):
             )
 
             removed = await store.delete_item(
-                "krea2", PromptPoolStore.item_id("A portrait in a studio")
+                "krea2", ids["A portrait in a studio"]
             )
             self.assertEqual(removed["count"], 2)
             with self.assertRaises(KeyError):
@@ -149,18 +150,18 @@ class PromptPoolMutationTests(unittest.IsolatedAsyncioTestCase):
                 [item["text"] for item in appended["items"]], ["first", "second", "third"]
             )
             self.assertEqual(
-                appended["imported_ids"], [PromptPoolStore.item_id("third")]
+                appended["imported_ids"], [appended["items"][-1]["id"]]
             )
             duplicate_append = await store.import_items("krea2", ["fourth", "FOURTH"], mode="append")
             self.assertEqual(
-                duplicate_append["imported_ids"], [PromptPoolStore.item_id("fourth")]
+                duplicate_append["imported_ids"], [duplicate_append["items"][-1]["id"]]
             )
             replacement = await store.import_items("krea2", ["replacement"], mode="replace")
             self.assertEqual(
                 [item["text"] for item in replacement["items"]], ["replacement"]
             )
             self.assertEqual(
-                replacement["imported_ids"], [PromptPoolStore.item_id("replacement")]
+                replacement["imported_ids"], [replacement["items"][0]["id"]]
             )
 
             created = await store.create_item("krea2", "Editable")
@@ -171,7 +172,7 @@ class PromptPoolMutationTests(unittest.IsolatedAsyncioTestCase):
 
             updated = await store.update_item("krea2", created["id"], "Edited")
             self.assertEqual(updated["text"], "Edited")
-            self.assertNotEqual(updated["id"], created["id"])
+            self.assertEqual(updated["id"], created["id"])
             deleted = await store.delete_items(
                 "krea2", [updated["id"], updated["id"], "missing"]
             )

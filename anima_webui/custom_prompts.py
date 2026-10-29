@@ -4,6 +4,7 @@ import asyncio
 import copy
 import csv
 import functools
+import hashlib
 import io
 import json
 import logging
@@ -16,7 +17,7 @@ from typing import Any
 
 from .async_utils import serialized_mutation
 from .catalog import SECTIONS, CatalogError, PromptCatalog, normalize_text
-from .persistence import StorageProtection
+from .persistence import StorageProtection, backup_for_migration
 
 
 logger = logging.getLogger(__name__)
@@ -99,48 +100,140 @@ class CustomPromptStore(StorageProtection):
     def reload(self) -> None:
         self.load_warnings = []
         self.read_only_reason = None
+        self.load_trusted = False
+        self.load_state = "missing"
+        self.disk_digest = None
+        self.source_completeness = "unverified"
         if not self.path.is_file():
             self.items = []
             self.groups = {section: [] for section in SECTIONS}
             self.catalog.set_custom_items([])
+            self.load_trusted = True
             return
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            source_bytes = self.path.read_bytes()
+            self.disk_digest = hashlib.sha256(source_bytes).hexdigest()
+            payload = json.loads(source_bytes.decode("utf-8"))
             if not isinstance(payload, dict):
                 raise CatalogError("自定义提示词文件不是 JSON 对象")
-            # 手改文件里 groups/items 可能是 null 或错误类型:null 视为空,
-            # 其余错误类型走坏文件备份,不能以 AttributeError/TypeError 炸掉启动。
-            raw_groups = payload.get("groups") or {}
-            raw_items = payload.get("items") or []
-            if not isinstance(raw_groups, dict) or not isinstance(raw_items, list):
-                raise CatalogError("自定义提示词文件的 groups/items 结构无效")
-            version = int(payload.get("version") or 0)
+            self.source_completeness = payload.get("source_completeness", "complete")
+            if self.source_completeness not in {"complete", "unverified"}:
+                raise CatalogError("自定义提示词来源完整性标记无效")
+            raw_groups = payload.get("groups", {})
+            raw_items = payload.get("items")
+            version = payload.get("version", 0)
+            if type(version) is not int or not 0 <= version <= CUSTOM_DATA_VERSION:
+                raise CatalogError("自定义提示词文件版本无效")
+            # 加载必须先拒绝会丢失数据的输入。API 的宽松规范化会忽略坏项、
+            # 截断分组及删除未知成员，不能把这样的结果当作清理收藏的可信依据。
+            self._validate_persisted_data(raw_groups, raw_items, version)
             groups = {
                 section: self._normalize_groups(raw_groups.get(section, []))
                 for section in SECTIONS
             }
-            items = [self._normalize(item) for item in raw_items if isinstance(item, dict)]
+            items = [self._normalize(item) for item in raw_items]
             if version < CUSTOM_DATA_VERSION:
                 groups, items = self._migrate_legacy_tree(groups, items)
+                self._validate_persisted_data(groups, items, CUSTOM_DATA_VERSION)
             self.groups = groups
             self.items = items
-            self._remove_unknown_group_ids()
-            # set_custom_items 也在保护范围内:_normalize 不校验 id 格式(create 会在
-            # 之后覆盖 id),老格式/手改的 id 在这里才被拒绝,不能因此炸掉启动。
             self.catalog.set_custom_items(self.items)
+            self.load_trusted = True
+            self.load_state = "loaded"
             if version < CUSTOM_DATA_VERSION:
                 try:
                     self._backup_before_v4_migration()
-                    self._write_text(self._serialize(self.groups, self.items))
+                    self._write_text(self._serialize(self.groups, self.items, self.source_completeness))
                 except OSError as error:
                     logger.warning("自定义提示词 v4 迁移暂未写回: %s", error)
                     self._protect_storage(f"自定义提示词已在内存迁移，但迁移备份或写回失败({error})")
         except (OSError, UnicodeError, json.JSONDecodeError, CatalogError, ValueError, TypeError) as error:
-            self._recover_load_failure(error)
+            self.load_trusted = False
+            self.load_state = "unreadable" if isinstance(error, OSError) else "invalid"
+            if not isinstance(error, OSError):
+                try:
+                    backup_for_migration(self.path, CUSTOM_DATA_VERSION)
+                except OSError as backup_error:
+                    logger.warning("自定义词库损坏备份失败: %s", backup_error)
+            self._protect_storage(f"源词库读取失败({error})，保留原文件以防重启后误判为空库")
             self.items = []
             self.groups = {section: [] for section in SECTIONS}
             # 同时把目录从 set_custom_items 可能留下的半修改状态恢复为无自定义项。
             self.catalog.set_custom_items([])
+
+    @staticmethod
+    def _validate_persisted_data(raw_groups: Any, raw_items: Any, version: int) -> None:
+        """Validate disk data before permissive API normalization can discard it."""
+        if not isinstance(raw_groups, dict) or not isinstance(raw_items, list):
+            raise CatalogError("自定义提示词文件的 groups/items 结构无效")
+        if any(section not in SECTIONS for section in raw_groups):
+            raise CatalogError("自定义提示词文件包含未知分组分类")
+        leaf_ids: dict[str, set[str]] = {}
+        for section in SECTIONS:
+            values = raw_groups.get(section, [])
+            if not isinstance(values, list) or len(values) > MAX_GROUPS_PER_SECTION:
+                raise CatalogError(f"{section} 自定义分组结构无效或数量超过上限")
+            by_id: dict[str, dict[str, Any]] = {}
+            for group in values:
+                if not isinstance(group, dict):
+                    raise CatalogError("自定义分组必须是对象")
+                group_id, name = group.get("id"), group.get("name")
+                if (
+                    not isinstance(group_id, str) or not group_id.strip()
+                    or group_id != group_id.strip() or group_id in by_id
+                    or not isinstance(name, str) or not name.strip() or len(name.strip()) > 100
+                ):
+                    raise CatalogError("自定义分组 ID 重复或名称/ID 无效")
+                kind, parent_id = group.get("kind", "group"), group.get("parentId")
+                if not isinstance(kind, str) or kind not in {"group", "import", "legacy"}:
+                    raise CatalogError("自定义分组类型无效")
+                if parent_id is not None and (
+                    not isinstance(parent_id, str) or not parent_id.strip() or parent_id != parent_id.strip()
+                ):
+                    raise CatalogError("自定义分组父项无效")
+                if (kind != "group" and parent_id is not None) or (
+                    version < CUSTOM_DATA_VERSION and (kind != "group" or parent_id is not None)
+                ):
+                    raise CatalogError("自定义分组层级与文件版本不符")
+                by_id[group_id] = group
+            for group in values:
+                parent_id = group.get("parentId")
+                if parent_id is not None and (
+                    parent_id not in by_id or by_id[parent_id].get("kind", "group") not in {"import", "legacy"}
+                ):
+                    raise CatalogError("自定义分组包含不存在或无效的父项")
+            leaf_ids[section] = {key for key, group in by_id.items() if group.get("kind", "group") == "group"}
+
+        seen: set[str] = set()
+        for item in raw_items:
+            if not isinstance(item, dict):
+                raise CatalogError("自定义项必须是对象")
+            item_id, section = item.get("id"), item.get("section")
+            if (
+                not isinstance(item_id, str) or not item_id.startswith("custom:")
+                or len(item_id) == len("custom:") or any(char.isspace() for char in item_id)
+                or item_id in seen
+            ):
+                raise CatalogError("自定义项 ID 重复或无效")
+            seen.add(item_id)
+            if not isinstance(section, str) or section not in SECTIONS:
+                raise CatalogError("自定义项包含未知分类")
+            for key in ("title", "prompt"):
+                if not isinstance(item.get(key), str) or not item[key].strip():
+                    raise CatalogError("自定义项名称和提示词必须是非空文本")
+            for key in ("subtitle", "gender", "hair", "eye", "copyright"):
+                if key in item and not isinstance(item[key], str):
+                    raise CatalogError(f"自定义项 {key} 必须是文本")
+            for key in ("groupIds", "categories", "traits"):
+                values = item.get(key, [])
+                if (
+                    not isinstance(values, list)
+                    or any(not isinstance(value, str) or not value.strip() for value in values)
+                    or len({value.strip() for value in values}) != len(values)
+                ):
+                    raise CatalogError(f"自定义项 {key} 必须是无重复的文本数组")
+                if key == "groupIds" and any(value not in leaf_ids[section] for value in values):
+                    raise CatalogError("自定义项包含不存在或非叶子的分组")
 
     def list(self, section: str | None = None, group_id: str | None = None) -> list[dict[str, Any]]:
         if section and section not in SECTIONS:
@@ -782,13 +875,14 @@ class CustomPromptStore(StorageProtection):
 
     async def _write(self, groups: dict[str, list[dict[str, Any]]], items: list[dict[str, Any]]) -> None:
         # 快照序列化在事件循环线程完成(状态一致),fsync 等慢速 I/O 移入工作线程。
-        payload = self._serialize(groups, items)
+        payload = self._serialize(groups, items, self.source_completeness)
         await asyncio.to_thread(self._write_text, payload)
 
     @staticmethod
-    def _serialize(groups: dict[str, list[dict[str, Any]]], items: list[dict[str, Any]]) -> str:
+    def _serialize(groups: dict[str, list[dict[str, Any]]], items: list[dict[str, Any]], source_completeness: str = "complete") -> str:
         return json.dumps(
-            {"version": CUSTOM_DATA_VERSION, "groups": groups, "items": items},
+            {"version": CUSTOM_DATA_VERSION, "groups": groups, "items": items,
+             **({"source_completeness": source_completeness} if source_completeness != "complete" else {})},
             ensure_ascii=False,
             indent=2,
         ) + "\n"
@@ -802,6 +896,7 @@ class CustomPromptStore(StorageProtection):
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temp_name, self.path)
+            self.disk_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         finally:
             if os.path.exists(temp_name):
                 os.unlink(temp_name)

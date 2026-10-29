@@ -111,7 +111,7 @@ class StorageApiTests(unittest.IsolatedAsyncioTestCase):
                 raise AssertionError("The retired ownership file must never be opened")
             return original_open(path, *args, **kwargs)
 
-        with patch("anima_webui.persistence.os.replace", side_effect=PermissionError("backup denied")), patch.object(Path, "open", new=protect_legacy):
+        with patch("anima_webui.persistence.os.replace", side_effect=PermissionError("backup denied")), patch("anima_webui.persistence.shutil.copy2", side_effect=PermissionError("backup denied")), patch.object(Path, "open", new=protect_legacy):
             self.app = create_app(
                 app_dir=Path(__file__).resolve().parents[1], data_dir=self.data,
                 comfy=self.comfy, anima_tools_dir=tools,
@@ -148,6 +148,31 @@ class StorageApiTests(unittest.IsolatedAsyncioTestCase):
             response = await self.client.get(endpoint)
             self.assertEqual(response.status, 200, (endpoint, await response.text()))
         self.assert_sources_unchanged()
+
+    async def test_invalid_source_remains_read_only_after_application_restart(self):
+        for name, endpoint, body in (
+            ("custom_prompts", "/api/custom-prompts", {"section": "pose", "title": "New", "prompt": "standing"}),
+            ("prompt_pools", "/api/prompt-pools/items", {"model_profile": "krea2", "text": "New scene"}),
+        ):
+            with self.subTest(store=name):
+                storage = self.root / f"restart-{name}"
+                storage.mkdir()
+                source_path = storage / STORE_FILES[name]
+                source_path.write_bytes(self.original)
+                for restart in range(2):
+                    with self.subTest(restart=restart):
+                        app = create_app(app_dir=Path(__file__).resolve().parents[1], data_dir=storage,
+                                         comfy=FakeComfy(), anima_tools_dir=self.tools)
+                        async with TestClient(TestServer(app)) as client:
+                            status = (await (await client.get("/api/config")).json())["storage_status"][name]
+                            self.assertTrue(status["read_only"])
+                            response = await client.post(endpoint, json=body)
+                            payload = await response.json()
+                            self.assertEqual(response.status, 503, payload)
+                            self.assertEqual(payload["code"], "storage_read_only")
+                            self.assertEqual(payload["store"], name)
+                            self.assertFalse(app[STORE_KEYS[name]].load_trusted)
+                            self.assertEqual(source_path.read_bytes(), self.original)
 
     async def test_json_mutation_routes_return_503_before_state_or_file_changes(self):
         requests = {

@@ -395,6 +395,7 @@
       <label class="field"><span>副标题 / 说明</span><input id="kreaPromptItemSubtitle" maxlength="300" placeholder="场景或内容简述"></label>
       <label class="field"><span>提示词文本</span><textarea id="kreaPromptItemText" rows="8" maxlength="20000" placeholder="输入一条自然语言提示词" required></textarea></label>
       <fieldset class="import-group-fieldset"><legend>自定义分组（可多选）</legend><div id="kreaPromptItemGroups" class="import-target-groups"></div></fieldset>
+      <p id="kreaPromptItemError" class="field-hint" role="alert" hidden></p>
       <div class="dialog-actions"><button id="kreaPromptItemDelete" class="button danger" type="button" hidden>删除</button><span></span><button id="kreaPromptItemCancel" class="button ghost" type="button">取消</button><button class="button primary" type="submit">保存</button></div>
     </form>
   </dialog>
@@ -461,6 +462,7 @@
 
   <dialog id="customDialog" class="compact-dialog">
     <form id="customForm" method="dialog">
+      <p id="customMutationError" class="field-hint" role="alert" hidden></p>
       <div class="dialog-heading"><div><span class="kicker">CUSTOM ENTRY</span><h2 id="customDialogTitle">新增自定义项</h2></div><button id="closeCustom" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
       <input id="customId" type="hidden">
       <label class="field"><span>名称</span><input id="customTitle" type="text" maxlength="200" required></label>
@@ -741,22 +743,23 @@
       <div class="single-inline-actions"><button id="sharedFavoriteGroupNew" type="button" class="button ghost">新建分组</button><button id="sharedFavoriteGroupSave" type="submit" class="button primary">保存名称</button><button type="button" class="button ghost" data-close-shared-favorite="sharedFavoriteGroupDialog">完成</button></div>
     </form>
   </dialog>
+  <div id="poolRefreshNotice" class="queue-panel glass open" style="z-index:80" role="status" hidden><p id="poolRefreshMessage"></p><button id="poolRefreshRetry" class="button ghost compact" type="button">重新刷新列表</button></div>
   <div id="toast" role="status" aria-live="polite"></div>
   <script src="/static/motion.js?v=20261024-motion" defer></script>
   <script src="/static/workbench-parameters.js?v=20261024-workflow-parameters" defer></script>
   <script src="/static/single-layout.js?v=20261029-artwork-favorites" defer></script>
   <script src="/static/single-gallery.js?v=20261028-remove-artwork-management" defer></script>
-  <script src="/static/shared-favorites.js?v=20261024-favorite-confirm" defer></script>
+  <script src="/static/shared-favorites.js?v=20261030-source-lifecycle" defer></script>
   <script src="/static/prompt-reverse.js?v=20261028-remove-artwork-management" defer></script>
   <script src="/static/prompt-assistant.js?v=20261024-pools" defer></script>
   <script src="/static/single-workbench.js?v=20261028-remove-artwork-management" defer></script>
   <script src="/static/single-input.js?v=20261028-remove-artwork-management" defer></script>
   <script src="/static/single-compatibility.js?v=20261024-single-ui" defer></script>
   <script src="/static/single-details.js?v=20261027-history-polish" defer></script>
-  <script src="/static/krea-pool.js?v=20261024-favorite-confirm" defer></script>
+  <script src="/static/krea-pool.js?v=20261030-source-lifecycle" defer></script>
   <script src="/static/history-detail.js?v=20261029-artwork-favorites" defer></script>
   <script src="/static/artwork-favorites.js?v=20261029-favorites-motion" defer></script>
   <script src="/static/detail-actions.js?v=20261027-history-polish" defer></script>
-  <script src="/static/app.js?v=20261029-artwork-favorites" defer></script>
+  <script src="/static/app.js?v=20261030-source-lifecycle" defer></script>
 </body>
 </html>

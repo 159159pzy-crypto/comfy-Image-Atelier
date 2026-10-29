@@ -20,6 +20,7 @@ function context(extra = {}) {
     localStorage: { setItem() {} }, ...extra,
   });
   vm.runInContext(source, sandbox);
+  vm.runInContext('for (const section of SECTIONS) sharedFavoritesState.reconciled.set(`anima:${section}`, true); sharedFavoritesState.reconciled.set("krea2:prompt", true);', sandbox);
   return { ctx: sandbox, elements, messages, persists: () => persists, profile: value => profile = value, run: code => vm.runInContext(code, sandbox) };
 }
 function appFunction(name) {
@@ -316,4 +317,184 @@ test("bulk favorite completion for an old category does not replace the active c
   const pending = ctx.saveFavoriteSelection({ preventDefault() {} });
   ctx.activeSection = "expression"; resolve({ items: ["stale"] }); await pending;
   assert.deepEqual(ctx.favoritesData.items, ["current"]);
+});
+
+test("source deletion invalidates pending readers and prunes every saved draft only in its owning model", () => {
+  const notices = [], timers = [];
+  const pool = () => ({ mode: "all", ids: ["gone", "keep"], excluded_ids: ["gone", "other"] });
+  const { ctx, run, persists } = context({
+    ui: { poolGrid: {} }, activeSection: "pose", draft: { pools: { pose: pool() }, fixed: { pose: "unchanged" }, modes: { pose: "fixed" } },
+    profileDrafts: { anima: { pools: { pose: pool() } }, krea2: { kreaPromptPoolSelection: ["gone"] } },
+    singleWorkbenchState: { drafts: { random: { anima: { settings: { pools: { pose: pool() } }, profileDrafts: { anima: { pools: { pose: pool() } } } } }, single: {} } },
+    poolRequest: 1, favoritesRequest: 1, customGroupsRequest: 1, poolSelectionOperation: {}, poolResultContext: "old",
+    favoritesData: { items: ["old"] }, favoritesAvailable: true, poolSelectionStats: new Map([["pose", {}]]), poseItemCache: new Map([["gone", {}], ["keep", {}]]),
+    setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout() {},
+    localStorage: { setItem: (key, value) => notices.push(JSON.parse(value)) },
+  });
+  run('sharedFavoritesView().section="pose"; sharedFavoritesState.ready=true; sharedFavoritesRender=()=>{}; sharedFavoritesState.items=[{id:"gone"}]');
+  ctx.poolSourceChanged({ model_profile: "anima", section: "pose", deletedItemIds: ["gone"], updatedItemIds: ["keep"] });
+  assert.deepEqual(plain(ctx.draft.pools.pose), { mode: "all", ids: ["keep"], excluded_ids: ["other"] });
+  assert.deepEqual(plain(ctx.profileDrafts.anima.pools.pose.ids), ["keep"]);
+  assert.deepEqual(plain(ctx.singleWorkbenchState.drafts.random.anima.settings.pools.pose.ids), ["keep"]);
+  assert.deepEqual(plain(ctx.singleWorkbenchState.drafts.random.anima.profileDrafts.anima.pools.pose.ids), ["keep"]);
+  assert.deepEqual(plain(ctx.profileDrafts.krea2.kreaPromptPoolSelection), ["gone"]);
+  assert.equal(ctx.draft.fixed.pose, "unchanged"); assert.equal(ctx.draft.modes.pose, "fixed");
+  assert.equal(ctx.poolRequest, 2); assert.equal(ctx.favoritesRequest, 2); assert.equal(ctx.customGroupsRequest, 2);
+  assert.equal(ctx.poolSelectionOperation, null); assert.equal(ctx.poolResultContext, ""); assert.equal(ctx.ui.poolGrid.inert, true);
+  assert.equal(ctx.poseItemCache.size, 0); assert.equal(ctx.poolSelectionStats.size, 0);
+  assert.deepEqual(plain(run("sharedFavoritesState.items")), []);
+  assert.equal(notices.length, 1); assert.deepEqual(notices[0].deletedItemIds, ["gone"]); assert.equal(timers.length, 1); assert.equal(persists(), 1);
+});
+
+test("cross-tab changes cancel old favorite reads without rebroadcasting or mutating current prompt text", async () => {
+  let resolve; const writes = [];
+  const { ctx, run } = context({
+    request: () => new Promise(done => resolve = done), setTimeout: () => 1, clearTimeout() {},
+    localStorage: { setItem: (...args) => writes.push(args) }, ui: { poolGrid: {} },
+  });
+  run('sharedFavoritesState.ready=true; sharedFavoritesState.profile="anima"; sharedFavoritesView().section="pose"; sharedFavoritesRender=()=>{}; sharedFavoritesStatus=()=>{}');
+  const pending = ctx.sharedFavoritesLoad();
+  ctx.sharedFavoritesChanged({ model_profile: "anima", section: "pose", deletedItemIds: ["deleted"] }, false);
+  resolve({ items: [{ id: "deleted", groupIds: ["default"] }], groups: [] }); await pending;
+  assert.deepEqual(plain(run("sharedFavoritesState.items")), []); assert.equal(writes.length, 0);
+});
+
+test("first-open reconciliation runs once per model and section and never emits a broadcast loop", async () => {
+  const calls = [], notices = [];
+  const { ctx, run } = context({ request: async (url, options) => { calls.push({ url, options }); return { model_profile: "anima", section: "pose", updatedItemIds: ["p"], deletedItemIds: [], favoritesSync: { state: "complete", updatedCount: 1, deletedCount: 0 } }; }, localStorage: { setItem: (...args) => notices.push(args) } });
+  run("sharedFavoritesState.reconciled.clear()");
+  await Promise.all([ctx.ensurePoolReconciled("anima", "pose"), ctx.ensurePoolReconciled("anima", "pose")]);
+  await ctx.ensurePoolReconciled("anima", "pose");
+  assert.equal(calls.length, 1); assert.equal(calls[0].url, "/api/favorites/pose/reconcile?model_profile=anima"); assert.equal(calls[0].options.method, "POST");
+  assert.equal(notices.length, 0);
+});
+
+test("read refresh failures expose a read-only retry without replaying a mutation", async () => {
+  let reads = 0, writes = 0;
+  const { ctx, elements, run, profile } = context({ request: async () => { writes++; }, loadKreaPromptPool: async () => { reads++; } });
+  profile("krea2");
+  run('sharedFavoritesState.ready=true; sharedFavoritesState.profile="krea2"; sharedFavoritesLoad=async()=>{ throw new Error("offline"); }');
+  await ctx.refreshPoolLifecycle();
+  assert.equal(run("sharedFavoritesState.refreshFailed"), true); assert.equal(elements.poolRefreshNotice.hidden, false);
+  run("sharedFavoritesLoad=async()=>{}"); await ctx.refreshPoolLifecycle();
+  assert.equal(elements.poolRefreshNotice.hidden, true); assert.equal(reads, 2); assert.equal(writes, 0);
+});
+
+test("lifecycle retry stays read-only before reconciliation while an explicit first open still reconciles", async () => {
+  const calls = [];
+  const { ctx, run, profile } = context({
+    request: async (url, options) => { calls.push({ url, method: options?.method || "GET" }); return { items: [], groups: [] }; },
+    loadKreaPromptPool: async () => {},
+  });
+  profile("krea2");
+  run('sharedFavoritesState.ready=true; sharedFavoritesState.profile="krea2"; sharedFavoritesState.reconciled.clear(); sharedFavoritesRender=()=>{}; sharedFavoritesStatus=()=>{}');
+  await ctx.refreshPoolLifecycle(); await ctx.refreshPoolLifecycle();
+  assert.deepEqual(calls.map(call => call.method), ["GET", "GET"]);
+  assert.equal(run('sharedFavoritesState.reconciled.has("krea2:prompt")'), false);
+  await ctx.sharedFavoritesLoad();
+  assert.deepEqual(calls.map(call => call.method), ["GET", "GET", "POST", "GET"]);
+  assert.equal(calls[2].url, "/api/favorites/prompt/reconcile?model_profile=krea2");
+  assert.equal(run('sharedFavoritesState.reconciled.get("krea2:prompt")'), true);
+});
+
+test("partly committed saves preserve editor text and report recovery without automatically repeating writes", async () => {
+  let writes = 0;
+  const error = Object.assign(new Error("收藏存储不可写"), { payload: { source_committed: true, recovery_required: true, updatedItemIds: ["source"] } });
+  const { ctx, elements, run } = context({ request: async () => { writes++; throw error; } });
+  elements.sharedFavoriteText = { value: "sunset" }; elements.sharedFavoriteName = { value: "Sunset" }; elements.sharedFavoriteSubtitle = { value: "Evening" };
+  ctx.document.querySelectorAll = () => [{ value: "default" }];
+  run('sharedFavoritesState.editor={profile:"anima",section:"pose",data:{groups:[]},busy:false}; sharedFavoriteValidate=()=>{}');
+  await ctx.sharedFavoriteSave({ preventDefault() {} });
+  assert.match(elements.sharedFavoriteError.textContent, /源词条已提交/); assert.match(elements.sharedFavoriteError.textContent, /不要重复提交/); assert.match(elements.sharedFavoriteError.textContent, /恢复存储/);
+  assert.equal(elements.sharedFavoriteText.value, "sunset"); assert.ok(run("sharedFavoritesState.editor")); assert.equal(writes, 1);
+});
+
+test("the shared Krea panel removes one favorite ID while preserving another alias of the same source", async () => {
+  const calls = [], fixture = renderedFavorite("krea2", "prompt", { confirm: () => true, request: async (url, options) => calls.push({ url, body: JSON.parse(options.body) }) });
+  const first = { ...fixture.item, source_item_id: "stable-source" };
+  const second = { ...first, id: "favorite-two", favorite_key: "favorite-two", title: "另一个别名" };
+  fixture.ctx.sameSourceFavorites = [first, second];
+  fixture.run('sharedFavoritesState.data.items=sameSourceFavorites; sharedFavoritesState.items=sameSourceFavorites');
+  fixture.ctx.sharedFavoritesRender();
+  const list = fixture.ctx.document.getElementById("singleFavoriteList");
+  assert.equal(list.children.length, 2);
+  await list.children[0].children[1].listeners.click();
+  assert.equal(calls.length, 1); assert.deepEqual(calls[0].body, { id: first.id, favorite: false });
+  fixture.ctx.remainingFavorites = [second];
+  fixture.run('sharedFavoritesState.data.items=remainingFavorites; sharedFavoritesState.items=remainingFavorites');
+  fixture.ctx.sharedFavoritesRender();
+  assert.equal(list.children.length, 1); assert.equal(list.children[0].children[0].textContent, "另一个别名");
+});
+
+test("Anima source cards cancel all linked favorites by source ID while adding remains item-ID based", async () => {
+  for (const section of ["character", "clothing", "pose", "background", "expression"]) {
+    const calls = [];
+    const { ctx, run } = context({
+      activeSection: section, favoritesData: {}, favoritesAvailable: true,
+      requestFavorites: async (url, options) => { calls.push({ url, body: JSON.parse(options.body) }); return { items: [], groups: [] }; },
+      reconcileFavoriteCollection: () => false, currentView: () => ({ filters: { collection: "" } }),
+      renderPoolItems() {}, renderPoolSidebar() {}, loadPool: async () => {},
+    });
+    run(appFunction("toggleFavorite"));
+    await ctx.toggleFavorite({ id: "source", favorite_ids: ["alias-one", "alias-two"] }, false);
+    await ctx.toggleFavorite({ id: "source" }, true);
+    assert.equal(calls.length, 2); assert.equal(calls[0].url, `/api/favorites/${section}/item`);
+    assert.deepEqual(calls[0].body, { source_item_id: "source", favorite: false });
+    assert.deepEqual(calls[1].body, { id: "source", favorite: true });
+  }
+});
+
+test("the favorite editor opened from an Anima source card removes all source associations in one request", async () => {
+  const calls = [];
+  const { ctx, run } = context({
+    activeSection: "pose", editingFavoriteItem: { id: "source", favorite_ids: ["alias-one", "alias-two"] }, favoritesData: {},
+    ui: { favoriteDialog: {} }, requestFavorites: async (url, options) => { calls.push({ url, body: JSON.parse(options.body) }); return { items: [], groups: [] }; },
+    reconcileFavoriteCollection: () => false, loadPool: async () => {},
+  });
+  ctx.motionDialog = () => {}; run(appFunction("removeFavorite")); await ctx.removeFavorite();
+  assert.equal(calls.length, 1); assert.deepEqual(calls[0].body, { source_item_id: "source", favorite: false });
+});
+
+test("Anima item deletion sends one write, preserves a newer editor, and refreshes through the lifecycle only", async () => {
+  let resolve; const calls = [], notices = [], dialogs = [];
+  const { ctx, run } = context({
+    activeSection: "pose", editingCustom: { id: "source" }, customEditorSession: 1, customWriteBusy: false,
+    confirm: () => true, request: (url, options) => { calls.push({ url, options }); return new Promise(done => resolve = done); },
+    ui: { customDialog: {} }, poolSourceChanged: value => notices.push(plain(value)),
+  });
+  ctx.poolSourceChanged = value => notices.push(plain(value));
+  ctx.motionDialog = (...args) => dialogs.push(args); run(appFunction("deleteCustomItem"));
+  const pending = ctx.deleteCustomItem(); await ctx.deleteCustomItem();
+  assert.equal(calls.length, 1); assert.match(calls[0].url, /source\?model_profile=anima/);
+  ctx.editingCustom = { id: "new-editor" }; ctx.customEditorSession++;
+  resolve({ deleted: true, deletedItemIds: ["source"], favoritesSync: { state: "complete", deletedCount: 1 } }); await pending;
+  assert.equal(notices.length, 1); assert.deepEqual(notices[0].deletedItemIds, ["source"]);
+  assert.equal(dialogs.length, 0); assert.equal(ctx.customWriteBusy, false); assert.equal(ctx.editingCustom.id, "new-editor");
+});
+
+test("Anima failed item deletion keeps the editor and does not prune or broadcast success", async () => {
+  const notices = [], dialogs = [];
+  const { ctx, elements, run } = context({
+    activeSection: "pose", editingCustom: { id: "source" }, customEditorSession: 1, customWriteBusy: false,
+    confirm: () => true, request: async () => { throw Object.assign(new Error("收藏不可写"), { payload: { source_committed: false, recovery_required: true } }); },
+    ui: { customDialog: {} }, poolSourceChanged: value => notices.push(value),
+  });
+  ctx.poolSourceChanged = value => notices.push(plain(value));
+  ctx.motionDialog = (...args) => dialogs.push(args); run(appFunction("deleteCustomItem")); await ctx.deleteCustomItem();
+  assert.equal(notices.length, 0); assert.equal(dialogs.length, 0); assert.equal(ctx.customWriteBusy, false);
+  assert.match(elements.customMutationError.textContent, /更改未提交/); assert.match(elements.customMutationError.textContent, /恢复存储/);
+});
+
+test("Anima import overwrite broadcasts its source result without replaying writes for a list refresh", async () => {
+  const calls = [], notices = [];
+  const preview = { rows: [{ action: "overwrite", item: { id: "source" } }] };
+  const { ctx, run } = context({
+    activeSection: "pose", importPreview: preview, ui: { commitImport: {}, importBundleName: { value: "Bundle" }, importDialog: {} },
+    selectedImportGroupIds: () => ["group"], request: async (url, options) => { calls.push({ url, body: JSON.parse(options.body) }); return { updatedItemIds: ["source"], deletedItemIds: [], bundleName: "Bundle", imported: 0, updated: 1, skipped: 0 }; },
+    poolSourceChanged: value => notices.push(plain(value)),
+  });
+  ctx.poolSourceChanged = value => notices.push(plain(value));
+  ctx.motionDialog = () => {}; run(appFunction("commitCustomImport")); await ctx.commitCustomImport();
+  assert.equal(calls.length, 1); assert.equal(calls[0].url, "/api/custom-prompts/import"); assert.equal(calls[0].body.section, "pose");
+  assert.deepEqual(notices[0].updatedItemIds, ["source"]); assert.equal(notices[0].model_profile, "anima");
 });

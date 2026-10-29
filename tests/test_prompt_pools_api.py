@@ -62,10 +62,7 @@ class PromptPoolApiTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        selected_ids = [
-            PromptPoolStore.item_id("A forest at dusk"),
-            PromptPoolStore.item_id("A portrait in a studio"),
-        ]
+        selected_ids = imported["imported_ids"][:2]
         response = await self.client.get(
             "/api/prompt-pools?" + urlencode(
                 {
@@ -99,7 +96,7 @@ class PromptPoolApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["count"], 4)
         self.assertEqual(
             payload["imported_ids"],
-            [PromptPoolStore.item_id("A new scene")],
+            [next(item["id"] for item in payload["items"] if item["text"] == "A new scene")],
         )
 
     async def test_top_level_json_prompt_objects_are_importable(self):

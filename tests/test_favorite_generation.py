@@ -61,7 +61,7 @@ class FavoriteGenerationTests(unittest.IsolatedAsyncioTestCase):
                 krea = await self.client.get("/api/favorites/prompt?model_profile=krea2")
                 self.assertEqual((await krea.json())["items"], [])
 
-    async def test_krea_snapshot_survives_pool_edit_delete_and_can_be_selected_again(self):
+    async def test_krea_link_follows_source_edit_and_is_removed_on_source_delete(self):
         text = "A blue bird in a quiet forest."
         saved = await self.post(
             "/api/favorites/prompt/text?model_profile=krea2",
@@ -80,16 +80,26 @@ class FavoriteGenerationTests(unittest.IsolatedAsyncioTestCase):
         )
         renamed_item = await renamed.json()
         self.assertEqual(renamed.status, 200, renamed_item)
+        self.assertEqual(renamed_item["id"], saved["source_item_id"])
+        favorites = await self.client.get("/api/favorites/prompt?model_profile=krea2")
+        linked = next(item for item in (await favorites.json())["items"] if item["id"] == saved["item_id"])
+        self.assertEqual(linked["text"], "A red bird.")
+        self.assertEqual(linked["source_item_id"], renamed_item["id"])
+        edited_settings = validate_settings({
+            "model_profile": "krea2", "workbench": "random",
+            "krea_prompt_pool": {"enabled": True, "ids": [renamed_item["id"]]},
+        })
+        self.assertEqual(self.app[MANAGER_KEY]._resolve_prompt(edited_settings, 456)["full_prompt"], "A red bird.")
         deleted = await self.client.delete(
             f"/api/prompt-pools/items?model_profile=krea2&id={renamed_item['id']}"
         )
         self.assertEqual(deleted.status, 200)
         favorites = await self.client.get("/api/favorites/prompt?model_profile=krea2")
-        snapshot = next(item for item in (await favorites.json())["items"] if item["id"] == saved["item_id"])
-        self.assertEqual(snapshot["text"], text)
-        restored = await self.post(
-            "/api/prompt-pools/items/ensure", {"model_profile": "krea2", "text": snapshot["text"]},
+        self.assertEqual((await favorites.json())["items"], [])
+        restored_favorite = await self.post(
+            "/api/favorites/prompt/text?model_profile=krea2", {"title": "Restored", "text": text},
         )
+        restored = {"id": restored_favorite["source_item_id"]}
         duplicate = await self.post(
             "/api/prompt-pools/items/ensure", {"model_profile": "krea2", "text": text.upper()},
         )
@@ -104,7 +114,7 @@ class FavoriteGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolved["selected"]["krea_prompt_pool"][0]["id"], restored["id"])
         removed = await self.client.put(
             "/api/favorites/prompt/item?model_profile=krea2",
-            json={"id": saved["item_id"], "favorite": False},
+            json={"id": restored_favorite["item_id"], "favorite": False},
         )
         self.assertEqual(removed.status, 200, await removed.text())
         self.assertEqual(self.app[MANAGER_KEY]._resolve_prompt(settings, 456)["full_prompt"], text)

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from anima_webui.catalog import CatalogError
 from anima_webui.custom_prompts import CustomPromptStore
+from anima_webui.persistence import StorageReadOnlyError
 
 
 class FakeCatalog:
@@ -50,15 +51,24 @@ class CustomGroupDeleteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(remaining[shared["id"]]["groupIds"], [second["id"]])
         self.assertEqual({item["id"] for item in self.catalog.items}, {shared["id"]})
 
-    def test_corrupt_file_is_backed_up_and_store_starts_empty(self):
-        # 回归 #P2-4:坏文件不再阻断启动,改名备份后以空数据继续并给出警告。
+    def test_corrupt_file_is_preserved_and_read_only_across_restart(self):
+        # Empty fallback data must never be treated as a trustworthy source for
+        # deleting favorites, including after another process restart.
         path = Path(self.temp.name) / "custom.json"
-        path.write_text('{"items": [{"section": "pose"}]}', encoding="utf-8")  # 缺 title/prompt → 校验失败
-        store = CustomPromptStore(path, FakeCatalog())
-        self.assertEqual(store.items, [])
-        self.assertEqual(len(store.load_warnings), 1)
-        self.assertIn("custom.json.corrupt.bak", store.load_warnings[0])
-        self.assertTrue(path.with_name("custom.json.corrupt.bak").is_file())
+        original = b'{"items": [{"section": "pose"}]}'
+        path.write_bytes(original)
+        for _ in range(2):
+            store = CustomPromptStore(path, FakeCatalog())
+            self.assertEqual(store.items, [])
+            self.assertEqual(len(store.load_warnings), 1)
+            self.assertFalse(store.load_trusted)
+            self.assertEqual(store.load_state, "invalid")
+            self.assertEqual(path.read_bytes(), original)
+            with self.assertRaises(StorageReadOnlyError):
+                store.ensure_writable()
+        backups = list(path.parent.glob("custom.json.v4*.bak"))
+        self.assertEqual(len(backups), 2)
+        self.assertTrue(all(backup.read_bytes() == original for backup in backups))
 
     async def test_default_delete_keeps_items_and_only_detaches_membership(self):
         group = (await self.store.create_group("expression", {"name": "Mood"}))["group"]

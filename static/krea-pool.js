@@ -92,14 +92,18 @@ async function fetchAllKreaPromptPoolItems(query = ui.kreaPoolSearch.value.trim(
   }
   return { items, count: first.count, poolCount: first.pool_count };
 }
-function openKreaPromptPool() {
+async function openKreaPromptPool() {
   if (currentProfile() !== "krea2") return;
   ui.kreaPoolDrawer.removeAttribute("inert"); ui.kreaPoolDrawer.classList.add("open");
   ui.kreaPoolDrawer.setAttribute("aria-hidden", "false");
   ui.kreaPoolBackdrop.classList.remove("closing");
   animatePoolSurface(ui.kreaPoolDrawer, ui.kreaPoolBackdrop, true);
   setKreaSidebarOpen(false); ui.kreaPoolSearch.focus({ preventScroll: true });
-  void loadKreaPromptPool();
+  if (typeof ensurePoolReconciled === "function") {
+    try { await ensurePoolReconciled("krea2", "prompt"); }
+    catch (error) { toast(poolMutationError(error, { model_profile: "krea2", section: "prompt" })); return; }
+  }
+  if (currentProfile() === "krea2" && ui.kreaPoolDrawer.classList.contains("open")) await loadKreaPromptPool();
 }
 function closeKreaPromptPool() {
   invalidateKreaPoolSelection();
@@ -114,7 +118,7 @@ function setKreaSidebarOpen(open) {
   ui.kreaPoolSidebar.inert = matchMedia("(max-width: 620px)").matches && !open;
   ui.toggleKreaPoolSidebar.setAttribute("aria-expanded", String(open));
 }
-async function loadKreaPromptPool({ page = kreaPoolPage } = {}) {
+async function loadKreaPromptPool({ page = kreaPoolPage, throwOnError = false } = {}) {
   if (currentProfile() !== "krea2") { renderKreaPromptPool(); return; }
   const requestId = ++kreaPromptPoolRequest, context = kreaSelectionContext();
   kreaPoolView.resultContext = null; updateKreaSelectionButtons();
@@ -128,10 +132,10 @@ async function loadKreaPromptPool({ page = kreaPoolPage } = {}) {
     if ((kreaPoolView.collection && kreaPoolView.collection !== "__all__" && !favorites.groups.some(g => g.id === kreaPoolView.collection)) ||
         (kreaPoolView.customGroup && !kreaPoolView.groups.some(g => g.id === kreaPoolView.customGroup))) {
       kreaPoolView.collection = ""; kreaPoolView.customGroup = "";
-      return loadKreaPromptPool({ page: 1 });
+      return loadKreaPromptPool({ page: 1, throwOnError });
     }
     kreaPoolPages = Number(payload.pages || 0); kreaPoolPage = Math.max(1, Number(payload.page || page));
-    if (kreaPoolPage > Math.max(1, kreaPoolPages)) return loadKreaPromptPool({ page: Math.max(1, kreaPoolPages) });
+    if (kreaPoolPage > Math.max(1, kreaPoolPages)) return loadKreaPromptPool({ page: Math.max(1, kreaPoolPages), throwOnError });
     kreaPoolQueryCount = Number(payload.count || 0); kreaPoolTotalCount = Number(payload.pool_count || 0);
     kreaPromptPool = { ...payload, count: kreaPoolTotalCount };
     kreaPoolView.resultContext = context;
@@ -140,6 +144,7 @@ async function loadKreaPromptPool({ page = kreaPoolPage } = {}) {
     renderKreaPromptPool(); renderKreaPoolSidebar();
   } catch (error) {
     if (requestId === kreaPromptPoolRequest && kreaSelectionContextCurrent(context)) toast(`Krea 2 提示词池读取失败：${error.message}`);
+    if (throwOnError) throw error;
   }
 }
 function renderKreaPromptPool() {
@@ -170,10 +175,14 @@ function renderKreaPromptPool() {
     copy.addEventListener("click", () => checkbox.click());
     const controls = kreaElement("div", "krea-prompt-tools");
     const favorite = kreaButton(item.favorite ? "♥" : "♡", async () => {
-      if (item.favorite && item.favorite_id) {
-        try { await request(kreaFavoriteUrl("/item"), { method: "PUT", body: JSON.stringify({ id: item.favorite_id, favorite: false }) }); notifyKreaFavorites(); await loadKreaPromptPool(); }
+      if (item.favorite) {
+        if (favorite.disabled) return;
+        favorite.disabled = true;
+        const identity = item.source_item_id || (item.in_pool !== false ? item.id : null);
+        try { await request(kreaFavoriteUrl("/item"), { method: "PUT", body: JSON.stringify({ ...(identity ? { source_item_id: identity } : { id: item.favorite_id }), favorite: false }) }); }
         catch (error) { toast(error.message); }
-      } else sharedFavoriteOpen("single", { section: "prompt", text: item.text, metadata: { title: item.title, subtitle: item.subtitle, prompt: item.text } });
+        finally { favorite.disabled = false; }
+      } else sharedFavoriteOpen("single", { section: "prompt", text: item.text, metadata: { title: item.title, subtitle: item.subtitle, prompt: item.text, source_item_id: item.id } });
     }, `button ghost compact favorite-toggle${item.favorite ? " active" : ""}`);
     favorite.title = item.favorite ? "取消收藏" : "收藏提示词"; favorite.setAttribute("aria-label", favorite.title);
     controls.append(favorite);
@@ -191,12 +200,18 @@ function renderKreaPromptPool() {
 async function applyKreaSelection(items, operation) {
   if (!items.length || !kreaSelectionContextCurrent(operation)) return;
   const missing = items.filter(item => item.in_pool === false);
-  if (missing.length) await request("/api/prompt-pools/items/ensure-many", { method: "POST", body: JSON.stringify({ model_profile: "krea2", items: missing.map(({ title, subtitle, text }) => ({ title, subtitle, text })) }) });
+  let ensured = null;
+  if (missing.length) ensured = await request("/api/prompt-pools/items/ensure-many", { method: "POST", body: JSON.stringify({ model_profile: "krea2", items: missing.map(({ title, subtitle, text }) => ({ title, subtitle, text })) }) });
   if (!kreaSelectionContextCurrent(operation)) return;
+  const actual = new Map((ensured?.items || []).map(item => [String(item.text || item.prompt || "").trim().toLocaleLowerCase(), item.id]));
+  const ids = items.map(item => item.in_pool !== false ? item.id : actual.get(String(item.text).trim().toLocaleLowerCase()));
+  if (ids.some(id => !id)) throw new Error("入池响应缺少实际词条 ID，请刷新后重试选择");
   invalidateKreaPoolSelection();
-  kreaPromptPoolSelection = [...new Set([...kreaPromptPoolSelection, ...items.map(item => item.id)])];
+  kreaPromptPoolSelection = [...new Set([...kreaPromptPoolSelection, ...ids])];
   ui.krea_prompt_pool_enabled.checked = true;
-  schedulePersist(); await loadKreaPromptPool();
+  schedulePersist();
+  if (ensured && typeof poolSourceChanged === "function") poolSourceChanged({ ...ensured, model_profile: "krea2", section: "prompt" });
+  else await loadKreaPromptPool();
 }
 async function selectKreaItems(items) {
   const operation = beginKreaSelection(); if (!operation) return;
@@ -271,6 +286,8 @@ function renderKreaGroupChecks(container, groups, selected = []) {
 function kreaChecked(container) { return [...container.querySelectorAll("input:checked")].map(input => input.value); }
 function openKreaPromptItemDialog(item = null) {
   ++kreaPoolView.itemSession;
+  const error = document.getElementById("kreaPromptItemError");
+  if (error) { error.hidden = true; error.textContent = ""; }
   editingKreaPromptItem = item ? { ...item } : null;
   ui.kreaPromptItemTitle.textContent = item ? "编辑自然语言提示词" : "新增自然语言提示词";
   ui.kreaPromptItemName.value = item?.title || ""; ui.kreaPromptItemSubtitle.value = item?.subtitle || "";
@@ -285,26 +302,35 @@ async function saveKreaPromptItem(event) {
   if (!body.title || !body.text || currentProfile() !== "krea2") return;
   try {
     const item = await request("/api/prompt-pools/items", { method: previousId ? "PUT" : "POST", body: JSON.stringify(body) });
+    if (typeof poolSourceChanged === "function") poolSourceChanged({ ...item, model_profile: "krea2", section: "prompt", updatedItemIds: item.updatedItemIds || [item.id] });
     if (!kreaDraftContextCurrent(context)) return;
     invalidateKreaPoolSelection();
     kreaPromptPoolSelection = [...new Set(kreaPromptPoolSelection.map(id => id === previousId ? item.id : id))];
     if (session === kreaPoolView.itemSession) { motionDialog(ui.kreaPromptItemDialog, false); editingKreaPromptItem = null; }
-    await loadKreaPromptPool(); schedulePersist(); toast(previousId ? "提示词已更新" : "提示词已新增");
-  } catch (error) { toast(error.message); }
+    if (typeof poolSourceChanged !== "function") await loadKreaPromptPool();
+    schedulePersist(); toast(previousId ? "提示词及关联收藏已更新" : "提示词已新增");
+  } catch (error) {
+    const message = typeof poolMutationError === "function" ? poolMutationError(error, { model_profile: "krea2", section: "prompt" }) : error.message;
+    const target = document.getElementById("kreaPromptItemError");
+    if (session === kreaPoolView.itemSession && target) { target.textContent = message; target.hidden = false; }
+    toast(message);
+  }
 }
 async function deleteKreaPromptPoolSelection(ids = kreaPromptPoolSelection) {
   const context = kreaSelectionContext();
   const targets = [...new Set(ids.map(String))];
-  if (!targets.length || !confirm(`从 Krea 2 词池删除 ${targets.length} 条提示词？已保存的收藏仍会保留。`)) return;
+  if (!targets.length || !confirm(`从 Krea 2 词池删除 ${targets.length} 条提示词，并同步移除关联收藏？收藏分组会保留。`)) return;
   try {
-    await request("/api/prompt-pools/items/delete", { method: "POST", body: JSON.stringify({ model_profile: "krea2", ids: targets }) });
+    const result = await request("/api/prompt-pools/items/delete", { method: "POST", body: JSON.stringify({ model_profile: "krea2", ids: targets }) });
+    if (typeof poolSourceChanged === "function") poolSourceChanged({ ...result, model_profile: "krea2", section: "prompt", deletedItemIds: result.deletedItemIds || result.deleted_ids || targets });
     if (!kreaDraftContextCurrent(context)) return;
     invalidateKreaPoolSelection();
     kreaPromptPoolSelection = kreaPromptPoolSelection.filter(id => !targets.includes(id));
     if (!kreaPromptPoolSelection.length) ui.krea_prompt_pool_enabled.checked = false;
     if (editingKreaPromptItem && targets.includes(editingKreaPromptItem.id)) motionDialog(ui.kreaPromptItemDialog, false);
-    await loadKreaPromptPool(); schedulePersist(); toast(`已删除 ${targets.length} 条提示词`);
-  } catch (error) { toast(error.message); }
+    if (typeof poolSourceChanged !== "function") await loadKreaPromptPool();
+    schedulePersist(); toast(`已删除 ${targets.length} 条提示词及关联收藏，收藏分组已保留`);
+  } catch (error) { toast(typeof poolMutationError === "function" ? poolMutationError(error, { model_profile: "krea2", section: "prompt" }) : error.message); }
 }
 function openKreaGroupDialog(kind, group = null) {
   kreaPoolView.editor = { kind, group, busy: false }; const favorite = kind === "favorite";
@@ -346,11 +372,13 @@ async function deleteKreaGroup() {
   editor.busy = true;
   try {
     const url = editor.kind === "favorite" ? kreaFavoriteUrl(`/groups/${encodeURIComponent(editor.group.id)}`) : `/api/prompt-pools/groups/${encodeURIComponent(editor.group.id)}?model_profile=krea2&deleteMode=${ui.kreaGroupDeleteMode.value}`;
-    await request(url, { method: "DELETE" });
+    const result = await request(url, { method: "DELETE" });
+    if (editor.kind === "custom" && typeof poolSourceChanged === "function") poolSourceChanged({ ...result, model_profile: "krea2", section: "prompt" });
     if (!kreaCurrent(epoch)) return;
-    if (editor.kind === "custom" && ui.kreaGroupDeleteMode.value !== "keep") await reconcileKreaSelection();
-    motionDialog(ui.kreaGroupDialog, false); notifyKreaFavorites(); await loadKreaPromptPool({ page: 1 });
-  } catch (error) { ui.kreaGroupError.textContent = error.message; }
+    if (editor.kind === "custom" && ui.kreaGroupDeleteMode.value !== "keep" && typeof poolSourceChanged !== "function") await reconcileKreaSelection();
+    motionDialog(ui.kreaGroupDialog, false);
+    if (editor.kind === "favorite" || typeof poolSourceChanged !== "function") { notifyKreaFavorites(); await loadKreaPromptPool({ page: 1 }); }
+  } catch (error) { ui.kreaGroupError.textContent = typeof poolMutationError === "function" ? poolMutationError(error, { model_profile: "krea2", section: "prompt" }) : error.message; }
   finally { editor.busy = false; }
 }
 async function importKreaFavoriteChild() {
@@ -465,18 +493,19 @@ async function commitKreaPromptImport() {
   const preview = kreaImportPreview, context = kreaSelectionContext();
   if (!preview || preview.fingerprint !== JSON.stringify(kreaImportOptions())) { await previewKreaPromptImport(); return; }
   if (preview.saving) return;
-  if (preview.options.mode === "replace" && !confirm("替换整个 Krea 2 词池及自定义分组？现有收藏快照仍会保留。")) return;
+  if (preview.options.mode === "replace" && !confirm("替换整个 Krea 2 词池及自定义分组？删除源词条时会同步移除其关联收藏，收藏分组会保留。")) return;
   preview.saving = true;
   ui.kreaPromptImportCommit.disabled = true;
   try {
     const payload = await request("/api/prompt-pools/import", { method: "POST", body: JSON.stringify({ model_profile: "krea2", mode: preview.options.mode, rows: preview.rows, bundleName: preview.options.bundleName, targetGroupIds: preview.options.targetGroupIds }) });
+    if (typeof poolSourceChanged === "function") poolSourceChanged({ ...payload, model_profile: "krea2", section: "prompt" });
     if (!kreaDraftContextCurrent(context)) return;
-    if (preview.options.mode === "replace") await reconcileKreaSelection(preview === kreaImportPreview ? payload.valid_ids : null);
+    if (preview.options.mode === "replace" && typeof poolSourceChanged !== "function") await reconcileKreaSelection(preview === kreaImportPreview ? payload.valid_ids : null);
     if (!kreaDraftContextCurrent(context)) return;
     if (preview === kreaImportPreview) { motionDialog(ui.kreaPromptImportDialog, false); kreaImportPreview = null; }
-    await loadKreaPromptPool({ page: 1 });
+    if (typeof poolSourceChanged !== "function") await loadKreaPromptPool({ page: 1 });
     schedulePersist(); toast(`导入完成：新增 ${payload.imported || 0} 条，更新 ${payload.updated || 0} 条`);
-  } catch (error) { if (preview === kreaImportPreview && kreaDraftContextCurrent(context)) { ui.kreaPromptImportHint.textContent = `导入失败：${error.message}`; ui.kreaPromptImportCommit.disabled = false; } }
+  } catch (error) { if (preview === kreaImportPreview && kreaDraftContextCurrent(context)) { ui.kreaPromptImportHint.textContent = typeof poolMutationError === "function" ? poolMutationError(error, { model_profile: "krea2", section: "prompt" }) : `导入失败：${error.message}`; ui.kreaPromptImportCommit.disabled = false; } }
   finally { preview.saving = false; }
 }
 function initializeKreaPromptPool() {

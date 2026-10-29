@@ -25,6 +25,7 @@ from .catalog import CatalogError, PromptCatalog, SECTIONS, resolve_history_sele
 from .persistence import StorageReadOnlyError
 from .custom_prompts import CustomPromptStore
 from .favorites import FavoriteSavePendingError, FavoritesService, FavoritesExtensionStore, favorite_key
+from .pool_lifecycle import PoolLifecycleError, PoolLifecycleService
 from .input_images import InputImageStore, MAX_IMAGE_BYTES
 from .image_location import ImageLocationError, reveal_image
 from .prompt_images import PromptImageStore
@@ -191,6 +192,8 @@ async def local_only_middleware(request: web.Request, handler: Any) -> web.Strea
 async def error_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
     try:
         response = await handler(request)
+    except PoolLifecycleError as error:
+        response = web.json_response(error.payload, status=503)
     except FavoriteSavePendingError as error:
         response = web.json_response(
             {"error": str(error), "code": "favorite_save_pending", "item_id": error.item_id,
@@ -198,7 +201,9 @@ async def error_middleware(request: web.Request, handler: Any) -> web.StreamResp
             status=502,
         )
     except StorageReadOnlyError as error:
-        response = web.json_response({"error": str(error), "code": error.code, "store": error.store, "path": str(error.path)}, status=503)
+        response = web.json_response({"error": str(error), "code": error.code, "store": error.store,
+                                      "path": str(error.path), "source_committed": False,
+                                      "recovery_required": False}, status=503)
     except ArtworkCollectionConflict as error:
         response = web.json_response(error.payload, status=409)
     except WorkflowError as error:
@@ -336,6 +341,7 @@ def create_app(
         style_presets_path or storage / "style_presets.json", prompt_rules
     )
     prompt_pools = PromptPoolStore(storage / "prompt_pools.json")
+    pool_lifecycle = PoolLifecycleService(storage, custom_prompts, prompt_pools, profile_favorites)
     # Deprecated argument retained for embedded callers. The legacy ownership
     # file is intentionally never opened, migrated, repaired, or overwritten.
     templates = WorkflowTemplates.load(root / "templates")
@@ -442,6 +448,7 @@ def create_app(
             # into the profile namespace; callers should use
             # /api/prompt-pools for Krea natural-language entries instead.
             raise WorkflowError("Krea 2 使用独立自然语言提示词池")
+        await pool_lifecycle.ensure_ready(model_profile)
         try:
             page = 1 if ids_only else int(params.get("page") or 1)
             limit = 48 if ids_only else int(params.get("limit") or 48)
@@ -520,38 +527,48 @@ def create_app(
         return service
 
     async def get_favorites(request: web.Request) -> web.Response:
-        return web.json_response(await request_favorites(request).get(request.match_info["section"]))
+        service = request_favorites(request)
+        await pool_lifecycle.ensure_ready(service.model_profile)
+        return web.json_response(await service.get(request.match_info["section"]))
+
+    async def reconcile_favorites(request: web.Request) -> web.Response:
+        service = request_favorites(request)
+        return web.json_response(await pool_lifecycle.reconcile(service.model_profile, request.match_info["section"]))
 
     async def update_favorite(request: web.Request) -> web.Response:
         return web.json_response(
-            await request_favorites(request).update_item(request.match_info["section"], await _json_body(request))
+            await pool_lifecycle.favorite(request_favorites(request).model_profile,
+                                          request.match_info["section"], "update_item", await _json_body(request))
         )
 
     async def save_favorite_text(request: web.Request) -> web.Response:
         service = request_favorites(request)
         return web.json_response(
-            await service.save_text(request.match_info["section"], await _json_body(request), custom_prompts, prompt_pools)
+            await pool_lifecycle.save_text(service.model_profile, request.match_info["section"], await _json_body(request))
         )
 
     async def update_favorite_selection(request: web.Request) -> web.Response:
         service = request_favorites(request)
         body = await _json_body(request)
         return web.json_response(
-            await service.update_selection(
-                request.match_info["section"], body.get("selection"), body.get("groupIds"), prompt_pools
+            await pool_lifecycle.favorite(
+                service.model_profile, request.match_info["section"], "update_selection",
+                body.get("selection"), body.get("groupIds"), prompt_pools
             )
         )
 
     async def create_favorite_group(request: web.Request) -> web.Response:
         return web.json_response(
-            await request_favorites(request).create_group(request.match_info["section"], await _json_body(request)),
+            await pool_lifecycle.favorite(request_favorites(request).model_profile,
+                                          request.match_info["section"], "create_group", await _json_body(request)),
             status=201,
         )
 
     async def update_favorite_group(request: web.Request) -> web.Response:
         return web.json_response(
-            await request_favorites(request).update_group(
-                request.match_info["section"], request.match_info["group_id"], await _json_body(request)
+            await pool_lifecycle.favorite(
+                request_favorites(request).model_profile, request.match_info["section"], "update_group",
+                request.match_info["group_id"], await _json_body(request)
             )
         )
 
@@ -575,8 +592,8 @@ def create_app(
         if source_group is None:
             raise KeyError(custom_group_id)
         return web.json_response(
-            await service.import_custom_group(
-                section,
+            await pool_lifecycle.favorite(
+                service.model_profile, section, "import_custom_group",
                 request.match_info["parent_id"],
                 source_group,
                 (prompt_pools.list_group_items(service.model_profile, custom_group_id) if section == "prompt"
@@ -587,45 +604,51 @@ def create_app(
 
     async def delete_favorite_group(request: web.Request) -> web.Response:
         return web.json_response(
-            await request_favorites(request).delete_group(
-                request.match_info["section"],
+            await pool_lifecycle.favorite(
+                request_favorites(request).model_profile, request.match_info["section"], "delete_group",
                 request.match_info["group_id"],
                 _query_bool(request, "deleteItems"),
             )
         )
 
     async def list_custom_prompts(request: web.Request) -> web.Response:
+        await pool_lifecycle.ensure_ready("anima")
         section = request.query.get("section") or None
         return web.json_response({"items": custom_prompts.list(section)})
 
     async def create_custom_prompt(request: web.Request) -> web.Response:
-        return web.json_response(await custom_prompts.create(await _json_body(request)), status=201)
+        body = await _json_body(request)
+        return web.json_response(await pool_lifecycle.source("anima", body.get("section", ""), "create", body), status=201)
 
     async def update_custom_prompt(request: web.Request) -> web.Response:
-        item = await custom_prompts.update(request.match_info["item_id"], await _json_body(request))
-        try:
-            await favorites.sync_custom(item["section"], item)
-        except ComfyError as error:
-            logger.warning("同步收藏昵称失败(条目 %s): %s", item.get("id"), error)
-        return web.json_response(item)
+        custom_prompts.ensure_writable()
+        item = catalog.get(request.match_info["item_id"])
+        if item is None:
+            raise KeyError(request.match_info["item_id"])
+        return web.json_response(await pool_lifecycle.source("anima", item["section"], "update",
+                                                            request.match_info["item_id"], await _json_body(request)))
 
     async def delete_custom_prompt(request: web.Request) -> web.Response:
-        if not await custom_prompts.delete(request.match_info["item_id"]):
+        custom_prompts.ensure_writable()
+        item = catalog.get(request.match_info["item_id"])
+        if item is None:
             raise KeyError(request.match_info["item_id"])
-        return web.json_response({"deleted": True})
+        return web.json_response(await pool_lifecycle.source("anima", item["section"], "delete", request.match_info["item_id"]))
 
     async def list_custom_groups(request: web.Request) -> web.Response:
+        await pool_lifecycle.ensure_ready("anima")
         return web.json_response(custom_prompts.list_groups(request.match_info["section"]))
 
     async def create_custom_group(request: web.Request) -> web.Response:
         return web.json_response(
-            await custom_prompts.create_group(request.match_info["section"], await _json_body(request)),
+            await pool_lifecycle.source("anima", request.match_info["section"], "create_group",
+                                        request.match_info["section"], await _json_body(request)),
             status=201,
         )
 
     async def update_custom_group(request: web.Request) -> web.Response:
         return web.json_response(
-            await custom_prompts.update_group(
+            await pool_lifecycle.source("anima", request.match_info["section"], "update_group",
                 request.match_info["section"], request.match_info["group_id"], await _json_body(request)
             )
         )
@@ -634,7 +657,7 @@ def create_app(
         delete_mode = request.query.get("deleteMode")
         delete_items = False if delete_mode is not None else _query_bool(request, "deleteItems")
         return web.json_response(
-            await custom_prompts.delete_group(
+            await pool_lifecycle.source("anima", request.match_info["section"], "delete_group",
                 request.match_info["section"],
                 request.match_info["group_id"],
                 delete_items,
@@ -666,7 +689,7 @@ def create_app(
     async def commit_custom_import(request: web.Request) -> web.Response:
         body = await _json_body(request)
         return web.json_response(
-            await custom_prompts.commit_import(
+            await pool_lifecycle.source("anima", str(body.get("section") or ""), "commit_import",
                 body.get("rows"),
                 str(body.get("section") or ""),
                 body.get("targetGroupIds"),
@@ -909,6 +932,7 @@ def create_app(
         for key in ("q", "collection", "custom_group", "sort"):
             if key in params and not isinstance(params[key], str):
                 raise WorkflowError(f"{key} 必须是字符串")
+        await pool_lifecycle.ensure_ready(profile)
         saved = await profile_favorites[profile].get("prompt") if profile == "krea2" else {}
         return web.json_response(prompt_pools.list(
             profile, query=params.get("q", ""), page=params.get("page", 1), limit=params.get("limit", 48),
@@ -952,7 +976,7 @@ def create_app(
         if "rows" in body:
             if set(body) - {"model_profile", "rows", "bundleName", "targetGroupIds", "mode"}:
                 raise WorkflowError("结构化导入不能混用 items/content/format 或未知字段")
-            return web.json_response(await prompt_pools.commit_structured_import(
+            return web.json_response(await pool_lifecycle.source(body.get("model_profile", "krea2"), "prompt", "commit_structured_import",
                 body.get("model_profile", "krea2"), body["rows"], bundle_name=body.get("bundleName"),
                 target_group_ids=body.get("targetGroupIds"), mode=body.get("mode", "append"),
             ))
@@ -964,7 +988,7 @@ def create_app(
         if not isinstance(file_format, str):
             raise WorkflowError("提示词池导入 format 必须是字符串")
         items = parse_prompt_records(body.get("items", body.get("content", [])), file_format)
-        return web.json_response(await prompt_pools.import_items(
+        return web.json_response(await pool_lifecycle.source(body.get("model_profile", "krea2"), "prompt", "import_items",
             body.get("model_profile", "krea2"), items, mode=body.get("mode", "replace"),
         ))
 
@@ -988,13 +1012,14 @@ def create_app(
     async def create_prompt_pool_item(request: web.Request) -> web.Response:
         body = await _json_body(request)
         fields = _prompt_pool_item_fields(body)
-        item = await prompt_pools.create_item(body.get("model_profile", "krea2"), body.get("text", body.get("prompt")), **fields)
+        item = await pool_lifecycle.source(body.get("model_profile", "krea2"), "prompt", "create_item",
+                                           body.get("model_profile", "krea2"), body.get("text", body.get("prompt")), **fields)
         return web.json_response(item, status=201)
 
     async def ensure_prompt_pool_item(request: web.Request) -> web.Response:
         body = await _json_body(request)
         fields = _prompt_pool_item_fields(body)
-        return web.json_response(await prompt_pools.ensure_item(
+        return web.json_response(await pool_lifecycle.source(body.get("model_profile", "krea2"), "prompt", "ensure_item",
             body.get("model_profile", "krea2"), body.get("text", body.get("prompt")), **fields,
         ))
 
@@ -1002,12 +1027,13 @@ def create_app(
         body = await _json_body(request)
         if set(body) - {"model_profile", "items"} or "items" not in body:
             raise WorkflowError("批量入池需要 items，且不能包含未知字段")
-        return web.json_response(await prompt_pools.ensure_items(body.get("model_profile", "krea2"), body["items"]))
+        return web.json_response(await pool_lifecycle.source(body.get("model_profile", "krea2"), "prompt", "ensure_items",
+                                                            body.get("model_profile", "krea2"), body["items"]))
 
     async def update_prompt_pool_item(request: web.Request) -> web.Response:
         body = await _json_body(request)
         fields = _prompt_pool_item_fields(body, update=True)
-        return web.json_response(await prompt_pools.update_item(
+        return web.json_response(await pool_lifecycle.source(body.get("model_profile", "krea2"), "prompt", "update_item",
             body.get("model_profile", "krea2"), body["id"], body.get("text", body.get("prompt")), **fields,
         ))
 
@@ -1015,19 +1041,23 @@ def create_app(
         body = await _json_body(request)
         if set(body) - {"model_profile", "ids"} or "ids" not in body:
             raise WorkflowError("提示词池删除需要 ids，且不能包含未知字段")
-        return web.json_response(await prompt_pools.delete_items(body.get("model_profile", "krea2"), body["ids"]))
+        return web.json_response(await pool_lifecycle.source(body.get("model_profile", "krea2"), "prompt", "delete_items",
+                                                            body.get("model_profile", "krea2"), body["ids"]))
 
     async def delete_prompt_pool_item(request: web.Request) -> web.Response:
-        return web.json_response(await prompt_pools.delete_item(request.query.get("model_profile", "krea2"), request.query.get("id")))
+        profile = request.query.get("model_profile", "krea2")
+        return web.json_response(await pool_lifecycle.source(profile, "prompt", "delete_item", profile, request.query.get("id")))
 
     async def list_prompt_pool_groups(request: web.Request) -> web.Response:
-        return web.json_response(prompt_pools.list_groups(request.query.get("model_profile", "krea2")))
+        profile = prompt_pools._profile(request.query.get("model_profile", "krea2"))
+        await pool_lifecycle.ensure_ready(profile)
+        return web.json_response(prompt_pools.list_groups(profile))
 
     async def create_prompt_pool_group(request: web.Request) -> web.Response:
         body = await _json_body(request)
         if set(body) - {"model_profile", "name", "parentId"}:
             raise WorkflowError("自定义分组包含未知字段")
-        return web.json_response(await prompt_pools.create_group(
+        return web.json_response(await pool_lifecycle.source(body.get("model_profile", request.query.get("model_profile", "krea2")), "prompt", "create_group",
             body.get("model_profile", request.query.get("model_profile", "krea2")), body,
         ), status=201)
 
@@ -1035,12 +1065,12 @@ def create_app(
         body = await _json_body(request)
         if set(body) - {"model_profile", "name", "parentId"}:
             raise WorkflowError("自定义分组包含未知字段")
-        return web.json_response(await prompt_pools.update_group(
+        return web.json_response(await pool_lifecycle.source(body.get("model_profile", request.query.get("model_profile", "krea2")), "prompt", "update_group",
             body.get("model_profile", request.query.get("model_profile", "krea2")), request.match_info["group_id"], body,
         ))
 
     async def delete_prompt_pool_group(request: web.Request) -> web.Response:
-        return web.json_response(await prompt_pools.delete_group(
+        return web.json_response(await pool_lifecycle.source(request.query.get("model_profile", "krea2"), "prompt", "delete_group",
             request.query.get("model_profile", "krea2"), request.match_info["group_id"], request.query.get("deleteMode", "keep"),
         ))
 
@@ -1802,6 +1832,7 @@ def create_app(
     app.router.add_delete("/api/prompt-rules/{rule_id}", delete_prompt_rule)
     app.router.add_post("/api/prompts/normalize", normalize_prompts)
     app.router.add_get("/api/favorites/{section}", get_favorites)
+    app.router.add_post("/api/favorites/{section}/reconcile", reconcile_favorites)
     app.router.add_put("/api/favorites/{section}/item", update_favorite)
     app.router.add_post("/api/favorites/{section}/text", save_favorite_text)
     app.router.add_post("/api/favorites/{section}/selection", update_favorite_selection)
@@ -1867,6 +1898,9 @@ def create_app(
     app.router.add_static("/static/", root / "static", show_index=False)
 
     async def start_resources(_: web.Application) -> None:
+        recovery_failures = await pool_lifecycle.recover_pending()
+        for profile, failure in recovery_failures.items():
+            logger.warning("%s 收藏一致性恢复尚未完成: %s", profile, failure["error"])
         await imported_images.start(manager)
 
     async def cleanup_resources() -> None:

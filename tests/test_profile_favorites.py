@@ -57,7 +57,7 @@ class ProfileFavoritesApiTests(unittest.IsolatedAsyncioTestCase):
         visible = await (await self.client.get(f"/api/pools/pose?collection={groups[1]}")).json()
         self.assertIn(first["item_id"], [item["id"] for item in visible["items"]])
 
-    async def test_anima_upstream_timeout_preserves_source_and_retry_deduplicates(self):
+    async def test_anima_lost_reply_is_confirmed_and_repeated_save_deduplicates(self):
         body = {"title": "Saved word", "text": "standing in rain"}
         original_save = self.comfy.save_favorites
 
@@ -67,16 +67,15 @@ class ProfileFavoritesApiTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(self.comfy, "save_favorites", side_effect=commit_then_timeout):
             response = await self.client.post("/api/favorites/pose/text", json=body)
-        partial = await response.json()
-        self.assertEqual(response.status, 502)
-        self.assertEqual(partial["code"], "favorite_save_pending")
-        self.assertTrue(partial["source_saved"])
+        confirmed = await response.json()
+        self.assertEqual(response.status, 200, confirmed)
+        self.assertEqual(confirmed["favoritesSync"]["state"], "complete")
         self.assertEqual(len(self.app[CUSTOM_PROMPTS_KEY].list("pose")), 1)
         self.assertEqual(len(self.comfy.favorites_data["pose"]["items"]), 1)
         response = await self.client.post("/api/favorites/pose/text", json=body)
         result = await response.json()
         self.assertEqual(response.status, 200)
-        self.assertEqual(result["item_id"], partial["item_id"])
+        self.assertEqual(result["item_id"], confirmed["item_id"])
         self.assertEqual(len(result["items"]), 1)
         self.assertEqual(len(self.app[CUSTOM_PROMPTS_KEY].list("pose")), 1)
 
@@ -104,7 +103,7 @@ class ProfileFavoritesApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 400)
         self.assertEqual(self.comfy.favorites_data, before)
 
-    async def test_krea_snapshots_and_groups_are_local_and_survive_restart(self):
+    async def test_krea_source_links_and_groups_survive_restart_and_source_deletion(self):
         before = copy.deepcopy(self.comfy.favorites_data)
         path = "/api/favorites/prompt"
         query = "?model_profile=krea2"
@@ -119,6 +118,7 @@ class ProfileFavoritesApiTests(unittest.IsolatedAsyncioTestCase):
             item_id = result["item_id"]
             source_id = result["source_item_id"]
             self.assertNotEqual(item_id, source_id)
+            self.assertEqual(result["items"][0]["source_item_id"], source_id)
             source = self.app[PROMPT_POOLS_KEY].all_items("krea2")[0]
             self.assertEqual(source["title"], "A scene")
             self.assertEqual(source["subtitle"], "Morning fog")
@@ -138,14 +138,19 @@ class ProfileFavoritesApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved["favorite_keys"], [item_id])
         self.assertEqual(saved["items"][0]["text"], "A misty forest")
         self.assertEqual(saved["items"][0]["subtitle"], "Morning fog")
-        await self.app[PROMPT_POOLS_KEY].delete_item("krea2", source_id)
-        self.assertEqual((await restored.get("prompt"))["items"][0]["id"], item_id)
+        deleted = await self.client.delete(f"/api/prompt-pools/items?model_profile=krea2&id={source_id}")
+        self.assertEqual(deleted.status, 200)
+        after = await (await self.client.get(path + query)).json()
+        self.assertEqual(after["items"], [])
+        self.assertIn(group_id, {group["id"] for group in after["groups"]})
+        reloaded = FavoritesExtensionStore(self.root / "data" / "favorite_extensions.json")
+        self.assertEqual(reloaded.get("krea2", "prompt")["items"], [])
         self.assertEqual(saved["groups"][1]["name"], "Landscapes")
         self.assertEqual(self.comfy.favorites_data, before)
         response = await self.client.delete(path + f"/groups/{group_id}" + query)
-        self.assertEqual((await response.json())["items"][0]["groupIds"], ["default"])
-        response = await self.client.put(path + "/item" + query, json={"id": item_id, "favorite": False})
         self.assertEqual((await response.json())["items"], [])
+        response = await self.client.put(path + "/item" + query, json={"id": item_id, "favorite": False})
+        self.assertEqual(response.status, 404)
         self.assertEqual(self.comfy.favorites_data, before)
 
     async def test_ensure_api_preserves_existing_create_conflict_contract(self):
@@ -163,24 +168,25 @@ class ProfileFavoritesApiTests(unittest.IsolatedAsyncioTestCase):
         conflict = await self.client.post("/api/prompt-pools/items", json=body)
         self.assertEqual(conflict.status, 400)
 
-    async def test_krea_validates_groups_before_source_and_retries_partial_save(self):
+    async def test_krea_favorite_write_failure_does_not_create_source(self):
         path = "/api/favorites/prompt/text?model_profile=krea2"
         body = {"title": "Sunset", "subtitle": "Evening light", "text": "A golden sunset"}
         rejected = await self.client.post(path, json={**body, "groupIds": ["missing"]})
         self.assertEqual(rejected.status, 400)
         self.assertEqual(self.app[PROMPT_POOLS_KEY].all_items("krea2"), [])
         extension = self.app[FAVORITES_KEY].expression_store
-        with patch.object(extension, "save", side_effect=OSError("temporary write failure")):
+        with patch.object(extension, "_write_text", side_effect=OSError("temporary write failure")):
             pending = await self.client.post(path, json=body)
         pending_body = await pending.json()
-        self.assertEqual(pending.status, 502)
-        self.assertEqual(pending_body["code"], "favorite_save_pending")
-        self.assertTrue(pending_body["source_saved"])
-        self.assertEqual(len(self.app[PROMPT_POOLS_KEY].all_items("krea2")), 1)
+        self.assertEqual(pending.status, 503)
+        self.assertEqual(pending_body["code"], "favorite_sync_failed")
+        self.assertFalse(pending_body["source_committed"])
+        self.assertEqual(self.app[PROMPT_POOLS_KEY].all_items("krea2"), [])
+        self.assertEqual(extension.get("krea2", "prompt")["items"], [])
         retried = await self.client.post(path, json=body)
         result = await retried.json()
         self.assertEqual(retried.status, 200)
-        self.assertEqual(result["source_item_id"], pending_body["item_id"])
+        self.assertEqual(result["source_item_id"], result["items"][0]["source_item_id"])
         self.assertEqual(result["items"][0]["subtitle"], "Evening light")
         self.assertEqual(len(result["items"]), 1)
         self.assertEqual(len(self.app[PROMPT_POOLS_KEY].all_items("krea2")), 1)
@@ -202,7 +208,7 @@ class ProfileFavoritesApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await response.json())["store"], "prompt_pools")
         self.assertEqual(extension.get("krea2", "prompt")["items"], [])
 
-    async def test_krea_bulk_favorites_are_independent_snapshots_and_atomic(self):
+    async def test_krea_bulk_favorites_link_sources_and_validate_atomically(self):
         pool = self.app[PROMPT_POOLS_KEY]
         sources = [await pool.ensure_item("krea2", f"Scene {number}", title=f"Title {number}", subtitle="Description") for number in range(2)]
         path = "/api/favorites/prompt"
@@ -217,15 +223,17 @@ class ProfileFavoritesApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(result["createdCount"], 2)
         self.assertTrue(all(item["id"].startswith("favorite_") for item in result["items"]))
+        self.assertEqual({item["source_item_id"] for item in result["items"]}, {item["id"] for item in sources})
         self.assertEqual(result["items"][0]["subtitle"], "Description")
         repeated = await self.client.post(path + "/selection" + query, json={"selection": {"mode": "include", "ids": [sources[0]["id"]]}, "groupIds": ["default"]})
         result = await repeated.json()
         self.assertEqual(result["createdCount"], 0)
         self.assertEqual(result["updatedCount"], 1)
-        await pool.delete_item("krea2", sources[0]["id"])
+        deleted = await self.client.delete(f"/api/prompt-pools/items?model_profile=krea2&id={sources[0]['id']}")
+        self.assertEqual(deleted.status, 200)
         saved = await (await self.client.get(path + query)).json()
-        self.assertEqual(len(saved["items"]), 2)
-        self.assertEqual(saved["items"][0]["text"], "Scene 0")
+        self.assertEqual(len(saved["items"]), 1)
+        self.assertEqual(saved["items"][0]["text"], "Scene 1")
 
     async def test_krea_custom_group_subtree_import_uses_existing_favorite_route(self):
         pool = self.app[PROMPT_POOLS_KEY]
@@ -243,6 +251,7 @@ class ProfileFavoritesApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["items"][0]["title"], "Forest")
         self.assertEqual(result["items"][0]["subtitle"], "At dawn")
         self.assertNotEqual(result["items"][0]["id"], source["id"])
+        self.assertEqual(result["items"][0]["source_item_id"], source["id"])
         duplicate = await self.client.post(f"{path}/{parent['id']}/children/import{query}", json={"customGroupId": source_group["id"]})
         self.assertEqual(duplicate.status, 400)
 
@@ -280,9 +289,9 @@ def test_extension_v1_migrates_with_backup_and_failed_backup_preserves_source(tm
     before = path.read_bytes()
     store = FavoritesExtensionStore(path)
     assert store.value["items"][0]["nickname"] == "Keep"
-    assert path.with_name(path.name + ".v2.bak").read_bytes() == before
+    assert path.with_name(path.name + ".v3.bak").read_bytes() == before
     migrated = json.loads(path.read_text(encoding="utf-8"))
-    assert migrated["version"] == 2
+    assert migrated["version"] == 3
     assert migrated["profiles"]["anima"]["expression"]["items"][0]["id"] == "custom:one"
 
     second = tmp_path / "protected.json"
@@ -302,7 +311,9 @@ def test_invalid_extension_version_is_recovered_without_startup_crash(tmp_path, 
     store = FavoritesExtensionStore(path)
     assert store.value["items"] == []
     assert store.load_warnings
-    assert path.with_name(path.name + ".corrupt.bak").read_bytes() == before
+    assert path.with_name(path.name + ".v3.bak").read_bytes() == before
+    assert path.read_bytes() == before
+    assert store.storage_status()["read_only"]
 
 
 def test_source_creation_disk_failure_never_publishes_ghost_item(tmp_path):
@@ -361,6 +372,7 @@ def test_krea_custom_group_import_copies_metadata_and_preserves_existing_snapsho
         item = result["items"][0]
         assert child["parentId"] == parent["id"]
         assert item["id"] != sources[0]["id"]
+        assert item["source_item_id"] == sources[0]["id"]
         assert item["title"] == "Forest" and item["subtitle"] == "Morning fog"
         assert item["groupIds"] == [child["id"]]
         sources[0].update(title="Changed source title", subtitle="Changed source subtitle")

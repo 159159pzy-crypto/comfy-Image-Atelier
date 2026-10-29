@@ -26,8 +26,8 @@ class StructuredPoolTests(unittest.IsolatedAsyncioTestCase):
         original = json.dumps({"version": 2, "profiles": {"anima": ["legacy"], "krea2": [prompt]}}).encode()
         self.path.write_bytes(original)
         store = PromptPoolStore(self.path)
-        self.assertEqual(self.path.with_name(self.path.name + ".v3.bak").read_bytes(), original)
-        self.assertEqual(json.loads(self.path.read_text())["version"], 3)
+        self.assertEqual(self.path.with_name(self.path.name + ".v4.bak").read_bytes(), original)
+        self.assertEqual(json.loads(self.path.read_text())["version"], 4)
         item = store.all_items("krea2")[0]
         self.assertEqual(item["id"], PromptPoolStore.item_id(prompt))
         self.assertEqual(item["title"], "A" * 200)
@@ -46,7 +46,7 @@ class StructuredPoolTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(StorageReadOnlyError):
             await store.create_group("krea2", {"name": "Blocked"})
 
-    def test_malformed_schema_is_quarantined_instead_of_crashing(self):
+    def test_malformed_schema_is_backed_up_and_preserved_read_only(self):
         bad = [{"version": value, "profiles": {}} for value in ([], {}, True, None)]
         bad.append({"version": 3, "profiles": {"krea2": {"items": [], "groups": [
             {"id": "bad", "name": "bad", "kind": []}
@@ -59,6 +59,11 @@ class StructuredPoolTests(unittest.IsolatedAsyncioTestCase):
                 store = PromptPoolStore(path)
                 self.assertEqual(store.all_items("krea2"), [])
                 self.assertEqual(path.with_name(path.name + ".corrupt.bak").read_bytes(), original)
+                self.assertEqual(path.read_bytes(), original)
+                self.assertFalse(store.load_trusted)
+                self.assertEqual(store.load_state, "invalid")
+                with self.assertRaises(StorageReadOnlyError):
+                    store.ensure_writable()
 
     async def test_metadata_ensure_and_group_hierarchy_roundtrip(self):
         parent = (await self.store.create_group("krea2", {"name": "Parent"}))["group"]
@@ -118,7 +123,7 @@ class StructuredPoolTests(unittest.IsolatedAsyncioTestCase):
         await self.store.create_group("krea2", {"name": "Removed"})
         preview = self.store.preview_structured_import("krea2", [{"title": "Keep", "prompt": "New"}], "json", bundle_name="Replacement", mode="replace")
         result = await self.store.commit_structured_import("krea2", preview["rows"], bundle_name="Replacement", mode="replace")
-        self.assertEqual(result["valid_ids"], [self.store.item_id("New")])
+        self.assertEqual(result["valid_ids"], [self.store.all_items("krea2")[0]["id"]])
         self.assertNotIn(created["id"], result["valid_ids"])
         self.assertNotIn("Removed", [group["name"] for group in result["groups"]])
         stale = self.store.preview_structured_import("krea2", [{"title": "Edit", "prompt": "New"}], "json", bundle_name="Replacement")
@@ -143,29 +148,29 @@ class StructuredPoolTests(unittest.IsolatedAsyncioTestCase):
         ], "json", bundle_name="Bundle")
         self.assertEqual(preview["bundle"]["newChildCount"], 1)
 
-    async def test_favorite_snapshot_query_is_read_only_and_lazy_ensure_is_atomic(self):
+    async def test_linked_favorite_query_is_read_only_and_ensure_is_atomic(self):
         await self.store.create_item("krea2", "Unstarred")
         existing = await self.store.create_item("krea2", "Original text", title="Pool title")
         favorites = {"groups": [{"id": "default", "parentId": None}, {"id": "child", "parentId": "default"}],
-                     "items": [{"id": "favorite-1", "title": "Snapshot", "subtitle": "Old explanation", "text": "Original text", "groupIds": ["child"]},
+                     "items": [{"id": "favorite-1", "source_item_id": existing["id"], "title": "Snapshot", "subtitle": "Old explanation", "text": "Original text", "groupIds": ["child"]},
                                {"id": "favorite-2", "title": "Orphan", "text": "Only in favorites", "groupIds": ["default"]}]}
         before = self.path.read_bytes()
         view = self.store.list("krea2", collection="default", favorites=favorites)
-        self.assertEqual(view["count"], 2)
-        self.assertEqual([item["in_pool"] for item in view["items"]], [True, False])
-        self.assertEqual(view["items"][0]["title"], "Snapshot")
+        self.assertEqual(view["count"], 1)
+        self.assertEqual([item["in_pool"] for item in view["items"]], [True])
+        self.assertEqual(view["items"][0]["title"], "Pool title")
         self.assertEqual(self.path.read_bytes(), before)
         sorted_items = self.store.list("krea2", favorites=favorites, sort="favorite-first")["items"]
         self.assertEqual(sorted_items[0]["id"], existing["id"])
         with self.assertRaises(WorkflowError):
             await self.store.ensure_items("krea2", [{"text": "First"}, {"text": ""}])
         self.assertEqual(self.path.read_bytes(), before)
-        orphan = view["items"][1]
-        ensured = await self.store.ensure_items("krea2", [{"title": orphan["title"], "text": orphan["text"]}, {"text": "only IN FAVORITES"}])
-        self.assertEqual(ensured["created_ids"], [orphan["id"]])
+        ensured = await self.store.ensure_items("krea2", [{"title": "Orphan", "text": "Only in favorites"}, {"text": "only IN FAVORITES"}])
+        self.assertEqual(ensured["created_ids"], [ensured["items"][0]["id"]])
         self.assertEqual(len(ensured["items"]), 1)
         await self.store.update_item("krea2", existing["id"], "Edited text", title="Edited")
-        self.assertFalse(self.store.list("krea2", collection="__all__", favorites=favorites)["items"][0]["in_pool"])
+        linked = self.store.list("krea2", collection="__all__", favorites=favorites)["items"][0]
+        self.assertEqual((linked["id"], linked["text"], linked["title"]), (existing["id"], "Edited text", "Edited"))
         self.assertEqual(favorites["items"][0]["text"], "Original text")
 
     async def test_selection_total_counts_only_actual_pool_ids_across_filters(self):
@@ -180,7 +185,7 @@ class StructuredPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((filtered["count"], filtered["selected_count"], filtered["selection_total"]), (1, 1, 2))
         before = self.path.read_bytes()
         orphan = self.store.list("krea2", collection="default", favorites=favorites, selected_ids=selected)
-        self.assertEqual((orphan["count"], orphan["selected_count"], orphan["selection_total"]), (1, 0, 2))
+        self.assertEqual((orphan["count"], orphan["selected_count"], orphan["selection_total"]), (0, 0, 2))
         self.assertEqual(self.path.read_bytes(), before)
         empty = self.store.list("krea2", query="no matches", selected_ids=selected, selected_only=True)
         self.assertEqual((empty["count"], empty["selected_count"], empty["selection_total"]), (0, 0, 2))
@@ -215,7 +220,7 @@ class StructuredPoolApiTests(unittest.IsolatedAsyncioTestCase):
         await self.client.close()
         self.temp.cleanup()
 
-    async def test_public_contract_templates_groups_import_and_lazy_favorites(self):
+    async def test_public_contract_templates_groups_import_and_linked_favorites(self):
         group_response = await self.client.post("/api/prompt-pools/groups", json={"model_profile": "krea2", "name": "Existing"})
         self.assertEqual(group_response.status, 201)
         group = (await group_response.json())["group"]
@@ -233,17 +238,19 @@ class StructuredPoolApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(committed.status, 200)
         self.assertEqual((await committed.json())["imported"], 1)
         extension = self.app[FAVORITES_KEY].expression_store
-        await extension.save({"items": [{"id": "old-favorite", "title": "Legacy", "text": "Never pooled", "groupIds": ["default"]}]}, "krea2", "prompt")
+        source = self.app[PROMPT_POOLS_KEY].all_items("krea2")[0]
+        await extension.save({"groups": [{"id": "default", "name": "Default Favorites"}], "items": [{"id": "old-favorite", "source_item_id": source["id"], "title": "Legacy", "text": source["text"], "groupIds": ["default"]}]}, "krea2", "prompt")
         before = copy.deepcopy(self.app[PROMPT_POOLS_KEY].items)
         query = await self.client.post("/api/prompt-pools/query", json={"model_profile": "krea2", "collection": "__all__", "selected_ids": [], "selected_only": False})
         self.assertEqual(query.status, 200)
-        orphan = (await query.json())["items"][0]
-        self.assertFalse(orphan["in_pool"])
+        linked = (await query.json())["items"][0]
+        self.assertTrue(linked["in_pool"])
+        self.assertEqual(linked["id"], source["id"])
         self.assertEqual(self.app[PROMPT_POOLS_KEY].items, before)
-        result = await self.client.post("/api/prompt-pools/items/ensure-many", json={"model_profile": "krea2", "items": [{"title": orphan["title"], "text": orphan["text"]}]})
+        result = await self.client.post("/api/prompt-pools/items/ensure-many", json={"model_profile": "krea2", "items": [{"title": linked["title"], "text": linked["text"]}]})
         self.assertEqual(result.status, 200)
-        self.assertEqual((await result.json())["created_ids"], [orphan["id"]])
-        selected = await self.client.post("/api/prompt-pools/query", json={"model_profile": "krea2", "collection": "__all__", "selected_ids": [orphan["id"]], "selected_only": True})
+        self.assertEqual((await result.json())["created_ids"], [])
+        selected = await self.client.post("/api/prompt-pools/query", json={"model_profile": "krea2", "collection": "__all__", "selected_ids": [source["id"]], "selected_only": True})
         self.assertTrue((await selected.json())["items"][0]["selected"])
         deleted = await self.client.delete(f"/api/prompt-pools/groups/{group['id']}?model_profile=krea2&deleteMode=keep")
         self.assertEqual(deleted.status, 200)

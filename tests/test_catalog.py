@@ -315,7 +315,7 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("gentle smile, relaxed expression", fixed["full_prompt"])
         self.assertEqual(fixed["selected"]["expression"], [])
 
-    def test_reload_with_legacy_item_id_backs_up_and_starts_empty(self):
+    def test_reload_with_legacy_item_id_preserves_source_and_protects_store(self):
         # 回归:不带 custom: 前缀的 id 能通过 _normalize,却在 try 块之外的
         # set_custom_items 处抛 CatalogError——服务器无法启动且不产生备份,
         # 目录还被留在"内置项已剥离、_by_id 过期"的半修改状态。
@@ -326,28 +326,29 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
         store = CustomPromptStore(path, self.catalog)
         self.assertEqual(store.items, [])
         self.assertEqual(len(store.load_warnings), 1)
-        self.assertIn("custom.json.corrupt.bak", store.load_warnings[0])
-        self.assertTrue(path.with_name("custom.json.corrupt.bak").is_file())
+        self.assertTrue(store.read_only_reason)
+        self.assertFalse(store.load_trusted)
+        self.assertEqual(path.with_name("custom.json.v4.bak").read_bytes(), path.read_bytes())
         # 目录回到一致状态:自定义项清空,内置项完好可检索
         self.assertEqual(self.catalog.count("pose"), 4)
         self.assertTrue(all(item["builtin"] for item in self.catalog.all_items("pose")))
         self.assertEqual(self.catalog.search("pose", "站立")["total"], 1)
 
-    def test_reload_with_malformed_shapes_backs_up_or_degrades(self):
+    def test_reload_with_malformed_shapes_preserves_file_and_protects_store(self):
         # 回归:groups/items 为 null/错误类型的手改文件曾以 AttributeError/TypeError
         # 炸掉启动(不在保护的异常列表里,也不产生备份)。
-        # null 视为空数据继续;错误类型视为坏文件,备份后以空数据启动。
+        # null 和错误类型均不能作为可信空库，保留原文件并只读启动。
         path = self.root / "custom.json"
-        path.write_text(json.dumps({"groups": None, "items": None}), encoding="utf-8")
-        store = CustomPromptStore(path, self.catalog)
-        self.assertEqual(store.items, [])
-        self.assertEqual(store.load_warnings, [])
-        for payload in ('{"groups": [], "items": 123}', '{"groups": "x", "items": []}', '[1, 2, 3]'):
+        for payload in ('{"groups": null, "items": null}', '{"groups": [], "items": 123}',
+                        '{"groups": "x", "items": []}', '[1, 2, 3]'):
             with self.subTest(payload=payload):
                 path.write_text(payload, encoding="utf-8")
                 store = CustomPromptStore(path, self.catalog)
                 self.assertEqual(store.items, [])
                 self.assertEqual(len(store.load_warnings), 1)
+                self.assertTrue(store.read_only_reason)
+                self.assertFalse(store.load_trusted)
+                self.assertEqual(path.read_text(encoding="utf-8"), payload)
                 self.assertEqual(self.catalog.count("pose"), 4)
 
     async def test_custom_groups_and_import_preserve_overwritten_id(self):

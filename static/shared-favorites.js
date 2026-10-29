@@ -4,7 +4,94 @@ const SHARED_FAVORITES_VIEW_KEY = "anima-studio:favorite-views:v1";
 const sharedFavoritesState = {
   ready: false, profile: "", epoch: 0, request: 0, data: null, items: [],
   views: {}, targets: {}, saveTargets: {}, editor: null, groupEditor: null, refreshTimer: null,
+  changeRevision: 0, reconciled: new Map(), refreshFailed: false,
 };
+
+// Source changes own cache invalidation; retrying this refresh never repeats a write.
+function poolSourceChanged(change = {}, broadcast = true) {
+  sharedFavoritesChanged({ ...change, sourceChange: true }, broadcast);
+}
+function prunePoolSourceSelections(profile, section, ids) {
+  const deleted = new Set(ids || []);
+  if (!deleted.size) return;
+  const prune = state => {
+    if (!state) return;
+    if (profile === "anima") {
+      const selection = state.pools?.[section];
+      if (selection) for (const key of ["ids", "excluded_ids"]) selection[key] = (selection[key] || []).filter(id => !deleted.has(id));
+    } else {
+      if (state.kreaPromptPoolSelection) state.kreaPromptPoolSelection = state.kreaPromptPoolSelection.filter(id => !deleted.has(id));
+      if (state.krea_prompt_pool?.ids) state.krea_prompt_pool.ids = state.krea_prompt_pool.ids.filter(id => !deleted.has(id));
+      if (state.kreaPromptPoolSelection?.length === 0) state.kreaPromptPoolEnabled = false;
+      if (state.krea_prompt_pool?.ids?.length === 0) state.krea_prompt_pool.enabled = false;
+    }
+  };
+  if (typeof profileDrafts !== "undefined") prune(profileDrafts[profile]);
+  if (typeof singleWorkbenchState !== "undefined") for (const workbench of Object.values(singleWorkbenchState.drafts || {})) {
+    for (const [savedProfile, saved] of Object.entries(workbench || {})) {
+      if (savedProfile === profile) prune(saved?.settings);
+      prune(saved?.profileDrafts?.[profile]);
+    }
+  }
+  if (profile === currentProfile()) {
+    if (profile === "anima" && typeof draft !== "undefined") prune(draft);
+    if (profile === "krea2" && typeof kreaPromptPoolSelection !== "undefined") {
+      kreaPromptPoolSelection = kreaPromptPoolSelection.filter(id => !deleted.has(id));
+      if (!kreaPromptPoolSelection.length && ui.krea_prompt_pool_enabled) ui.krea_prompt_pool_enabled.checked = false;
+    }
+  }
+  if (typeof schedulePersist === "function") schedulePersist();
+}
+function poolMutationError(error, context = {}) {
+  const payload = error.payload || {};
+  if (payload.source_committed === true) {
+    poolSourceChanged({ ...context, ...payload });
+    return `源词条已提交，关联同步未完成：${error.message}。请先刷新状态，不要重复提交。${payload.recovery_required ? "需要恢复存储后重试同步。" : ""}`;
+  }
+  return `${payload.source_committed === false ? "更改未提交，编辑内容已保留。" : ""}${error.message}${payload.recovery_required ? " 请恢复存储后重试，编辑内容已保留。" : ""}`;
+}
+async function ensurePoolReconciled(profile = currentProfile(), section = sharedFavoritesView(profile).section) {
+  if (section === "artist") return;
+  const key = `${profile}:${section}`, state = sharedFavoritesState;
+  if (!state.reconciled.has(key)) {
+    const pending = request(sharedFavoriteUrl(section, "/reconcile", profile), { method: "POST", body: "{}" })
+      .then(result => {
+        state.reconciled.set(key, true);
+        if (result.deletedItemIds?.length || result.updatedItemIds?.length || result.favoritesSync?.updatedCount || result.favoritesSync?.deletedCount) sharedFavoritesChanged({ ...result, model_profile: profile, section, refresh: false }, false);
+        return result;
+      })
+      .catch(error => { state.reconciled.delete(key); throw error; });
+    state.reconciled.set(key, pending);
+  }
+  return state.reconciled.get(key);
+}
+function showPoolRefreshFailure(failed, message = "内容已保存，列表刷新失败。请重新刷新，操作不会重复提交。") {
+  sharedFavoritesState.refreshFailed = failed;
+  const notice = document.getElementById("poolRefreshNotice");
+  if (!notice) return;
+  notice.hidden = !failed;
+  const text = document.getElementById("poolRefreshMessage");
+  if (text) text.textContent = message;
+}
+async function refreshPoolLifecycle() {
+  const state = sharedFavoritesState, profile = currentProfile();
+  const revision = state.changeRevision;
+  const tasks = [];
+  if (state.ready) tasks.push(sharedFavoritesLoad({ throwOnError: true, reconcile: false }));
+  if (profile === "anima") {
+    if (typeof refreshPoolSelectionTotals === "function") tasks.push(refreshPoolSelectionTotals({ throwOnError: true }));
+    if (typeof activeSection !== "undefined" && ui.poolDrawer?.classList.contains("open")) {
+      const section = activeSection;
+      tasks.push(Promise.all([loadFavorites(section, { throwOnError: true }), loadCustomGroups(section, { throwOnError: true })]).then(() => {
+        if (profile === currentProfile() && section === activeSection && revision === state.changeRevision) return loadPool({ throwOnError: true });
+      }));
+    }
+    if (typeof loadArtistFavorites === "function" && sharedFavoritesView().section === "artist") tasks.push(loadArtistFavorites());
+  } else if (typeof loadKreaPromptPool === "function") tasks.push(loadKreaPromptPool({ throwOnError: true }));
+  const results = await Promise.allSettled(tasks);
+  if (revision !== state.changeRevision || profile !== currentProfile()) return;
+  showPoolRefreshFailure(results.some(result => result.status === "rejected"));
+}
 
 function sharedFavoriteUrl(section, suffix = "", profile = currentProfile()) {
   return `/api/favorites/${section}${suffix}${suffix.includes("?") ? "&" : "?"}model_profile=${encodeURIComponent(profile)}`;
@@ -106,11 +193,15 @@ function sharedFavoritesResetModel() {
   void sharedFavoritesLoad();
   if (currentProfile() === "anima") void loadArtistFavorites();
 }
-async function sharedFavoritesLoad() {
+async function sharedFavoritesLoad({ throwOnError = false, reconcile = true } = {}) {
   const state = sharedFavoritesState;
   if (!state.ready) return;
-  if (state.profile !== currentProfile()) { sharedFavoritesResetModel(); return; }
-  const profile = currentProfile(), section = sharedFavoritesView(profile).section, epoch = state.epoch, token = ++state.request;
+  if (state.profile !== currentProfile()) { if (reconcile) sharedFavoritesResetModel(); return; }
+  const profile = currentProfile(), section = sharedFavoritesView(profile).section, epoch = state.epoch;
+  try { if (reconcile && state.reconciled.get(`${profile}:${section}`) !== true) await ensurePoolReconciled(profile, section); }
+  catch (error) { sharedFavoritesStatus(poolMutationError(error, { model_profile: profile, section })); if (throwOnError) throw error; return; }
+  if (!sharedFavoritesCurrent(profile, section, epoch)) return;
+  const token = ++state.request;
   const valid = () => token === state.request && sharedFavoritesCurrent(profile, section, epoch);
   sharedFavoritesStatus("正在读取共享收藏…");
   try {
@@ -145,6 +236,7 @@ async function sharedFavoritesLoad() {
     if (!valid()) return;
     state.data = null; state.items = []; sharedFavoritesRender();
     sharedFavoritesStatus(`收藏暂不可用：${error.message}`);
+    if (throwOnError) throw error;
   }
 }
 function sharedFavoritesRender() {
@@ -230,6 +322,8 @@ async function sharedFavoriteEditorGroups(editor, selected) {
   document.getElementById("sharedFavoriteCreateGroup").disabled = true;
   document.getElementById("sharedFavoriteGroups").replaceChildren();
   try {
+    if (sharedFavoritesState.reconciled.get(`${editor.profile}:${section}`) !== true) await ensurePoolReconciled(editor.profile, section);
+    if (sharedFavoritesState.editor !== editor || editor.profile !== currentProfile() || token !== editor.request || section !== editor.section) return;
     const data = await request(sharedFavoriteUrl(section, "", editor.profile));
     if (sharedFavoritesState.editor !== editor || editor.profile !== currentProfile() || token !== editor.request || section !== editor.section) return;
     editor.data = data;
@@ -286,8 +380,8 @@ async function sharedFavoriteSave(event) {
     await request(sharedFavoriteUrl(editor.section, "/text", editor.profile), { method: "POST", body: JSON.stringify(body) });
     if (sharedFavoritesState.editor !== editor || editor.profile !== currentProfile()) return;
     motionDialog(document.getElementById("sharedFavoriteDialog"), false); sharedFavoritesState.editor = null;
-    toast("提示词已入池并收藏");
-  } catch (error) { if (sharedFavoritesState.editor === editor) sharedFavoriteEditorError(error.message); }
+    toast("已收藏并加入词池");
+  } catch (error) { if (sharedFavoritesState.editor === editor) sharedFavoriteEditorError(poolMutationError(error, { model_profile: editor.profile, section: editor.section })); }
   finally { editor.busy = false; if (sharedFavoritesState.editor === editor) sharedFavoriteValidate(); }
 }
 async function sharedFavoriteCreateGroup() {
@@ -305,25 +399,32 @@ async function sharedFavoriteCreateGroup() {
   } catch (error) { if (sharedFavoritesState.editor === editor && editor.section === section && editor.request === token) sharedFavoriteEditorError(error.message); }
   finally { if (sharedFavoritesState.editor === editor && editor.section === section && editor.request === token) document.getElementById("sharedFavoriteCreateGroup").disabled = false; }
 }
-function sharedFavoritesChanged({ model_profile = currentProfile(), section = sharedFavoritesView(model_profile).section } = {}, broadcast = true) {
-  if (!sharedFavoritesState.ready) return;
+function sharedFavoritesChanged(change = {}, broadcast = true) {
+  const { model_profile = currentProfile(), section = sharedFavoritesView(model_profile).section, deletedItemIds = [], updatedItemIds = [], refresh = true } = change;
+  const state = sharedFavoritesState;
+  prunePoolSourceSelections(model_profile, section, deletedItemIds);
   if (broadcast) {
-    try { localStorage.setItem(SHARED_FAVORITES_KEY, JSON.stringify({ model_profile, section, nonce: `${Date.now()}-${Math.random()}` })); } catch { /* Same-page refresh remains available. */ }
+    try { localStorage.setItem(SHARED_FAVORITES_KEY, JSON.stringify({ model_profile, section, deletedItemIds, updatedItemIds, sourceChange: Boolean(change.sourceChange), nonce: `${Date.now()}-${Math.random()}` })); } catch { /* Same-page refresh remains available. */ }
   }
   if (model_profile !== currentProfile()) return;
-  clearTimeout(sharedFavoritesState.refreshTimer);
-  sharedFavoritesState.refreshTimer = setTimeout(() => {
-    if (model_profile !== currentProfile()) return;
-    void sharedFavoritesLoad();
-    if (model_profile === "anima") {
-      void loadArtistFavorites();
-      if (ui.poolDrawer.classList.contains("open")) void loadFavorites(activeSection).then(() => {
-        if (currentProfile() === model_profile) { renderPoolSidebar(); void loadPool(); }
-      });
-    } else if (ui.kreaPoolDrawer.classList.contains("open")) {
-      void loadKreaPromptPool({ force: true });
-    }
-  }, 0);
+  state.changeRevision++; state.request++;
+  if (section === sharedFavoritesView(model_profile).section) { state.data = null; state.items = []; if (state.ready) sharedFavoritesRender(); }
+  if (typeof favoritesRequest !== "undefined") favoritesRequest++;
+  if (typeof customGroupsRequest !== "undefined") customGroupsRequest++;
+  if (typeof poolRequest !== "undefined") poolRequest++;
+  if (typeof poolSelectionOperation !== "undefined") poolSelectionOperation = null;
+  if (typeof poolResultContext !== "undefined") poolResultContext = "";
+  if (typeof ui !== "undefined" && ui.poolGrid) ui.poolGrid.inert = true;
+  if (typeof favoritesData !== "undefined" && typeof activeSection !== "undefined" && activeSection === section) {
+    favoritesData = { groups: [], items: [], favorite_keys: [] }; favoritesAvailable = false;
+  }
+  if (typeof poolSelectionStats !== "undefined") poolSelectionStats.delete(section);
+  if (typeof poseItemCache !== "undefined") for (const id of [...deletedItemIds, ...updatedItemIds]) poseItemCache.delete(id);
+  if (typeof invalidateKreaPoolSelection === "function") invalidateKreaPoolSelection();
+  if (typeof kreaPoolView !== "undefined") { kreaPoolView.selectionSummary = null; kreaPoolView.resultContext = null; }
+  if (!state.ready || !refresh) return;
+  clearTimeout(state.refreshTimer);
+  state.refreshTimer = setTimeout(() => { if (model_profile === currentProfile()) void refreshPoolLifecycle(); }, 0);
 }
 function sharedFavoriteManageGroups() {
   if (!sharedFavoritesState.data) return;
@@ -367,6 +468,7 @@ async function sharedFavoriteMutateGroup(remove = null) {
 function initializeSharedFavorites() {
   const state = sharedFavoritesState;
   if (state.ready) return;
+  document.getElementById("poolRefreshRetry")?.addEventListener("click", () => void refreshPoolLifecycle());
   try { state.views = JSON.parse(localStorage.getItem(SHARED_FAVORITES_VIEW_KEY) || "{}") || {}; } catch { state.views = {}; }
   for (const prefix of ["single"]) {
     document.getElementById(`${prefix}FavoriteOpen`).addEventListener("click", () => { const panel = document.getElementById(`${prefix}FavoritePanel`); panel.hidden = !panel.hidden; if (!panel.hidden) void sharedFavoritesLoad(); });
