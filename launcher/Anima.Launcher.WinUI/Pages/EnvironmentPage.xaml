@@ -123,7 +123,7 @@
                             <TextBlock x:Name="RootLabel" Text="02  选择安装位置" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
                             <Grid ColumnSpacing="8">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                                <TextBox x:Name="RootBox" PlaceholderText="例如 D:\AnimaStudio" TextChanged="Root_Changed" />
+                                <TextBox x:Name="RootBox" PlaceholderText="例如 D:\ComfyImageAtelier" TextChanged="Root_Changed" />
                                 <Button Grid.Column="1" Content="选择文件夹" Click="PickRoot_Click" />
                             </Grid>
                             <TextBlock x:Name="RootHelp" Style="{StaticResource StudioBodyStyle}" FontSize="11" />

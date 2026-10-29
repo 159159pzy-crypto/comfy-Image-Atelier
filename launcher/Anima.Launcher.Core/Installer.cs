@@ -555,7 +555,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         // Supported by Impact's installers and prestartup; avoid unselected model downloads.
         var skip = Path.Combine(custom, "skip_download_model");
         var hadSkip = File.Exists(skip);
-        if (!hadSkip) File.WriteAllText(skip, "Model downloads are managed by Anima Random Studio.\n");
+        if (!hadSkip) File.WriteAllText(skip, "Model downloads are managed by Comfy Image Atelier.\n");
         foreach (var node in nodePlans)
         {
             var repo = node.Repository;

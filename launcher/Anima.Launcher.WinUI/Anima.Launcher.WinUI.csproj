@@ -6,6 +6,9 @@
     <UseWinUI>true</UseWinUI>
     <RootNamespace>Anima.Launcher</RootNamespace>
     <AssemblyName>AnimaRandomStudio</AssemblyName>
+    <Product>Comfy Image Atelier</Product>
+    <Title>Comfy Image Atelier</Title>
+    <Description>Comfy Image Atelier · ComfyUI 安装与创作工作台</Description>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ImplicitUsings>enable</ImplicitUsings>

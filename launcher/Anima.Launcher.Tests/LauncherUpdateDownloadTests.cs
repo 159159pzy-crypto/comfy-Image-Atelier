@@ -35,7 +35,8 @@ internal static class LauncherUpdateDownloadTests
         using (var offline = new LauncherUpdates(Path.Combine(directory, "offline"), source, "1.1.0", handler: new Handler(_ =>
         { offlineCalls++; throw new HttpRequestException("fixture offline"); })))
         {
-            JsonFile.Write(Path.Combine(offline.Store.Root, "release-cache.json"), new LauncherReleaseCache(DateTimeOffset.UtcNow, release));
+            JsonFile.Write(Path.Combine(offline.Store.Root, "release-cache-" + LauncherUpdates.Repository.Replace('/', '-') + ".json"),
+                new LauncherReleaseCache(DateTimeOffset.UtcNow, release));
             Check((await offline.CheckAsync(false, default))?.Version == release.Version && offlineCalls == 0,
                 "an offline automatic updater reuses its recent release cache without network access");
             await Reject<HttpRequestException>(() => offline.CheckAsync(true, default), "an explicit offline update check returns a retryable network error");

@@ -5,6 +5,9 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <AssemblyName>AnimaLauncherEntry</AssemblyName>
+    <Product>Comfy Image Atelier</Product>
+    <Title>Comfy Image Atelier</Title>
+    <Description>Comfy Image Atelier launcher entry</Description>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <DebugType>embedded</DebugType>

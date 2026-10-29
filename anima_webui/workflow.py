@@ -2104,7 +2104,7 @@ def _render_v2_workflows(
             "images": list(current),
         },
         "class_type": "SaveImage",
-        "_meta": {"title": "Anima Random Studio 输出"},
+        "_meta": {"title": "Comfy Image Atelier 输出"},
     }
     return api, ui
 

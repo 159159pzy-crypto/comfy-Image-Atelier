@@ -116,14 +116,14 @@ internal static class Program
         {
             const string uninstall = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\AnimaRandomStudio_is1";
             using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(uninstall, writable: true);
-            if (key?.GetValue("DisplayName") as string != "Anima Random Studio") return;
+            if (key is null) return;
             var location = key.GetValue("InstallLocation") as string;
-            if (string.IsNullOrWhiteSpace(location)) return;
-            var entry = Path.Combine(location, "AnimaRandomStudio.exe");
             var previous = UpdateContext?.Previous.Executable ?? Environment.ProcessPath!;
             var knownEntries = new LauncherUpdateStore(StateDir).Load().EntryPaths;
-            if (LauncherUpdateStore.SamePath(entry, previous) || LauncherUpdateStore.SamePath(entry, Environment.ProcessPath!)
-                || knownEntries.Any(path => LauncherUpdateStore.SamePath(path, entry))) key.SetValue("DisplayVersion", version);
+            if (!ProductBranding.OwnsInstallation(key.GetValue("DisplayName") as string, location,
+                knownEntries.Concat([previous, Environment.ProcessPath!]))) return;
+            key.SetValue("DisplayVersion", version);
+            key.SetValue("DisplayName", ProductBranding.DisplayName);
         }
         catch (Exception ex) { Log("安装信息版本同步失败：" + ex.Message); }
     }
@@ -292,7 +292,7 @@ internal static class Program
             catch { }
             Thread.Sleep(250);
         }
-        NativeMessage("启动器已运行，请从系统托盘打开。", "Anima Random Studio", false);
+        NativeMessage("启动器已运行，请从系统托盘打开。", ProductBranding.DisplayName, false);
     }
 
     [STAThread]

@@ -109,11 +109,13 @@ if ($InstallRootEntry) {
 }
 if ($InstallShortcut) {
     $shortcutExe = if ($InstallRootEntry) { Join-Path $repo 'AnimaRandomStudio.exe' } else { $exe }
-    $shell = New-Object -ComObject WScript.Shell
-    $link = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) 'Anima Random Studio.lnk'))
-    $link.TargetPath = $shortcutExe
-    $link.WorkingDirectory = Split-Path $shortcutExe -Parent
-    $link.IconLocation = "$shortcutExe,0"
-    $link.Save()
+    $knownEntries = @(Join-Path $repo 'AnimaRandomStudio.exe')
+    $stateDirectory = if ($env:ANIMA_LAUNCHER_HOME) { $env:ANIMA_LAUNCHER_HOME } else { Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'AnimaRandomStudio' }
+    $statePath = Join-Path $stateDirectory 'launcher-updates\state.json'
+    if (Test-Path -LiteralPath $statePath) {
+        try { $knownEntries += @((Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json).entryPaths) }
+        catch { Write-Warning 'Could not read existing launcher entries; only the current project entry will be migrated.' }
+    }
+    & (Join-Path $repo 'launcher\scripts\Install-LauncherShortcut.ps1') -ExecutablePath $shortcutExe -KnownEntryPaths $knownEntries
 }
 $result | ConvertTo-Json

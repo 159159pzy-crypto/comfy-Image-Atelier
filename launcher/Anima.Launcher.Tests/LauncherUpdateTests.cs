@@ -35,21 +35,65 @@ internal static class LauncherUpdateTests
         object Release(bool prerelease = false, string? exeUrl = null) => new { draft = false, prerelease, tag_name = "1.2.0", body = "new release", published_at = "2026-10-23T00:00:00Z",
             assets = new[] { Asset("AnimaRandomStudio.exe", exeUrl), Asset("SHA256SUMS.txt"), Asset("build-info.json") } };
         var seen = 0;
+        var requestedUrls = new List<string>();
+        HttpResponseMessage OfficialResponse(HttpRequestMessage request) =>
+            request.RequestUri!.AbsolutePath.EndsWith("/latest") ? Json(Release())
+                : request.RequestUri.AbsolutePath.EndsWith("SHA256SUMS.txt") ? Text(sha + "  AnimaRandomStudio.exe\n" + new string('f', 64) + "  AnimaRandomStudio-portable-win-x64.zip\n")
+                : Json(buildInfo);
         var releaseHandler = new UpdateHandler(request =>
         {
             seen++;
-            return request.RequestUri!.AbsolutePath.EndsWith("/latest") ? Json(Release())
-                : request.RequestUri.AbsolutePath.EndsWith("SHA256SUMS.txt") ? Text(sha + "  AnimaRandomStudio.exe\n" + new string('f', 64) + "  AnimaRandomStudio-portable-win-x64.zip\n")
-                : Json(buildInfo);
+            requestedUrls.Add(request.RequestUri!.AbsoluteUri);
+            return OfficialResponse(request);
         });
         using var client = new LauncherUpdates(Path.Combine(directory, "official"), executable, "1.1.0", handler: releaseHandler);
         var release = await client.CheckAsync(true, default);
         Check(release is { Version: "1.2.0", Size: 1024, Notes: "new release" } && release.Sha256 == sha, "official release binds EXE size and SHA to build metadata");
+        Check(requestedUrls[0] == "https://api.github.com/repos/159159pzy-crypto/comfy-Image-Atelier/releases/latest"
+            && requestedUrls.Skip(1).All(url => url.StartsWith("https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/download/", StringComparison.Ordinal)),
+            "update checks and metadata downloads use the new repository");
         await Reject(() => { LauncherUpdates.ValidateRelease(release! with { ExeUrl = "https://example.com/AnimaRandomStudio.exe" }); return Task.CompletedTask; }, "tampered cached release origin is revalidated before execution");
         var calls = seen;
         Check((await client.CheckAsync(false, default))?.Version == "1.2.0" && seen == calls, "automatic checks reuse the 24 hour cache");
         await client.CheckAsync(true, default);
         Check(seen == calls + 3, "manual check bypasses release cache");
+        var oldBase = "https://github.com/159159pzy-crypto/comfyui-random-image-generation/releases/download/1.2.0/";
+        var oldRelease = release! with { ExeUrl = oldBase + "AnimaRandomStudio.exe", BuildInfoUrl = oldBase + "build-info.json" };
+        foreach (var legacyRelease in new LauncherRelease?[] { oldRelease, null })
+        {
+            var migrationCalls = 0;
+            using var migrated = new LauncherUpdates(Path.Combine(directory, legacyRelease is null ? "legacy-negative-cache" : "legacy-release-cache"),
+                executable, "1.1.0", handler: new UpdateHandler(request => { migrationCalls++; return OfficialResponse(request); }));
+            var legacyPath = Path.Combine(migrated.Store.Root, "release-cache.json");
+            JsonFile.Write(legacyPath, new LauncherReleaseCache(DateTimeOffset.UtcNow, legacyRelease));
+            var legacyText = File.ReadAllText(legacyPath);
+            Check(migrated.GetCachedRelease() is null, "migration does not expose the old repository cache");
+            Check((await migrated.CheckAsync(false, default))?.ExeUrl == release!.ExeUrl && migrationCalls == 3,
+                legacyRelease is null ? "old no-update cache cannot suppress the new repository check" : "old release cache triggers a fresh new repository check");
+            Check(File.ReadAllText(legacyPath) == legacyText && !File.Exists(migrated.Store.StatePath),
+                "repository cache migration preserves legacy cache and installed update state");
+        }
+        var offlineCalls = 0;
+        using (var offline = new LauncherUpdates(client.Store.StateDirectory, executable, "1.1.0", handler: new UpdateHandler(_ =>
+        { offlineCalls++; throw new HttpRequestException("fixture offline"); })))
+        {
+            Check(offline.GetCachedRelease()?.Sha256 == sha && (await offline.CheckAsync(false, default))?.Sha256 == sha && offlineCalls == 0,
+                "new repository release cache survives restart and works offline");
+        }
+        var rejectedCacheCalls = 0;
+        using (var poisoned = new LauncherUpdates(Path.Combine(directory, "foreign-scoped-cache"), executable, "1.1.0",
+            handler: new UpdateHandler(request => { rejectedCacheCalls++; return OfficialResponse(request); })))
+        {
+            JsonFile.Write(Path.Combine(poisoned.Store.Root, "release-cache-" + LauncherUpdates.Repository.Replace('/', '-') + ".json"),
+                new LauncherReleaseCache(DateTimeOffset.UtcNow, oldRelease));
+            Check(poisoned.GetCachedRelease() is null && (await poisoned.CheckAsync(false, default))?.Sha256 == sha && rejectedCacheCalls == 3,
+                "old repository assets copied into the new cache are rejected and refreshed");
+        }
+        await Reject(() => { LauncherUpdates.ValidateRelease(oldRelease); return Task.CompletedTask; },
+            "old repository assets cannot be installed through the new update source");
+        using var legacyAsset = new LauncherUpdates(Path.Combine(directory, "legacy-asset"), executable, "1.1.0", handler: new UpdateHandler(request =>
+            request.RequestUri!.AbsolutePath.EndsWith("/latest") ? Json(Release(exeUrl: oldRelease.ExeUrl)) : OfficialResponse(request)));
+        await Reject(() => legacyAsset.CheckAsync(true, default), "new repository release cannot advertise an old repository executable");
         using var foreign = new LauncherUpdates(Path.Combine(directory, "foreign"), executable, "1.1.0", handler: new UpdateHandler(_ => Json(Release(exeUrl: "https://example.com/AnimaRandomStudio.exe"))));
         await Reject(() => foreign.CheckAsync(true, default), "foreign release executable URL rejected before metadata download");
         using var preview = new LauncherUpdates(Path.Combine(directory, "preview"), executable, "1.1.0", handler: new UpdateHandler(_ => Json(Release(prerelease: true))));

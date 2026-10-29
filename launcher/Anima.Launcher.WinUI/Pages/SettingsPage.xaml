@@ -136,7 +136,7 @@
                 </launch:Card.ActionContent>
             </launch:Card>
 
-            <launch:Card Header="桌面快捷方式" IconGlyph="&#xE71B;" Description="在桌面创建 Anima Random Studio 快捷方式">
+            <launch:Card Header="桌面快捷方式" IconGlyph="&#xE71B;" Description="在桌面创建 Comfy Image Atelier 快捷方式">
                 <launch:Card.ActionContent>
                     <Button Content="创建快捷方式" Click="Shortcut_Click" />
                 </launch:Card.ActionContent>

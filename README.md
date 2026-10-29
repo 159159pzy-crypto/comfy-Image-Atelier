@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/readme/app-icon.png" width="96" alt="Anima Random Studio 软件图标">
+  <img src="docs/readme/app-icon.png" width="96" alt="Comfy Image Atelier 软件图标">
 </p>
 
-<h1 align="center">Anima Random Studio</h1>
+<h1 align="center">Comfy Image Atelier</h1>
 
 <p align="center">
   <strong>Anima 与 Krea 2 的本地生图工作台</strong><br>
@@ -10,8 +10,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/159159pzy-crypto/comfyui-random-image-generation/releases/download/1.4.0/AnimaRandomStudio.exe"><strong>下载单文件版</strong></a> ·
-  <a href="https://github.com/159159pzy-crypto/comfyui-random-image-generation/releases/download/1.4.0/AnimaRandomStudio-Setup-win-x64.exe">下载安装版</a> ·
+  <a href="https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/download/1.5.0/AnimaRandomStudio.exe"><strong>下载单文件版</strong></a> ·
+  <a href="https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/download/1.5.0/AnimaRandomStudio-Setup-win-x64.exe">下载安装版</a> ·
   <a href="#开始使用">开始使用</a> ·
   <a href="docs/guide.md">使用指南</a> ·
   <a href="https://qm.qq.com/q/M9MbjzaAUA">QQ 交流群</a>
@@ -23,10 +23,10 @@
 
 **固定你喜欢的角色与风格，让动作、服装和场景带来新的可能；抽到满意的图，再把它变成下一次创作的起点。**
 
-Anima Random Studio 基于 [ComfyUI](https://github.com/Comfy-Org/ComfyUI) 与 Anima Tools 生态构建，把提示词池、单图编辑、图生图、AI 提示词工具、LoRA、放大修复和作品历史放进同一个工作台。配套原生 Windows 启动器，负责环境准备、模型下载、服务管理与更新，让日常精力更多留在选词、看图和调整画面上。
+Comfy Image Atelier 基于 [ComfyUI](https://github.com/Comfy-Org/ComfyUI) 与 Anima Tools 生态构建，把提示词池、单图编辑、图生图、AI 提示词工具、LoRA、放大修复和作品历史放进同一个工作台。配套原生 Windows 启动器，负责环境准备、模型下载、服务管理与更新，让日常精力更多留在选词、看图和调整画面上。
 
 > [!NOTE]
-> 已发布安装包为 **1.4.0 beta**，需手动下载，该发行包的**收藏功能暂不推荐使用**。当前源码已重新实现下述作品收藏功能，尚未发布新的安装包。版本变化与实机验证范围见 [发行说明](RELEASE_NOTES.md)；需要正式版可查看 [最新正式 Release](https://github.com/159159pzy-crypto/comfyui-random-image-generation/releases/latest)。
+> **Comfy Image Atelier 1.5.0 正式版**现已发布。本项目由 Anima Random Studio 更名并迁移至本仓库；旧版用户请手动下载本版一次，之后从新仓库获取更新。版本变化与验证范围见 [发行说明](RELEASE_NOTES.md)；[最新正式 Release](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/latest)。
 
 ## 你可以用它做什么
 
@@ -201,7 +201,7 @@ Anima 的基础规范按标签规则整理；Krea 2 保留段落、大小写、�
 
 提示词与自定义内容保存在本地，历史使用本地数据库；存储异常会给出保护提示，方便先备份、再排查。图生图与反推导入副本继续保存在本地，不再按闲置天数自动清理；已有图片、历史记录和反推结果保留。
 
-作品收藏与提示词收藏相互独立。源码升级保留旧收藏夹和收藏记录，并在数据库结构迁移前备份；旧记录缺少收藏时间时保持原有顺序，新收藏排在前面。项目同时保留提示词收藏树、画师快捷收藏及词池相关批量入口；Krea 2 的提示词收藏保存独立文本快照。已发布的 1.4.0 beta 收藏使用提示仍以发行说明为准。
+作品收藏与提示词收藏相互独立。源码升级保留旧收藏夹和收藏记录，并在数据库结构迁移前备份；旧记录缺少收藏时间时保持原有顺序，新收藏排在前面。项目同时保留提示词收藏树、画师快捷收藏及词池相关批量入口；Krea 2 的提示词收藏保存独立文本快照。
 
 界面提供浅色 / 深色主题、可打断的切换与展开动效，并适配窄屏、触摸大图与系统减少动态效果设置。服务默认面向本机使用，界面适配不等于开放局域网访问。
 
@@ -243,11 +243,11 @@ Anima 的基础规范按标签规则整理；Krea 2 保留段落、大小写、�
 
 | 下载 | 适合怎样使用 |
 | --- | --- |
-| [**AnimaRandomStudio.exe**](https://github.com/159159pzy-crypto/comfyui-random-image-generation/releases/download/1.4.0/AnimaRandomStudio.exe) | 单文件直接运行，适合想先打开体验的用户 |
-| [**Windows 安装版**](https://github.com/159159pzy-crypto/comfyui-random-image-generation/releases/download/1.4.0/AnimaRandomStudio-Setup-win-x64.exe) | 按当前用户安装，创建开始菜单及可选桌面入口，无需管理员权限 |
-| [**便携 ZIP**](https://github.com/159159pzy-crypto/comfyui-random-image-generation/releases/download/1.4.0/AnimaRandomStudio-portable-win-x64.zip) | 解压后是同一份 EXE，适合通过压缩包下载、保存或传输 |
+| [**AnimaRandomStudio.exe**](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/download/1.5.0/AnimaRandomStudio.exe) | 单文件直接运行，适合想先打开体验的用户 |
+| [**Windows 安装版**](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/download/1.5.0/AnimaRandomStudio-Setup-win-x64.exe) | 按当前用户安装，创建开始菜单及可选桌面入口，无需管理员权限 |
+| [**便携 ZIP**](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/download/1.5.0/AnimaRandomStudio-portable-win-x64.zip) | 解压后是同一份 EXE，适合通过压缩包下载、保存或传输 |
 
-发布页的 Source code 是开发源码，不包含启动器。ComfyUI、节点与模型在配置环境时另行准备；文件校验值见 [1.4.0 发布页](https://github.com/159159pzy-crypto/comfyui-random-image-generation/releases/tag/1.4.0) 的 `SHA256SUMS.txt`。
+发布页的 Source code 是开发源码，不包含启动器。ComfyUI、节点与模型在配置环境时另行准备；文件校验值见 [1.5.0 发布页](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/tag/1.5.0) 的 `SHA256SUMS.txt`。
 
 ### 三步生成第一张图
 
@@ -263,11 +263,11 @@ Anima 的基础规范按标签规则整理；Krea 2 保留段落、大小写、�
 | 磁盘空间 | Anima 三项基础模型约 5.24 GiB，另需环境、依赖与缓存空间，以安装预检为准 |
 | 默认地址 | Studio `http://127.0.0.1:8190`；ComfyUI `http://127.0.0.1:8188` |
 
-**当前版本说明：** 1.4.0 为 beta，尚未完成从零安装、GPU 生图和升级回退的完整实机验收，不进入正式版自动更新渠道。当前发布包未签署代码签名；详细验证范围与已知问题见 [发行说明](RELEASE_NOTES.md)。
+**当前版本说明：** 1.5.0 为正式版，本次验证以自动化检查和迁移、启动、安装包完整性为重点，未覆盖完整的从零安装、GPU 生图与升级回退实机验收。当前发布包未签署代码签名；具体范围见 [发行说明](RELEASE_NOTES.md)。
 
 ## 数据保存与源码运行
 
-安装版与单文件版共用 `%LOCALAPPDATA%/AnimaRandomStudio`，源码版默认使用项目 `data`。移动 EXE 不迁移环境或历史，旧源码数据也不会自动迁入启动器目录。升级前等待队列空闲、停止工作台并退出启动器，再备份整个数据目录；ComfyUI 原图、模型与插件配置按需另行备份。
+更名后继续使用 `AnimaRandomStudio.exe` 和原安装标识；安装版可覆盖升级。安装版与单文件版共用 `%LOCALAPPDATA%/AnimaRandomStudio`，源码版默认使用项目 `data`。移动 EXE 不迁移环境或历史，旧源码数据也不会自动迁入启动器目录。升级前等待队列空闲、停止工作台并退出启动器，再备份整个数据目录；ComfyUI 原图、模型与插件配置按需另行备份。
 
 源码运行需要 **Python 3.11+** 和已配好节点、模型的本机 ComfyUI。先启动 ComfyUI，再在仓库根目录执行：
 
@@ -284,7 +284,7 @@ python -m venv .venv
 作者目前是学生，项目仍在维护。欢迎分享实际创作场景、反馈可复现的问题，也欢迎参与功能改进、修复和文档建设。
 
 - [QQ 交流群](https://qm.qq.com/q/M9MbjzaAUA)：交流用法、参数与创作体验。
-- [提交 Issue](https://github.com/159159pzy-crypto/comfyui-random-image-generation/issues)：附上版本、操作步骤与日志，遮去密钥等私人信息。
+- [提交 Issue](https://github.com/159159pzy-crypto/comfy-Image-Atelier/issues)：附上版本、操作步骤与日志，遮去密钥等私人信息。
 - [完整使用指南](docs/guide.md) / [更新日志](CHANGELOG.md) / [发行说明](RELEASE_NOTES.md)：查用法、版本变化与当前限制。
 - [安全与支持范围](SECURITY.md) / [依赖说明](docs/dependencies.md)：了解本机访问边界、第三方组件与已知限制。
 

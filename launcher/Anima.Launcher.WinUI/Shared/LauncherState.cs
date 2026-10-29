@@ -1013,15 +1013,26 @@ internal sealed partial class LauncherState : IDisposable
     public void CreateDesktopShortcut()
     {
         var exe = Environment.ProcessPath!;
-        var shortcut = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Anima Random Studio.lnk");
+        var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+        var shortcut = Path.Combine(desktop, ProductBranding.DisplayName + ".lnk");
+        var legacyShortcut = Path.Combine(desktop, ProductBranding.LegacyDisplayName + ".lnk");
+        var entries = new LauncherUpdateStore(Program.StateDir).Load().EntryPaths.Append(exe).ToArray();
         // COM arguments are supplied as data, never interpolated into a shell command.
         var type = Type.GetTypeFromProgID("WScript.Shell")!;
         dynamic shell = Activator.CreateInstance(type)!;
         dynamic link = shell.CreateShortcut(shortcut);
+        if (File.Exists(shortcut) && !ProductBranding.MatchesEntry((string)link.TargetPath, entries))
+            throw new IOException("桌面已存在指向其他程序的同名快捷方式，请先将其改名。");
         link.TargetPath = exe;
         link.WorkingDirectory = Path.GetDirectoryName(exe);
         link.IconLocation = exe + ",0";
         link.Save();
+        if (File.Exists(legacyShortcut))
+        {
+            dynamic legacy = shell.CreateShortcut(legacyShortcut);
+            if (ProductBranding.MatchesEntry((string)legacy.TargetPath, entries)
+                && string.IsNullOrWhiteSpace((string)legacy.Arguments)) File.Delete(legacyShortcut);
+        }
         SetStatus("桌面快捷方式已创建。");
     }
 

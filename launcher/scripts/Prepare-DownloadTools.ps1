@@ -113,7 +113,7 @@ if ($BundleContentDirectory) {
         } finally { $zip.Dispose() }
     } finally { $package.Dispose(); $stream.Dispose() }
     $notice = @'
-Anima Random Studio download tools
+Comfy Image Atelier download tools
 
 uv 0.12.16: MIT OR Apache-2.0. The original license texts and pinned source archive are included in DOWNLOAD-TOOLS-SOURCES.zip.
 aria2 1.37.0 Windows x64 build1: GPL-2.0-or-later. The upstream executable is unchanged. COPYING, LICENSE.OpenSSL, AUTHORS, README.mingw and NEWS are included.

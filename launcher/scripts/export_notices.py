@@ -45,7 +45,7 @@ def export(assets: Path, output: Path) -> None:
             notices.append("\n--- " + path.name + " ---\n" + path.read_text(encoding="utf-8-sig", errors="replace"))
     output.mkdir(parents=True, exist_ok=True)
     introduction = (
-        "Anima Random Studio - third-party notices\n"
+        "Comfy Image Atelier - third-party notices\n"
         "This inventory covers restored launcher packages and runtime packs, including build-only dependencies.\n"
         "Not every listed package is redistributed. Original notices are reproduced below.\n"
         "ComfyUI, Python packages, custom nodes and models are downloaded separately and retain their own licenses.\n"

@@ -79,7 +79,7 @@
                             <TextBlock x:Name="RootLabel" Text="安装文件夹" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
                             <Grid ColumnSpacing="8">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                                <TextBox x:Name="RootBox" TextChanged="Root_Changed" PlaceholderText="例如 D:\AnimaStudio"
+                                <TextBox x:Name="RootBox" TextChanged="Root_Changed" PlaceholderText="例如 D:\ComfyImageAtelier"
                                     AutomationProperties.AutomationId="SetupRoot" AutomationProperties.Name="安装或导入目录" />
                                 <Button x:Name="PickRootButton" Grid.Column="1" Content="浏览…" Click="PickRoot_Click"
                                     AutomationProperties.AutomationId="SetupPickRoot" AutomationProperties.Name="选择安装或导入文件夹" />

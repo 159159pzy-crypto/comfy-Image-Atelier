@@ -2,7 +2,7 @@
 
 ## 安装与使用
 
-本版为 [1.4.0 beta Release](https://github.com/159159pzy-crypto/comfyui-random-image-generation/releases/tag/1.4.0)，需手动下载；[最新正式 Release](https://github.com/159159pzy-crypto/comfyui-random-image-generation/releases/latest) 继续提供稳定版。1.2.0 起，下载 `AnimaRandomStudio-Setup-win-x64.exe` 安装，或直接下载 `AnimaRandomStudio.exe` 运行。`AnimaRandomStudio-portable-win-x64.zip` 仅包含同一份 EXE。源码 ZIP 不包含 EXE。运行依赖自动提取到用户缓存，EXE 旁无需 DLL 或资源文件。
+本版为 [Comfy Image Atelier 1.5.0 正式版](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/tag/1.5.0)。软件由 Anima Random Studio 更名，旧版用户需从新仓库手动下载一次，之后启动器从新仓库检查正式 Release。为兼容现有安装与用户数据，保留 EXE 文件名、安装标识和数据目录。下载 `AnimaRandomStudio-Setup-win-x64.exe` 安装，或直接下载 `AnimaRandomStudio.exe` 运行。`AnimaRandomStudio-portable-win-x64.zip` 仅包含同一份 EXE。源码 ZIP 不包含 EXE。运行依赖自动提取到用户缓存，EXE 旁无需 DLL 或资源文件。
 
 安装版默认按用户安装到 `%LOCALAPPDATA%/Programs/AnimaRandomStudio`，也可选择其他位置；创建开始菜单入口，可选桌面快捷方式；卸载保留用户数据、模型和环境。
 
@@ -86,7 +86,7 @@ aria2 的临时数据和控制文件与兼容下载的连续 `.part` 文件分�
 
 完整更新验证成功后解除旧工作台的固定回退；失败恢复原版本和原配置，保留原固定设置。原来运行的工作台会安全停止并恢复，原来停止的服务保持停止；无法安全停机时拒绝更新，不强制结束任务。工作台的「应用内置新版」与「回退上一版」仍可单独使用。
 
-1.1.0 及更早版本没有联网自更新功能，需要最后一次下载带更新功能的新版本。此后可直接从软件内更新。安装版拒绝降级，安装相同版本可修复；安装或卸载前需先退出启动器，安装程序不会强制结束服务。
+旧仓库发布的程序仍使用旧更新地址，需要手动下载安装本版一次。此后可直接从软件内获取新仓库的正式版更新。安装版拒绝降级，安装相同版本可修复；安装或卸载前需先退出启动器，安装程序不会强制结束服务。
 
 便携版、安装版和旧入口共享配置、历史及更新状态，默认目录为 `%LOCALAPPDATA%/AnimaRandomStudio`。移动便携 EXE 不会迁移历史、模型或 ComfyUI。迁移前先等待任务空闲、停止工作台并退出启动器，再备份整个目录；旧源码版的数据在原项目的 `data` 中。启动器不会自动把旧源码版的数据迁入新位置。
 
@@ -122,7 +122,7 @@ python launcher/scripts/patch_prompt_assistant.py --root '<Prompt Assistant 插�
 
 `--check` 不修改文件：返回码 0 表示已安装，2 表示已识别但待安装，1 表示不支持或文件异常。补丁脚本内嵌在启动器 Core 程序集中，发布包不依赖源码目录。
 
-可将 `templates/workflow_ui_v2.json` 拖进 ComfyUI 检查缺失节点；应用实际提交使用 `templates/workflow_api_v2.json`。节点及版本见 [运行清单](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.4.0/launcher/manifests/launcher-manifest.json)。
+可将 `templates/workflow_ui_v2.json` 拖进 ComfyUI 检查缺失节点；应用实际提交使用 `templates/workflow_api_v2.json`。节点及版本见 [运行清单](https://github.com/159159pzy-crypto/comfy-Image-Atelier/blob/1.5.0/launcher/manifests/launcher-manifest.json)。
 
 ## 本地图像反推模型
 
@@ -179,4 +179,4 @@ pwsh ./launcher/scripts/Test-LauncherInstaller.ps1 -CandidateDirectory './dist/c
 
 需要源码目录的双击入口时，可运行 `pwsh ./Build-Launcher.ps1 -InstallRootEntry`；部署到根目录的 EXE 与发布单文件一致，不依赖同级 `.launcher`；替换前旧入口备份在 `.launcher` 中。普通构建不会修改根入口或快捷方式。
 
-包内附带第三方许可和依赖清单；ComfyUI、节点与模型单独下载。已知依赖限制见 [依赖说明](https://github.com/159159pzy-crypto/comfyui-random-image-generation/blob/1.4.0/docs/dependencies.md)。
+包内附带第三方许可和依赖清单；ComfyUI、节点与模型单独下载。已知依赖限制见 [依赖说明](https://github.com/159159pzy-crypto/comfy-Image-Atelier/blob/1.5.0/docs/dependencies.md)。

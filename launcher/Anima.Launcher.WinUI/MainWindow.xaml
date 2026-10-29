@@ -29,7 +29,7 @@
             </Rectangle>
         </Grid>
         <Grid x:Name="AppTitleBar" Background="Transparent">
-            <TextBlock Text="Anima Random Studio" Margin="22,0,140,0" VerticalAlignment="Center" FontSize="11" Foreground="{ThemeResource StudioTertiaryBrush}" />
+            <TextBlock Text="Comfy Image Atelier" Margin="22,0,140,0" VerticalAlignment="Center" FontSize="11" Foreground="{ThemeResource StudioTertiaryBrush}" />
         </Grid>
         <Border Grid.Row="1" Background="{ThemeResource StudioChromeBrush}" BorderBrush="{ThemeResource StudioEdgeBrush}" BorderThickness="1" CornerRadius="32" Margin="16,4,16,16" Padding="14,9">
             <Grid ColumnSpacing="14">

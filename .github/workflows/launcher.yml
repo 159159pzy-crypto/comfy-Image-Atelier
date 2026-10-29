@@ -50,6 +50,9 @@ jobs:
       - run: dotnet run -c Release --project launcher/Anima.Launcher.Tests
         env:
           ANIMA_LAUNCHER_TEST_ROOT: ${{ runner.temp }}/anima-launcher-tests
+      - name: Verify branding and owned shortcut migration
+        shell: pwsh
+        run: ./launcher/scripts/Test-LauncherBranding.ps1
       - name: Verify package integrity checks
         shell: pwsh
         run: ./launcher/scripts/Test-LauncherPackage.ps1

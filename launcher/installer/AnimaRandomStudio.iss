@@ -14,20 +14,22 @@
   #define InstallerMutex "Local\AnimaRandomStudioLauncher"
 #endif
 #if InstallerAppId == "AnimaRandomStudio"
-  #define ShortcutName "Anima Random Studio"
+  #define ShortcutName "Comfy Image Atelier"
+  #define LegacyShortcutName "Anima Random Studio"
 #else
   #define ShortcutName InstallerAppId
+  #define LegacyShortcutName InstallerAppId + ".Legacy"
 #endif
 
 [Setup]
 AppId={#InstallerAppId}
 AppName={#ShortcutName}
 AppVersion={#AppVersion}
-AppPublisher=Anima Random Studio
-AppPublisherURL=https://github.com/159159pzy-crypto/comfyui-random-image-generation
+AppPublisher=Comfy Image Atelier
+AppPublisherURL=https://github.com/159159pzy-crypto/comfy-Image-Atelier
 DefaultDirName={localappdata}\Programs\AnimaRandomStudio
 DisableDirPage=no
-DefaultGroupName=Anima Random Studio
+DefaultGroupName=Comfy Image Atelier
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
@@ -56,9 +58,36 @@ Name: "{autoprograms}\{#ShortcutName}"; Filename: "{app}\AnimaRandomStudio.exe";
 Name: "{autodesktop}\{#ShortcutName}"; Filename: "{app}\AnimaRandomStudio.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\AnimaRandomStudio.exe"; Parameters: "--show"; Description: "Open Anima Random Studio"; Flags: nowait postinstall skipifsilent unchecked
+Filename: "{app}\AnimaRandomStudio.exe"; Parameters: "--show"; Description: "Open Comfy Image Atelier"; Flags: nowait postinstall skipifsilent unchecked
 
 [Code]
+procedure MigrateOwnedShortcut(const Directory: String);
+var
+  OldPath, NewPath, Target: String;
+  Shell, Link: Variant;
+begin
+  OldPath := Directory + '\{#LegacyShortcutName}.lnk';
+  NewPath := Directory + '\{#ShortcutName}.lnk';
+  if not FileExists(OldPath) or not FileExists(NewPath) then exit;
+  Target := ExpandConstant('{app}\AnimaRandomStudio.exe');
+  try
+    Shell := CreateOleObject('WScript.Shell');
+    Link := Shell.CreateShortcut(OldPath);
+    if (CompareText(ExpandFileName(String(Link.TargetPath)), Target) = 0) and (String(Link.Arguments) = '') then
+      DeleteFile(OldPath);
+  except
+    Log('Existing shortcut was preserved because its target could not be confirmed.');
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then begin
+    MigrateOwnedShortcut(ExpandConstant('{autoprograms}'));
+    MigrateOwnedShortcut(ExpandConstant('{autodesktop}'));
+  end;
+end;
+
 function PackedVersion(const Text: String): Int64;
 var
   Parts: TArrayOfString;
@@ -119,7 +148,7 @@ begin
   StringChangeEx(Report, #9, '', True);
   if (Pos('"protocolVersion":1', Report) = 0) or (Pos('"canInstall":true', Report) = 0) or
      (Pos('"updateInProgress":false', Report) = 0) or (Pos('"running":false', Report) = 0) then
-    Result := 'Close Anima Random Studio and wait for its update to finish before installing.';
+    Result := 'Close Comfy Image Atelier and wait for its update to finish before installing.';
   if Result <> '' then exit;
   if CheckDowngrade then begin
     StartAt := Pos('"effectiveVersion":"', Report);

@@ -136,14 +136,16 @@ public sealed class LauncherUpdateStore
 
 public sealed class LauncherUpdates : IDisposable
 {
-    public const string Repository = "159159pzy-crypto/comfyui-random-image-generation";
+    public const string Repository = "159159pzy-crypto/comfy-Image-Atelier";
     public const string LatestReleaseUrl = "https://api.github.com/repos/" + Repository + "/releases/latest";
     public LauncherUpdateStore Store { get; }
     public string CurrentExecutable { get; }
     public string CurrentVersion { get; }
     private readonly HttpClient http;
     private readonly Action<string> log;
-    private string CachePath => Path.Combine(Store.Root, "release-cache.json");
+    // Repository-scoped caches also isolate negative (no update) results from
+    // the previous update source. Keep legacy files for older installations.
+    private string CachePath => Path.Combine(Store.Root, "release-cache-" + Repository.Replace('/', '-') + ".json");
     public LauncherUpdates(string stateDir, string currentExe, string currentVersion, Action<string>? log = null, HttpMessageHandler? handler = null)
     {
         Store = new(stateDir); CurrentExecutable = Path.GetFullPath(currentExe); CurrentVersion = currentVersion;
@@ -157,10 +159,18 @@ public sealed class LauncherUpdates : IDisposable
             throw new InvalidDataException("启动器版本必须是稳定版三段版本号。");
         return value;
     }
-    public LauncherRelease? GetCachedRelease()
+    private LauncherReleaseCache? ReadCache()
     {
-        try { return File.Exists(CachePath) ? JsonFile.Read<LauncherReleaseCache>(CachePath).Release : null; } catch { return null; }
+        try
+        {
+            if (!File.Exists(CachePath)) return null;
+            var cached = JsonFile.Read<LauncherReleaseCache>(CachePath);
+            if (cached.Release is { } release) ValidateRelease(release);
+            return cached;
+        }
+        catch { return null; }
     }
+    public LauncherRelease? GetCachedRelease() => ReadCache()?.Release;
     public InstalledLauncher? GetDownloaded()
     {
         var candidate = Store.Load().Downloaded;
@@ -170,10 +180,8 @@ public sealed class LauncherUpdates : IDisposable
     public bool IsFailed(InstalledLauncher candidate) => Store.Load().Failed.Any(x => x.Version == candidate.Version && x.Sha256.Equals(candidate.Sha256, StringComparison.OrdinalIgnoreCase));
     public async Task<LauncherRelease?> CheckAsync(bool force, CancellationToken ct)
     {
-        if (!force && File.Exists(CachePath))
-        {
-            try { var cached = JsonFile.Read<LauncherReleaseCache>(CachePath); if (DateTimeOffset.UtcNow - cached.CheckedAt < TimeSpan.FromHours(24)) return cached.Release; } catch { }
-        }
+        if (!force && ReadCache() is { } cached && DateTimeOffset.UtcNow - cached.CheckedAt < TimeSpan.FromHours(24))
+            return cached.Release;
         var json = await GetText(LatestReleaseUrl, 1024 * 1024, ct);
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;

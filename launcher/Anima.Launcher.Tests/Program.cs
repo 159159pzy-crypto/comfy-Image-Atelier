@@ -134,6 +134,11 @@ var testArtifacts = Environment.GetEnvironmentVariable("ANIMA_LAUNCHER_TEST_ROOT
 var work = Path.Combine(string.IsNullOrWhiteSpace(testArtifacts) ? Path.Combine(root, "output", "launcher-tests") : Path.GetFullPath(testArtifacts), Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(work);
 var count = 0;
+count += ProductBrandingTests.Run(work);
+if (args.Contains("--branding-only"))
+{
+    Console.WriteLine($"{count} product branding compatibility checks passed."); return;
+}
 void Check(bool condition, string label) { if (!condition) throw new Exception("FAIL: " + label); count++; Console.WriteLine("PASS: " + label); }
 async Task Throws(Func<Task> operation, string label) { try { await operation(); } catch { Check(true, label); return; } throw new Exception("Expected failure: " + label); }
 async Task ThrowsType<T>(Func<Task> operation, string label) where T : Exception

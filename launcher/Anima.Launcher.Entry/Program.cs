@@ -29,7 +29,7 @@ internal static class Program
                 CreateNoWindow = commandLine,
             };
             foreach (var argument in args) info.ArgumentList.Add(argument);
-            using var process = Process.Start(info) ?? throw new IOException("无法启动 Anima Random Studio。");
+            using var process = Process.Start(info) ?? throw new IOException("无法启动 Comfy Image Atelier。");
             if (!commandLine) return 0;
             var output = process.StandardOutput.ReadToEndAsync();
             var error = process.StandardError.ReadToEndAsync();
@@ -41,7 +41,7 @@ internal static class Program
         catch (Exception ex)
         {
             if (commandLine) Console.Error.WriteLine(ex.Message);
-            else MessageBoxW(IntPtr.Zero, ex.Message, "Anima Random Studio", 0x10);
+            else MessageBoxW(IntPtr.Zero, ex.Message, "Comfy Image Atelier", 0x10);
             return 1;
         }
     }

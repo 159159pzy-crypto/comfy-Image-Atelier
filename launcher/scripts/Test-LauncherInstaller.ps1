@@ -21,6 +21,9 @@ if ($LASTEXITCODE -ne 0) { throw 'Isolated installer test build failed.' }
 $setup = Join-Path $output 'AnimaRandomStudio-Setup-win-x64.exe'
 $installed = Join-Path $root 'installed'
 $registryPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\' + $id + '_is1'
+$programs = [Environment]::GetFolderPath('Programs')
+$legacyShortcut = Join-Path $programs ($id + '.Legacy.lnk')
+$newShortcut = Join-Path $programs ($id + '.lnk')
 $previousHome = $env:ANIMA_LAUNCHER_HOME
 $previousExtract = $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR
 $script:installerRun = 0
@@ -74,7 +77,7 @@ try {
     if (Test-Path -LiteralPath (Join-Path $installed 'AnimaRandomStudio.exe')) { throw 'First-install downgrade guard wrote program files.' }
     Write-Output 'PASS: first Setup refuses a newer active portable launcher in shared state'
     [System.IO.File]::WriteAllText($updateState, ('{"protocolVersion":1,"pendingTransactionId":"' + [Guid]::NewGuid().ToString('N') + '"}'))
-    try { Run-Installer $setup $arguments $true 'Close Anima Random Studio and wait for its update to finish before installing.' } finally { Remove-Item -LiteralPath $updateState }
+    try { Run-Installer $setup $arguments $true 'Close Comfy Image Atelier and wait for its update to finish before installing.' } finally { Remove-Item -LiteralPath $updateState }
     Write-Output 'PASS: first Setup refuses a pending portable software update'
     Run-Installer $setup $arguments
     if ((Get-FileHash -LiteralPath (Join-Path $installed 'AnimaRandomStudio.exe')).Hash -ne (Get-FileHash -LiteralPath $source).Hash) { throw 'Installed EXE differs from portable EXE.' }
@@ -96,11 +99,27 @@ try {
     Write-Output 'PASS: installer rejects a downgrade'
     Run-Installer $setup $arguments
     Write-Output 'PASS: equal-version repair succeeds'
+    # The UUID-backed test AppId gives these two Start menu links unique names.
+    # Exercise the real installer migration without touching product shortcuts.
+    $shell = New-Object -ComObject WScript.Shell
+    $legacyLink = $shell.CreateShortcut($legacyShortcut)
+    $legacyLink.TargetPath = Join-Path $installed 'AnimaRandomStudio.exe'
+    $legacyLink.Save()
+    $iconArguments = @($arguments | Where-Object { $_ -ne '/NOICONS' })
+    Run-Installer $setup $iconArguments
+    if ((Test-Path -LiteralPath $legacyShortcut) -or -not (Test-Path -LiteralPath $newShortcut)) { throw 'Installer did not replace its confirmed legacy Start menu entry.' }
+    $legacyLink = $shell.CreateShortcut($legacyShortcut)
+    $legacyLink.TargetPath = $source
+    $legacyLink.Save()
+    Run-Installer $setup $iconArguments
+    if (-not (Test-Path -LiteralPath $legacyShortcut) -or $shell.CreateShortcut($legacyShortcut).TargetPath -ne $source) { throw 'Installer changed a legacy-name shortcut targeting another executable.' }
+    Write-Output 'PASS: installer migrates only confirmed legacy shortcuts and preserves unrelated targets'
     Run-Installer (Join-Path $installed 'unins000.exe') @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/LOG="' + (Join-Path $root 'uninstall.log') + '"'))
     if ((Test-Path -LiteralPath (Join-Path $installed 'AnimaRandomStudio.exe')) -or (Test-Path -LiteralPath $registryPath)) { throw 'Uninstall did not remove the test program or its isolated registration.' }
     if ([System.IO.File]::ReadAllText($sentinel) -ne 'preserve user data') { throw 'Uninstall changed shared user data.' }
     Write-Output 'PASS: uninstall removes only program/registration and preserves shared user data'
 } finally {
+    if (Test-Path -LiteralPath $legacyShortcut) { Remove-Item -LiteralPath $legacyShortcut }
     $env:ANIMA_LAUNCHER_HOME = $previousHome
     $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR = $previousExtract
 }

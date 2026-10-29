@@ -43,7 +43,7 @@ public sealed partial class MainWindow : Window
         this.forceShow = forceShow;
         InitializeComponent();
         StudioTheme.ScopeResources(RootGrid);
-        Title = "Anima Random Studio · 安装与启动";
+        Title = "Comfy Image Atelier · 安装与启动";
         SystemBackdrop = new MicaBackdrop();
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
@@ -343,7 +343,7 @@ public sealed partial class MainWindow : Window
         try { AppWindow.Hide(); } catch { }
         if (minimizeNotified) return;
         minimizeNotified = true;
-        try { tray?.ShowNotification("Anima Random Studio", "已最小化到托盘，任务继续运行。"); } catch { }
+        try { tray?.ShowNotification("Comfy Image Atelier", "已最小化到托盘，任务继续运行。"); } catch { }
     }
 
     public void ShowWindow()
@@ -433,7 +433,7 @@ public sealed partial class MainWindow : Window
 
             tray = new TaskbarIcon
             {
-                ToolTipText = "Anima Random Studio",
+                ToolTipText = "Comfy Image Atelier",
                 ContextFlyout = menu,
                 LeftClickCommand = new RelayCommand(ShowWindow),
             };

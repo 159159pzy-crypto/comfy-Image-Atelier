@@ -1908,7 +1908,7 @@ def _setup_logging(root: Path, data_dir: Path | None = None) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Anima Random WebUI")
+    parser = argparse.ArgumentParser(description="Comfy Image Atelier")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8190)
     parser.add_argument("--comfy-url", default="http://127.0.0.1:8188")
