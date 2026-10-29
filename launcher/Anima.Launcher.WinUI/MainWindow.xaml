@@ -39,7 +39,7 @@
                         <TextBlock Text="A" FontFamily="Georgia" FontSize="25" FontWeight="Bold" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" />
                     </Border>
                     <StackPanel x:Name="BrandCopy" VerticalAlignment="Center" Spacing="2">
-                        <TextBlock Text="Anima" FontSize="15" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
+                        <TextBlock Text="Comfy Image Atelier" FontSize="15" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
                         <TextBlock Text="创作，从这里开始" FontSize="10" Foreground="{ThemeResource StudioSecondaryBrush}" />
                     </StackPanel>
                 </StackPanel>

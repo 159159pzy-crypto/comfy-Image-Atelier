@@ -14,7 +14,7 @@
                     <StackPanel Spacing="8">
                         <TextBlock Text="YOUR CREATIVE WORKSPACE" Style="{StaticResource StudioKickerStyle}" />
                         <TextBlock x:Name="WelcomeTitle" Text="创作，从这里开始。" Style="{StaticResource StudioHeadingStyle}" />
-                        <TextBlock x:Name="WelcomeDescription" Text="准备环境、放入模型，然后打开你的 Anima 创作工作台。" Style="{StaticResource StudioBodyStyle}" MaxWidth="580" HorizontalAlignment="Left" />
+                        <TextBlock x:Name="WelcomeDescription" Text="准备环境、放入模型，然后打开你的 Comfy Image Atelier 创作工作台。" Style="{StaticResource StudioBodyStyle}" MaxWidth="580" HorizontalAlignment="Left" />
                         <TextBlock x:Name="EnvironmentPath" FontSize="11" Foreground="{ThemeResource StudioTertiaryBrush}" TextTrimming="CharacterEllipsis" IsTextSelectionEnabled="True" />
                     </StackPanel>
                     <StackPanel x:Name="WelcomeActions" Grid.Column="1" Spacing="8" VerticalAlignment="Center" MinWidth="204">

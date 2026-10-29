@@ -6,7 +6,7 @@
     <SelfContained>true</SelfContained>
     <AssemblyName>AnimaLauncherEntry</AssemblyName>
     <Product>Comfy Image Atelier</Product>
-    <Title>Comfy Image Atelier</Title>
+    <AssemblyTitle>Comfy Image Atelier</AssemblyTitle>
     <Description>Comfy Image Atelier launcher entry</Description>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>

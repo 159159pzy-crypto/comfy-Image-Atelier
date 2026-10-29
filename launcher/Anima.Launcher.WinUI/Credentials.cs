@@ -33,7 +33,7 @@ internal static class Credentials
         var pointer = Marshal.StringToCoTaskMemUni(token);
         try
         {
-            var credential = new Credential { Type = 1, TargetName = "AnimaRandomStudio/" + host, UserName = host, CredentialBlob = pointer, CredentialBlobSize = (uint)Encoding.Unicode.GetByteCount(token), Persist = 2, Comment = "Anima model download" };
+            var credential = new Credential { Type = 1, TargetName = "AnimaRandomStudio/" + host, UserName = host, CredentialBlob = pointer, CredentialBlobSize = (uint)Encoding.Unicode.GetByteCount(token), Persist = 2, Comment = "Comfy Image Atelier model download" };
             if (!CredWrite(ref credential, 0)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
         }
         finally { Marshal.ZeroFreeCoTaskMemUnicode(pointer); }

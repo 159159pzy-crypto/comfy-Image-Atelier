@@ -21,6 +21,10 @@ foreach ($name in $hashes.Keys) {
     if ((Get-FileHash -LiteralPath (Join-Path $candidate $name) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hashes[$name]) { throw "Candidate hash does not match SHA256SUMS.txt: $name" }
 }
 $exe = Join-Path $candidate 'AnimaRandomStudio.exe'
+$versionInfo = (Get-Item -LiteralPath $exe).VersionInfo
+if ($versionInfo.ProductName -ne 'Comfy Image Atelier' -or $versionInfo.FileDescription -ne 'Comfy Image Atelier') {
+    throw 'Executable display metadata must use Comfy Image Atelier while retaining its compatible filename.'
+}
 Test-LauncherPackageIntegrity -ZipPath (Join-Path $candidate $archiveNames[0]) -ExecutablePath $exe | Out-Null
 $infoText = [System.IO.File]::ReadAllText((Join-Path $candidate 'build-info.json'))
 $info = $infoText | ConvertFrom-Json
