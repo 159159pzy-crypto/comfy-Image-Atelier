@@ -1107,8 +1107,8 @@ def validate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         settings["lora_managed_triggers"]
     )
 
-    if not isinstance(settings["character_detail"], str) or settings["character_detail"] not in {"trigger", "trigger_tags"}:
-        raise WorkflowError("character_detail 必须是 trigger 或 trigger_tags")
+    if not isinstance(settings["character_detail"], str) or settings["character_detail"] not in {"trigger", "trigger_tags", "trigger_tags_no_clothing"}:
+        raise WorkflowError("character_detail 必须是 trigger、trigger_tags 或 trigger_tags_no_clothing")
 
     settings["manual_artist"] = (
         normalize_artist_tags(settings["manual_artist"]) if profile_id == "anima"

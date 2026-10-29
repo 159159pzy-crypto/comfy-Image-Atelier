@@ -12,7 +12,7 @@ const sections = ['character', 'clothing', 'pose', 'background', 'expression'];
 const emptyPools = () => Object.fromEntries(sections.map(section => [section, { mode: 'include', ids: [], excluded_ids: [] }]));
 function defaults(profile = 'anima', workbench = 'random') {
   return { model_profile: profile, workbench, count: workbench === 'single' ? 1 : 4,
-    model_name: `${profile}-default`, steps: 20, cfg: 8, base_mode: 'normal',
+    model_name: `${profile}-default`, steps: 20, cfg: 8, base_mode: 'normal', character_detail: 'trigger_tags',
     loras: [], lora_managed_triggers: [], pools: emptyPools(), upscalers: {},
     extra_prompt: '', negative_prompt: '', krea_prompt_pool: { enabled: false, ids: [] } };
 }
@@ -183,3 +183,36 @@ test('single-workbench history and refresh retain hidden Krea selection without 
   assert.deepEqual(plain(loaded.ctx.draft.fixed), composition().fixed);
   assert.deepEqual(plain(loaded.ctx.readSettings().krea_prompt_pool), { enabled: false, ids: [] });
 });
+
+for (const mode of ['trigger_tags', 'trigger', 'trigger_tags_no_clothing']) {
+  test(`character mode ${mode} survives submission, refresh, model switching, and history import`, () => {
+    const h = setup();
+    h.setCurrent({ model_profile: 'anima', workbench: 'random' }, composition());
+    assert.equal(h.ctx.ui.character_detail.value, 'trigger_tags', 'new drafts retain the existing default');
+    h.ctx.ui.character_detail.value = mode;
+    assert.equal(h.ctx.readSettings().character_detail, mode, 'generation settings use the selected mode');
+    h.ctx.singleWorkbenchPersist();
+
+    const saved = JSON.parse(h.storage.get('anima-studio:workbenches:v1'));
+    assert.equal(saved.drafts.random.anima.settings.character_detail, mode);
+    const loaded = setup(h.storage);
+    loaded.state.drafts = saved.drafts;
+    loaded.ctx.singleWorkbenchSwitch(saved.mode, saved.profile, { save: false });
+    assert.equal(loaded.ctx.ui.character_detail.value, mode);
+    assert.equal(loaded.ctx.readSettings().character_detail, mode);
+    loaded.ctx.singleWorkbenchSwitch('random', 'krea2');
+    assert.equal(loaded.ctx.readSettings().character_detail, 'trigger_tags', 'a new model draft uses its default');
+    loaded.ctx.singleWorkbenchSwitch('random', 'anima');
+    assert.equal(loaded.ctx.ui.character_detail.value, mode, 'returning to Anima restores its saved choice');
+
+    const history = record();
+    history.settings.character_detail = mode;
+    loaded.ctx.ui.character_detail.value = mode === 'trigger' ? 'trigger_tags' : 'trigger';
+    const previousPools = plain(loaded.ctx.draft.pools);
+    loaded.ctx.singleWorkbenchRestoreHistory(history);
+    assert.equal(loaded.ctx.ui.character_detail.value, mode, 'history restores the recorded character mode');
+    assert.equal(loaded.ctx.readSettings().character_detail, mode);
+    assert.deepEqual(plain(loaded.ctx.draft.pools), previousPools, 'history still preserves the current pool selection');
+    assert.equal(JSON.parse(loaded.storage.get('anima-studio:workbenches:v1')).drafts.random.anima.settings.character_detail, mode);
+  });
+}

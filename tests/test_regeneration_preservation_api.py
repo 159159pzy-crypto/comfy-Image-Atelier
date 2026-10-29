@@ -1,4 +1,5 @@
 import copy
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -81,6 +82,57 @@ class RegenerationPreservationApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("blue eyes", text)
         saved = await self.history.get_image(image["id"])
         self.assertEqual(saved["resolved_selection"], image["resolved_selection"])
+
+    async def test_clothing_filter_reaches_workflow_history_and_frozen_regeneration(self):
+        catalog = self.manager.catalog
+        (catalog.tools_dir / "js" / "character_official_data.json").write_text(json.dumps({
+            "alpha||series": {"trigger": "alpha, series", "tags": [
+                "1girl", "blue eyes", "white shirt", "detached sleeves", "barefoot",
+                "hair bow", "bare shoulders", "navel", "cleavage",
+            ]},
+        }), encoding="utf-8")
+        catalog.reload()
+
+        async def captured_history(prompt_id, should_abort=None, missing_timeout=30.0):
+            payload = self.comfy.submissions[-1]
+            return {
+                "outputs": {"12": {"images": [{"filename": "filtered.png", "type": "output"}]}},
+                "prompt": [0, prompt_id, payload["prompt"], payload["extra_data"]],
+            }
+
+        self.comfy.wait_for_history = captured_history
+        settings = copy.deepcopy(DEFAULT_SETTINGS)
+        settings.update({"count": 1, "random_character": True, "character_detail": "trigger_tags_no_clothing",
+                         "quality_prompt": "", "manual_artist": ""})
+        settings["pools"]["character"] = {"mode": "include", "ids": ["character:alpha||series"]}
+        response = await self.client.post("/api/batches", json=settings)
+        self.assertEqual(response.status, 201, await response.text())
+        await self.manager.wait()
+        self.assertEqual(self.manager.snapshot()["status"], "completed")
+        expected = "1girl, alpha, series, blue eyes, hair bow, bare shoulders, navel, cleavage"
+        submitted = self.comfy.submissions[-1]
+        self.assertEqual(submitted["prompt"]["168"]["inputs"]["value"], expected)
+        image = (await self.history.list_images())["items"][0]
+        self.assertEqual(image["positive_prompt"], expected)
+        self.assertEqual(image["settings"]["character_detail"], "trigger_tags_no_clothing")
+        role = image["resolved_selection"]["character"][0]
+        self.assertEqual(role["prompt"], expected.removeprefix("1girl, "))
+        self.assertIn("white shirt", role["tags"])
+
+        # Frozen operations must work even when the original source disappears.
+        catalog._items["character"] = []
+        catalog._by_id.pop("character:alpha||series")
+        for mode in ("replay", "prompt_variant"):
+            with self.subTest(mode=mode):
+                body = {"mode": mode, **({"count": 1} if mode == "prompt_variant" else {})}
+                response = await self.client.post(f"/api/history/{image['id']}/regenerate", json=body)
+                self.assertEqual(response.status, 201, await response.text())
+                await self.manager.wait()
+                self.assertEqual(self.manager.snapshot()["status"], "completed")
+                submitted = self.comfy.submissions[-1]
+                self.assertEqual(submitted["prompt"]["168"]["inputs"]["value"], expected)
+                metadata = submitted["extra_data"]["extra_pnginfo"]["anima_random_webui"]
+                self.assertEqual(metadata["resolved_selection"], image["resolved_selection"])
 
     async def test_mismatched_role_requires_including_character_in_redraw(self):
         image = await self.create_legacy_image(positive="1girl, mystery, other, standing")

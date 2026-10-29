@@ -9,6 +9,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
 
+from .character_clothing_tags import is_character_clothing_tag
+
 
 logger = logging.getLogger(__name__)
 
@@ -306,7 +308,10 @@ def _restore_history_item(
         if not trigger:
             raise CatalogError("旧记录无法可靠保留角色，请同时重抽角色，或使用同提示词变体")
         snapshot["trigger"] = trigger
-        parts = trigger + (tags if settings.get("character_detail", "trigger_tags") == "trigger_tags" else [])
+        # Legacy snapshots contain historical tags, not fresh catalog output.
+        # Never apply today's clothing dictionary while preserving a character.
+        detail = settings.get("character_detail", "trigger_tags")
+        parts = trigger + (tags if detail in {"trigger_tags", "trigger_tags_no_clothing"} else [])
         if settings.get("female_count") or settings.get("male_count"):
             parts = [part for part in parts if normalize_text(part) not in PERSON_TAGS]
     if section == "character":
@@ -644,8 +649,11 @@ class PromptCatalog:
     ) -> list[str]:
         if section == "character" and item.get("trigger"):
             values = split_prompt(item.get("trigger"))
-            if character_detail == "trigger_tags":
-                values.extend(split_prompt(item.get("tags")))
+            if character_detail in {"trigger_tags", "trigger_tags_no_clothing"}:
+                tags = split_prompt(item.get("tags"))
+                if character_detail == "trigger_tags_no_clothing" and item.get("builtin") is True:
+                    tags = [tag for tag in tags if not is_character_clothing_tag(tag)]
+                values.extend(tags)
         else:
             values = split_prompt(item.get("tags") or item.get("prompt"))
         if strip_person_tags:

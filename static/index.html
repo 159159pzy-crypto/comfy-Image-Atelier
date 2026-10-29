@@ -82,7 +82,7 @@
           <div class="section-heading"><h2>提示词池</h2><span id="poolOverview">0 项已选</span></div>
           <div id="animaPromptPoolControls">
           <div id="dimensionList" class="dimension-list"></div>
-          <label class="field"><span>角色标签</span><select id="character_detail"><option value="trigger_tags">触发词 + 特征</option><option value="trigger">仅触发词</option></select></label>
+          <label class="field"><span>角色标签</span><select id="character_detail" aria-describedby="characterDetailHint"><option value="trigger_tags">触发词 + 特征</option><option value="trigger">仅触发词</option><option value="trigger_tags_no_clothing">触发词 + 特征（剔除服装）</option></select><small id="characterDetailHint" class="field-hint">剔除服装仅处理内置角色的衣物标签，保留配饰与身体特征；触发词仍可能带出默认服装。</small></label>
           <label class="field"><span>固定画师</span><input id="manual_artist" type="text" placeholder="例如 @anmi, @rella" autocomplete="off" spellcheck="false"></label>
           <details class="artist-favorites-section">
             <summary><span>收藏画师</span><span id="artistFavoriteCount" class="summary-value">0 位</span><i>+</i></summary>
