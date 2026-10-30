@@ -16,6 +16,8 @@ public sealed partial class DownloadTaskService : IDownloadDispatcher, IAsyncDis
     private readonly HashSet<string> cleaning = new(StringComparer.Ordinal);
     private readonly HashSet<string> cleaningTargets = new(StringComparer.Ordinal);
     private readonly int maxConcurrent;
+    private readonly int maxDependencyConcurrent;
+    private readonly Func<DependencyDownloadIdentity, LauncherConfig, CancellationToken, Task<string[]>> dependencySourceResolver;
     private int running;
     private long sequence;
     private bool disposed;
@@ -27,12 +29,18 @@ public sealed partial class DownloadTaskService : IDownloadDispatcher, IAsyncDis
     public DownloadTaskDatabase GetSnapshot() { lock (sync) return DownloadTaskIdentity.Copy(database); }
     public bool HasRunningTasks { get { lock (sync) return executions.Count > 0 || ownerExecutions.Count > 0; } }
 
-    public DownloadTaskService(Downloads downloads, string stateDirectory, int maxConcurrent = 2)
+    public DownloadTaskService(Downloads downloads, string stateDirectory, int maxConcurrent = 2, int maxDependencyConcurrent = 4,
+        Func<DependencyDownloadIdentity, LauncherConfig, CancellationToken, Task<string[]>>? dependencySourceResolver = null)
     {
         if (maxConcurrent is < 1 or > 8) throw new ArgumentOutOfRangeException(nameof(maxConcurrent));
+        if (maxDependencyConcurrent is < 1 or > 8) throw new ArgumentOutOfRangeException(nameof(maxDependencyConcurrent));
         if (downloads.Dispatcher is not null) throw new InvalidOperationException("下载调度器已配置。");
         this.downloads = downloads;
         this.maxConcurrent = maxConcurrent;
+        this.maxDependencyConcurrent = maxDependencyConcurrent;
+        this.dependencySourceResolver = dependencySourceResolver ?? ((dependency, config, ct) =>
+            DependencyPackageSources.RefreshSourcesAsync(dependency.Name, dependency.Version, dependency.FileName,
+                dependency.Sha256, dependency.Size, config, ct));
         store = new(stateDirectory);
         database = store.Load();
         var recovered = false;
@@ -182,7 +190,7 @@ public sealed partial class DownloadTaskService : IDownloadDispatcher, IAsyncDis
             // Ambient owner wins over a mutable global configuration resolver.
             request = request with { Network = current is not null ? NetworkPolicySnapshot.Capture(Owner(current.Id).Configuration)
                 : request.Network ?? NetworkPolicySnapshot.Capture() };
-            var fingerprint = DownloadTaskIdentity.Artifact(request.Destination, request.Size, request.Sha256);
+            var fingerprint = DownloadTaskIdentity.Artifact(request);
             var target = DownloadTaskIdentity.PathKey(request.Destination);
             if (cleaningTargets.Contains(target)) throw new InvalidOperationException("此目标正在清理未完成文件，请等待清理结束后重试。");
             var conflict = database.Tasks.FirstOrDefault(t => DownloadTaskIdentity.PathKey(t.Destination) == target
@@ -197,6 +205,7 @@ public sealed partial class DownloadTaskService : IDownloadDispatcher, IAsyncDis
             {
                 record = new() { Name = request.Name, Destination = request.Destination, Size = request.Size, Sha256 = request.Sha256,
                     Urls = request.Urls, Network = request.Network, PreferHttpClient = request.PreferHttpClient,
+                    TransferProfile = request.TransferProfile, Dependency = request.Dependency,
                     Fingerprint = fingerprint, Required = current?.Required ?? true };
                 database.Tasks.Add(record);
             }
@@ -266,9 +275,16 @@ public sealed partial class DownloadTaskService : IDownloadDispatcher, IAsyncDis
 
     private void Pump()
     {
-        while (running < maxConcurrent)
+        // Dependency batches may use four file slots, while ordinary transfers retain
+        // their existing two-file limit. Both classes still share the HTTP connection budget.
+        while (running < Math.Max(maxConcurrent, maxDependencyConcurrent))
         {
-            var next = pending.Where(e => !e.Cancellation.IsCancellationRequested)
+            var active = executions.Values.Where(e => e.Started).ToArray();
+            var dependencies = active.Count(e => TaskRecord(e.Id).TransferProfile == DownloadTransferProfile.Dependency);
+            var ordinary = active.Length - dependencies;
+            var next = pending.Where(e => !e.Cancellation.IsCancellationRequested
+                    && (TaskRecord(e.Id).TransferProfile == DownloadTransferProfile.Dependency
+                        ? dependencies < maxDependencyConcurrent : ordinary < maxConcurrent))
                 .OrderByDescending(e => TaskRecord(e.Id).Required).ThenBy(e => e.Sequence).FirstOrDefault();
             if (next is null) return;
             pending.Remove(next); next.Started = true; running++;
@@ -591,39 +607,110 @@ public sealed partial class DownloadTaskService : IDownloadDispatcher, IAsyncDis
         DownloadOwnerRecord result;
         lock (sync)
         {
-            EnsureWritable();
-            if (ownerExecutions.ContainsKey(id)) throw new InvalidOperationException("请先暂停此批次，再选择换源继续。");
-            var owner = Owner(id);
-            if (owner.IsResourceGroup) throw new InvalidOperationException("请先选择此批次中的模型，再更换下载来源。");
-            var next = owner.Configuration.Clone();
-            next.SourceId = sourceConfig.SourceId; next.GitMirror = sourceConfig.GitMirror;
-            next.ModelMirror = sourceConfig.ModelMirror; next.PipIndex = sourceConfig.PipIndex;
-            next.NetworkMode = sourceConfig.NetworkMode; next.ProxyAddress = sourceConfig.ProxyAddress;
-            next.Validate();
-            DownloadTaskIdentity.ValidatePayload(JsonSerializer.SerializeToElement(next, JsonFile.Options));
-            var network = NetworkPolicySnapshot.Capture(next);
-            var updates = new Dictionary<string, string[]>();
-            foreach (var record in database.Tasks.Where(t => t.OwnerIds.Contains(id)))
-            {
-                if (executions.ContainsKey(record.Id)) throw new InvalidOperationException("共享文件仍在下载，请先暂停后换源。");
-                string[]? urls = null;
-                foreach (var intent in owner.Models)
-                {
-                    if (!intent.Model.IsPackage && DownloadTaskIdentity.PathKey(intent.Destination) == DownloadTaskIdentity.PathKey(record.Destination))
-                        urls = DownloadSources.ModelCandidates(intent.Model, next);
-                    else if (intent.Model.IsPackage)
-                        foreach (var file in intent.Model.Files)
-                            if (DownloadTaskIdentity.PathKey(Safety.Under(ModelPackages.Staging(intent.Model, intent.Destination), file.Path)) == DownloadTaskIdentity.PathKey(record.Destination))
-                                urls = DownloadSources.ModelCandidates(file, next);
-                }
-                updates[record.Id] = DownloadTaskIdentity.Validate(record.Request() with
-                    { Urls = urls ?? DownloadSources.Candidates(record.Urls[^1], next), Network = network }).Urls;
-            }
-            owner.Configuration = next; owner.TransportRevision++; owner.UpdatedAt = DateTimeOffset.UtcNow;
-            foreach (var update in updates) { var record = TaskRecord(update.Key); record.Urls = update.Value; record.Network = network; record.TransportRevision++; }
-            Save(); result = DownloadTaskIdentity.Copy(owner);
+            if (database.Tasks.Any(task => task.OwnerIds.Contains(id) && task.Dependency is not null))
+                throw new InvalidOperationException("此批次包含 Python 依赖，请使用异步换源检查以保留固定包身份。");
+            result = UpdateOwnerSourcesLocked(id, sourceConfig, new Dictionary<string, string[]>());
         }
         Notify(); return result;
+    }
+
+    /// <summary>Resolve package mirrors without holding the store lock, then atomically replace only transport settings.</summary>
+    public async Task<DownloadOwnerRecord> UpdateOwnerSourcesAsync(string id, LauncherConfig sourceConfig, CancellationToken ct = default)
+    {
+        DownloadOwnerRecord frozenOwner;
+        DownloadTaskRecord[] frozenTasks;
+        LauncherConfig next;
+        lock (sync)
+        {
+            EnsureWritable();
+            frozenOwner = DownloadTaskIdentity.Copy(Owner(id));
+            frozenTasks = DownloadTaskIdentity.Copy(database.Tasks.Where(task => task.OwnerIds.Contains(id)).ToArray());
+            EnsureSourcesStopped(id, frozenTasks);
+            next = SourceConfiguration(frozenOwner.Configuration, sourceConfig);
+        }
+        using var gate = new SemaphoreSlim(4, 4);
+        var sources = await Task.WhenAll(frozenTasks.Where(task => task.Dependency is not null).Select(async task =>
+        {
+            await gate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                var dependency = task.Dependency!;
+                var urls = await dependencySourceResolver(dependency, next, ct).ConfigureAwait(false);
+                return (task.Id, Urls: urls.Length > 0 ? urls : task.Urls);
+            }
+            finally { gate.Release(); }
+        })).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        DownloadOwnerRecord result;
+        lock (sync)
+        {
+            EnsureWritable();
+            var current = database.Tasks.Where(task => task.OwnerIds.Contains(id)).ToArray();
+            EnsureSourcesStopped(id, current);
+            if (Owner(id).Fingerprint != frozenOwner.Fingerprint || Owner(id).TransportRevision != frozenOwner.TransportRevision
+                || current.Length != frozenTasks.Length || frozenTasks.Any(before => !current.Any(after => after.Id == before.Id
+                    && after.Fingerprint == before.Fingerprint && after.TransportRevision == before.TransportRevision && after.AttemptId == before.AttemptId)))
+                throw new InvalidOperationException("换源检查期间任务已变化，请保持暂停后重新检查。");
+            result = UpdateOwnerSourcesLocked(id, next, sources.ToDictionary(item => item.Id, item => item.Urls));
+        }
+        Notify(); return result;
+    }
+
+    private void EnsureSourcesStopped(string id, IEnumerable<DownloadTaskRecord> tasks)
+    {
+        if (ownerExecutions.ContainsKey(id)) throw new InvalidOperationException("请先暂停此批次，再选择换源继续。");
+        if (Owner(id).IsResourceGroup) throw new InvalidOperationException("请先选择此批次中的模型，再更换下载来源。");
+        if (tasks.Any(task => executions.ContainsKey(task.Id))) throw new InvalidOperationException("共享文件仍在下载，请先暂停后换源。");
+    }
+
+    private static LauncherConfig SourceConfiguration(LauncherConfig original, LauncherConfig sourceConfig)
+    {
+        var next = original.Clone();
+        next.SourceId = sourceConfig.SourceId; next.GitMirror = sourceConfig.GitMirror;
+        next.ModelMirror = sourceConfig.ModelMirror; next.PipIndex = sourceConfig.PipIndex;
+        next.NetworkMode = sourceConfig.NetworkMode; next.ProxyAddress = sourceConfig.ProxyAddress;
+        next.Validate();
+        DownloadTaskIdentity.ValidatePayload(JsonSerializer.SerializeToElement(next, JsonFile.Options));
+        return next;
+    }
+
+    private DownloadOwnerRecord UpdateOwnerSourcesLocked(string id, LauncherConfig sourceConfig, IReadOnlyDictionary<string, string[]> packageSources)
+    {
+        EnsureWritable();
+        var owner = Owner(id);
+        var tasks = database.Tasks.Where(task => task.OwnerIds.Contains(id)).ToArray();
+        EnsureSourcesStopped(id, tasks);
+        var next = SourceConfiguration(owner.Configuration, sourceConfig);
+        var network = NetworkPolicySnapshot.Capture(next);
+        var updates = new Dictionary<string, string[]>();
+        foreach (var record in tasks)
+        {
+            string[]? urls = packageSources.TryGetValue(record.Id, out var refreshed) ? refreshed : null;
+            foreach (var intent in owner.Models)
+            {
+                if (!intent.Model.IsPackage && DownloadTaskIdentity.PathKey(intent.Destination) == DownloadTaskIdentity.PathKey(record.Destination))
+                    urls = DownloadSources.ModelCandidates(intent.Model, next);
+                else if (intent.Model.IsPackage)
+                    foreach (var file in intent.Model.Files)
+                        if (DownloadTaskIdentity.PathKey(Safety.Under(ModelPackages.Staging(intent.Model, intent.Destination), file.Path)) == DownloadTaskIdentity.PathKey(record.Destination))
+                            urls = DownloadSources.ModelCandidates(file, next);
+            }
+            if (record.Dependency is not null && urls is null) throw new InvalidOperationException("依赖包来源尚未完成身份检查。");
+            updates[record.Id] = DownloadTaskIdentity.Validate(record.Request() with
+                { Urls = urls ?? DownloadSources.Candidates(record.Urls[^1], next), Network = network }).Urls;
+        }
+        var previousOwner = DownloadTaskIdentity.Copy(owner);
+        var previousTasks = DownloadTaskIdentity.Copy(tasks);
+        owner.Configuration = next; owner.TransportRevision++; owner.UpdatedAt = DateTimeOffset.UtcNow;
+        foreach (var update in updates) { var record = TaskRecord(update.Key); record.Urls = update.Value; record.Network = network; record.TransportRevision++; }
+        try { Save(); }
+        catch
+        {
+            database.Owners[database.Owners.IndexOf(owner)] = previousOwner;
+            foreach (var previous in previousTasks) database.Tasks[database.Tasks.FindIndex(task => task.Id == previous.Id)] = previous;
+            throw;
+        }
+        return DownloadTaskIdentity.Copy(owner);
     }
 
     public async ValueTask DisposeAsync()

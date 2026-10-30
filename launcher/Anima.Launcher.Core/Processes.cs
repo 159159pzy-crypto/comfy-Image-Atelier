@@ -17,14 +17,26 @@ public static class Commands
         info.Environment["PYTHONIOENCODING"] = "utf-8";
         info.Environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1";
         info.Environment["GIT_TERMINAL_PROMPT"] = "0";
-        if (env is not null) foreach (var pair in env) info.Environment[pair.Key] = pair.Value;
+        if (env is not null) foreach (var pair in env)
+        {
+            if (pair.Value is null) info.Environment.Remove(pair.Key);
+            else info.Environment[pair.Key] = pair.Value;
+        }
+        // GIT_TERMINAL_PROMPT does not disable Git Credential Manager's GUI.
+        // Installer commands must fail explicitly instead of waiting for a hidden login.
+        info.Environment["GCM_INTERACTIVE"] = "never";
         NetworkPolicy.Apply(info);
         return info;
     }
-    public static async Task<string> Run(string exe, IEnumerable<string> args, string cwd, Action<string>? log, CancellationToken ct, IDictionary<string, string>? env = null, TimeSpan? timeout = null, bool terminateOnFailure = true)
+    public static async Task<string> Run(string exe, IEnumerable<string> args, string cwd, Action<string>? log, CancellationToken ct, IDictionary<string, string>? env = null, TimeSpan? timeout = null, bool terminateOnFailure = true, bool allowBackgroundChildren = false)
     {
         ct.ThrowIfCancellationRequested();
-        using var process = new Process { StartInfo = Info(exe, args, cwd, env) };
+        var info = Info(exe, args, cwd, env);
+        if (OperatingSystem.IsWindows() && terminateOnFailure)
+            return await CommandProcessLifetime.RunAsync(info, log, ct, timeout ?? DefaultTimeout, allowBackgroundChildren);
+        // Software-update recovery explicitly preserves its bootstrap on failure.
+        // It must not acquire a kill-on-close job even if this call is cancelled.
+        using var process = new Process { StartInfo = info };
         var output = new StringBuilder();
         var errors = new StringBuilder();
         process.OutputDataReceived += (_, e) => { if (e.Data is not null) { lock (output) output.AppendLine(e.Data); log?.Invoke(DiagnosticRedaction.Text(e.Data)); } };
@@ -440,7 +452,7 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
         // Give the long-lived child real log file handles, not pipes owned by the launcher.
         // Otherwise closing the tray would break Python stdout/stderr on the next write.
         const string script = "import subprocess,sys,json,os; f=open(sys.argv[1],'ab',buffering=0); p=subprocess.Popen(json.loads(sys.argv[2]),cwd=sys.argv[3],stdin=subprocess.DEVNULL,stdout=f,stderr=f,creationflags=0x08000000); print(p.pid)";
-        var pid = await Commands.Run(exe, ["-c", script, logPath, JsonSerializer.Serialize(new[] { exe }.Concat(args)), cwd], cwd, null, ct, env, terminateOnFailure: !preserveOnFailure);
+        var pid = await Commands.Run(exe, ["-c", script, logPath, JsonSerializer.Serialize(new[] { exe }.Concat(args)), cwd], cwd, null, ct, env, terminateOnFailure: !preserveOnFailure, allowBackgroundChildren: true);
         Process? process = null;
         long started;
         try

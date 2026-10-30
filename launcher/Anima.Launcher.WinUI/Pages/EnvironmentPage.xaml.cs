@@ -46,9 +46,11 @@ public sealed partial class EnvironmentPage : LauncherPage
         State.ComfyUpdateChanged += OnComfyUpdate;
         State.NodeUpdateChanged += OnNodeUpdate;
         State.DownloadsChanged += OnDownloadsChanged;
+        State.DependencyProgressChanged += OnDependencyProgress;
         UpdateComfyMaintenance();
         UpdateNodeMaintenance();
         UpdateInstallationProgress();
+        UpdateDependencyProgress();
         ConfigurationPanel.IsEnabled = !State.Busy;
         OpenSetupButton.IsEnabled = !State.Busy;
         ApplyInstallEligibility();
@@ -64,6 +66,7 @@ public sealed partial class EnvironmentPage : LauncherPage
         State.ComfyUpdateChanged -= OnComfyUpdate;
         State.NodeUpdateChanged -= OnNodeUpdate;
         State.DownloadsChanged -= OnDownloadsChanged;
+        State.DependencyProgressChanged -= OnDependencyProgress;
         base.OnNavigatedFrom(e);
     }
 
@@ -76,7 +79,40 @@ public sealed partial class EnvironmentPage : LauncherPage
         UpdateNodeMaintenance();
         ApplyInstallEligibility();
         UpdateInstallationProgress();
+        UpdateDependencyProgress();
     });
+    private void OnDependencyProgress() { if (active) UpdateDependencyProgress(); }
+    private void UpdateDependencyProgress()
+    {
+        var progress = State.DependencyProgressView;
+        DependencyProgressPanel.Visibility = progress is null ? Visibility.Collapsed : Visibility.Visible;
+        if (progress is null) return;
+        DependencyHeading.Text = progress.Heading;
+        DependencyDetails.Text = progress.Detail;
+        DependencyQuietNotice.Text = progress.QuietNotice;
+        DependencyQuietNotice.Visibility = progress.QuietNotice.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        DependencyProgressBar.IsIndeterminate = State.Busy && progress.Indeterminate;
+        DependencyProgressBar.Value = progress.Percent;
+        var running = State.Busy && State.DependencyActivity?.Status == DependencyProgressStatus.Running;
+        PauseDependencyButton.Visibility = running ? Visibility.Visible : Visibility.Collapsed;
+        PauseDependencyButton.IsEnabled = running && !dependencyPauseRequested;
+        if (!running) dependencyPauseRequested = false;
+        ResumeDependencyButton.Visibility = State.CanRetry ? Visibility.Visible : Visibility.Collapsed;
+        ResumeDependencyButton.IsEnabled = State.CanRetry;
+        ResumeDependencyButton.Content = State.DependencyActivity?.Status == DependencyProgressStatus.Failed ? "重试" : "继续";
+    }
+    private bool dependencyPauseRequested;
+    private void PauseDependency_Click(object sender, RoutedEventArgs e)
+    {
+        dependencyPauseRequested = true;
+        PauseDependencyButton.IsEnabled = false;
+        State.PauseTask();
+    }
+    private async void ResumeDependency_Click(object sender, RoutedEventArgs e)
+    {
+        if (State.CanRetry) await State.ResumeTaskAsync();
+    }
+    private void DependencyLogs_Click(object sender, RoutedEventArgs e) => Shell.GoToPage(3);
     private void OnDownloadsChanged() => DispatcherQueue.TryEnqueue(() => { if (active) UpdateInstallationProgress(); });
     private void UpdateInstallationProgress()
     {

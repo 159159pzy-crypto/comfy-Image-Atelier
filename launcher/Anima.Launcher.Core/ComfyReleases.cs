@@ -10,6 +10,12 @@ public sealed record ComfyDependencySnapshot(string ComfyCommit, string Requirem
     public bool Resolved { get; init; }
     public string PythonIdentity { get; init; } = "";
     public string NodeRequirementsIdentity { get; init; } = "";
+    public int PlanVersion { get; init; }
+    public string PackageIndex { get; init; } = "";
+    public string GitSource { get; init; } = "";
+    public string[] EnvironmentPackages { get; init; } = [];
+    public DependencyPackage[] Packages { get; init; } = [];
+    public string TransportIdentity { get; init; } = "";
 }
 
 /// <summary>Resolve the official stable release once; all later downloads use its immutable commit.</summary>

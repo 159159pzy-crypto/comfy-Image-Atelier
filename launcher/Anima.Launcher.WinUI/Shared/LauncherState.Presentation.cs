@@ -7,7 +7,7 @@ namespace Anima.Launcher;
 internal sealed partial class LauncherState
 {
     [Flags]
-    private enum DisplayChange { Downloads = 1, Tasks = 2, Setup = 4, Batch = 8, Progress = 16, ProgressText = 32, Software = 64, Status = 128 }
+    private enum DisplayChange { Downloads = 1, Tasks = 2, Setup = 4, Batch = 8, Progress = 16, ProgressText = 32, Software = 64, Status = 128, Dependency = 256 }
     private readonly PresentationRefreshGate displayGate = new();
     private readonly Stopwatch displayClock = Stopwatch.StartNew();
     private DispatcherQueueTimer displayTimer = null!;
@@ -27,6 +27,7 @@ internal sealed partial class LauncherState
         displayTimer = downloadUi.CreateTimer();
         displayTimer.IsRepeating = false;
         displayTimer.Tick += (_, _) => FlushPresentation();
+        InitializeDependencyPresentation();
     }
 
     private void RequestPresentation(DisplayChange changes)
@@ -54,9 +55,10 @@ internal sealed partial class LauncherState
         presentationVisible = visible;
         displayGate.SetVisible(visible);
         displayTimer.Stop();
+        dependencyTimer.Stop();
         if (visible)
         {
-            displayGate.Request((int)(DisplayChange.Downloads | DisplayChange.Tasks | DisplayChange.Setup | DisplayChange.Software | DisplayChange.Status | DisplayChange.Progress | DisplayChange.ProgressText | DisplayChange.Batch));
+            displayGate.Request((int)(DisplayChange.Downloads | DisplayChange.Tasks | DisplayChange.Setup | DisplayChange.Software | DisplayChange.Status | DisplayChange.Progress | DisplayChange.ProgressText | DisplayChange.Batch | DisplayChange.Dependency));
             FlushPresentation(force: true);
         }
         PresentationVisibilityChanged?.Invoke(visible);
@@ -76,7 +78,8 @@ internal sealed partial class LauncherState
                 UpdateDurableModelProgress();
                 DownloadsChanged?.Invoke();
             }
-            changes |= (DisplayChange)displayGate.Take(displayClock.Elapsed, force: true, mask: ~(int)DisplayChange.Downloads);
+            if (changes.HasFlag(DisplayChange.Dependency)) FlushDependencyPresentation();
+            changes |= (DisplayChange)displayGate.Take(displayClock.Elapsed, force: true, mask: ~(int)(DisplayChange.Downloads | DisplayChange.Dependency));
             if (changes.HasFlag(DisplayChange.Tasks)) TaskStateChanged?.Invoke();
             if (changes.HasFlag(DisplayChange.Setup)) SetupChanged?.Invoke();
             if (changes.HasFlag(DisplayChange.Batch)) BatchProgressChanged?.Invoke();
@@ -98,5 +101,6 @@ internal sealed partial class LauncherState
     {
         displayDisposed = true;
         displayTimer.Stop();
+        dependencyTimer.Stop();
     }
 }

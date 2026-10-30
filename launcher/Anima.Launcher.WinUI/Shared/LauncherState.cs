@@ -107,6 +107,7 @@ internal sealed partial class LauncherState : IDisposable
 
     public void SetStatus(string text)
     {
+        dependencyOwnsGlobalStatus = false;
         SetupStatusText = text;
         displayedStatus = text;
         RequestPresentation(DisplayChange.Status);
@@ -218,6 +219,9 @@ internal sealed partial class LauncherState : IDisposable
             return;
         }
         task = new CancellationTokenSource();
+        dependencySession.Begin();
+        RequestPresentation(DisplayChange.Dependency);
+        var dependencyOutcome = DependencyProgressStatus.Complete;
         retryIsSetup = setupOperation;
         retryAction = action;
         retryConfig = null;
@@ -249,6 +253,7 @@ internal sealed partial class LauncherState : IDisposable
         }
         catch (OperationCanceledException) when (task.IsCancellationRequested)
         {
+            dependencyOutcome = DependencyProgressStatus.Paused;
             retryable = true;
             var message = cancelDownloads ? "任务已取消，已下载文件保留。需要释放空间时，请打开「查看全部下载」单独删除未完成文件。" : "任务已暂停，点击继续可从已完成步骤恢复。";
             SetSetupInterruption(message, true);
@@ -257,6 +262,7 @@ internal sealed partial class LauncherState : IDisposable
         }
         catch (OperationCanceledException ex)
         {
+            dependencyOutcome = ex.CancellationToken.IsCancellationRequested ? DependencyProgressStatus.Paused : DependencyProgressStatus.Failed;
             retryable = true;
             if (ex.CancellationToken.IsCancellationRequested)
             {
@@ -270,10 +276,12 @@ internal sealed partial class LauncherState : IDisposable
             SetSetupInterruption(error.Message, false);
             TaskFailed?.Invoke(error);
         }
-        catch (Exception ex) { retryable = true; SetSetupInterruption(ex.Message, false); TaskFailed?.Invoke(ex); }
+        catch (Exception ex) { dependencyOutcome = DependencyProgressStatus.Failed; retryable = true; SetSetupInterruption(ex.Message, false); TaskFailed?.Invoke(ex); }
         finally
         {
             activeInstallationPlan = null;
+            dependencySession.End(dependencyOutcome, DateTimeOffset.UtcNow);
+            RequestPresentation(DisplayChange.Dependency);
             task.Dispose();
             task = null;
             BusyChanged?.Invoke(false);
@@ -305,6 +313,7 @@ internal sealed partial class LauncherState : IDisposable
 
     private void InstallStageChanged(string stage)
     {
+        ClearDependencyProgress();
         if (activeDownloadOwner is not null) DownloadTasks.SetOwnerPhase(activeDownloadOwner, "Installing", stage);
         ResetTransferProgress();
         PublishPercent(-1); // Dependency stages have no byte total.
@@ -423,7 +432,7 @@ internal sealed partial class LauncherState : IDisposable
         // restart resumes CUDA/dependency stages, not an incomplete import.
         Save();
         SetStatus("正在安装环境；已完成的下载和步骤会自动复用…");
-        var installer = new Installer(Program.StateDir, Program.Runtime, Downloads, AppendLog, DownloadProgress(), InstallStageChanged, UpdateSetupProgress);
+        var installer = CreateInstaller(Program.Runtime);
         Config = await installer.Install(plan, ct);
         Config.InstallPending = fresh;
         Save();

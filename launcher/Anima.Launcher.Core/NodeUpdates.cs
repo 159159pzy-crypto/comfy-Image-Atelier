@@ -29,7 +29,8 @@ public sealed class NodeUpdateCoordinator(string stateDir, string git, Action<st
     Func<Repository, CancellationToken, Task<NodeRelease>>? resolveHead = null,
     Func<NodeUpdateEntry, CancellationToken, Task>? fetchCommit = null,
     Func<LauncherConfig, ComfyDependencySnapshot, IReadOnlyList<string>, IReadOnlyDictionary<string, string>, CancellationToken, Task<ComfyDependencySnapshot>>? resolveDependencies = null,
-    Func<string, NodeUpdateEntry, CancellationToken, Task>? prepareSubmodules = null)
+    Func<string, NodeUpdateEntry, CancellationToken, Task>? prepareSubmodules = null,
+    Action<DependencyProgress>? dependencyProgress = null)
 {
     private static string Full(string path) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
     private static bool Same(string a, string b) => Full(a).Equals(Full(b), StringComparison.OrdinalIgnoreCase);
@@ -217,7 +218,7 @@ public sealed class NodeUpdateCoordinator(string stateDir, string git, Action<st
         IReadOnlyList<string> files, IReadOnlyDictionary<string, string> map, CancellationToken ct) => resolveDependencies is not null
         ? resolveDependencies(config, snapshot, files, map, ct)
         : ComfyDependencyResolver.ResolveAsync(config, snapshot, Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "cache"), ct, Log,
-            files, new Dictionary<string, string> { ["PATH"] = Path.GetDirectoryName(git) + Path.PathSeparator + Environment.GetEnvironmentVariable("PATH") }, plan.Sam2Commit, map);
+            files, new Dictionary<string, string> { ["PATH"] = Path.GetDirectoryName(git) + Path.PathSeparator + Environment.GetEnvironmentVariable("PATH") }, plan.Sam2Commit, map, dependencyProgress);
 
     public async Task<NodeUpdatePlan> PrepareAsync(LauncherConfig config, NodeUpdatePlan plan, RuntimeManifest runtime, CancellationToken ct)
     {

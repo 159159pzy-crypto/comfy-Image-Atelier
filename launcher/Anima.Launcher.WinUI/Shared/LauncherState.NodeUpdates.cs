@@ -63,7 +63,7 @@ internal sealed partial class LauncherState
         {
             RequireRoot();
             var git = ComfyGit();
-            var coordinator = new NodeUpdateCoordinator(Program.StateDir, git, AppendLog);
+            var coordinator = new NodeUpdateCoordinator(Program.StateDir, git, AppendLog, dependencyProgress: DependencyProgressObserver());
             if (frozen is null)
             {
                 NodeUpdateStatus = "正在检查已启用的插件与自定义节点，并固定目标提交…";
@@ -98,7 +98,7 @@ internal sealed partial class LauncherState
     public Task ApplyNodeUpdatesAsync() => Run(async ct =>
     {
         RestoreNodeUpdatePlan();
-        var coordinator = new NodeUpdateCoordinator(Program.StateDir, ComfyGit(), AppendLog);
+        var coordinator = new NodeUpdateCoordinator(Program.StateDir, ComfyGit(), AppendLog, dependencyProgress: DependencyProgressObserver());
         if (!NodesUpdateReady)
         {
             await PrepareNodeUpdatesCoreAsync(coordinator, ct);
@@ -107,7 +107,7 @@ internal sealed partial class LauncherState
         var config = Config.Clone();
         var plan = checkedNodePlan!;
         var runtime = Program.Runtime with { Comfy = Program.Runtime.Comfy with { Commit = plan.CoreCommit }, PythonConstraints = plan.Dependencies!.Constraints };
-        var installer = new Installer(Program.StateDir, runtime, Downloads, AppendLog, DownloadProgress());
+        var installer = CreateInstaller(runtime);
         NodeUpdateStatus = "正在备份节点、完整 Python 与配置，并更新已固定的节点版本…";
         NodeUpdateChanged?.Invoke();
         try

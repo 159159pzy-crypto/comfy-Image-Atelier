@@ -44,6 +44,11 @@ var root = File.Exists(Path.Combine(Environment.CurrentDirectory, "launcher", "m
     ? Environment.CurrentDirectory : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
 var manifestDir = Path.Combine(root, "launcher", "manifests");
 var manifest = JsonFile.Read<RuntimeManifest>(Path.Combine(manifestDir, "launcher-manifest.json"));
+if (args.FirstOrDefault() == "--dependency-install-acceptance")
+{
+    await DependencyInstallAcceptance.Run(root, args[1], args.ElementAtOrDefault(2) ?? "cold", args.ElementAtOrDefault(3) ?? "current");
+    return;
+}
 var models = JsonFile.Read<ModelManifest>(Path.Combine(manifestDir, "model-manifest.json"));
 var taggerModels = JsonFile.Read<ModelManifest>(Path.Combine(root, "anima_webui", "tagger-models.json"));
 models = models with { Models = models.Models.Concat(taggerModels.Models).ToArray() };
@@ -163,6 +168,21 @@ if (args.Contains("--download-engine-only"))
     count += await DownloadEngineTests.Run(work);
     Console.WriteLine($"{count} download engine checks passed; artifacts: {work}"); return;
 }
+if (args.Contains("--download-representation-only"))
+{
+    count += await DownloadRepresentationTests.Run(work);
+    Console.WriteLine($"{count} download representation checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--command-process-lifetime-only"))
+{
+    count += await CommandProcessLifetimeTests.Run(work);
+    Console.WriteLine($"{count} command process lifetime checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--software-update-service-only"))
+{
+    count += await SoftwareUpdateServiceTests.Run(work, manifest);
+    Console.WriteLine($"{count} software update service checks passed; artifacts: {work}"); return;
+}
 if (args.Contains("--native-process-only"))
 {
     var total = await WindowsProcessInspectionTests.Run(work);
@@ -251,6 +271,46 @@ if (args.Contains("--runtime-dependencies-only"))
     count += await RuntimeDependencyTests.Run(work);
     Console.WriteLine($"{count} runtime dependency checks passed."); return;
 }
+if (args.Contains("--dependency-transfers-only"))
+{
+    count += await DependencyTransferTests.Run(work);
+    Console.WriteLine($"{count} dependency transfer checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--dependency-transfer-performance-only"))
+{
+    count += await DependencyTransferTests.RunPerformance(work);
+    Console.WriteLine($"{count} dependency transfer performance checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--dependency-sources-only"))
+{
+    count += await DependencyPackageSourceTests.Run(work);
+    Console.WriteLine($"{count} dependency source checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--dependency-progress-only"))
+{
+    count += DependencyProgressTests.Run();
+    Console.WriteLine($"{count} dependency progress checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--installation-source-preferences-only"))
+{
+    count += await InstallationSourcePreferenceTests.Run(work);
+    Console.WriteLine($"{count} installation source preference checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--git-fetch-transfer-only"))
+{
+    count += await GitFetchTransferTests.Run(work);
+    Console.WriteLine($"{count} Git transfer checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--dependency-source-build-only"))
+{
+    count += await DependencyInstallationTests.RunSourceBuildTests(work);
+    Console.WriteLine($"{count} dependency source build checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--dependency-installation-only"))
+{
+    count += await DependencyInstallationTests.Run(work);
+    Console.WriteLine($"{count} dependency installation checks passed; artifacts: {work}"); return;
+}
 if (args.Contains("--updates-only"))
 {
     count += await LauncherUpdateTests.Run(work);
@@ -283,6 +343,10 @@ if (args.Contains("--assistant-only"))
     Console.WriteLine($"{count} Prompt Assistant checks passed; artifacts: {work}");
     return;
 }
+var suiteOptions = new HashSet<string>(StringComparer.Ordinal)
+    { "--core-only", "--after-artifacts", "--resume-node-updates", "--tagger-only", "--recovery-only", "--live", "--owned", "--generate" };
+if (args.Any(argument => !suiteOptions.Contains(argument)))
+    throw new ArgumentException("Unknown test option. Select a documented test entry point; the default suite was not started: " + string.Join(" ", args));
 if (!args.Contains("--core-only"))
 {
 if (!args.Contains("--after-artifacts"))
@@ -292,6 +356,12 @@ if (!args.Contains("--resume-node-updates"))
     count += await DownloadSourceTests.Run(work, models);
     count += await ComfyLaunchArgumentsTests.Run(work, manifest);
     count += await RuntimeDependencyTests.Run(work);
+    count += await DependencyPackageSourceTests.Run(work);
+    count += await InstallationSourcePreferenceTests.Run(work);
+    count += await GitFetchTransferTests.Run(work);
+    count += DependencyProgressTests.Run();
+    count += await DependencyTransferTests.Run(work);
+    count += await DependencyInstallationTests.Run(work);
     count += await ComfyReleaseUpdateTests.Run(work, manifest);
     count += await NodeReleaseTests.Run(work, manifest);
 }
@@ -311,6 +381,8 @@ count += await SetupImportTests.Run(work, root, manifest, models,
     JsonFile.Read<ModelProfilesManifest>(Path.Combine(manifestDir, "model-profiles.json")));
 count += await ModelBatchProgressTests.Run();
 count += await DownloadEngineTests.Run(work);
+count += await DownloadRepresentationTests.Run(work);
+count += await CommandProcessLifetimeTests.Run(work);
 count += await TaskStoreTests.Run(work);
 count += await ResourceOwnerTests.Run(work);
 count += ModelDownloadProjectionTests.Run(work);

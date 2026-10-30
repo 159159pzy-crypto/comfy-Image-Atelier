@@ -155,7 +155,7 @@ public static class DownloadEngineTests
             using var firstResponse = await client.SendAsync(first); _ = await firstResponse.Content.ReadAsByteArrayAsync();
             using var changed = new HttpRequestMessage(HttpMethod.Get, bridge.Address); changed.Headers.Range = new(16, 31);
             using var changedResponse = await client.SendAsync(changed);
-            Check(changedResponse.StatusCode == HttpStatusCode.BadGateway && await bridge.Failure is InvalidDataException,
+            Check(changedResponse.StatusCode == HttpStatusCode.BadGateway && await bridge.Failure is DownloadSourceRepresentationChangedException,
                 "bridge rejects changed strong ETag even when upstream ignores If-Range");
         }
 
@@ -305,8 +305,8 @@ public static class DownloadEngineTests
             File.WriteAllBytes(DownloadCheckpoint.AriaControl(request.Destination), control);
             await downloads.FetchDirectAsync(request, null, default);
             Check(fullGets == 1 && await Downloads.Verify(request.Destination, data.Length, sha, default)
-                && File.Exists(DownloadCheckpoint.AriaData(request.Destination)) && File.Exists(DownloadCheckpoint.AriaControl(request.Destination)),
-                "aria2 416 performs one independent full GET while preserving sparse data and control file");
+                && !Downloads.PartialFiles(request.Destination).Any(File.Exists),
+                "aria2 416 publishes one independently verified full GET before cleaning obsolete sparse checkpoints");
         }
         var limitedOnce = 0;
         using (var pattern = new PatternHandler(largeSize, 1))

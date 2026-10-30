@@ -1,10 +1,30 @@
 namespace Anima.Launcher.Core;
 
+public enum DownloadTransferProfile { Standard, Dependency }
+
+/// <summary>The package coordinate is frozen with its content; changing sources cannot select a different wheel.</summary>
+public sealed record DependencyDownloadIdentity(string Name, string Version, string FileName, string Sha256, long Size);
+
 public sealed record DownloadRequest(string Name, string[] Urls, string Destination, long Size, string Sha256)
 {
     public string? TaskId { get; init; }
     public NetworkPolicySnapshot? Network { get; init; }
     public bool PreferHttpClient { get; init; }
+    public DownloadTransferProfile TransferProfile { get; init; }
+    public DependencyDownloadIdentity? Dependency { get; init; }
+}
+
+public static class DownloadTransferPolicy
+{
+    public static long NativeThreshold(DownloadRequest request, DownloadEngineOptions options) =>
+        request.TransferProfile == DownloadTransferProfile.Dependency ? 16L * 1024 * 1024 : options.MinimumAria2Bytes;
+
+    public static int Connections(DownloadRequest request, DownloadEngineOptions options) =>
+        request.Size < (request.TransferProfile == DownloadTransferProfile.Dependency ? 16L : 64L) * 1024 * 1024
+            ? 1 : Math.Clamp(options.ConnectionsPerFile, 1, 4);
+
+    public static string MinimumSplitSize(DownloadRequest request) =>
+        request.TransferProfile == DownloadTransferProfile.Dependency ? "4M" : "32M";
 }
 
 public interface IDownloadDispatcher
@@ -51,4 +71,6 @@ public sealed class DownloadSourceException(string message, System.Net.HttpStatu
 public sealed class DownloadEngineUnavailableException(string message, Exception? inner = null) : IOException(message, inner);
 internal sealed class DownloadEngineCrashedException(string message, Exception? inner = null) : IOException(message, inner);
 public sealed class DownloadCheckpointException(string message, Exception? inner = null) : IOException(message, inner);
+/// <summary>A source returned different strong validators for concurrent ranges of one locked artifact.</summary>
+public sealed class DownloadSourceRepresentationChangedException(string message) : IOException(message);
 internal sealed class RangeNotSupportedException(string message) : HttpRequestException(message);

@@ -59,6 +59,7 @@ public sealed partial class SetupPage : LauncherPage
         State.TaskProgressChanged += OnProgress;
         State.ProgressChanged += OnPercent;
         State.BatchProgressChanged += OnChanged;
+        State.DependencyProgressChanged += OnChanged;
         LoadFields();
         Refresh();
     }
@@ -71,6 +72,7 @@ public sealed partial class SetupPage : LauncherPage
         State.TaskProgressChanged -= OnProgress;
         State.ProgressChanged -= OnPercent;
         State.BatchProgressChanged -= OnChanged;
+        State.DependencyProgressChanged -= OnChanged;
         if (e.SourcePageType != typeof(DownloadsPage)) assistant.ClearSession();
         base.OnNavigatedFrom(e);
     }
@@ -446,6 +448,13 @@ public sealed partial class SetupPage : LauncherPage
         TransferDetails.Text = State.ProgressText;
         FileProgress.IsIndeterminate = State.Busy && State.SetupDownloadPercent < 0;
         FileProgress.Value = Math.Max(0, State.SetupDownloadPercent);
+        if (State.DependencyProgressView is { } dependency)
+        {
+            CurrentOperation.Text = dependency.Heading;
+            TransferDetails.Text = dependency.Detail + (dependency.QuietNotice.Length > 0 ? "\n" + dependency.QuietNotice : "");
+            FileProgress.IsIndeterminate = State.Busy && dependency.Indeterminate;
+            FileProgress.Value = dependency.Percent;
+        }
         UpdateBatch(BatchPanel, BatchBar, BatchDetails);
         var signature = string.Join("\n", State.SetupStages.Select(stage => $"{stage.StageId}|{stage.Status}|{stage.Detail}"));
         if (signature == stageSignature) return;

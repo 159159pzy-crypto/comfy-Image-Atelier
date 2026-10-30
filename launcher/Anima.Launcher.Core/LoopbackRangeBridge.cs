@@ -122,7 +122,7 @@ public sealed class LoopbackRangeBridge : IAsyncDisposable
                 {
                     var previous = Interlocked.CompareExchange(ref upstreamEtag, etag, null);
                     if (previous is not null && !string.Equals(previous, etag, StringComparison.Ordinal))
-                        throw new InvalidDataException("来源在并行传输中改变了文件 ETag，已停止此来源以避免混合内容。");
+                        throw new DownloadSourceRepresentationChangedException("来源在并行传输中改变了文件 ETag，已停止此来源以避免混合内容。");
                 }
                 Interlocked.Increment(ref activeStreams);
                 try

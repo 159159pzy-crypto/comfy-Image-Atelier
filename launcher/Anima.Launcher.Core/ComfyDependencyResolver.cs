@@ -79,7 +79,7 @@ public static class ComfyDependencyResolver
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(input))).ToLowerInvariant();
     }
 
-    public static string PrepareNodeRequirements(string path, string directory, string? sam2Commit)
+    public static string PrepareNodeRequirements(string path, string directory, string? sam2Commit, string? sam2Directory = null)
     {
         var files = RequirementFiles([path]);
         if (sam2Commit is null || !files.Any(file => Installer.PinSam2(File.ReadAllText(file), sam2Commit) is not null)) return path;
@@ -92,6 +92,9 @@ public static class ComfyDependencyResolver
         {
             var content = File.ReadAllText(file);
             var pinned = Installer.PinSam2(content, sam2Commit) ?? content;
+            if (sam2Directory is not null)
+                pinned = pinned.Replace("SAM-2 @ git+" + DependencySources.Sam2Url + "@" + sam2Commit,
+                    "SAM-2 @ " + new Uri(Path.GetFullPath(sam2Directory) + Path.DirectorySeparatorChar).AbsoluteUri);
             pinned = IncludeLine.Replace(pinned, match => IncludePath(file, match.Groups[2].Value) is { } child
                 ? match.Groups[1].Value + '"' + destinations[child] + '"' : match.Value);
             File.WriteAllText(destinations[file], pinned);
@@ -101,9 +104,12 @@ public static class ComfyDependencyResolver
 
     public static async Task<ComfyDependencySnapshot> ResolveAsync(LauncherConfig config, ComfyDependencySnapshot snapshot,
         string cacheRoot, CancellationToken ct, Action<string>? log = null, IEnumerable<string>? nodeRequirements = null,
-        IDictionary<string, string>? environment = null, string? sam2Commit = null, IReadOnlyDictionary<string, string>? logicalPaths = null)
+        IDictionary<string, string>? environment = null, string? sam2Commit = null, IReadOnlyDictionary<string, string>? logicalPaths = null,
+        Action<DependencyProgress>? dependencyProgress = null)
     {
         Safety.Commit(snapshot.ComfyCommit);
+        var reporter = new DependencyProgressReporter(dependencyProgress, log);
+        reporter.Phase("resolving", "正在检查已安装依赖与固定版本");
         var inventory = await Commands.Run(config.Python, ["-B", "-c", "import sys,importlib.metadata as m; print(sys.version.split()[0]); print(chr(10).join(sorted(d.metadata['Name']+'=='+d.version for d in m.distributions() if d.metadata['Name'])))"], config.ComfyRoot, null, ct, timeout: TimeSpan.FromSeconds(30));
         var lines = inventory.Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries);
         var gpu = lines.Skip(1).Where(line => Regex.IsMatch(line, @"^(torch|torchvision|torchaudio)==", RegexOptions.IgnoreCase)).ToArray();
@@ -113,6 +119,8 @@ public static class ComfyDependencyResolver
         if (snapshot.Resolved && snapshot.NodeRequirementsIdentity == nodeIdentity)
         {
             if (snapshot.PythonIdentity != identity) throw new InvalidOperationException("Python 或 GPU 版本已变化，请重新检查依赖计划。");
+            DependencyPlans.ValidateEnvironment(snapshot, lines.Skip(1));
+            reporter.Complete("已复用固定依赖计划");
             return snapshot;
         }
         var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity + "\n" + snapshot.ComfyCommit + "\n" + snapshot.RequirementsText + "\n" + snapshot.ManagerRequirementsText
@@ -126,9 +134,32 @@ public static class ComfyDependencyResolver
         if (File.Exists(existingPath))
         {
             var existing = JsonFile.Read<ComfyDependencySnapshot>(existingPath);
-            if (existing.Resolved && existing.PythonIdentity == identity && existing.ComfyCommit == snapshot.ComfyCommit
-                && existing.NodeRequirementsIdentity == nodeIdentity) return existing;
-            throw new InvalidDataException("已有依赖快照身份不匹配，已保留原文件。");
+            if (!existing.Resolved || existing.PythonIdentity != identity || existing.ComfyCommit != snapshot.ComfyCommit
+                || existing.NodeRequirementsIdentity != nodeIdentity)
+                throw new InvalidDataException("已有依赖快照身份不匹配，已保留原文件。");
+            try
+            {
+                DependencyPlans.ValidateEnvironment(existing, lines.Skip(1));
+                reporter.Complete("已复用缓存中的固定依赖计划");
+                return existing;
+            }
+            catch (InvalidOperationException) when (!snapshot.Resolved)
+            {
+                // A new review may follow a deliberate environment change. Keep the old approved plan,
+                // and give the new baseline its own cache key instead of asking to recheck forever.
+                key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key + "\n" + string.Join("\n", lines.Skip(1))))).ToLowerInvariant();
+                root = Path.Combine(cacheRoot, "dependency-plans", key);
+                saved = Path.Combine(root, "resolved.json");
+                if (File.Exists(saved))
+                {
+                    var reviewed = JsonFile.Read<ComfyDependencySnapshot>(saved);
+                    if (reviewed.PythonIdentity != identity || reviewed.NodeRequirementsIdentity != nodeIdentity || reviewed.ComfyCommit != snapshot.ComfyCommit)
+                        throw new InvalidDataException("新检查的依赖快照身份不符。");
+                    DependencyPlans.ValidateEnvironment(reviewed, lines.Skip(1));
+                    reporter.Complete("已复用当前环境的依赖计划");
+                    return reviewed;
+                }
+            }
         }
         Directory.CreateDirectory(root);
         var requirements = Path.Combine(root, "requirements.txt");
@@ -137,50 +168,71 @@ public static class ComfyDependencyResolver
         File.WriteAllText(requirements, snapshot.RequirementsText);
         File.WriteAllText(manager, snapshot.ManagerRequirementsText);
         File.WriteAllLines(constraints, gpu.Length > 0 ? gpu : snapshot.Constraints.Where(line => Regex.IsMatch(line, @"^(torch|torchvision|torchaudio)==", RegexOptions.IgnoreCase)));
-        var additionalFiles = additional.Select(path => PrepareNodeRequirements(path, Path.Combine(root, "nodes"), sam2Commit)).ToArray();
+        string? sam2Directory = null;
+        if (sam2Commit is not null && RequirementFiles(additional).Any(file => Installer.PinSam2(File.ReadAllText(file), sam2Commit) is not null))
+        {
+            reporter.Phase("preparing", "正在准备固定版本的 SAM-2 源码");
+            sam2Directory = await DependencySources.PrepareAsync(DependencySources.Sam2Url, sam2Commit, cacheRoot, config, ct, reporter.Log, environment);
+        }
+        var additionalFiles = additional.Select(path => PrepareNodeRequirements(path, Path.Combine(root, "nodes"), sam2Commit, sam2Directory)).ToArray();
         var needsGit = RequirementFiles(additionalFiles).Any(path => File.ReadAllText(path).Contains("git+https://github.com/", StringComparison.OrdinalIgnoreCase));
         var reportPath = Path.Combine(root, "report.json");
         using var temporary = InstallationTemporaryDirectory.Enter(Path.GetDirectoryName(Path.GetFullPath(cacheRoot))!);
-        var indexes = DownloadSources.PipIndexes(config);
-        return await WithPackageSourcesAsync(indexes,
+        var offline = environment?.TryGetValue("PIP_NO_INDEX", out var noIndex) == true && noIndex == "1";
+        var indexes = offline ? DownloadSources.PipIndexes(config) : await DependencyPackageSources.SelectIndexesAsync(config,
+            new[] { requirements, manager }.Concat(additionalFiles), ct, reporter.Log);
+        var result = await WithPackageSourcesAsync(indexes,
             needsGit ? DownloadSources.GitCandidates("https://github.com/", config) : new[] { "https://github.com/" }, async (index, gitSource) =>
         {
-            log?.Invoke("解析当前稳定版依赖（保留已安装 GPU 运行时）：" + index);
+            reporter.Phase("resolving", "正在解析 ComfyUI、Manager 与节点依赖", index);
+            reporter.Log("解析当前稳定版依赖（保留已安装 GPU 运行时）：" + index);
             var env = environment is null ? new Dictionary<string, string>() : new Dictionary<string, string>(environment);
             env["PIP_INDEX_URL"] = index; env["PIP_EXTRA_INDEX_URL"] = ""; env["PIP_CONSTRAINT"] = constraints;
             env["PIP_CONFIG_FILE"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
             env["PIP_CACHE_DIR"] = Path.Combine(cacheRoot, "pip"); env["TEMP"] = temporary.Path; env["TMP"] = temporary.Path;
             Installer.ConfigureGitEnvironment(env, gitSource);
+            NetworkPolicySnapshot.Capture(config).AddEnvironment(env, new Uri(index));
             var arguments = new List<string> { "-m", "pip", "install", "--dry-run", "--disable-pip-version-check", "--timeout", "20", "--retries", "1", "--report", reportPath,
                 "--index-url", index, "-r", requirements, "-r", manager };
             if (additionalFiles.Where((file, i) => file != additional[i]).Any()) arguments.Add("--no-build-isolation");
             foreach (var file in additionalFiles) { arguments.Add("-r"); arguments.Add(file); }
-            await Commands.Run(config.Python, arguments, config.ComfyRoot, log, ct, env);
+            await Commands.Run(config.Python, arguments, config.ComfyRoot, reporter.Log, ct, env);
             using var report = JsonDocument.Parse(File.ReadAllText(reportPath));
             var pins = MergeConstraints(lines.Skip(1), report.RootElement);
             foreach (var pin in gpu) if (!pins.Contains(pin, StringComparer.OrdinalIgnoreCase)) throw new InvalidOperationException("依赖解析试图改变已有 GPU 版本，已中止。");
-            var resolved = snapshot with { Constraints = pins, Resolved = true, PythonIdentity = identity, NodeRequirementsIdentity = nodeIdentity };
+            var packages = await DependencyPlans.ReadReportAsync(report.RootElement, ct, sam2Directory, sam2Commit);
+            var resolved = snapshot with { Constraints = pins, Resolved = true, PythonIdentity = identity, NodeRequirementsIdentity = nodeIdentity,
+                PlanVersion = 1, PackageIndex = index, GitSource = gitSource, EnvironmentPackages = lines.Skip(1).ToArray(), Packages = packages,
+                TransportIdentity = DependencyPlans.TransportIdentity(config) };
             JsonFile.Write(saved, resolved);
             return resolved;
-        }, ct, log);
+        }, ct, log, config);
+        reporter.Complete("依赖解析完成，已固定版本与文件身份");
+        return result;
     }
 
     public static async Task<T> WithPackageSourcesAsync<T>(IEnumerable<string> indexes, IEnumerable<string> gitSources,
-        Func<string, string, Task<T>> action, CancellationToken ct, Action<string>? log = null)
+        Func<string, string, Task<T>> action, CancellationToken ct, Action<string>? log = null, LauncherConfig? config = null)
     {
         Exception? last = null;
+        var packageCandidates = indexes.Distinct().ToArray();
         var gitCandidates = gitSources.Distinct().ToArray();
-        foreach (var index in indexes.Distinct())
-        foreach (var gitSource in gitCandidates)
+        var packageIndex = 0;
+        var gitIndex = 0;
+        while (packageIndex < packageCandidates.Length && gitIndex < gitCandidates.Length)
         {
             ct.ThrowIfCancellationRequested();
-            try { return await action(index, gitSource); }
-            catch (Exception ex) when (!ct.IsCancellationRequested && Installer.IsSourceFailure(ex))
+            try { return await action(packageCandidates[packageIndex], gitCandidates[gitIndex]); }
+            catch (Exception ex) when (!ct.IsCancellationRequested && (Installer.IsSourceFailure(ex)
+                || config is not null && Installer.IsPublicGitMirrorFailure(ex, gitCandidates[gitIndex], config)))
             {
                 last = ex;
-                log?.Invoke("当前索引未完成解析：" + ex.Message);
-                // A missing PyPI distribution cannot be repaired by changing Git's URL.
-                if (ex is CommandFailureException { Kind: ProcessFailureKind.PackageUnavailable }) break;
+                var gitFailure = config is not null && Installer.IsPublicGitMirrorFailure(ex, gitCandidates[gitIndex], config)
+                    || ex is CommandFailureException command && command.Kind != ProcessFailureKind.PackageUnavailable
+                    && (command.Executable.StartsWith("git", StringComparison.OrdinalIgnoreCase)
+                        || Regex.IsMatch(command.StandardError, @"(?im)(?:fatal:|unable to access|git (?:clone|fetch).*did not run successfully)"));
+                log?.Invoke((gitFailure ? "Git 来源不可用，切换 Git 来源：" : "Python 包来源不可用，切换包来源：") + DiagnosticRedaction.Text(ex.Message));
+                if (gitFailure) gitIndex++; else packageIndex++;
             }
         }
         throw new InvalidOperationException("当前稳定版依赖无法在保留 GPU 版本的条件下解析。", last);

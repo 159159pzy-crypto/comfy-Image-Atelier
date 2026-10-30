@@ -64,6 +64,18 @@ public sealed class Downloads : IDisposable
     public Task Fetch(string name, string url, string destination, long size, string sha, IProgress<DownloadProgress>? progress, CancellationToken ct) =>
         Fetch(name, new[] { url }, destination, size, sha, progress, ct);
 
+    public Task FetchDependencyAsync(DependencyPackage package, string destination, LauncherConfig config,
+        IProgress<DownloadProgress>? progress, CancellationToken ct)
+    {
+        var urls = package.Sources.Length > 0 ? package.Sources : new[] { package.Url };
+        var request = Normalize(new(package.Name + " " + package.Version, urls, destination, package.Size, package.Sha256)
+        {
+            Network = NetworkPolicySnapshot.Capture(config), TransferProfile = DownloadTransferProfile.Dependency,
+            Dependency = new(package.Name, package.Version, package.FileName, package.Sha256, package.Size)
+        });
+        return Dispatcher is { } dispatcher ? dispatcher.FetchAsync(request, progress, ct) : FetchDirectAsync(request, progress, ct);
+    }
+
     public Task Fetch(string name, IEnumerable<string> urls, string destination, long size, string sha,
         IProgress<DownloadProgress>? progress, CancellationToken ct)
     {
@@ -95,7 +107,7 @@ public sealed class Downloads : IDisposable
         }
         string? aria2 = null;
         // Keep native checkpoints on their owning engine even when a new threshold would select HTTP.
-        var useNative = request.Size >= options.MinimumAria2Bytes
+        var useNative = request.Size >= DownloadTransferPolicy.NativeThreshold(request, options)
             || File.Exists(DownloadCheckpoint.AriaData(request.Destination))
             || File.Exists(DownloadCheckpoint.AriaState(request.Destination))
             || File.Exists(DownloadCheckpoint.AriaControl(request.Destination));
@@ -137,13 +149,19 @@ public sealed class Downloads : IDisposable
                         health.Succeeded(Key(url));
                         return;
                     }
-                    catch (DownloadSourceException error) when (error.StatusCode == System.Net.HttpStatusCode.RequestedRangeNotSatisfiable)
+                    catch (Exception error) when (error is DownloadSourceException { StatusCode: System.Net.HttpStatusCode.RequestedRangeNotSatisfiable }
+                        || last && error is DownloadSourceRepresentationChangedException)
                     {
                         // Exactly one independent full GET. Sparse progress remains untouched and cannot become a HTTP prefix.
-                        sourceProgress.Report(new(request.Name, 0, request.Size, "服务器拒绝并行断点，保留原断点并尝试一次完整下载")
-                        { Engine = "HttpClient", Phase = "Connecting", FailureCode = "range_rejected" });
+                        var changedRepresentation = error is DownloadSourceRepresentationChangedException;
+                        sourceProgress.Report(new(request.Name, 0, request.Size, changedRepresentation
+                            ? "来源分段标识不一致，保留原断点并尝试一次完整下载"
+                            : "服务器拒绝并行断点，保留原断点并尝试一次完整下载")
+                        { Engine = "HttpClient", Phase = "Connecting", FailureCode = changedRepresentation ? "source_representation_changed" : "range_rejected" });
                         await compatible.FetchAsync(request, url, sourceProgress, ct, new(!last, 0, RestartWithoutRange: true, Space: space));
                         health.Succeeded(Key(url));
+                        // The independent file has passed the original size/SHA and was published under our target lease.
+                        DownloadCheckpoint.Cleanup(request.Destination);
                         return;
                     }
                     catch (Exception error) when (error is DownloadEngineUnavailableException or RangeNotSupportedException)
@@ -168,6 +186,7 @@ public sealed class Downloads : IDisposable
                 {
                     SlowDownloadException => "持续低速",
                     TimeoutException => "连接超时",
+                    DownloadSourceRepresentationChangedException => "来源分段标识不一致",
                     InvalidDataException => "内容校验失败",
                     HttpRequestException { StatusCode: { } status } => "HTTP " + (int)status,
                     _ => "连接中断"
@@ -179,7 +198,8 @@ public sealed class Downloads : IDisposable
         }
     }
 
-    private static bool IsSourceFailure(Exception error) => error is HttpRequestException or TimeoutException or InvalidDataException;
+    private static bool IsSourceFailure(Exception error) => error is HttpRequestException or TimeoutException or InvalidDataException
+        or DownloadSourceRepresentationChangedException;
     private static string? ReusablePart(DownloadRequest request, bool native)
     {
         try
@@ -199,6 +219,7 @@ public sealed class Downloads : IDisposable
     {
         if (request.Size <= 0 || request.Sha256 is null || !Regex.IsMatch(request.Sha256, "^[a-fA-F0-9]{64}$"))
             throw new InvalidDataException("下载需要确定的大小和 SHA-256。");
+        DownloadTaskIdentity.ValidateDependency(request);
         // Both standalone and dispatched downloads persist resume metadata, so share the same stable-URL boundary.
         var urls = request.Urls.Select(DownloadTaskIdentity.StableUrl).Distinct(StringComparer.Ordinal).ToArray();
         if (urls.Length == 0) throw new InvalidDataException("没有可用的下载来源。");

@@ -132,6 +132,32 @@ internal static class RuntimeDependencyTests
             "a resolved lock with a changed GPU pin cannot satisfy the original environment plan");
         foreach (var message in new[] { "HTTP 403", "Connection timed out", "No matching distribution found", "Could not resolve host" })
             Check(Installer.IsSourceFailure(new InvalidOperationException(message)), "network or unsynchronized index permits source fallback");
+        const string slowGit = "fatal: unable to access 'https://example.invalid/repo.git/': Operation too slow. Less than 1024 bytes/sec transferred the last 30 seconds";
+        var unattendedGit = Commands.Info("git.exe", ["--version"], work, new Dictionary<string, string> { ["GCM_INTERACTIVE"] = "always" });
+        Check(unattendedGit.Environment["GCM_INTERACTIVE"] == "never" && unattendedGit.Environment["GIT_TERMINAL_PROMPT"] == "0",
+            "installer child commands cannot wait for a hidden Git Credential Manager prompt");
+        var removedEnvironment = Commands.Info("git.exe", ["--version"], work,
+            new Dictionary<string, string> { ["PYTHONUTF8"] = null!, ["ANIMA_TEST_EMPTY"] = "" });
+        Check(!removedEnvironment.Environment.ContainsKey("PYTHONUTF8") && removedEnvironment.Environment.ContainsKey("ANIMA_TEST_EMPTY")
+            && removedEnvironment.Environment["ANIMA_TEST_EMPTY"] == "",
+            "null child overrides remove variables while explicit empty values remain distinct");
+        Check(CommandFailureException.Classify("fatal: Cannot prompt because user interactivity has been disabled.") == ProcessFailureKind.AuthenticationRequired,
+            "disabled Git credential prompting is a structured authentication failure");
+        foreach (var wrapper in new[] { "", "error: subprocess-exited-with-error\n" })
+        {
+            var failure = new CommandFailureException("git.exe", 128, "", wrapper + slowGit);
+            Check(failure.Kind == ProcessFailureKind.Transport && Installer.IsSourceFailure(failure), "Git low-speed abort is a retryable transport error, including pip's subprocess wrapper");
+        }
+        var lowSpeedAttempts = new List<string>();
+        await ComfyDependencyResolver.WithPackageSourcesAsync(["https://index.invalid/simple"], ["https://mirror.invalid/", "https://github.com/"], (index, source) =>
+        {
+            lowSpeedAttempts.Add(index + "|" + source);
+            return lowSpeedAttempts.Count == 1 ? Task.FromException<bool>(new CommandFailureException("git.exe", 128, "", slowGit)) : Task.FromResult(true);
+        }, default);
+        Check(lowSpeedAttempts.SequenceEqual(new[] { "https://index.invalid/simple|https://mirror.invalid/", "https://index.invalid/simple|https://github.com/" }),
+            "a real Git low-speed abort changes Git source only and keeps the successful package index");
+        Check(CommandFailureException.Classify("error: subprocess-exited-with-error\ncompiler error") == ProcessFailureKind.BuildFailure,
+            "a genuine compiler failure is never reclassified as a source retry");
         foreach (var error in new Exception[] { new OperationCanceledException(), new IOException("locked"), new InvalidOperationException("Permission denied"), new InvalidOperationException("No space left on device"), new InvalidOperationException("ResolutionImpossible") })
             Check(!Installer.IsSourceFailure(error), "cancellation, local errors and incompatible requirements do not trigger source fallback");
         foreach (var error in new[] { "Filename too long; Failed to build git+https://github.com/facebookresearch/sam2", "WinError 206: git clone https://github.com/example/repo checkout failed",

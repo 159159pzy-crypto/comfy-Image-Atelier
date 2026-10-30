@@ -10,6 +10,7 @@ internal sealed partial class LauncherState
     public event Action? DownloadsChanged;
     private DispatcherQueue downloadUi = null!;
     private readonly Dictionary<string, Task> ownerExecutions = new();
+    private readonly Dictionary<string, TaskCompletionSource> ownerResumptions = new();
     private bool shuttingDown;
     private string? activeDownloadOwner;
     private LauncherConfig? savedDownloadSettings;
@@ -154,11 +155,14 @@ internal sealed partial class LauncherState
 
     public async Task ResumeDownloadOwnerAsync(string id, bool newSources = false)
     {
-        if (shuttingDown || ownerExecutions.ContainsKey(id)) return;
+        if (shuttingDown || ownerExecutions.ContainsKey(id) || ownerResumptions.ContainsKey(id)) return;
+        var resumption = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        ownerResumptions.Add(id, resumption);
         IDisposable? softwareReservation = null;
         try
         {
             using var cacheUse = await LauncherCache.AcquireUseAsync(Program.StateDir, modelInspectionLifetime.Token);
+            if (shuttingDown) return;
             var owner = DownloadTasks.Owners.Single(o => o.Id == id);
             if (owner.Kind == "models" && owner.Models.Length > 1)
             {
@@ -174,7 +178,9 @@ internal sealed partial class LauncherState
             }
             if (newSources)
             {
-                DownloadTasks.UpdateOwnerSources(id, WithSavedDownloadSettings(Config));
+                SetStatus("正在检查原任务的新下载来源…");
+                await DownloadTasks.UpdateOwnerSourcesAsync(id, WithSavedDownloadSettings(Config), modelInspectionLifetime.Token);
+                if (shuttingDown) return;
                 owner = DownloadTasks.Owners.Single(o => o.Id == id);
             }
             if (owner.Kind is "setup" or "install")
@@ -208,7 +214,7 @@ internal sealed partial class LauncherState
         }
         catch (OperationCanceledException) { SetStatus("下载已停止，进度已保留。"); }
         catch (Exception ex) { AppendLog(ex.Message); SetStatus("下载未完成：" + ex.Message); }
-        finally { softwareReservation?.Dispose(); }
+        finally { ownerResumptions.Remove(id); softwareReservation?.Dispose(); resumption.TrySetResult(); }
     }
 
     private async Task DownloadFrozenModelsAsync(DownloadOwnerRecord owner, CancellationToken ct, IProgress<DownloadProgress>? progress = null)
@@ -303,6 +309,10 @@ internal sealed partial class LauncherState
         task?.Cancel();
         await DownloadTasks.PauseAllAsync();
         await inspections;
+        // Source refreshes can be awaiting network metadata before an owner starts running.
+        // Their shared lifetime is canceled at shutdown; drain them before disposing the store.
+        var resumptions = ownerResumptions.Values.Select(item => item.Task).ToArray();
+        if (resumptions.Length > 0) await Task.WhenAll(resumptions);
         var running = ownerExecutions.Values.ToArray();
         if (running.Length > 0) { try { await Task.WhenAll(running); } catch { } }
         // Cancellation of install subprocesses is awaited by the existing environment coordinator.

@@ -30,7 +30,7 @@ public sealed class SafeHttpSourceClient : IDisposable
         client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("AnimaRandomStudio", version));
     }
 
-    public async Task<SourceResponse> OpenAsync(string url, long? from, long? to, string? etag, CancellationToken ct)
+    public async Task<SourceResponse> OpenAsync(string url, long? from, long? to, string? etag, CancellationToken ct, string? accept = null)
     {
         var original = Safety.Https(url);
         var sourceKey = health?.Key(url, credential, network);
@@ -40,6 +40,7 @@ public sealed class SafeHttpSourceClient : IDisposable
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);
             request.Headers.AcceptEncoding.ParseAdd("identity");
+            if (accept is not null) request.Headers.Accept.ParseAdd(accept);
             if (from is not null)
             {
                 request.Headers.Range = new RangeHeaderValue(from, to);

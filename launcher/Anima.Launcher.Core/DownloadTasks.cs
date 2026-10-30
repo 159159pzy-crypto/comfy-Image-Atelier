@@ -24,6 +24,8 @@ public sealed class DownloadTaskRecord
     public string[] Urls { get; set; } = [];
     public NetworkPolicySnapshot? Network { get; set; }
     public bool PreferHttpClient { get; set; }
+    public DownloadTransferProfile TransferProfile { get; set; }
+    public DependencyDownloadIdentity? Dependency { get; set; }
     public string Fingerprint { get; set; } = "";
     public List<string> OwnerIds { get; set; } = [];
     public bool Required { get; set; } = true;
@@ -44,7 +46,8 @@ public sealed class DownloadTaskRecord
     public string? FailureCode { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
-    public DownloadRequest Request() => new(Name, Urls.ToArray(), Destination, Size, Sha256) { TaskId = Id, Network = Network, PreferHttpClient = PreferHttpClient };
+    public DownloadRequest Request() => new(Name, Urls.ToArray(), Destination, Size, Sha256)
+    { TaskId = Id, Network = Network, PreferHttpClient = PreferHttpClient, TransferProfile = TransferProfile, Dependency = Dependency };
 }
 
 public sealed class DownloadOwnerRecord
@@ -87,6 +90,10 @@ internal static class DownloadTaskIdentity
     internal static string PathKey(string value) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(value)).ToUpperInvariant();
     internal static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     internal static string Artifact(string path, long size, string sha) => Hash(PathKey(path) + "\n" + size + "\n" + sha.ToLowerInvariant());
+    internal static string Artifact(DownloadRequest request) => request.Dependency is { } dependency
+        ? Hash(Artifact(request.Destination, request.Size, request.Sha256) + "\n" + ComfyDependencyResolver.NormalizeName(dependency.Name)
+            + "\n" + dependency.Version + "\n" + dependency.FileName)
+        : Artifact(request.Destination, request.Size, request.Sha256);
     internal static string Owner(DownloadOwnerRecord owner) => Hash(JsonSerializer.Serialize(new
     {
         owner.Kind, Environment = string.IsNullOrWhiteSpace(owner.EnvironmentRoot) ? "" : PathKey(owner.EnvironmentRoot),
@@ -104,7 +111,25 @@ internal static class DownloadTaskIdentity
         var urls = (request.Urls ?? []).Select(StableUrl).Distinct(StringComparer.Ordinal).ToArray();
         if (urls.Length == 0) throw new InvalidDataException("下载任务缺少已验证来源。");
         if (request.Network is { } network) NetworkPolicySnapshot.ValidateSettings(network.Mode, network.ProxyAddress);
+        ValidateDependency(request);
         return request with { Destination = Path.GetFullPath(request.Destination), Sha256 = request.Sha256!.ToLowerInvariant(), Urls = urls };
+    }
+
+    internal static void ValidateDependency(DownloadRequest request)
+    {
+        if (!Enum.IsDefined(request.TransferProfile)
+            || (request.TransferProfile == DownloadTransferProfile.Dependency) != (request.Dependency is not null))
+            throw new InvalidDataException("依赖下载配置缺少固定包身份。");
+        if (request.Dependency is not { } dependency) return;
+        if (!Regex.IsMatch(dependency.Name ?? "", "^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+            || !Regex.IsMatch(dependency.Version ?? "", "^[A-Za-z0-9][A-Za-z0-9.+!_-]*$")
+            || string.IsNullOrWhiteSpace(dependency.FileName)
+            || dependency.FileName != Path.GetFileName(dependency.FileName)
+            || dependency.FileName.IndexOfAny(['/', '\\', ':']) >= 0 || dependency.FileName is "." or ".."
+            || !string.Equals(Path.GetFileName(request.Destination), dependency.FileName, StringComparison.Ordinal)
+            || dependency.Size != request.Size
+            || !string.Equals(dependency.Sha256, request.Sha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("依赖包名、版本、文件名或内容身份与下载任务不符。");
     }
 
     internal static void ValidateModel(ModelDownloadIntent intent)

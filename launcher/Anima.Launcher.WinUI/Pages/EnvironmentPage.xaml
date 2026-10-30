@@ -28,6 +28,19 @@
                     </StackPanel>
                 </StackPanel>
             </Border>
+            <Border x:Name="DependencyProgressPanel" Visibility="Collapsed" Style="{StaticResource StudioPanelStyle}">
+                <StackPanel Spacing="10">
+                    <TextBlock x:Name="DependencyHeading" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap" Foreground="{ThemeResource StudioTextBrush}" AutomationProperties.AutomationId="EnvironmentDependencyHeading" />
+                    <ProgressBar x:Name="DependencyProgressBar" Minimum="0" Maximum="100" Height="5" AutomationProperties.AutomationId="EnvironmentDependencyProgress" />
+                    <TextBlock x:Name="DependencyDetails" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="EnvironmentDependencyDetails" />
+                    <TextBlock x:Name="DependencyQuietNotice" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="EnvironmentDependencyQuietNotice" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="PauseDependencyButton" Content="暂停" Click="PauseDependency_Click" AutomationProperties.AutomationId="EnvironmentPauseDependency" />
+                        <Button x:Name="ResumeDependencyButton" Content="继续" Click="ResumeDependency_Click" AutomationProperties.AutomationId="EnvironmentResumeDependency" />
+                        <HyperlinkButton Content="查看日志" Click="DependencyLogs_Click" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
             <Border x:Name="LegacySetupSteps" Visibility="Collapsed" Background="{ThemeResource StudioMutedBrush}" CornerRadius="18" Padding="18,14">
                 <Grid ColumnSpacing="8">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>

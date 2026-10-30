@@ -62,12 +62,12 @@ internal sealed class Aria2Transport(SafeHttpSourceClient source, DownloadPolicy
         if (!await source.SupportsRangesAsync(url, request.Size, ct)) throw new RangeNotSupportedException("此来源不支持分段下载。");
         await using var bridge = await LoopbackRangeBridge.StartAsync(source, request, url, ct);
         await using var engine = await Aria2Process.StartAsync(executable, options, ct);
-        var connections = request.Size < 64L * 1024 * 1024 ? 1 : Math.Clamp(options.ConnectionsPerFile, 1, 4);
+        var connections = DownloadTransferPolicy.Connections(request, options);
         var downloadOptions = new Dictionary<string, string>
         {
             ["dir"] = Path.GetDirectoryName(data)!, ["out"] = Path.GetFileName(data),
             ["continue"] = "true", ["always-resume"] = "true", ["auto-file-renaming"] = "false", ["allow-overwrite"] = "false",
-            ["split"] = connections.ToString(), ["max-connection-per-server"] = connections.ToString(), ["min-split-size"] = "32M",
+            ["split"] = connections.ToString(), ["max-connection-per-server"] = connections.ToString(), ["min-split-size"] = DownloadTransferPolicy.MinimumSplitSize(request),
             ["piece-length"] = "1M", ["file-allocation"] = "none", ["check-integrity"] = "false",
             ["max-tries"] = "1", ["retry-wait"] = "0", ["http-accept-gzip"] = "false",
             ["header"] = LoopbackRangeBridge.CapabilityHeader + ": " + bridge.Token,

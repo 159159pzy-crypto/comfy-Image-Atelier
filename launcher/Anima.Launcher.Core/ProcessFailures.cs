@@ -49,14 +49,17 @@ public sealed class CommandFailureException : InvalidOperationException
         if (Has("being used by another process", "winerror 32")) return ProcessFailureKind.FileInUse;
         if (Has("permission denied", "access is denied", "winerror 5")) return ProcessFailureKind.AccessDenied;
         if (Has("resolutionimpossible", "conflicting dependencies", "dependency conflict")) return ProcessFailureKind.DependencyConflict;
-        if (Has("failed building wheel", "subprocess-exited-with-error", "error: command", "compiler error", "checkout failed")) return ProcessFailureKind.BuildFailure;
-        if (HttpStatus("401") || Has("authentication failed", "could not read username", "authentication required")) return ProcessFailureKind.AuthenticationRequired;
+        if (Has("failed building wheel", "error: command", "compiler error", "checkout failed")) return ProcessFailureKind.BuildFailure;
+        if (HttpStatus("401") || Has("authentication failed", "could not read username", "authentication required", "interactivity has been disabled", "terminal prompts disabled")) return ProcessFailureKind.AuthenticationRequired;
         if (HttpStatus("403") || Has("access forbidden")) return ProcessFailureKind.Forbidden;
         if (HttpStatus("429") || Has("too many requests", "rate limit exceeded")) return ProcessFailureKind.RateLimited;
         if (HttpStatus("404") || Has("not our ref", "repository not found")) return ProcessFailureKind.MissingResource;
         if (Has("could not find a version", "no matching distribution")) return ProcessFailureKind.PackageUnavailable;
         if (HttpStatus(@"5\d\d")) return ProcessFailureKind.ServerUnavailable;
-        if (Has("timed out", "timeout", "connection", "resolve host", "name resolution", "network is unreachable", "ssl", "tls", "remote end hung", "early eof", "fetch failed", "failed to download")) return ProcessFailureKind.Transport;
+        if (Has("timed out", "timeout", "operation too slow", "connection", "resolve host", "name resolution", "network is unreachable", "ssl", "tls", "remote end hung", "early eof", "fetch failed", "failed to download")) return ProcessFailureKind.Transport;
+        // pip wraps failed Git/HTTP subprocesses in the same generic error heading
+        // as build failures. Keep concrete transport evidence authoritative.
+        if (Has("subprocess-exited-with-error")) return ProcessFailureKind.BuildFailure;
         return ProcessFailureKind.Unknown;
     }
 }

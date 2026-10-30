@@ -84,7 +84,7 @@ public sealed class DownloadTaskStore
                 || task.OwnerIds is null || task.OwnerIds.Any(id => !ownerIds.Contains(id)))
                 throw new InvalidDataException("下载文件任务记录无效。");
             DownloadTaskIdentity.Validate(task.Request());
-            if (task.Fingerprint != DownloadTaskIdentity.Artifact(task.Destination, task.Size, task.Sha256))
+            if (task.Fingerprint != DownloadTaskIdentity.Artifact(task.Request()))
                 throw new InvalidDataException("下载任务的目标或内容发生变化，请重新确认。");
         }
     }

@@ -7,7 +7,8 @@ namespace Anima.Launcher.Core;
 public sealed record InstallJournal(string Root, string Stage, string Status, DateTime UpdatedUtc, string? Error = null);
 public sealed record NodeInstallPlan(Repository Repository, string Directory, bool PreserveExisting);
 
-public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloads downloads, Action<string> log, IProgress<DownloadProgress>? progress, Action<string>? stageChanged = null, Action<SetupProgress>? setupProgress = null)
+public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloads downloads, Action<string> log, IProgress<DownloadProgress>? progress, Action<string>? stageChanged = null, Action<SetupProgress>? setupProgress = null,
+    Action<DependencyProgress>? dependencyProgress = null)
 {
     public static IReadOnlyList<NodeInstallPlan> PlanNodes(string root, RuntimeManifest runtime)
     {
@@ -18,6 +19,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
     private string? git;
     private string? uv;
     private ComfyDependencySnapshot? activeDependencies;
+    private string? installationDependenciesPath;
     private Dictionary<string, string> Env(LauncherConfig config, string? destination = null)
     {
         var environment = new Dictionary<string, string>
@@ -129,21 +131,29 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             if (File.Exists(stageMarker)) ValidateRepositoryIdentity(JsonFile.Read<Repository>(stageMarker), repo, staging);
             JsonFile.Write(stageMarker, repo);
             await Commands.Run(git!, ["init"], staging, log, ct);
-            await WithSources("Git " + repo.Id, DownloadSources.GitCandidates(repo.Url, config), async source =>
+            var sourceCache = Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "cache");
+            string? fetchedSource = null;
+            await WithSources("Git " + repo.Id, InstallationSourcePreferences.GitRepositories(sourceCache, repo.Url, config), async source =>
             {
                 var env = Env(config, source);
                 ConfigureGitEnvironment(env, "https://github.com/");
-                await GitFetchRecovery.Run(git!, ["fetch", "--depth", "1", source, repo.Commit], staging, log, ct, env);
-            }, ct);
+                await GitFetchRecovery.RunTransfer(git!, ["fetch", "--progress", "--depth", "1", source, repo.Commit], staging, log, ct, env);
+                fetchedSource = source;
+            }, ct, config);
             await Commands.Run(git!, ["checkout", "--detach", "FETCH_HEAD"], staging, log, ct, Env(config));
             var actual = (await Commands.Run(git!, ["rev-parse", "HEAD"], staging, null, ct)).Trim();
             if (actual != repo.Commit) throw new InvalidDataException("Git 来源提交与锁定版本不同。");
-            await WithSources("Git 子模块", DownloadSources.GitCandidates("https://github.com/", config), async source =>
+            if (fetchedSource is not null) InstallationSourcePreferences.RememberRepository(sourceCache, config, repo.Url, fetchedSource, log);
+            var modulesPath = Path.Combine(staging, ".gitmodules");
+            var pendingModules = File.Exists(modulesPath) && InstallationSourcePreferences.HasPendingGitHubSubmodules(
+                File.ReadAllText(modulesPath), await Commands.Run(git!, ["submodule", "status", "--recursive"], staging, null, ct, Env(config)));
+            if (File.Exists(modulesPath)) await WithSources("Git 子模块", InstallationSourcePreferences.GitBases(sourceCache, config), async source =>
             {
                 var env = Env(config, source);
                 ConfigureGitEnvironment(env, source);
                 await Commands.Run(git!, ["submodule", "update", "--init", "--recursive"], staging, log, ct, env);
-            }, ct);
+                if (pendingModules) InstallationSourcePreferences.RememberGitBase(sourceCache, config, source, log);
+            }, ct, config);
             JsonFile.Write(Path.Combine(staging, ".anima-revision.json"), repo);
             await ValidateClone(repo, staging, config, ct);
             File.Delete(stageMarker);
@@ -217,22 +227,21 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
                 if (!baseArgs.Contains("--no-build-isolation")) baseArgs.Add("--no-build-isolation");
             }
         }
-        await WithSources("Python 包", DownloadSources.PipIndexes(config), async source =>
+        var requirementsFiles = arguments.Where((arg, i) => i > 0 && arguments[i - 1] == "-r").ToArray();
+        var needsGit = arguments.Any(arg => arg.StartsWith("git+https://github.com/", StringComparison.OrdinalIgnoreCase))
+            || ComfyDependencyResolver.RequirementFiles(requirementsFiles).Any(path => File.ReadAllText(path).Contains("git+https://github.com/", StringComparison.OrdinalIgnoreCase));
+        var reuseSource = activeDependencies?.TransportIdentity == DependencyPlans.TransportIdentity(config);
+        await ComfyDependencyResolver.WithPackageSourcesAsync(DependencyInstallation.Prefer(DownloadSources.PipIndexes(config), reuseSource ? activeDependencies?.PackageIndex ?? "" : ""),
+            needsGit ? DependencyInstallation.Prefer(DownloadSources.GitCandidates("https://github.com/", config), reuseSource ? activeDependencies?.GitSource ?? "" : "") : ["https://github.com/"], async (source, gitSource) =>
         {
+            log("Python 包 · 来源：" + source);
             var env = Env(config, source);
             env["PIP_INDEX_URL"] = source;
             env["UV_DEFAULT_INDEX"] = source;
-            var requirementsFiles = arguments.Where((arg, i) => i > 0 && arguments[i - 1] == "-r");
-            var needsGit = arguments.Any(arg => arg.StartsWith("git+https://github.com/", StringComparison.OrdinalIgnoreCase))
-                || ComfyDependencyResolver.RequirementFiles(requirementsFiles).Any(path => File.ReadAllText(path).Contains("git+https://github.com/", StringComparison.OrdinalIgnoreCase));
-            if (needsGit)
-                await WithSources("Git Python 依赖", DownloadSources.GitCandidates("https://github.com/", config), async gitSource =>
-                {
-                    ConfigureGitEnvironment(env, gitSource);
-                    await Commands.Run(config.Python, baseArgs.Concat(["--timeout", "20", "--retries", "1"]).Concat(arguments), config.ComfyRoot, log, ct, env);
-                }, ct);
-            else await Commands.Run(config.Python, baseArgs.Concat(["--timeout", "20", "--retries", "1"]).Concat(arguments), config.ComfyRoot, log, ct, env);
-        }, ct);
+            ConfigureGitEnvironment(env, gitSource);
+            await Commands.Run(config.Python, baseArgs.Concat(["--timeout", "20", "--retries", "1"]).Concat(arguments), config.ComfyRoot, log, ct, env);
+            return true;
+        }, ct, log, config);
     }
 
     public static bool IsSourceFailure(Exception error)
@@ -246,12 +255,27 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             "filename too long", "file name too long", "winerror 206", "checkout failed", "resolutionimpossible", "conflicting dependencies", "dependency conflict" }.Any(message.Contains)) return false;
         // A requirement's https URL is not an HTTP error. pip often repeats that URL in
         // local build failures; only transport evidence permits trying another mirror.
-        return new[] { "timed out", "timeout", "connection", "resolve host", "name resolution", "network is unreachable", "ssl", "tls",
+        return new[] { "timed out", "timeout", "operation too slow", "connection", "resolve host", "name resolution", "network is unreachable", "ssl", "tls",
             "could not find a version", "no matching distribution", "remote end hung", "early eof", "fetch failed", "failed to download", "not our ref" }.Any(message.Contains)
             || Regex.IsMatch(message, @"(?:http(?: error)?(?: status(?: code)?)?\s*[:=]?\s*|returned error:\s*|status code:?\s*)[45]\d\d\b|\b[45]\d\d\s+(?:client|server)\s+error\b");
     }
 
-    private async Task WithSources(string name, IEnumerable<string> sources, Func<string, Task> action, CancellationToken ct)
+    public static bool IsPublicGitMirrorFailure(Exception error, string source, LauncherConfig config)
+    {
+        if (!DownloadSources.PreferChina(config) || !string.IsNullOrWhiteSpace(config.GitMirror)
+            || !string.IsNullOrWhiteSpace(config.CustomRepository) || NetworkPolicy.Direct
+            || error is not CommandFailureException command
+            || command.Kind is not (ProcessFailureKind.AuthenticationRequired or ProcessFailureKind.Forbidden)) return false;
+        var gitFailure = Path.GetFileNameWithoutExtension(command.Executable).StartsWith("git", StringComparison.OrdinalIgnoreCase)
+            || command.StandardError.Contains("https://gh-proxy.com/https://github.com/", StringComparison.OrdinalIgnoreCase)
+                && Regex.IsMatch(command.StandardError, @"(?im)(?:^\s*fatal:|\bgit(?:\.exe)?\s+(?:clone|fetch)\b)");
+        if (!gitFailure) return false;
+        return Uri.TryCreate(source, UriKind.Absolute, out var uri) && uri.Scheme == "https" && uri.Host == "gh-proxy.com"
+            && uri.AbsolutePath.StartsWith("/https://github.com/", StringComparison.Ordinal) && uri.UserInfo.Length == 0
+            && uri.Query.Length == 0 && uri.Fragment.Length == 0;
+    }
+
+    private async Task WithSources(string name, IEnumerable<string> sources, Func<string, Task> action, CancellationToken ct, LauncherConfig? gitConfig = null)
     {
         var candidates = sources.Distinct().ToArray();
         for (var i = 0; i < candidates.Length; i++)
@@ -259,7 +283,8 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             ct.ThrowIfCancellationRequested();
             log($"{name} · 来源：{candidates[i]}");
             try { await action(candidates[i]); return; }
-            catch (Exception ex) when (!ct.IsCancellationRequested && i + 1 < candidates.Length && IsSourceFailure(ex))
+            catch (Exception ex) when (!ct.IsCancellationRequested && i + 1 < candidates.Length
+                && (IsSourceFailure(ex) || gitConfig is not null && IsPublicGitMirrorFailure(ex, candidates[i], gitConfig)))
             {
                 log($"{name} 当前来源不可用，切换下一来源：{DiagnosticRedaction.Text(ex.Message)}");
                 await Task.Delay(ex is CommandFailureException { Kind: ProcessFailureKind.RateLimited } ? TimeSpan.FromSeconds(15)
@@ -296,6 +321,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
 
     public async Task RepairDependencies(LauncherConfig config, ComfyDependencySnapshot? dependencies, CancellationToken ct)
     {
+        installationDependenciesPath = null;
         config.Validate();
         _ = ComfyUpdateCoordinator.IndependentPythonDirectory(config);
         manifest = InstallationPlanner.PreserveExistingNodeVersions(config.ComfyRoot, manifest);
@@ -317,6 +343,13 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
 
     private async Task InstallCombinedDependencies(LauncherConfig config, string gpuPins, bool requiredManager, CancellationToken ct)
     {
+        var startedAt = DateTimeOffset.UtcNow;
+        void PublishDependencyProgress(DependencyProgress value) => dependencyProgress?.Invoke(value with { StartedAt = startedAt });
+        var reporter = new DependencyProgressReporter(PublishDependencyProgress, log);
+        // Resolving and installing artifacts are substeps. Only the final runtime
+        // validation below may complete the shared dependency stage.
+        void IntermediateProgress(DependencyProgress value) => PublishDependencyProgress(
+            value.Status == DependencyProgressStatus.Complete ? value with { Status = DependencyProgressStatus.Running } : value);
         var requirements = Path.Combine(config.ComfyRoot, "requirements.txt");
         var manager = Path.Combine(config.ComfyRoot, "manager_requirements.txt");
         if (!File.Exists(manager))
@@ -338,17 +371,27 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             if (activeDependencies is not null)
             {
                 activeDependencies = await ComfyDependencyResolver.ResolveAsync(config, activeDependencies,
-                    Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "cache"), ct, log, nodes, Env(config), manifest.Sam2Commit);
+                    Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "cache"), ct, log, nodes, Env(config), manifest.Sam2Commit,
+                    dependencyProgress: IntermediateProgress);
                 EnsureConstraints(config, gpuPins);
+                if (installationDependenciesPath is not null) JsonFile.Write(installationDependenciesPath, activeDependencies);
             }
             else log("此环境没有可验证的 Git 提交；使用现有源码依赖联合安装并保留 GPU 版本，不复用依赖快照。");
-            var args = new List<string> { "-r", requirements };
-            if (File.Exists(manager)) { args.Add("-r"); args.Add(manager); }
-            foreach (var node in nodes) { args.Add("-r"); args.Add(node); }
-            await Pip(config, args, ct);
+            if (activeDependencies is { PlanVersion: 1 } resolved)
+                await DependencyInstallation.InstallAsync(config, resolved, InstallationPlanner.ResolveRuntimeRoot(config, stateDir), downloads, Env(config),
+                    async token => uv ??= await Tool("uv", config, token), ct, log, IntermediateProgress);
+            else
+            {
+                reporter.Phase("installing", "正在按原固定计划安装依赖（兼容模式）");
+                var args = new List<string> { "-r", requirements };
+                if (File.Exists(manager)) { args.Add("-r"); args.Add(manager); }
+                foreach (var node in nodes) { args.Add("-r"); args.Add(node); }
+                await Pip(config, args, ct);
+            }
+            reporter.Phase("verifying", "正在验证 Manager 与环境依赖");
+            if (File.Exists(manager)) await RuntimeDependencies.ValidateManager(config, ct);
+            reporter.Complete("ComfyUI 依赖已安装并通过校验");
         });
-        if (File.Exists(manager))
-            await Stage(config, "dependencies", "安装并验证 Manager 依赖", () => RuntimeDependencies.ValidateManager(config, ct));
     }
 
     private async Task CompleteNodeInstallers(LauncherConfig config, IEnumerable<NodeInstallPlan> nodes, CancellationToken ct)
@@ -368,6 +411,25 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
                 }
                 JsonFile.Write(complete, RuntimeDependencies.CreateNodeReceipt(config, node.Directory, probe, commit));
             });
+        }
+    }
+
+    private async Task WithInstallationCheckpoint(LauncherConfig config, Func<Task> action)
+    {
+        if (installationDependenciesPath is null || activeDependencies is not { PlanVersion: 1 })
+        {
+            await action();
+            return;
+        }
+        DependencyPlans.ValidateEnvironment(activeDependencies, await DependencyPlans.InventoryAsync(config, CancellationToken.None), installed: true);
+        try { await action(); }
+        finally
+        {
+            // Child processes have already stopped, even when the user paused. Keep
+            // exact additions made by authorized installers so the fixed plan resumes.
+            var inventory = await DependencyPlans.InventoryAsync(config, CancellationToken.None);
+            activeDependencies = DependencyPlans.RecordAuthorizedAdditions(activeDependencies, inventory);
+            JsonFile.Write(installationDependenciesPath, activeDependencies);
         }
     }
 
@@ -481,11 +543,26 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
     }
     public async Task<LauncherConfig> Install(InstallationPlan plan, CancellationToken ct)
     {
+        installationDependenciesPath = null;
         plan = await InstallationPlanner.ResolveStableAsync(plan, manifest, stateDir, ct);
         manifest = plan.ResolvedRuntime ?? manifest;
         activeDependencies = plan.Dependencies;
         var config = plan.CreateConfig();
         var fresh = plan.Fresh;
+        if (fresh && activeDependencies is not null)
+        {
+            installationDependenciesPath = Path.Combine(stateDir, "install-dependency-plans",
+                Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(config.ComfyRoot).ToUpperInvariant()))).ToLowerInvariant(),
+                activeDependencies.ComfyCommit + ".json");
+            if (File.Exists(installationDependenciesPath))
+            {
+                var savedDependencies = JsonFile.Read<ComfyDependencySnapshot>(installationDependenciesPath);
+                if (savedDependencies.ComfyCommit != activeDependencies.ComfyCommit || savedDependencies.RequirementsText != activeDependencies.RequirementsText
+                    || savedDependencies.ManagerRequirementsText != activeDependencies.ManagerRequirementsText)
+                    throw new InvalidDataException("续装依赖计划与已确认的 ComfyUI 版本不同。");
+                activeDependencies = savedDependencies;
+            }
+        }
         config.Validate();
         Safety.ValidateRuntime(manifest);
         if (string.IsNullOrWhiteSpace(config.ComfyRoot)) throw new InvalidDataException("请先选择 ComfyUI 目录：新建选空目录，导入选含 main.py 的目录。");
@@ -567,8 +644,8 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             });
         }
         await InstallCombinedDependencies(config, importedPins, fresh || ComfyLaunchArguments.ManagerEnabled(config.ComfyArguments), ct);
-        await CompleteNodeInstallers(config, nodePlans, ct);
-        await Stage(config, "nodes", "检查可选 Triton 加速依赖", () => RepairOptionalDependencies(config, ct));
+        await WithInstallationCheckpoint(config, () => CompleteNodeInstallers(config, nodePlans, ct));
+        await WithInstallationCheckpoint(config, () => Stage(config, "nodes", "检查可选 Triton 加速依赖", () => RepairOptionalDependencies(config, ct)));
         var assistantDirectory = PromptAssistantCompatibility.ResolveDirectory(config.ComfyRoot);
         if (assistantDirectory is not null)
             await Stage(config, "nodes", "验证提示词助手纯模板兼容", () => PromptAssistantCompatibility.CheckOrApply(config, stateDir, assistantDirectory, true, ct));

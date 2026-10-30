@@ -108,7 +108,7 @@ internal sealed partial class LauncherState
             Path.Combine(InstallationPlanner.ResolveRuntimeRoot(Config, Program.StateDir), "cache"), ct, AppendLog,
             nodeRequirements: ComfyDependencyResolver.ExistingNodeRequirements(Config),
             environment: new Dictionary<string, string> { ["PATH"] = Path.GetDirectoryName(git) + Path.PathSeparator + Environment.GetEnvironmentVariable("PATH") },
-            sam2Commit: Program.Runtime.Sam2Commit);
+            sam2Commit: Program.Runtime.Sam2Commit, dependencyProgress: DependencyProgressObserver());
         new ComfyUpdatePlans(Program.StateDir).Save(Config, checkedComfyRelease, checkedComfyDependencies);
         ComfyUpdateStatus = $"已固定 {checkedComfyRelease.Tag} · {checkedComfyRelease.Commit[..12]} 与完整依赖快照，重启后仍可继续。更新会备份 Git、完整 Python 与配置，并保留模型和节点。";
         ComfyUpdateChanged?.Invoke();
@@ -131,9 +131,9 @@ internal sealed partial class LauncherState
             Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, Program.StateDir), "cache"), ct, AppendLog,
             nodeRequirements: ComfyDependencyResolver.ExistingNodeRequirements(config),
             environment: new Dictionary<string, string> { ["PATH"] = Path.GetDirectoryName(git) + Path.PathSeparator + Environment.GetEnvironmentVariable("PATH") },
-            sam2Commit: Program.Runtime.Sam2Commit);
+            sam2Commit: Program.Runtime.Sam2Commit, dependencyProgress: DependencyProgressObserver());
         var runtime = Program.Runtime with { Comfy = Program.Runtime.Comfy with { Commit = release.Commit }, PythonConstraints = dependencies.Constraints };
-        var installer = new Installer(Program.StateDir, runtime, Downloads, AppendLog, DownloadProgress());
+        var installer = CreateInstaller(runtime);
         try
         {
             await coordinator.UpdateAsync(config, release, runtime, dependencies,
@@ -169,7 +169,7 @@ internal sealed partial class LauncherState
     public Task RepairComfyDependenciesAsync() => Run(async ct =>
     {
         RequireRoot();
-        var installer = new Installer(Program.StateDir, Program.Runtime, Downloads, AppendLog, DownloadProgress());
+        var installer = CreateInstaller(Program.Runtime);
         await installer.RepairDependencies(Config, null, ct);
         if (!Config.ComfyArguments.Contains("--enable-manager")) Config.ComfyArguments.Add("--enable-manager");
         Save();
