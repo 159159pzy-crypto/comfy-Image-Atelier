@@ -135,49 +135,75 @@ public sealed class Downloads : IDisposable
             var sourceProgress = new DownloadInlineProgress(value => progress?.Report(value with
             { Stage = value.Stage + " · " + label, Source = label, TaskId = request.TaskId }));
             var last = index == request.Urls.Length - 1;
+            var initialSourceBytes = DownloadCheckpoint.RetainedBytes(request.Destination, request.Size, request.Sha256);
+            var independentRestart = false;
             try
             {
-                if (health.Cooldown(Key(url)) is { } retryAt)
-                    sourceProgress.Report(new(request.Name, DownloadCheckpoint.RetainedBytes(request.Destination, request.Size, request.Sha256), request.Size,
-                        "等待来源冷却后继续") { Phase = "RetryWaiting", RetryAt = retryAt });
-                sourceProgress.Report(new(request.Name, DownloadCheckpoint.RetainedBytes(request.Destination, request.Size, request.Sha256), request.Size, "连接来源") { Phase = "Connecting" });
-                if (native is not null)
+                for (var continuation = 0; ; continuation++)
                 {
                     try
                     {
-                        await native.FetchAsync(request, url, sourceProgress, ct, new(!last, last ? 3 : 0, Space: space));
+                        if (health.Cooldown(Key(url)) is { } retryAt)
+                            sourceProgress.Report(new(request.Name, DownloadCheckpoint.RetainedBytes(request.Destination, request.Size, request.Sha256), request.Size,
+                                "等待来源冷却后继续") { Phase = "RetryWaiting", RetryAt = retryAt });
+                        sourceProgress.Report(new(request.Name, DownloadCheckpoint.RetainedBytes(request.Destination, request.Size, request.Sha256), request.Size, "连接来源") { Phase = "Connecting" });
+                        if (native is not null)
+                        {
+                            try
+                            {
+                                await native.FetchAsync(request, url, sourceProgress, ct, new(!last, last ? 3 : 0, Space: space));
+                                health.Succeeded(Key(url));
+                                return;
+                            }
+                            catch (Exception error) when (error is DownloadSourceException { StatusCode: System.Net.HttpStatusCode.RequestedRangeNotSatisfiable }
+                                || last && error is DownloadSourceRepresentationChangedException)
+                            {
+                                // Exactly one independent full GET. Sparse progress remains untouched and cannot become a HTTP prefix.
+                                var changedRepresentation = error is DownloadSourceRepresentationChangedException;
+                                independentRestart = true;
+                                sourceProgress.Report(new(request.Name, 0, request.Size, changedRepresentation
+                                    ? "来源分段标识不一致，保留原断点并尝试一次完整下载"
+                                    : "服务器拒绝并行断点，保留原断点并尝试一次完整下载")
+                                { Engine = "HttpClient", Phase = "Connecting", FailureCode = changedRepresentation ? "source_representation_changed" : "range_rejected" });
+                                await compatible.FetchAsync(request, url, sourceProgress, ct, new(!last, 0, RestartWithoutRange: true, Space: space));
+                                health.Succeeded(Key(url));
+                                // The independent file has passed the original size/SHA and was published under our target lease.
+                                DownloadCheckpoint.Cleanup(request.Destination);
+                                return;
+                            }
+                            catch (Exception error) when (error is DownloadEngineUnavailableException or RangeNotSupportedException)
+                            {
+                                if (error is RangeNotSupportedException && !last && File.Exists(DownloadCheckpoint.AriaData(request.Destination)))
+                                    throw;
+                                await DownloadCheckpoint.RestoreLegacyBeforeFallbackAsync(request, ct);
+                                sourceProgress.Report(new(request.Name, 0, request.Size, error is RangeNotSupportedException
+                                    ? "来源不支持并行分段，使用兼容下载" : "并行引擎不可用，使用兼容下载") { Phase = "Connecting", Engine = "HttpClient" });
+                            }
+                        }
+                        await compatible.FetchAsync(request, url, sourceProgress, ct, new(!last, last ? 3 : 0, Space: space));
                         health.Succeeded(Key(url));
+                        if (!request.PreferHttpClient && !File.Exists(DownloadCheckpoint.AriaData(request.Destination)))
+                            DownloadCheckpoint.Cleanup(request.Destination, includeLegacy: false);
                         return;
                     }
-                    catch (Exception error) when (error is DownloadSourceException { StatusCode: System.Net.HttpStatusCode.RequestedRangeNotSatisfiable }
-                        || last && error is DownloadSourceRepresentationChangedException)
+                    catch (Exception error) when (!last && continuation < 2 && !independentRestart && !ct.IsCancellationRequested
+                        && HttpClientTransport.IsRetryable(error)
+                        && DownloadCheckpoint.RetainedBytes(request.Destination, request.Size, request.Sha256) > initialSourceBytes)
                     {
-                        // Exactly one independent full GET. Sparse progress remains untouched and cannot become a HTTP prefix.
-                        var changedRepresentation = error is DownloadSourceRepresentationChangedException;
-                        sourceProgress.Report(new(request.Name, 0, request.Size, changedRepresentation
-                            ? "来源分段标识不一致，保留原断点并尝试一次完整下载"
-                            : "服务器拒绝并行断点，保留原断点并尝试一次完整下载")
-                        { Engine = "HttpClient", Phase = "Connecting", FailureCode = changedRepresentation ? "source_representation_changed" : "range_rejected" });
-                        await compatible.FetchAsync(request, url, sourceProgress, ct, new(!last, 0, RestartWithoutRange: true, Space: space));
-                        health.Succeeded(Key(url));
-                        // The independent file has passed the original size/SHA and was published under our target lease.
-                        DownloadCheckpoint.Cleanup(request.Destination);
-                        return;
-                    }
-                    catch (Exception error) when (error is DownloadEngineUnavailableException or RangeNotSupportedException)
-                    {
-                        if (error is RangeNotSupportedException && !last && File.Exists(DownloadCheckpoint.AriaData(request.Destination)))
-                            throw;
-                        await DownloadCheckpoint.RestoreLegacyBeforeFallbackAsync(request, ct);
-                        sourceProgress.Report(new(request.Name, 0, request.Size, error is RangeNotSupportedException
-                            ? "来源不支持并行分段，使用兼容下载" : "并行引擎不可用，使用兼容下载") { Phase = "Connecting", Engine = "HttpClient" });
+                        // A source that has supplied verified-identity partial content
+                        // gets a bounded chance to resume before moving to another host.
+                        // Authentication, content/hash errors, slow sources and disk
+                        // failures never enter this path; the user's cancellation wins.
+                        var retryAt = DownloadSourceHealth.RetryAt(error, policy, continuation);
+                        var delay = retryAt - DateTimeOffset.UtcNow;
+                        if (delay > policy.MaximumAutomaticRetryDelay) throw;
+                        sourceProgress.Report(new(request.Name,
+                            DownloadCheckpoint.RetainedBytes(request.Destination, request.Size, request.Sha256), request.Size,
+                            "来源已下载部分内容，连接中断后自动续传")
+                        { Phase = "RetryWaiting", RetryAt = retryAt, Attempt = continuation + 1, FailureCode = "connection_interrupted" });
+                        if (delay > TimeSpan.Zero) await Task.Delay(delay, ct);
                     }
                 }
-                await compatible.FetchAsync(request, url, sourceProgress, ct, new(!last, last ? 3 : 0, Space: space));
-                health.Succeeded(Key(url));
-                if (!request.PreferHttpClient && !File.Exists(DownloadCheckpoint.AriaData(request.Destination)))
-                    DownloadCheckpoint.Cleanup(request.Destination, includeLegacy: false);
-                return;
             }
             catch (Exception error) when (!ct.IsCancellationRequested && !last && IsSourceFailure(error))
             {

@@ -81,6 +81,7 @@ def test_clean_venv_without_extra_paths_does_not_require_yaml(clean_python, comf
     assert actual["paths"]["diffusion_models"] == [str(models / "diffusion_models"), str(models / "unet")]
     assert actual["paths"]["text_encoders"] == [str(models / "text_encoders"), str(models / "clip")]
     assert actual["paths"]["wd_taggers"] == [str(models / "wd_taggers")]
+    assert actual["paths"]["forbidden_vision"] == [str(models / "forbidden_vision")]
 
 
 @pytest.mark.parametrize("argument, suffix", [("--base-directory", "models"), ("--models-directory", "")])
@@ -92,6 +93,7 @@ def test_clean_venv_preserves_model_directory_arguments(clean_python, comfy_root
     models = alternate / suffix
     assert actual["paths"]["diffusion_models"][0] == str(models / "diffusion_models")
     assert actual["paths"]["wd_taggers"] == [str(models / "wd_taggers")]
+    assert actual["paths"]["forbidden_vision"] == [str(models / "forbidden_vision")]
 
 
 def test_extra_paths_with_missing_yaml_still_fail(clean_python, comfy_root):

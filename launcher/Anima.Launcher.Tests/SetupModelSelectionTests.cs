@@ -13,18 +13,38 @@ internal static class SetupModelSelectionTests
         { try { await action(); } catch (InvalidDataException) { Check(true, label); return; } throw new Exception("Expected InvalidDataException: " + label); }
 
         var choices = SetupModelSelection.Choices(models, profiles, "anima");
-        Check(choices.Length == 10 && choices.Count(choice => choice.ModelIds.Length == 2) == 2,
-            "onboarding catalog retains Krea and SeedVR2 pairs and all eight independent taggers");
+        Check(choices.Length == 10 && choices.Count(choice => choice.ModelIds.Length == 2) == 1
+            && choices.Single(choice => choice.Id == "face-refine").ModelIds.Length == 3 && choices.All(choice => choice.Id != "seedvr2"),
+            "onboarding offers Krea, the complete face model set and eight taggers while SeedVR2 is mandatory");
         Check(choices.Single(choice => choice.Recommended).Id == "tagger-pixai-tagger-v0.9-timm",
             "tagger recommendation is metadata, not an automatic selection");
-        Check(SetupModelSelection.Resolve(models, profiles, "anima", []).Length == 3,
-            "empty optional selection downloads only the profile's required models");
-        var selected = choices.Where(choice => choice.Id is "krea2" or "seedvr2").SelectMany(choice => choice.ModelIds).ToArray();
+        Check(profiles.RequiredModels(models, "anima").Length == 3
+            && SetupModelSelection.Resolve(models, profiles, "anima", []).Select(model => model.Id).ToHashSet()
+                .SetEquals(["anima-base-v1", "qwen-text", "qwen-vae", "seedvr2-model", "seedvr2-vae"]),
+            "empty optional selection adds SeedVR2 without changing the Anima generation profile contract");
+        var selected = choices.Where(choice => choice.Id == "krea2").SelectMany(choice => choice.ModelIds).ToArray();
         Check(SetupModelSelection.Resolve(models, profiles, "anima", selected.Concat(["qwen-vae", "krea2-turbo"])).Length == 7,
             "feature union deduplicates repeated choices and the shared Qwen VAE");
         Check(SetupModelSelection.Choices(models, profiles, "krea2").All(choice => choice.Id != "krea2")
-            && SetupModelSelection.Resolve(models, profiles, "krea2", []).Length == 3,
+            && SetupModelSelection.Resolve(models, profiles, "krea2", []).Length == 5,
             "current Krea profile remains required and cannot be deselected as an optional feature");
+        var face = choices.Single(choice => choice.Id == "face-refine");
+        Check(!face.Recommended && face.Size == 76326352 && face.ModelIds.All(id => models.Models.Single(model => model.Id == id).CanDownload)
+            && SetupModelSelection.Resolve(models, profiles, "anima", face.ModelIds).Length == 8
+            && new SetupRecord().OptionalModelIds.Length == 0,
+            "face defaults have locked downloads and remain unselected until the user opts in");
+        var skippedKrea = SetupModelSelection.ExpandSkippedOptionalIds(models, profiles, "anima", ["krea2-turbo"]);
+        Check(skippedKrea.ToHashSet().SetEquals(["krea2-turbo", "qwen3vl-krea2"])
+            && !SetupModelSelection.ResolveIds(models, profiles, "anima", selected.Except(skippedKrea))
+                .Any(id => selected.Contains(id)),
+            "skipping a failed Krea model also deselects its encoder so startup cannot require the skipped profile again");
+        Check(SetupModelSelection.ExpandSkippedOptionalIds(models, profiles, "anima", ["forbidden-vision-detect"])
+                .ToHashSet().SetEquals(face.ModelIds)
+            && SetupModelSelection.ExpandSkippedOptionalIds(models, profiles, "anima", ["tagger-pixai-tagger-v0.9-timm"])
+                .SequenceEqual(["tagger-pixai-tagger-v0.9-timm"]),
+            "face failures skip the whole feature while independent tagger choices stay independent");
+        Check(SetupModelSelection.ExpandSkippedOptionalIds(models, profiles, "krea2", ["krea2-turbo", "qwen3vl-krea2", "qwen-vae", "seedvr2-model", "seedvr2-vae"]).Length == 0,
+            "skip expansion cannot remove the active generation profile or mandatory SeedVR2 models");
         await Fails(() => Task.FromResult(SetupModelSelection.Resolve(models, profiles, "anima", ["removed-model"])),
             "stale saved model selection requires review instead of silently dropping a choice");
 
@@ -50,15 +70,15 @@ internal static class SetupModelSelectionTests
         var optional = new[] { tagger.Id };
         var plan = InstallationPlanner.Create(config, fixtureRuntime, directory, false, tiny, profiles, optional);
         optional[0] = "changed-after-review";
-        Check(plan.ModelIds.Length == 4 && plan.ModelIds.Contains(tagger.Id) && !plan.ModelIds.Contains(optional[0]),
+        Check(plan.ModelIds.Length == 6 && plan.MandatoryModelIds.Length == 5 && plan.ModelIds.Contains(tagger.Id) && !plan.ModelIds.Contains(optional[0]),
             "explicit import selection snapshots required and optional IDs independently of UI edits");
         Check(plan.ModelPathsDeferred && plan.DeferredModelBytes == 2 * bytes.Length
-            && plan.Downloads.Length == 3 && plan.Downloads.All(item => !item.Destination.Contains("wd_taggers")),
+            && plan.Downloads.Length == 5 && plan.Downloads.All(item => !item.Destination.Contains("wd_taggers")),
             "unknown package target reserves bytes without inventing a download directory");
         var fresh = InstallationPlanner.Create(new LauncherConfig { InstallRoot = Path.Combine(directory, "not-installed") },
             fixtureRuntime, directory, true, tiny, profiles, [tagger.Id]);
         var freshPrepared = await InstallationPlanner.PreparePlanAsync(fresh, tiny, profiles, "not-needed-before-install.py", default);
-        Check(freshPrepared.ModelPathsDeferred && freshPrepared.ModelInventory.Length == 15
+        Check(freshPrepared.ModelPathsDeferred && freshPrepared.ModelInventory.Length == 18
             && freshPrepared.ModelInventory.Single(item => item.Model.Id == tagger.Id).Destination.Length == 0,
             "fresh setup previews all model choices before Python exists without guessing package targets");
         await Fails(() => InstallationPlanner.PreparePlanAsync(fresh, tiny, profiles, "not-installed.py", default, true),
@@ -76,12 +96,13 @@ internal static class SetupModelSelectionTests
             ["text_encoders"] = [Path.Combine(external, "text")],
             ["vae"] = [Path.Combine(external, "vae")],
             ["wd_taggers"] = [Path.Combine(external, "taggers")],
+            ["forbidden_vision"] = [Path.Combine(external, "faces")],
         });
         var resolved = await InstallationPlanner.ResolveModelDestinationsAsync(plan, probe, tiny, profiles, default);
         var requiredOnly = InstallationPlanner.Create(config, fixtureRuntime, directory, false, tiny, profiles, []);
         var requiredPreview = await InstallationPlanner.ResolveModelDestinationsAsync(requiredOnly, probe, tiny, profiles, default);
-        Check(requiredPreview.ModelInventory.Length == 15 && requiredPreview.ModelIds.Length == 3
-            && requiredPreview.Downloads.Length == 3 && requiredPreview.EstimatedDownloadBytes == 3 * bytes.Length
+        Check(requiredPreview.ModelInventory.Length == 18 && requiredPreview.ModelIds.Length == 5
+            && requiredPreview.Downloads.Length == 5 && requiredPreview.EstimatedDownloadBytes == 5 * bytes.Length
             && requiredPreview.ModelInventory.Single(item => item.Model.Id == "seedvr2-model").Destination.StartsWith(external)
             && requiredPreview.ModelInventory.Single(item => item.Model.Id == tagger.Id).Destination.StartsWith(external),
             "unchecked optional choices show actual status and paths without entering selected downloads or byte totals");
@@ -117,7 +138,7 @@ internal static class SetupModelSelectionTests
             "unregistered unchecked taggers do not require package paths for the selected plan");
         var package = resolved.ModelInventory.Single(item => item.Model.Id == tagger.Id);
         var staging = ModelPackages.Staging(package.Model, package.Destination);
-        Check(!resolved.ModelPathsDeferred && resolved.DeferredModelBytes == 0 && resolved.Downloads.Length == 5
+        Check(!resolved.ModelPathsDeferred && resolved.DeferredModelBytes == 0 && resolved.Downloads.Length == 7
             && resolved.Downloads.Count(item => item.Destination.StartsWith(staging)) == 2
             && resolved.ModelInventory.All(item => item.Destination.StartsWith(external)),
             "actual model paths and package staging files replace provisional download and volume estimates");
@@ -127,7 +148,7 @@ internal static class SetupModelSelectionTests
         File.WriteAllBytes(partial, bytes[..3]);
         JsonFile.Write(partial + ".json", new ResumeInfo(stagedFile.Sha256, stagedFile.Size, stagedFile.Urls[0], null));
         var resumed = await InstallationPlanner.RefreshSpaceEstimateAsync(resolved, default);
-        Check(resumed.EstimatedDownloadBytes == 5 * bytes.Length - 3,
+        Check(resumed.EstimatedDownloadBytes == 7 * bytes.Length - 3,
             "package partial downloads reduce the remaining batch estimate by actual staged bytes");
         var corruptStagingFile = Path.Combine(staging, stagedFile.Path);
         var corrupt = new byte[bytes.Length];
@@ -135,12 +156,12 @@ internal static class SetupModelSelectionTests
         var repairable = await InstallationPlanner.ResolveModelDestinationsAsync(resolved, probe, tiny, profiles, default);
         var replacement = repairable.Downloads.Single(item => item.Destination == corruptStagingFile);
         Check(replacement.RepairableStaging && replacement.RequiresReplacement && replacement.RemainingBytes == bytes.Length
-            && repairable.EstimatedDownloadBytes == 5 * bytes.Length,
+            && repairable.EstimatedDownloadBytes == 7 * bytes.Length,
             "same-size corrupt package staging reserves a full replacement while preserving its original allocation");
         var repairPreflight = await InstallationPlanner.PreflightAsync(repairable, default);
         Check(repairPreflight.CanInstall && repairPreflight.Issues.All(issue => issue.Code != "cache_invalid")
             && repairPreflight.Volumes.Single().RequiredBytes == repairable.EnvironmentReserveBytes + repairable.RuntimeReserveBytes
-                + 5 * bytes.Length + 256L * 1024 * 1024
+                + 7 * bytes.Length + 256L * 1024 * 1024
             && File.ReadAllBytes(corruptStagingFile).SequenceEqual(corrupt),
             "repairable staged corruption passes preflight with full disk reserve and no mutation of the damaged file");
         var finalSingle = repairable.Downloads.First(item => !item.RepairableStaging);
@@ -154,13 +175,13 @@ internal static class SetupModelSelectionTests
         File.WriteAllBytes(corruptStagingFile, bytes);
         var repairedEstimate = await InstallationPlanner.RefreshSpaceEstimateAsync(repairable, default);
         Check(!repairedEstimate.Downloads.Single(item => item.Destination == corruptStagingFile).RequiresReplacement
-            && repairedEstimate.EstimatedDownloadBytes == 4 * bytes.Length,
+            && repairedEstimate.EstimatedDownloadBytes == 6 * bytes.Length,
             "refresh clears replacement reserve once the staged file actually verifies");
         Directory.CreateDirectory(package.Destination);
         foreach (var file in package.Model.Files) File.WriteAllBytes(Path.Combine(package.Destination, file.Path), bytes);
         var installed = await InstallationPlanner.ResolveModelDestinationsAsync(resolved, probe, tiny, profiles, default);
         Check(installed.ModelInventory.Single(item => item.Model.Id == tagger.Id).State == "已校验"
-            && installed.Downloads.Length == 3 && installed.EstimatedDownloadBytes == 3 * bytes.Length,
+            && installed.Downloads.Length == 5 && installed.EstimatedDownloadBytes == 5 * bytes.Length,
             "verified installed packages are reused without staging a second copy");
         await Fails(() => InstallationPlanner.ResolveModelDestinationsAsync(plan, probe with { Root = external }, tiny, profiles, default),
             "model paths reported for a different ComfyUI root are rejected");

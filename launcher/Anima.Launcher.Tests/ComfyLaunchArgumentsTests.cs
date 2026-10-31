@@ -108,7 +108,7 @@ internal static class ComfyLaunchArgumentsTests
                     lock (requests) requests.Add(request);
                     while (await reader.ReadLineAsync(cancel.Token) is { Length: > 0 }) { }
                     var bytes = request.Contains("/object_info")
-                        ? JsonSerializer.SerializeToUtf8Bytes(manifest.Nodes.SelectMany(node => node.RequiredClasses)
+                        ? JsonSerializer.SerializeToUtf8Bytes(manifest.Comfy.RequiredClasses.Concat(manifest.Nodes.SelectMany(node => node.RequiredClasses))
                             .Concat(["UNETLoader", "CLIPLoader", "VAELoader", "KSampler", "KSamplerAdvanced", "VAEDecodeTiled", "EmptyLatentImage"])
                             .Distinct().ToDictionary(name => name, _ => new { }))
                         : JsonSerializer.SerializeToUtf8Bytes(new { system = new { argv = new[] { built[0], "--port", defaults.ComfyPort.ToString(), "--cpu" } } });
@@ -118,6 +118,7 @@ internal static class ComfyLaunchArgumentsTests
             }
             catch (OperationCanceledException) when (cancel.IsCancellationRequested) { }
             catch (SocketException) when (cancel.IsCancellationRequested) { }
+            catch (ObjectDisposedException) when (cancel.IsCancellationRequested) { }
         }, cancel.Token);
         try
         {
@@ -152,7 +153,7 @@ internal static class ComfyLaunchArgumentsTests
         var pythonRoot = Path.Combine(work, "python-identity-fixture");
         Directory.CreateDirectory(pythonRoot);
         var entrypoint = Path.Combine(pythonRoot, "main.py");
-        File.WriteAllText(Path.Combine(pythonRoot, "nodes.json"), JsonSerializer.Serialize(manifest.Nodes.SelectMany(node => node.RequiredClasses)
+        File.WriteAllText(Path.Combine(pythonRoot, "nodes.json"), JsonSerializer.Serialize(manifest.Comfy.RequiredClasses.Concat(manifest.Nodes.SelectMany(node => node.RequiredClasses))
             .Concat(["UNETLoader", "CLIPLoader", "VAELoader", "KSampler", "KSamplerAdvanced", "VAEDecodeTiled", "EmptyLatentImage"])
             .Distinct().ToDictionary(name => name, _ => new { })));
         File.WriteAllText(entrypoint, """

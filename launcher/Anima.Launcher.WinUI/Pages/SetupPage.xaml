@@ -47,7 +47,7 @@
                                 <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                                 <StackPanel Spacing="8">
                                     <TextBlock Text="第一次使用" FontSize="20" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
-                                    <TextBlock Text="选择「安装完整环境」。自动准备 ComfyUI、独立运行环境、必要节点和 Anima 基础模型。" Style="{StaticResource StudioBodyStyle}" />
+                                    <TextBlock Text="选择「安装完整环境」。自动准备 ComfyUI、独立运行环境、必要节点、Anima 基础模型和 SeedVR2 修复模型。" Style="{StaticResource StudioBodyStyle}" />
                                     <TextBlock Text="需要联网和足够磁盘空间；下载量会在开始前确认。" Style="{StaticResource StudioBodyStyle}" />
                                 </StackPanel>
                                 <StackPanel x:Name="ImportChoice" Grid.Column="1" Spacing="8">
@@ -109,7 +109,7 @@
                             <TextBlock Text="下载慢或连接失败时，可以暂停后切换来源。已完成的下载会继续复用。" Style="{StaticResource StudioBodyStyle}" />
                         </StackPanel>
                         <Border Background="{ThemeResource StudioAccentSoftBrush}" CornerRadius="14" Padding="16,13">
-                            <TextBlock x:Name="ModelSummary" Text="将准备 Anima 基础模型：底模、文本编码器和 VAE。" Style="{StaticResource StudioBodyStyle}" />
+                            <TextBlock x:Name="ModelSummary" Text="将准备 Anima 三件套和 SeedVR2 两个修复模型，共五项必装模型。" Style="{StaticResource StudioBodyStyle}" />
                         </Border>
                         <Expander x:Name="AdvancedSettings" Header="高级下载设置" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
                             <StackPanel Spacing="12">
@@ -207,7 +207,7 @@
 
                 <StackPanel x:Name="AssistantPanel" Visibility="Collapsed" Spacing="18">
                     <TextBlock Text="连接你的提示词助手。" Style="{StaticResource StudioHeadingStyle}" />
-                    <TextBlock Text="配置供应商和默认文本模型，用于提示词重写。可以稍后配置；跳过不会启动后台服务。" Style="{StaticResource StudioBodyStyle}" />
+                    <TextBlock Text="配置供应商和默认文本模型，用于提示词重写。可以稍后配置，不影响基础生图。" Style="{StaticResource StudioBodyStyle}" />
                     <ContentControl x:Name="AssistantHost" HorizontalContentAlignment="Stretch" />
                 </StackPanel>
 

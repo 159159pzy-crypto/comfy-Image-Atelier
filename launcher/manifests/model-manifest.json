@@ -125,7 +125,7 @@
       },
       "sourceUrl": "https://huggingface.co/Comfy-Org/SeedVR2/blob/df48879708206a403d2a61acd55578c2e80fd233/diffusion_models/seedvr2_3b_int8_convrot.safetensors",
       "name": "SeedVR2 3B INT8",
-      "group": "SeedVR2 修复放大（可选）",
+      "group": "SeedVR2 修复放大（必装）",
       "category": "diffusion_models",
       "relativePath": "seedvr2_3b_int8_convrot.safetensors",
       "revision": "df48879708206a403d2a61acd55578c2e80fd233"
@@ -147,10 +147,61 @@
       },
       "sourceUrl": "https://huggingface.co/Comfy-Org/SeedVR2/blob/df48879708206a403d2a61acd55578c2e80fd233/vae/ema_vae_fp16.safetensors",
       "name": "SeedVR2 EMA VAE FP16",
-      "group": "SeedVR2 修复放大（可选）",
+      "group": "SeedVR2 修复放大（必装）",
       "category": "vae",
       "relativePath": "ema_vae_fp16.safetensors",
       "revision": "df48879708206a403d2a61acd55578c2e80fd233"
+    },
+    {
+      "id": "forbidden-vision-detect",
+      "name": "Forbidden Vision 人脸检测",
+      "group": "脸部细化（可选）",
+      "category": "forbidden_vision",
+      "relativePath": "ForbiddenVision_face_detect_v1.pt",
+      "aliases": [],
+      "size": 19146906,
+      "sha256": "0c28ef22bb5eaef86c4a1178439a0ddb36a7bc084b6812f6f437f4ad21e13968",
+      "urls": [
+        "https://huggingface.co/luxdelux7/ForbiddenVision_Models/resolve/46f7c19f548abe403aef3794e4de7812b1bdfdae/ForbiddenVision_face_detect_v1.pt"
+      ],
+      "sourceUrl": "https://huggingface.co/luxdelux7/ForbiddenVision_Models/blob/46f7c19f548abe403aef3794e4de7812b1bdfdae/ForbiddenVision_face_detect_v1.pt",
+      "license": "Apache-2.0",
+      "licenseUrl": "https://huggingface.co/luxdelux7/ForbiddenVision_Models/blob/46f7c19f548abe403aef3794e4de7812b1bdfdae/README.md",
+      "revision": "46f7c19f548abe403aef3794e4de7812b1bdfdae"
+    },
+    {
+      "id": "forbidden-vision-segment",
+      "name": "Forbidden Vision 脸部分割",
+      "group": "脸部细化（可选）",
+      "category": "forbidden_vision",
+      "relativePath": "ForbiddenVision_face_segment_v1.safetensors",
+      "aliases": [],
+      "size": 45700584,
+      "sha256": "41a74db0be3b2a14428da4b469fcc875c9899733793d6016becbfd186347246b",
+      "urls": [
+        "https://huggingface.co/luxdelux7/ForbiddenVision_Models/resolve/46f7c19f548abe403aef3794e4de7812b1bdfdae/ForbiddenVision_face_segment_v1.safetensors"
+      ],
+      "sourceUrl": "https://huggingface.co/luxdelux7/ForbiddenVision_Models/blob/46f7c19f548abe403aef3794e4de7812b1bdfdae/ForbiddenVision_face_segment_v1.safetensors",
+      "license": "Apache-2.0",
+      "licenseUrl": "https://huggingface.co/luxdelux7/ForbiddenVision_Models/blob/46f7c19f548abe403aef3794e4de7812b1bdfdae/README.md",
+      "revision": "46f7c19f548abe403aef3794e4de7812b1bdfdae"
+    },
+    {
+      "id": "forbidden-vision-corrector",
+      "name": "Forbidden Vision 颜色校正",
+      "group": "脸部细化（可选）",
+      "category": "forbidden_vision",
+      "relativePath": "ForbiddenVision_neural_corrector_v1.safetensors",
+      "aliases": [],
+      "size": 11478862,
+      "sha256": "4229628ae1acefd026b5f37b19993f991fdd55b2e46bebbfc87490bfac28345c",
+      "urls": [
+        "https://huggingface.co/luxdelux7/ForbiddenVision_Models/resolve/46f7c19f548abe403aef3794e4de7812b1bdfdae/ForbiddenVision_neural_corrector_v1.safetensors"
+      ],
+      "sourceUrl": "https://huggingface.co/luxdelux7/ForbiddenVision_Models/blob/46f7c19f548abe403aef3794e4de7812b1bdfdae/ForbiddenVision_neural_corrector_v1.safetensors",
+      "license": "Apache-2.0",
+      "licenseUrl": "https://huggingface.co/luxdelux7/ForbiddenVision_Models/blob/46f7c19f548abe403aef3794e4de7812b1bdfdae/README.md",
+      "revision": "46f7c19f548abe403aef3794e4de7812b1bdfdae"
     }
   ]
 }

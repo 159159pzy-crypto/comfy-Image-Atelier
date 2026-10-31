@@ -4,6 +4,7 @@ public enum SetupStep { Welcome, Location, Review, Installing, Complete, Finishe
 public enum AssistantSetupStatus { Legacy = 0, Pending, Configured, Skipped }
 public enum SetupStageStatus { Pending, Running, Complete, Paused, Failed }
 public sealed record SetupProgress(string StageId, string Detail, SetupStageStatus Status);
+public sealed record SetupRestoreDecision(SetupStep? Step, bool RequiresSupplement = false, bool RequiresRepairReview = false);
 
 /// <summary>A draft is separate from the active configuration until installation starts.</summary>
 public sealed class SetupRecord
@@ -15,8 +16,11 @@ public sealed class SetupRecord
     public bool InstallStarted { get; set; }
     public bool InstallFinished { get; set; }
     public bool ModelsPending { get; set; }
+    public bool RuntimeVerified { get; set; }
     public string[] OptionalModelIds { get; set; } = [];
+    public string[] SkippedOptionalModelIds { get; set; } = [];
     public InstallationPlan? ReviewedPlan { get; set; }
+    public InstallationPlan? SupplementalPlan { get; set; }
     public AssistantSetupStatus AssistantStatus { get; set; }
     // Old installations selected the ComfyUI folder itself. Keep that identity
     // when the user temporarily clears the path while editing a recovery draft.
@@ -55,6 +59,26 @@ public static class SetupRouting
             _ => SetupStep.Welcome
         };
     }
+
+    /// <summary>Unfinished completion screens must prepare requirements introduced after their frozen plan.</summary>
+    public static SetupRestoreDecision ResolveForRuntime(LauncherConfig current, SetupRecord? saved,
+        RuntimeManifest runtime, ModelManifest models, ModelProfilesManifest profiles)
+    {
+        var step = Resolve(current, saved);
+        // An ended wizard remains ended. Its explicit installation/repair entry point
+        // creates a new reviewed plan instead of reopening onboarding on every upgrade.
+        if (step is not (SetupStep.Complete or SetupStep.Assistant)) return new(step);
+        var plan = saved!.ReviewedPlan;
+        if (plan is null || !TargetsMatch(current, new LauncherConfig { ComfyRoot = plan.ComfyRoot }, false)
+            || plan.RuntimeArtifactsIdentity.Length > 0 && plan.RuntimeArtifactsIdentity != RuntimeArtifactPlanning.Identity)
+            return new(SetupStep.Location, RequiresRepairReview: true);
+        return NeedsSupplement(plan, runtime, models, profiles) ? new(SetupStep.Installing, RequiresSupplement: true) : new(step);
+    }
+
+    public static bool NeedsSupplement(InstallationPlan plan, RuntimeManifest runtime,
+        ModelManifest models, ModelProfilesManifest profiles) => plan.RuntimeArtifactsIdentity.Length == 0
+        || SetupModelSelection.SupplementalModels(plan, models, profiles).Length > 0
+        || plan.ResolvedRuntime is { } frozen && runtime.Nodes.Any(node => !frozen.Nodes.Any(old => old.Id == node.Id));
 
     /// <summary>Compare a normalized installation target, including an unexpanded fresh-install draft.</summary>
     public static bool TargetsMatch(LauncherConfig current, LauncherConfig draft, bool fresh)

@@ -66,6 +66,12 @@ internal static class Program
     private static LauncherPackageInfo PackageInfo()
     {
         BundledTools.VerifyEmbedded();
+        _ = NvidiaRuntimePreparation.Catalog();
+        foreach (var resource in new[] { "patch_prompt_assistant.py", "patch_forbidden_vision.py", "check_nvidia_runtime.py" })
+        {
+            using var embedded = typeof(Installer).Assembly.GetManifestResourceStream("Anima.Launcher.Core." + resource);
+            if (embedded is null || embedded.Length == 0) throw new InvalidDataException("启动器包缺少安装资源：" + resource);
+        }
         var directory = AppContext.BaseDirectory;
         var build = JsonFile.Read<JsonElement>(Path.Combine(directory, "build-info.json"));
         LauncherUpdates.ValidateBuildInfo(build, Version);

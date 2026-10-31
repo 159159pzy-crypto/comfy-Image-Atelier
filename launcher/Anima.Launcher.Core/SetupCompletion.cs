@@ -92,22 +92,24 @@ public sealed record SetupCompletionPresentation(string Title, string Descriptio
     SetupCompletionAction PrimaryAction, bool AllowOpenAnyway)
 {
     public static SetupCompletionPresentation Resolve(SetupModelReadiness readiness, bool reviewVisible = false,
-        bool canDownload = false, bool canResume = false, bool startFailed = false, bool hasError = false)
+        bool canDownload = false, bool canResume = false, bool startFailed = false, bool hasError = false,
+        bool runtimeVerified = false)
     {
         if (startFailed) return new("工作台还没有启动。", "环境配置已保留。处理提示的问题后，可以重试启动。",
             "重试启动", SetupCompletionAction.StartWorkbench, false);
         if (canResume) return new(hasError ? "模型下载需要重试。" : "模型下载已暂停。", "已完成的文件会保留，继续时会重新确认实际位置与文件状态。",
-            hasError ? "重试下载" : "继续下载", SetupCompletionAction.ResumeModels, true);
+            hasError ? "重试下载" : "继续下载", SetupCompletionAction.ResumeModels, false);
         return readiness switch
         {
-            SetupModelReadiness.Ready => new("环境已准备好。", "基础模型已找到。打开工作台时会先确认服务连接正常。", "打开工作台", SetupCompletionAction.StartWorkbench, false),
+            SetupModelReadiness.Ready when runtimeVerified => new("环境已准备好。", "必需模型、节点和运行检查已通过，可以开始创作。", "打开工作台", SetupCompletionAction.StartWorkbench, false),
+            SetupModelReadiness.Ready => new("模型已齐备，还需检查运行环境。", "启动时将检查实际节点、模型分类和词库，全部通过后即可开始创作。", "检查并启动工作台", SetupCompletionAction.StartWorkbench, false),
             SetupModelReadiness.Checking => new("正在检查基础模型。", "正在确认实际模型位置和文件状态，请稍候。", "正在检查…", SetupCompletionAction.None, false),
-            SetupModelReadiness.ScanFailed => new("还不能确认模型状态。", "环境配置已保留。请重新检查，也可以先打开工作台查看。", "重新检查模型", SetupCompletionAction.ReviewModels, true),
+            SetupModelReadiness.ScanFailed => new("还不能确认模型状态。", "环境配置已保留。请重新检查必需模型。", "重新检查模型", SetupCompletionAction.ReviewModels, false),
             SetupModelReadiness.NeedsAttention => new("还有模型需要处理。", "请查看下方说明。已有异常文件会保留，可自动补齐的模型可以单独下载。",
-                reviewVisible && canDownload ? "下载可补齐模型" : "重新检查模型", reviewVisible && canDownload ? SetupCompletionAction.DownloadModels : SetupCompletionAction.ReviewModels, true),
-            SetupModelReadiness.NeedsDownload => new("环境已连接，还需准备基础模型。", "先确认缺少的模型、下载量和保存位置，再开始下载。也可以先打开工作台。",
-                reviewVisible && canDownload ? "开始下载" : "准备基础模型", reviewVisible && canDownload ? SetupCompletionAction.DownloadModels : SetupCompletionAction.ReviewModels, true),
-            _ => new("环境已连接。", "检查基础模型后，即可确认下一步。", "检查基础模型", SetupCompletionAction.ReviewModels, true),
+                reviewVisible && canDownload ? "下载可补齐模型" : "重新检查模型", reviewVisible && canDownload ? SetupCompletionAction.DownloadModels : SetupCompletionAction.ReviewModels, false),
+            SetupModelReadiness.NeedsDownload => new("环境已连接，还需准备基础模型。", "先确认缺少的模型、下载量和保存位置，再开始下载。",
+                reviewVisible && canDownload ? "开始下载" : "准备基础模型", reviewVisible && canDownload ? SetupCompletionAction.DownloadModels : SetupCompletionAction.ReviewModels, false),
+            _ => new("环境已连接。", "检查基础模型后，即可确认下一步。", "检查基础模型", SetupCompletionAction.ReviewModels, false),
         };
     }
 }

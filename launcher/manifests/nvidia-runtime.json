@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 1,
+  "vfxWheels": [
+    {
+      "id": "nvidia-vfx-cp310-cp310",
+      "url": "https://pypi.nvidia.com/nvidia-vfx/nvidia_vfx-0.1.0.1-cp310-cp310-win_amd64.whl",
+      "size": 490399082,
+      "sha256": "76929a3198874d0fc76ad6ee3bfaa494c69aae36959cfaaea55804312d4ee6cd",
+      "executable": "nvidia_vfx-0.1.0.1-cp310-cp310-win_amd64.whl",
+      "fileName": "nvidia_vfx-0.1.0.1-cp310-cp310-win_amd64.whl",
+      "version": "0.1.0.1"
+    },
+    {
+      "id": "nvidia-vfx-cp311-cp311",
+      "url": "https://pypi.nvidia.com/nvidia-vfx/nvidia_vfx-0.1.0.1-cp311-cp311-win_amd64.whl",
+      "size": 490398915,
+      "sha256": "ff7e3e65b4a6acd507c3c9dde0d8d881891b0643af80c4acc5b7d886463764bd",
+      "executable": "nvidia_vfx-0.1.0.1-cp311-cp311-win_amd64.whl",
+      "fileName": "nvidia_vfx-0.1.0.1-cp311-cp311-win_amd64.whl",
+      "version": "0.1.0.1"
+    },
+    {
+      "id": "nvidia-vfx-cp312-abi3",
+      "url": "https://pypi.nvidia.com/nvidia-vfx/nvidia_vfx-0.1.0.1-cp312-abi3-win_amd64.whl",
+      "size": 490396952,
+      "sha256": "b6cfaff5f435ad18329a1e1c1ac3ceb36f2aa6cfb0774d271c0bcc3aeaf31c53",
+      "executable": "nvidia_vfx-0.1.0.1-cp312-abi3-win_amd64.whl",
+      "fileName": "nvidia_vfx-0.1.0.1-cp312-abi3-win_amd64.whl",
+      "version": "0.1.0.1"
+    }
+  ],
+  "sevenZipBootstrap": {
+    "id": "sevenzip-bootstrap",
+    "url": "https://github.com/ip7z/7zip/releases/download/26.05/7zr.exe",
+    "size": 602624,
+    "sha256": "9bf582b894dfa665f852d7e9112b02290a1c303c2d95a21fcdc41ffcb03143b7",
+    "executable": "7zr.exe",
+    "fileName": "7zr.exe"
+  },
+  "sevenZipArchive": {
+    "id": "sevenzip-portable",
+    "url": "https://github.com/ip7z/7zip/releases/download/26.05/7z2605-x64.exe",
+    "size": 1663506,
+    "sha256": "fd99e86f57d8f429ef5ed045bf98315af962e2309b0f1ba87a147a44c71647d0",
+    "executable": "7z2605-x64.exe",
+    "fileName": "7z2605-x64.exe"
+  },
+  "sevenZipExeSha256": "94205cfc054dd3bbeb978905bc619a65b3f04e9e73bb2717841110b6f46d962e",
+  "sevenZipDllSha256": "78bf6b668d75801e3aa180b4ccb16e6d8395fba80dec8a065055bb6f8dfabb82",
+  "vcRuntime": {
+    "id": "vc-runtime-x64",
+    "url": "https://download.visualstudio.microsoft.com/download/pr/990c720a-46ce-4dc7-87b9-c2eb615d34b9/CC0FF0EB1DC3F5188AE6300FAEF32BF5BEEBA4BDD6E8E445A9184072096B713B/VC_redist.x64.exe",
+    "size": 25635768,
+    "sha256": "cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b",
+    "executable": "VC_redist.x64.exe",
+    "fileName": "VC_redist.x64.exe"
+  },
+  "dlssArchive": {
+    "id": "dlss5-host",
+    "url": "https://github.com/purkatyy/DLSS5-/releases/download/dlss/DLSS5Tool.zip",
+    "size": 106976930,
+    "sha256": "733c334f3b30d10d7fbd4d75f7242ff01b6e08380ac3396b39920e47eb6f65d0",
+    "executable": "DLSS5Tool.zip",
+    "fileName": "DLSS5Tool.zip"
+  },
+  "dlssHost": {
+    "fileName": "dlssnr_host.dll",
+    "size": 54272,
+    "sha256": "9ec879388e573bebbf7886dccbdc885641d945420fdf4bb80bac6c657094160c"
+  },
+  "dlssRuntimes": [
+    {
+      "generation": "rtx30",
+      "archive": {
+        "id": "dlss5-rtx30",
+        "url": "https://github.com/purkatyy/DLSS5-/releases/download/dlss/RTX30xx.rar",
+        "size": 121737898,
+        "sha256": "62427325f40aef0fc703904f53055883740ff8d2721203cfe376f33892b304b1",
+        "executable": "RTX30xx.rar",
+        "fileName": "RTX30xx.rar"
+      },
+      "dll": {
+        "fileName": "nvngx_dlssnr.dll",
+        "size": 165840496,
+        "sha256": "f8c6ca1d27faaa82bbb6fdc26889622aa42098ec551346b7c99dade2ff93902d"
+      }
+    },
+    {
+      "generation": "rtx40",
+      "archive": {
+        "id": "dlss5-rtx40",
+        "url": "https://github.com/purkatyy/DLSS5-/releases/download/dlss/DLSS5Tool.zip",
+        "size": 106976930,
+        "sha256": "733c334f3b30d10d7fbd4d75f7242ff01b6e08380ac3396b39920e47eb6f65d0",
+        "executable": "DLSS5Tool.zip",
+        "fileName": "DLSS5Tool.zip"
+      },
+      "dll": {
+        "fileName": "nvngx_dlssnr.dll",
+        "size": 165840496,
+        "sha256": "ceb6432f6fbdf44d886014bcd47241932bf8b67439feef9bbdd0961436662650"
+      }
+    },
+    {
+      "generation": "rtx50",
+      "archive": {
+        "id": "dlss5-rtx50",
+        "url": "https://github.com/purkatyy/DLSS5-/releases/download/dlss/RTX50xx.rar",
+        "size": 113766028,
+        "sha256": "97d5d4292937d5f7839c2a0755c63961dc5db8b755fd994e37607496e14e31dd",
+        "executable": "RTX50xx.rar",
+        "fileName": "RTX50xx.rar"
+      },
+      "dll": {
+        "fileName": "nvngx_dlssnr.dll",
+        "size": 165840496,
+        "sha256": "e16bcf15e16e13f527491cdf7845b2fe6521a738d8f7c9c721866a8496e1fc8e"
+      }
+    }
+  ]
+}

@@ -31,7 +31,8 @@ internal static class ComfyReleaseUpdateTests
         }));
         var client = new ComfyReleases(http);
         using var nodeHttp = new HttpClient(new Handler(request => Json(request.RequestUri!.AbsolutePath.Contains("/commits/")
-            ? "{\"sha\":\"" + sha + "\"}" : "{\"default_branch\":\"main\"}")));
+            ? "{\"sha\":\"" + (request.RequestUri.AbsolutePath.Contains("ComfyUI-Prompt-Assistant") ? PromptAssistantCompatibility.SupportedCommit
+                : request.RequestUri.AbsolutePath.Contains("ComfyUI-Forbidden-Vision") ? ForbiddenVisionCompatibility.SupportedCommit : sha) + "\"}" : "{\"default_branch\":\"main\"}")));
         var nodeReleases = new NodeReleases(nodeHttp);
         var latest = await client.LatestAsync(default);
         Check(latest.Tag == "v1.2.3" && latest.Commit == sha, "official stable release is resolved to a complete immutable SHA");

@@ -32,7 +32,7 @@ internal sealed partial class LauncherState
     }
 
     private SetupModelReview BuildSetupModelReview(List<ModelStatus> scan) => Core.SetupModelReview.Create(
-        OperationProfiles.RequiredModels(OperationModels, Config.SelectedProfile), scan,
+        SetupModelSelection.MandatoryModels(OperationModels, OperationProfiles, Config.SelectedProfile), scan,
         status => status.Model.IsPackage
             ? ModelPackages.RemainingBytes(status.Model, status.Destination)
             : Downloads.RemainingBytes(status.Destination, status.Model.Size, status.Model.Sha256),
@@ -52,7 +52,7 @@ internal sealed partial class LauncherState
         NotifySetup();
         try
         {
-            var ids = OperationProfiles.RequiredModels(OperationModels, Config.SelectedProfile).Select(model => model.Id).ToArray();
+            var ids = SetupModelSelection.MandatoryModels(OperationModels, OperationProfiles, Config.SelectedProfile).Select(model => model.Id).ToArray();
             // Only the required generation models are checked here. This never invokes
             // installation, repairs nodes, or applies the original installation draft.
             var scan = await ResolveModelIdsAsync(ids, true, ct);
@@ -68,10 +68,10 @@ internal sealed partial class LauncherState
         }
         SetupNotice = SetupModelsReadiness switch
         {
-            SetupModelReadiness.Ready => "基础模型检查完成，可以打开工作台。",
+            SetupModelReadiness.Ready => Setup.RuntimeVerified ? "必需模型和运行检查已完成，可以打开工作台。" : "必需模型检查完成，启动时还将验证节点与模型分类。",
             SetupModelReadiness.NeedsAttention => "有模型需要手动处理；已有异常文件会保留，不会直接覆盖。",
             SetupModelReadiness.ScanFailed => "未取得全部基础模型的检查结果，请重新检查。",
-            _ => "基础模型尚未齐备。先查看下载内容，也可以先打开工作台。",
+            _ => "必需模型尚未齐备，请查看下载内容并完成准备。",
         };
         SetStatus("基础模型检查完成。");
     }

@@ -1,12 +1,44 @@
 {
   "schemaVersion": 1,
-  "version": "1.5.0",
+  "version": "1.5.1",
   "validation": "Windows x64. Release packages include the launcher, self-contained runtime, application resources, third-party notices and SHA-256 checksums. ComfyUI and models are downloaded separately.",
   "comfy": {
     "id": "ComfyUI",
     "url": "https://github.com/Comfy-Org/ComfyUI.git",
     "commit": "c9602625e445e9ee37d3ac6faf5ea9ec1e0de87e",
-    "requiredClasses": []
+    "requiredClasses": [
+      "CLIPLoader",
+      "CLIPTextEncode",
+      "ComfyMathExpression",
+      "ComfySwitchNode",
+      "ConditioningZeroOut",
+      "EmptyImage",
+      "EmptyLatentImage",
+      "GetImageSize",
+      "ImageToMask",
+      "JoinImageWithAlpha",
+      "KSampler",
+      "KSamplerAdvanced",
+      "LatentUpscaleBy",
+      "LoadImage",
+      "MaskPreview",
+      "PreviewAny",
+      "PrimitiveBoolean",
+      "PrimitiveInt",
+      "PrimitiveStringMultiline",
+      "RebatchImages",
+      "SaveImage",
+      "SeedVR2Conditioning",
+      "SeedVR2PostProcessing",
+      "SeedVR2Preprocess",
+      "StringConcatenate",
+      "UNETLoader",
+      "VAEDecode",
+      "VAEDecodeTiled",
+      "VAEEncode",
+      "VAEEncodeTiled",
+      "VAELoader"
+    ]
   },
   "pythonVersion": "3.11.9",
   "torchVersion": "2.11.0",
@@ -91,9 +123,7 @@
       "id": "comfyui-impact-pack",
       "url": "https://github.com/ltdrdata/ComfyUI-Impact-Pack.git",
       "commit": "429d0159ad429e64d2b3916e6e7be9c22d025c3c",
-      "requiredClasses": [
-        "ImpactIfNone"
-      ]
+      "requiredClasses": []
     },
     {
       "id": "comfyui-impact-subpack",
@@ -105,9 +135,7 @@
       "id": "comfyui-easy-use",
       "url": "https://github.com/yolain/ComfyUI-Easy-Use.git",
       "commit": "b5e31ef12ad9d0b187b545c2707735cc7d581c52",
-      "requiredClasses": [
-        "ComfyMathExpression"
-      ]
+      "requiredClasses": []
     },
     {
       "id": "ComfyUI-KJNodes",
@@ -116,7 +144,10 @@
       "requiredClasses": [
         "ResizeImageMaskNode",
         "ModelPassThrough",
-        "VRAM_Debug"
+        "VRAM_Debug",
+        "FloatConstant",
+        "JoinStrings",
+        "SomethingToString"
       ]
     },
     {
@@ -144,7 +175,8 @@
       "url": "https://github.com/yawiii/ComfyUI-Prompt-Assistant.git",
       "commit": "e0587e6d50939ae05e92922f1ed2fce008c7f622",
       "requiredClasses": [
-        "PromptExpand"
+        "PromptExpand",
+        "ImageCaptionNode"
       ]
     },
     {
@@ -153,6 +185,46 @@
       "commit": "1515d23a5b399a44ccd97482e1105a43937268ae",
       "requiredClasses": [
         "KreaSeedVarianceEnhancer"
+      ]
+    },
+    {
+      "id": "SesquiLSR",
+      "url": "https://github.com/LoganBooker/SesquiLSR.git",
+      "commit": "821e6db7412089f2a5c0a106c42d3c1a396b9515",
+      "requiredClasses": [
+        "SesquiLatentUpscale"
+      ]
+    },
+    {
+      "id": "forbidden-vision",
+      "url": "https://github.com/luxdelux7/ComfyUI-Forbidden-Vision.git",
+      "commit": "5617d4395fa6be9b0e57d74a56e2943ede9ef192",
+      "requiredClasses": [
+        "ForbiddenVisionFaceProcessorIntegrated"
+      ]
+    },
+    {
+      "id": "RES4LYF",
+      "url": "https://github.com/ClownsharkBatwing/RES4LYF.git",
+      "commit": "56e44755d866c87ff9cb4b6608c8e42155db6ecc",
+      "requiredClasses": [
+        "ClownsharKSampler_Beta"
+      ]
+    },
+    {
+      "id": "nvidia-rtx-vsr-pro",
+      "url": "https://github.com/whmc76/ComfyUI-NVIDIA-RTX-VSR-Pro.git",
+      "commit": "49733df7a02446cf1c1fac4af6f6181682522303",
+      "requiredClasses": [
+        "RTXVideoSuperResolution"
+      ]
+    },
+    {
+      "id": "DLSS5-Comfyui",
+      "url": "https://github.com/storyAura/DLSS5-Comfyui.git",
+      "commit": "b00ccbbc0510abcbb8afc7d383dafa5c9b31f793",
+      "requiredClasses": [
+        "DLSS5NeuralRender"
       ]
     }
   ],

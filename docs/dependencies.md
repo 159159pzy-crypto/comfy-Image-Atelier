@@ -1,5 +1,9 @@
 # 依赖说明
 
+1.5.1 安装修复新增 [SesquiLSR](https://github.com/LoganBooker/SesquiLSR)、[Forbidden Vision](https://github.com/luxdelux7/ComfyUI-Forbidden-Vision)、[RES4LYF](https://github.com/ClownsharkBatwing/RES4LYF)、[NVIDIA RTX VSR Pro](https://github.com/whmc76/ComfyUI-NVIDIA-RTX-VSR-Pro) 和 [DLSS5-Comfyui](https://github.com/storyAura/DLSS5-Comfyui)。清单及实际工作流的契约测试覆盖原生节点、自定义节点和扩展采样参数；不存在于实际提交工作流的模板注释节点不作为必装依据。SeedVR2 使用 ComfyUI 原生节点，Anima 三件套及两个 SeedVR2 权重必装；Forbidden Vision 三个默认权重按需成组下载。
+
+`launcher/manifests/nvidia-runtime.json` 保存官方 NVIDIA VFX wheel、VC++ 运行库、7-Zip 和 DLSS 原生文件的来源、大小及 SHA-256；Python 3.10/3.11 使用对应 ABI，3.12 及以上使用已验证的 abi3 wheel。声明 `nvidia-vfx` 的节点依赖经临时需求文件改写为固定官方 wheel，不修改节点的原始依赖文件，不启用全局附加索引。支持硬件在安装阶段完成原生运行文件准备和实际 GPU 调用验证。兼容补丁及验证脚本嵌入单 EXE，模型与 GPU 运行资产不随 EXE 再分发。
+
 图像反推的本地读取适配自 MIT 许可的 [Stable Diffusion Prompt Reader v1.3.5](https://github.com/receyuki/stable-diffusion-prompt-reader/commit/1a499becb0a88fd28ac3e4e09bd8917ce95c9629)，仅包含元数据读取部分，使用现有 Pillow，不安装上游 GUI、Tk 或旧版 Pillow。随源码和应用负载保留来源、许可及本地适配说明。
 
 本地标签识别使用可选的 [ComfyUI-WD-Timm-Tagger](https://github.com/bedovyy/ComfyUI-WD-Timm-Tagger)，在 ComfyUI 环境中运行。新安装检查节点官方默认分支的最新提交并固定到安装计划；八个预设模型包的来源版本、文件校验和及各自许可保存在 `anima_webui/tagger-models.json`，由网页检测和启动器下载共用。模型按需单独下载，不包含在启动器安装包中。该节点所需 `timm`、`huggingface_hub` 使用现有 ComfyUI 依赖管理，不加入轻量网页服务依赖。模型包中的额外架构文件同样锁定版本并校验，完整性检测本身不导入或执行它们。

@@ -44,6 +44,11 @@ var root = File.Exists(Path.Combine(Environment.CurrentDirectory, "launcher", "m
     ? Environment.CurrentDirectory : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
 var manifestDir = Path.Combine(root, "launcher", "manifests");
 var manifest = JsonFile.Read<RuntimeManifest>(Path.Combine(manifestDir, "launcher-manifest.json"));
+if (args.FirstOrDefault() == "--onboarding-runtime-acceptance")
+{
+    await OnboardingRuntimeAcceptance.Run(root, args.ElementAtOrDefault(1) ?? "all", args.ElementAtOrDefault(2), args.ElementAtOrDefault(3));
+    return;
+}
 if (args.FirstOrDefault() == "--dependency-install-acceptance")
 {
     await DependencyInstallAcceptance.Run(root, args[1], args.ElementAtOrDefault(2) ?? "cold", args.ElementAtOrDefault(3) ?? "current");
@@ -139,6 +144,26 @@ var testArtifacts = Environment.GetEnvironmentVariable("ANIMA_LAUNCHER_TEST_ROOT
 var work = Path.Combine(string.IsNullOrWhiteSpace(testArtifacts) ? Path.Combine(root, "output", "launcher-tests") : Path.GetFullPath(testArtifacts), Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(work);
 var count = 0;
+if (args.Contains("--installation-readiness-only"))
+{
+    count += await InstallationReadinessTests.Run(work, manifest);
+    Console.WriteLine($"{count} installation readiness checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--forbidden-compat-only"))
+{
+    count += await ForbiddenVisionCompatibilityTests.Run(work, manifest);
+    Console.WriteLine($"{count} Forbidden Vision compatibility checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--runtime-artifacts-only"))
+{
+    count += await RuntimeArtifactPlanningTests.Run(work, manifest);
+    Console.WriteLine($"{count} runtime artifact planning checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--download-progress-recovery-only"))
+{
+    count += await DownloadProgressRecoveryTests.Run(work);
+    Console.WriteLine($"{count} download progress recovery checks passed; artifacts: {work}"); return;
+}
 count += ProductBrandingTests.Run(work);
 if (args.Contains("--branding-only"))
 {
@@ -259,6 +284,8 @@ if (args.Contains("--node-updates-only"))
 count += await LauncherCacheTests.Run(work);
 count += PresentationPerformanceTests.Run(work);
 count += await NodeUpdateTests.Run(work, manifest);
+count += await ForbiddenVisionCompatibilityTests.Run(work, manifest);
+count += await RuntimeArtifactPlanningTests.Run(work, manifest);
     Console.WriteLine($"{count} node update and rollback checks passed."); return;
 }
 if (args.Contains("--launch-arguments-only"))
@@ -320,6 +347,8 @@ if (args.Contains("--updates-only"))
 }
 if (args.Contains("--onboarding-only"))
 {
+    count += RuntimeCapabilityTests.Run(work, manifest);
+    count += await InstallationReadinessTests.Run(work, manifest);
     count += await OnboardingTests.Run(work, manifest);
     count += await SetupCompletionTests.Run(work);
     count += await SetupModelSelectionTests.Run(work, manifest, models,
@@ -375,6 +404,8 @@ if (args.Contains("--tagger-only"))
 }
 count += await OnboardingTests.Run(work, manifest);
 count += await SetupCompletionTests.Run(work);
+count += await InstallationReadinessTests.Run(work, manifest);
+count += RuntimeCapabilityTests.Run(work, manifest);
 count += await SetupModelSelectionTests.Run(work, manifest, models,
     JsonFile.Read<ModelProfilesManifest>(Path.Combine(manifestDir, "model-profiles.json")));
 count += await SetupImportTests.Run(work, root, manifest, models,
@@ -382,6 +413,7 @@ count += await SetupImportTests.Run(work, root, manifest, models,
 count += await ModelBatchProgressTests.Run();
 count += await DownloadEngineTests.Run(work);
 count += await DownloadRepresentationTests.Run(work);
+count += await DownloadProgressRecoveryTests.Run(work);
 count += await CommandProcessLifetimeTests.Run(work);
 count += await TaskStoreTests.Run(work);
 count += await ResourceOwnerTests.Run(work);
@@ -406,7 +438,7 @@ if (args.Contains("--recovery-only"))
 }
 Safety.Validate(manifest, models); Check(true, "shipped manifests validate");
 var requiredV2Classes = new[] { "PromptSelector", "QuickGroupManager", "ResolutionPreset", "PromptExpand", "KreaSeedVarianceEnhancer", "ModelPassThrough", "VRAM_Debug", "Lora Loader (LoraManager)", "Any Switch (rgthree)", "ComfyMathExpression" };
-var installedNodeClasses = manifest.Nodes.SelectMany(node => node.RequiredClasses).ToHashSet(StringComparer.Ordinal);
+var installedNodeClasses = manifest.Nodes.SelectMany(node => node.RequiredClasses).Concat(manifest.Comfy.RequiredClasses).ToHashSet(StringComparer.Ordinal);
 Check(requiredV2Classes.All(installedNodeClasses.Contains), "v2 graph dependencies are pinned and startup-checked");
 await Throws(() => Task.FromResult(Safety.Under(work, "../outside")), "path traversal rejected");
 await Throws(() => Task.FromResult(Safety.Under(work, @"C:\outside")), "absolute destination rejected");
@@ -820,7 +852,12 @@ File.WriteAllText(unrelatedDefaultModel, "import must not verify this model");
 var importedPlan = InstallationPlanner.Create(resumedEnvironment, resumeManifest, resumeState, false, models, profiles);
 Check(importedPlan.Downloads.Length == 0 && importedPlan.EstimatedDownloadBytes == 0, "import repair does not reserve optional base models or fresh-install tools");
 var importedPrepared = await InstallationPlanner.PreparePlanAsync(importedPlan, models, profiles, "missing-probe-script.py", default);
-Check(ReferenceEquals(importedPrepared, importedPlan) && (await InstallationPlanner.RefreshSpaceEstimateAsync(importedPlan, default)).EstimatedDownloadBytes == 0, "import planning skips model probes and unrelated corrupt default model files");
+Check(importedPrepared.RuntimeArtifactsPrepared && importedPrepared.ModelIds.IsEmpty && importedPrepared.ModelInventory.IsEmpty
+    && importedPrepared.Downloads.IsEmpty && importedPrepared.ConfigurationJson == importedPlan.ConfigurationJson
+    && File.ReadAllText(unrelatedDefaultModel) == "import must not verify this model"
+    && importedPrepared.EstimatedDownloadBytes == 0
+    && (await InstallationPlanner.RefreshSpaceEstimateAsync(importedPrepared, default)).EstimatedDownloadBytes == 0,
+    "import planning prepares native scope without probing models, changing unrelated corrupt files or adding downloads");
 var deferredPathsPreflight = await InstallationPlanner.PreflightAsync(importedPlan with { ModelPathsDeferred = true }, default);
 Check(deferredPathsPreflight.CanInstall && deferredPathsPreflight.Issues.Single(issue => issue.Code == "model_paths_deferred").Blocking == false,
     "deferred model path discovery remains visible without blocking dependency recovery");
@@ -840,7 +877,7 @@ var externalProbe = new ProbeResult(resumedEnvironment.ComfyRoot, resumedEnviron
 });
 var relocatedPlan = await InstallationPlanner.ResolveModelDestinationsAsync(
     InstallationPlanner.Create(resumedConfig, resumeManifest, resumeState, true, smallModels, profiles), externalProbe, smallModels, profiles, default);
-Check(relocatedPlan.Downloads.Single(a => a.Destination == existingExternalModel).InEnvironment && relocatedPlan.EstimatedDownloadBytes == 2 * data.Length, "resumed planning reuses an existing model from effective paths without hashing it twice");
+Check(relocatedPlan.Downloads.Single(a => a.Destination == existingExternalModel).InEnvironment && relocatedPlan.EstimatedDownloadBytes == 4 * data.Length, "resumed planning reuses an existing model and budgets the other four mandatory files");
 var relocatedVolumes = InstallationPlanner.EstimateVolumes(relocatedPlan);
 var relocatedBudgetDiagnostic = new
 {
@@ -863,20 +900,20 @@ Check(unverifiedRuntimeArtifacts.Length == 3
     && unverifiedRuntimeArtifacts.Single(artifact => Path.GetFileName(artifact.Destination) == "python.tar.gz").RemainingAllocationBytes == data.Length
     && relocatedPlan.RuntimeBytes == relocatedPlan.RuntimeReserveBytes + expectedUnverifiedRuntimeAllocation,
     "new relocated plan conservatively budgets its unverified tool/Python caches and credits only the wheel partial allocation");
-Check(relocatedVolumes.Single(v => v.Volume == separateVolume).RequiredBytes == 2 * data.Length + 256L * 1024 * 1024
+Check(relocatedVolumes.Single(v => v.Volume == separateVolume).RequiredBytes == 3 * data.Length + 256L * 1024 * 1024
     && relocatedVolumes.Single(v => v.Volume.Equals(Path.GetPathRoot(work), StringComparison.OrdinalIgnoreCase)).RequiredBytes
-        == relocatedPlan.EnvironmentReserveBytes + relocatedPlan.RuntimeReserveBytes + expectedUnverifiedRuntimeAllocation + data.Length + 256L * 1024 * 1024,
+        == relocatedPlan.EnvironmentReserveBytes + relocatedPlan.RuntimeReserveBytes + expectedUnverifiedRuntimeAllocation + 2 * data.Length + 256L * 1024 * 1024,
     "each volume includes only its own unverified models and cache allocations plus component reserves and one safety margin");
 await ThrowsType<InvalidDataException>(() => InstallationPlanner.RefreshSpaceEstimateAsync(relocatedPlan, default), "preflight verifies the existing effective model path instead of a hardcoded models directory");
 File.WriteAllBytes(existingExternalModel, data);
 var verifiedRelocatedPlan = await InstallationPlanner.RefreshSpaceEstimateAsync(relocatedPlan, default);
-Check(verifiedRelocatedPlan.EstimatedDownloadBytes == 2 * data.Length, "verified external models need no duplicate download allocation");
+Check(verifiedRelocatedPlan.EstimatedDownloadBytes == 4 * data.Length, "verified external models need no duplicate download allocation");
 Check(verifiedRelocatedPlan.Downloads.Where(artifact => !artifact.InEnvironment).All(artifact => artifact.RemainingAllocationBytes == 0)
     && verifiedRelocatedPlan.RuntimeBytes == verifiedRelocatedPlan.RuntimeReserveBytes,
     "strong cache verification releases all three runtime archive allocations without dropping runtime component reserves");
 var verifiedRelocatedVolumes = InstallationPlanner.EstimateVolumes(verifiedRelocatedPlan);
-Check(verifiedRelocatedVolumes.Single(v => v.Volume == separateVolume).RequiredBytes == 2 * data.Length + 256L * 1024 * 1024
-    && verifiedRelocatedVolumes.Single(v => v.Volume.Equals(Path.GetPathRoot(work), StringComparison.OrdinalIgnoreCase)).RequiredBytes == verifiedRelocatedPlan.EnvironmentReserveBytes + verifiedRelocatedPlan.RuntimeReserveBytes + 256L * 1024 * 1024,
+Check(verifiedRelocatedVolumes.Single(v => v.Volume == separateVolume).RequiredBytes == 3 * data.Length + 256L * 1024 * 1024
+    && verifiedRelocatedVolumes.Single(v => v.Volume.Equals(Path.GetPathRoot(work), StringComparison.OrdinalIgnoreCase)).RequiredBytes == verifiedRelocatedPlan.EnvironmentReserveBytes + verifiedRelocatedPlan.RuntimeReserveBytes + data.Length + 256L * 1024 * 1024,
     "verified external contents release only their own allocation while offline model volume and component reserves remain");
 
 var metadataRoot = Path.Combine(work, "model-metadata");
@@ -887,8 +924,9 @@ var preservedModel = Path.Combine(metadataRoot, "preserved", profiles.Get("anima
 Directory.CreateDirectory(Path.GetDirectoryName(preservedModel)!);
 var preservedSidecar = Path.ChangeExtension(preservedModel, ".metadata.json");
 File.WriteAllText(preservedSidecar, "user-authored metadata");
-var preservedMetadata = await ModelMetadata.EnsureDefaultAsync(new LauncherConfig(), manifest, models, profiles, preservedModel, default);
-Check(!preservedMetadata.Created && File.ReadAllText(preservedSidecar) == "user-authored metadata", "existing model metadata is preserved without reading or rewriting the model");
+File.WriteAllText(preservedModel, "incorrect model fixture");
+await ThrowsType<InvalidDataException>(() => ModelMetadata.EnsureDefaultAsync(new LauncherConfig(), manifest, models, profiles, preservedModel, default), "existing sidecar cannot bypass official model verification");
+Check(File.ReadAllText(preservedSidecar) == "user-authored metadata", "existing model metadata is preserved when verification fails");
 var invalidModel = Path.Combine(metadataRoot, profiles.Get("anima").ModelName);
 File.WriteAllText(invalidModel, "incorrect model fixture");
 await ThrowsType<InvalidDataException>(() => ModelMetadata.EnsureDefaultAsync(new LauncherConfig(), manifest, models, profiles, invalidModel, default), "unverified default model cannot receive trusted Anima metadata");

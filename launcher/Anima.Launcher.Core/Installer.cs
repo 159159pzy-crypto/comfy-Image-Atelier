@@ -182,9 +182,12 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         var changes = await Commands.Run(git!, ["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=untracked"], path, null, ct);
         if (!string.IsNullOrWhiteSpace(changes))
         {
-            if (repo.Id != PromptAssistantCompatibility.NodeId || !PromptAssistantCompatibility.IsOnlyCompatibilityChange(changes))
+            if (repo.Id == ForbiddenVisionCompatibility.NodeId && ForbiddenVisionCompatibility.IsOnlyCompatibilityChange(changes))
+                await ForbiddenVisionCompatibility.CheckOrApply(config, stateDir, path, false, ct);
+            else if (repo.Id == PromptAssistantCompatibility.NodeId && PromptAssistantCompatibility.IsOnlyCompatibilityChange(changes))
+                await PromptAssistantCompatibility.CheckOrApply(config, stateDir, path, false, ct);
+            else
                 throw new IOException($"受管理仓库有源代码修改，已保留：{path}。请先备份处理后再继续安装。");
-            await PromptAssistantCompatibility.CheckOrApply(config, stateDir, path, false, ct);
         }
         var submodules = await Commands.Run(git!, ["submodule", "status", "--recursive"], path, null, ct);
         if (submodules.Split('\n', StringSplitOptions.RemoveEmptyEntries).Any(line => line[0] != ' '))
@@ -337,6 +340,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         activeDependencies = dependencies;
         await InstallCombinedDependencies(config, gpuPins, requiredManager: true, ct);
         await CompleteNodeInstallers(config, PlanNodes(config.ComfyRoot, manifest).Where(node => Directory.Exists(node.Directory)), ct);
+        await SesquiRuntimePreparation.PrepareAsync(config, manifest, runtime, downloads, log, progress, ct);
         await RepairOptionalDependencies(config, ct);
         await Commands.Run(config.Python, ["-m", "pip", "check"], config.ComfyRoot, log, ct);
     }
@@ -544,8 +548,11 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
     public async Task<LauncherConfig> Install(InstallationPlan plan, CancellationToken ct)
     {
         installationDependenciesPath = null;
+        RuntimeArtifactPlanning.ValidateIdentity(plan);
         plan = await InstallationPlanner.ResolveStableAsync(plan, manifest, stateDir, ct);
         manifest = plan.ResolvedRuntime ?? manifest;
+        plan = await RuntimeArtifactPlanning.PrepareAsync(plan, manifest, ct);
+        await RuntimeArtifactPlanning.ValidateHostAsync(plan, manifest, ct);
         activeDependencies = plan.Dependencies;
         var config = plan.CreateConfig();
         var fresh = plan.Fresh;
@@ -645,10 +652,23 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         }
         await InstallCombinedDependencies(config, importedPins, fresh || ComfyLaunchArguments.ManagerEnabled(config.ComfyArguments), ct);
         await WithInstallationCheckpoint(config, () => CompleteNodeInstallers(config, nodePlans, ct));
+        if (plan.RuntimeArtifactsIdentity.Length > 0)
+            await Stage(config, "nodes", "验证潜空间放大权重",
+                () => SesquiRuntimePreparation.PrepareAsync(config, manifest, runtimeDirectory, downloads, log, progress, ct));
         await WithInstallationCheckpoint(config, () => Stage(config, "nodes", "检查可选 Triton 加速依赖", () => RepairOptionalDependencies(config, ct)));
         var assistantDirectory = PromptAssistantCompatibility.ResolveDirectory(config.ComfyRoot);
         if (assistantDirectory is not null)
             await Stage(config, "nodes", "验证提示词助手纯模板兼容", () => PromptAssistantCompatibility.CheckOrApply(config, stateDir, assistantDirectory, true, ct));
+        var faceDirectory = ForbiddenVisionCompatibility.ResolveDirectory(config.ComfyRoot);
+        if (faceDirectory is not null)
+            await Stage(config, "nodes", "验证脸部模型受管理下载", () => ForbiddenVisionCompatibility.CheckOrApply(config, stateDir, faceDirectory, true, ct));
+        if (plan.RuntimeArtifactsIdentity.Length > 0 && manifest.Nodes.Any(node => node.Id == "DLSS5-Comfyui"))
+            await WithInstallationCheckpoint(config, () => Stage(config, "nodes", "准备并验证 NVIDIA 运行库",
+                async () =>
+                {
+                    var native = await NvidiaRuntimePreparation.PrepareAsync(config, runtimeDirectory, downloads, log, progress, ct);
+                    if (native.Supported && !native.Ready) throw new InvalidOperationException(native.Detail);
+                }));
         setupProgress?.Invoke(new("nodes", "必要节点已准备就绪", SetupStageStatus.Complete));
         await Stage(config, "validation", "验证运行依赖", async () =>
         {

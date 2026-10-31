@@ -100,7 +100,8 @@ public static class DownloadOwnerRecovery
         {
             // Resolve required resources only inside the snapshot; current catalog additions
             // may be displayed but can never substitute for a missing frozen requirement.
-            var required = profiles.RequiredModels(new(1, frozen.FrozenModels), frozen.SelectedProfile).Select(model => model.Id).ToHashSet();
+            var required = SetupModelSelection.RequiredForPlan(frozen, new(1, frozen.FrozenModels), profiles, frozen.SelectedProfile)
+                .Select(model => model.Id).ToHashSet(StringComparer.Ordinal);
             if (required.Any(id => !frozen.ModelIds.Contains(id)))
                 throw new InvalidDataException("固定安装计划缺少基础模型，请重新检查。");
             optional = frozen.ModelIds.Where(id => !required.Contains(id)).ToArray();

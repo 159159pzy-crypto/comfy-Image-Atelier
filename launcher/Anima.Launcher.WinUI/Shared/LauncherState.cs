@@ -67,6 +67,7 @@ internal sealed partial class LauncherState : IDisposable
         root = getRoot;
         showWindow = showWindowAction;
         Config = File.Exists(configFile) ? LoadConfig() : new LauncherConfig { AppRoot = Program.AppRoot, DataDir = Path.Combine(Program.StateDir, "data") };
+        RuntimePolicies.EnsureWorkbenchDefaults(Config, Program.AppRoot, Path.Combine(Program.StateDir, "data"));
         Downloads = new(Credentials.Read, engineOptions: new DownloadEngineOptions
         {
             Aria2PathResolver = async ct => await BundledTools.EnsureAsync("aria2", Path.Combine(Program.StateDir, "download-runtime"), ct),
@@ -395,7 +396,7 @@ internal sealed partial class LauncherState : IDisposable
         var snapshot = Config.Clone();
         // Counting an existing environment can touch thousands of package files.
         // Keep it off the UI thread, then resolve ComfyUI's configured model roots.
-        var plan = await Task.Run(() => InstallationPlanner.Create(snapshot, Program.Runtime, Program.StateDir, fresh, Program.Models, Program.ModelProfiles), ct);
+        var plan = await Task.Run(() => InstallationPlanner.Create(snapshot, Program.Runtime, Program.StateDir, fresh, Program.Models, Program.ModelProfiles, []), ct);
         plan = await InstallationPlanner.ResolveStableAsync(plan, Program.Runtime, Program.StateDir, ct);
         return await InstallationPlanner.PreparePlanAsync(plan, Program.Models, Program.ModelProfiles,
             Path.Combine(Program.Assets, "probe_comfy.py"), ct);
@@ -437,13 +438,13 @@ internal sealed partial class LauncherState : IDisposable
         Config.InstallPending = fresh;
         Save();
         Reloaded();
-        if (fresh && prepareModels)
+        if (prepareModels)
         {
-            UpdateSetupProgress(new("models", "准备 Anima 基础模型", SetupStageStatus.Running));
-            SetStatus("环境已安装，正在准备 Anima 基础模型…");
+            UpdateSetupProgress(new("models", "准备必需生成模型与 SeedVR2", SetupStageStatus.Running));
+            SetStatus("环境已安装，正在准备必需生成模型与 SeedVR2…");
             var probe = await TaggerRuntime.Probe(Config, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
-            var selected = OperationProfiles.RequiredModels(OperationModels, Config.SelectedProfile).Select(m => m.Id).ToHashSet();
-            var inventory = await Inventory.Scan(probe, OperationModels, false, ct);
+            var selected = SetupModelSelection.RequiredForPlan(plan, OperationModels, OperationProfiles, Config.SelectedProfile).Select(m => m.Id).ToHashSet();
+            var inventory = await Inventory.Scan(probe, OperationModels, true, ct);
             var pending = inventory.Where(m => selected.Contains(m.Model.Id) && m.Missing).ToList();
             await DownloadModelsAsync(pending, ct);
             // A resumed install may already have the verified model, but may have
@@ -453,15 +454,26 @@ internal sealed partial class LauncherState : IDisposable
                     item.FoundPath ?? item.Destination, ct, AppendLog);
             UpdateSetupProgress(new("models", "基础模型已准备", SetupStageStatus.Complete));
         }
-        UpdateSetupProgress(new("verify", "检查模型与节点", SetupStageStatus.Running));
-        if (prepareModels) await Scan(ct);
-        UpdateSetupProgress(new("verify", "最终检查完成", SetupStageStatus.Complete));
         FreshInstallRequested = false;
         Config.InstallPending = false;
         Save();
         Reloaded();
+        if (prepareModels)
+        {
+            if (plan.RuntimeArtifactsIdentity.Length == 0
+                || SetupModelSelection.SupplementalModels(plan, Program.Models, Program.ModelProfiles).Length > 0
+                || plan.ResolvedRuntime is { } frozen && Program.Runtime.Nodes.Any(node => !frozen.Nodes.Any(old => old.Id == node.Id)))
+            {
+                await SupplementReviewedSetupAsync(plan, ct);
+                return;
+            }
+            await Scan(ct, true);
+            await VerifySetupRuntimeAsync(SetupModelSelection.MandatoryModels(OperationModels, OperationProfiles, Config.SelectedProfile)
+                .Select(model => model.Id).ToArray(), ct);
+        }
         if (!SetupActive) GoTo(0);
-        SetStatus("安装完成。点击“启动工作台”开始创作；可选资源可在模型页添加。");
+        SetStatus(prepareModels ? "安装完成。必需模型、节点、模型分类和词库检查已通过。"
+            : "环境依赖已准备，继续下载模型并检查实际运行状态。");
     }
 
     /// <summary>Pages set this before calling Install to choose fresh/import.</summary>
@@ -506,7 +518,7 @@ internal sealed partial class LauncherState : IDisposable
 
     public void SelectBaseGroup()
     {
-        var required = OperationProfiles.RequiredModels(OperationModels, Config.SelectedProfile).Select(m => m.Id).ToHashSet();
+        var required = SetupModelSelection.MandatoryModels(OperationModels, OperationProfiles, Config.SelectedProfile).Select(m => m.Id).ToHashSet();
         foreach (var row in Rows) row.Selected = required.Contains(row.Status.Model.Id) && row.CanSelect;
     }
 
@@ -682,6 +694,10 @@ internal sealed partial class LauncherState : IDisposable
     /// <summary>Returns true when a stale running instance had to be stopped (a restart is appropriate).</summary>
     public async Task<bool> EnsureCurrentVersionAsync(CancellationToken ct)
     {
+        // Older frozen installation plans may omit these runtime-only paths. Fill
+        // them before the first-install/dev-mode early return, without rewriting
+        // that plan or treating a missing path as an intentional source checkout.
+        if (RuntimePolicies.EnsureWorkbenchDefaults(Config, Program.AppRoot, Path.Combine(Program.StateDir, "data"))) Save();
         if (!Config.SetupComplete || DevAppRoot) return false;
         var desired = Config.PinnedAppRoot.Length > 0 ? Config.PinnedAppRoot : Program.AppRoot;
         var health = await ServiceManager.PortOpen(Config.WebPort, ct) ? await ServiceManager.Json(Config.WebUrl + "/api/launcher-health", ct) : null;

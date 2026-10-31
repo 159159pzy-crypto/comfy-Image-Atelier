@@ -60,7 +60,7 @@ internal sealed partial class LauncherState
         {
             try { ValidateDownload(item); queue.Add(item); }
             catch (Exception ex) when (optionalIds?.Contains(item.Model.Id) == true)
-            { SetupOptionalFailures.Add(item.Model.Name + "：" + ex.Message); }
+            { SetupOptionalFailures.Add(item.Model.Name + "：" + ex.Message); setupFailedOptionalModelIds.Add(item.Model.Id); }
         }
         await CheckModelSpaceAsync(queue.Where(item => optionalIds?.Contains(item.Model.Id) != true), ct);
         downloadQueue = queue;
@@ -69,8 +69,6 @@ internal sealed partial class LauncherState
             item => item.Model.Id, item => Math.Max(0, item.Model.Size - ModelRemaining(item))));
         modelBatch = batch;
         var singleProgress = DownloadProgress();
-        var requiredRemaining = queue.Where(item => optionalIds?.Contains(item.Model.Id) != true)
-            .Select(item => item.Model.Id).ToHashSet();
         DownloadCancelable?.Invoke(true);
         try
         {
@@ -92,12 +90,11 @@ internal sealed partial class LauncherState
                         await CheckModelSpaceAsync([item], ct);
                     await FetchModelAsync(item, progress, ct);
                     PublishBatch(batch.Complete(item.Model.Id));
-                    requiredRemaining.Remove(item.Model.Id);
-                    if (optionalIds is not null && requiredRemaining.Count == 0) SetupRequiredModelsReady = true;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException && optionalIds?.Contains(item.Model.Id) == true)
                 {
                     SetupOptionalFailures.Add(item.Model.Name + "：" + ex.Message);
+                    setupFailedOptionalModelIds.Add(item.Model.Id);
                     AppendLog("可选模型下载失败：" + item.Model.Name + "：" + ex.Message);
                 }
             }));

@@ -102,6 +102,31 @@ internal static class DownloadOwnerRecoveryTests
         Check(migrated.Plan.FrozenModels.Length == 4 && migrated.Plan.FrozenModels.All(model => model.Sha256 == new string('a', 64))
             && migrated.Plan.FrozenProfile == profile && migrated.Setup.OptionalModelIds.SequenceEqual(["optional"]),
             "legacy inventory migrates exact saved model identities when the profile requires only those filenames");
+        var seedModels = new[] { Model("seedvr2-model", "diffusion_models"), Model("seedvr2-vae", "vae") };
+        var expandedCatalog = currentModels with { Models = currentModels.Models.Concat(seedModels).ToArray() };
+        var supplement = SetupModelSelection.SupplementalModels(plan, expandedCatalog, currentProfiles);
+        Check(supplement.Select(model => model.Id).SequenceEqual(["seedvr2-model", "seedvr2-vae"])
+            && plan.ModelIds.SequenceEqual(["diffusion", "clip", "vae", "optional"]) && plan.MandatoryModelIds.IsEmpty,
+            "a legacy owner exposes a separate SeedVR2 supplement without changing its frozen model identities");
+        var newPlan = plan with
+        {
+            ModelIds = [.. plan.ModelIds, .. seedModels.Select(model => model.Id)],
+            FrozenModels = [.. frozenModels, .. seedModels],
+            MandatoryModelIds = ["diffusion", "clip", "vae", "seedvr2-model", "seedvr2-vae"]
+        };
+        var newRecovery = DownloadOwnerRecovery.Prepare(owner, newPlan, installed, expandedCatalog, currentProfiles);
+        Check(newRecovery.Setup.OptionalModelIds.SequenceEqual(["optional"])
+            && newRecovery.Plan.MandatoryModelIds.SequenceEqual(newPlan.MandatoryModelIds)
+            && SetupModelSelection.SupplementalModels(newRecovery.Plan, expandedCatalog, currentProfiles).Length == 0,
+            "new owners retain both mandatory SeedVR2 models through pause and recovery without duplicating a supplement");
+        Fails(() => Prepare(fixedPlan: newPlan with { FrozenModels = frozenModels }),
+            "recovery cannot borrow missing mandatory SeedVR2 identities from the current catalog");
+        Fails(() => Prepare(fixedPlan: newPlan with { ModelIds = plan.ModelIds }),
+            "a model frozen in inventory but omitted from selected IDs cannot satisfy a mandatory requirement");
+        Fails(() => Prepare(fixedPlan: newPlan with { MandatoryModelIds = ["seedvr2-model", "seedvr2-vae"] }),
+            "mandatory identity cannot discard the frozen generation profile's original three resources");
+        Fails(() => Prepare(fixedPlan: newPlan with { MandatoryModelIds = [.. newPlan.MandatoryModelIds, "seedvr2-model"] }),
+            "duplicate mandatory identities are rejected instead of changing required and optional classification");
         Fails(() => Prepare(fixedPlan: legacy), "legacy inventory refuses a current profile requiring a different model filename");
         Fails(() => DownloadOwnerRecovery.Prepare(owner, legacy with { ModelInventory = [.. legacy.ModelInventory.Take(2)] },
             installed, currentModels, compatibleProfiles), "legacy inventory missing a selected model cannot use a new catalog as a substitute");

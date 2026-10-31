@@ -38,6 +38,7 @@ def probe(root, arguments=()):
         paths = {key: list(value[0]) for key, value in folder_paths.folder_names_and_paths.items()}
     models = Path(folder_paths.models_dir)
     paths["wd_taggers"] = [str(models / "wd_taggers")]
+    paths["forbidden_vision"] = [str(models / "forbidden_vision")]
     paths.setdefault("sams", [str(models / "sams")])
     paths.setdefault("ultralytics", [str(models / "ultralytics")])
     # Impact Subpack also recognizes these extra_model_paths keys.

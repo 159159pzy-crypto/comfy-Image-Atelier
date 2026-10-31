@@ -1,4 +1,6 @@
+using System.Collections.Immutable;
 using System.Reflection;
+using System.Text.Json;
 using Anima.Launcher.Core;
 
 internal static class OnboardingTests
@@ -74,6 +76,57 @@ internal static class OnboardingTests
         File.Delete(Path.Combine(comfy, "main.py"));
         Check(SetupRouting.Resolve(configured, saved) == SetupStep.Location, "deleted ComfyUI entry point invalidates restored completion");
         File.WriteAllText(Path.Combine(comfy, "main.py"), "# isolated fixture");
+
+        var upgradeModels = new ModelManifest(1, new[] {
+            ("anima-base-v1", "diffusion_models", "anima.safetensors"),
+            ("qwen-text", "text_encoders", "clip.safetensors"), ("qwen-vae", "vae", "vae.safetensors"),
+            ("seedvr2-model", "diffusion_models", "seed.safetensors"), ("seedvr2-vae", "vae", "seedvae.safetensors")
+        }.Select(item => new ModelItem(item.Item1, item.Item1, "fixture", item.Item2, item.Item3, [], 1,
+            new string('a', 64), ["https://example.com/fixture"], "fixture", "https://example.com/license")).ToArray());
+        var upgradeProfile = new ModelProfileDefinition("anima", "Anima", "anima.safetensors", "clip.safetensors", "vae.safetensors", "stable_diffusion", "seed.safetensors", "seedvae.safetensors");
+        var upgradeProfiles = new ModelProfilesManifest(1, "anima", [upgradeProfile]);
+        var currentPlan = new InstallationPlan(JsonSerializer.Serialize(configured, JsonFile.Options), comfy,
+            Path.Combine(state, "runtime"), "anima", false, 0, 0, 0, [])
+        {
+            ResolvedRuntime = manifest, RuntimeArtifactsIdentity = RuntimeArtifactPlanning.Identity,
+            ModelIds = upgradeModels.Models.Select(model => model.Id).ToImmutableArray(),
+            MandatoryModelIds = upgradeModels.Models.Select(model => model.Id).ToImmutableArray(),
+            FrozenModels = upgradeModels.Models, FrozenProfile = upgradeProfile,
+        };
+        var legacyPlan = currentPlan with { RuntimeArtifactsIdentity = "", MandatoryModelIds = [],
+            ModelIds = currentPlan.ModelIds.Take(3).ToImmutableArray(), FrozenModels = upgradeModels.Models.Take(3).ToArray() };
+        foreach (var step in new[] { SetupStep.Complete, SetupStep.Assistant })
+        {
+            var upgradeReceipt = Record(step);
+            upgradeReceipt.InstallStarted = upgradeReceipt.InstallFinished = true;
+            upgradeReceipt.AssistantStatus = step == SetupStep.Assistant ? AssistantSetupStatus.Pending : AssistantSetupStatus.Skipped;
+            upgradeReceipt.ReviewedPlan = legacyPlan;
+            var before = JsonSerializer.Serialize(upgradeReceipt, JsonFile.Options);
+            var decision = SetupRouting.ResolveForRuntime(configured, upgradeReceipt, manifest, upgradeModels, upgradeProfiles);
+            Check(decision.Step == SetupStep.Installing && decision.RequiresSupplement && !decision.RequiresRepairReview
+                && JsonSerializer.Serialize(upgradeReceipt, JsonFile.Options) == before,
+                $"legacy unfinished {step} returns to supplemental installation without mutating its frozen plan");
+            upgradeReceipt.ReviewedPlan = currentPlan;
+            Check(SetupRouting.ResolveForRuntime(configured, upgradeReceipt, manifest, upgradeModels, upgradeProfiles).Step == step,
+                $"current unfinished {step} keeps its position and still requires fresh runtime verification");
+        }
+        var noPlan = Record(SetupStep.Complete);
+        noPlan.InstallStarted = noPlan.InstallFinished = true;
+        Check(SetupRouting.ResolveForRuntime(configured, noPlan, manifest, upgradeModels, upgradeProfiles)
+            is { Step: SetupStep.Location, RequiresRepairReview: true },
+            "old completion without a frozen plan returns to review an existing-environment repair");
+        noPlan.ReviewedPlan = currentPlan with { ComfyRoot = Path.Combine(state, "foreign") };
+        Check(SetupRouting.ResolveForRuntime(configured, noPlan, manifest, upgradeModels, upgradeProfiles).RequiresRepairReview,
+            "completion never resumes a frozen plan for a different environment");
+        noPlan.Step = SetupStep.Finished;
+        noPlan.ReviewedPlan = legacyPlan;
+        Check(SetupRouting.ResolveForRuntime(configured, noPlan, manifest, upgradeModels, upgradeProfiles).Step is null
+            && !SetupRouting.OpenWizardFromEnvironmentPage(configured, false),
+            "an explicitly finished legacy wizard stays closed while its maintenance entry can create a new repair plan");
+        Check(SetupRouting.NeedsSupplement(currentPlan with { ResolvedRuntime = manifest with { Nodes = [] } }, manifest, upgradeModels, upgradeProfiles),
+            "a completed plan missing newly required nodes must be supplemented even with current native identity");
+        Check(SetupRouting.NeedsSupplement(legacyPlan with { RuntimeArtifactsIdentity = RuntimeArtifactPlanning.Identity }, manifest, upgradeModels, upgradeProfiles),
+            "a completed generation-only plan must add mandatory SeedVR2 before returning to creation");
 
         saved.SchemaVersion = 999;
         Check(SetupRouting.Resolve(configured, saved) is null && SetupRouting.Resolve(first, saved) == SetupStep.Welcome,

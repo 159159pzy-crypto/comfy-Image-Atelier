@@ -86,9 +86,13 @@ public sealed class SafeHttpSourceClient : IDisposable
         if (response.IsSuccessStatusCode) return;
         var retry = response.Headers.RetryAfter;
         var retryAt = retry?.Date ?? (retry?.Delta is { } delay ? DateTimeOffset.UtcNow + delay : (DateTimeOffset?)null);
-        var message = response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden
-            ? "来源需要访问权限；在设置中保存该官方站点令牌，或手动导入文件。"
-            : "下载来源返回 HTTP " + (int)response.StatusCode + "。";
+        var tokenSite = response.RequestMessage?.RequestUri is { Port: 443, Host: "huggingface.co" or "civitai.com" };
+        var denied = response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden;
+        var message = denied && tokenSite
+            ? "来源拒绝访问（HTTP " + (int)response.StatusCode + "）；请确认已获该模型访问权限，必要时在设置中保存对应官方站点令牌。"
+            : denied
+                ? "下载来源拒绝请求（HTTP " + (int)response.StatusCode + "）；可能是该来源或网络访问受限。已保留可续传内容，请重试或切换下载来源。"
+                : "下载来源返回 HTTP " + (int)response.StatusCode + "。";
         throw new DownloadSourceException(message, response.StatusCode, retryAt);
     }
 

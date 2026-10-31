@@ -89,9 +89,12 @@ public sealed class NodeUpdateCoordinator(string stateDir, string git, Action<st
         var changes = await Git(entry.Directory, ["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=untracked"], ct);
         if (!string.IsNullOrWhiteSpace(changes))
         {
-            if (entry.Name != PromptAssistantCompatibility.NodeId || !PromptAssistantCompatibility.IsOnlyCompatibilityChange(changes))
+            if (entry.Name == ForbiddenVisionCompatibility.NodeId && ForbiddenVisionCompatibility.IsOnlyCompatibilityChange(changes))
+                await ForbiddenVisionCompatibility.CheckOrApply(config, stateDir, entry.Directory, false, ct);
+            else if (entry.Name == PromptAssistantCompatibility.NodeId && PromptAssistantCompatibility.IsOnlyCompatibilityChange(changes))
+                await PromptAssistantCompatibility.CheckOrApply(config, stateDir, entry.Directory, false, ct);
+            else
                 throw new InvalidOperationException("节点有本地源码修改，已跳过，未覆盖。");
-            await PromptAssistantCompatibility.CheckOrApply(config, stateDir, entry.Directory, false, ct);
         }
     }
 
@@ -115,6 +118,8 @@ public sealed class NodeUpdateCoordinator(string stateDir, string git, Action<st
                 entry = entry with { Name = managed?.Id ?? name };
                 if (PromptAssistantCompatibility.ResolveDirectory(config.ComfyRoot) is { } assistant && Same(assistant, directory))
                     entry = entry with { Name = PromptAssistantCompatibility.NodeId };
+                if (ForbiddenVisionCompatibility.ResolveDirectory(config.ComfyRoot) is { } face && Same(face, directory))
+                    entry = entry with { Name = ForbiddenVisionCompatibility.NodeId };
                 await ValidateNode(config, entry, "", ct);
                 var before = (await Git(directory, ["rev-parse", "HEAD"], ct)).Trim();
                 string origin;
@@ -243,6 +248,7 @@ public sealed class NodeUpdateCoordinator(string stateDir, string git, Action<st
             await Git(stage, ["checkout", "--detach", entry.TargetSha], ct);
             await Submodules(stage, entry, config, ct);
             if (entry.Name == PromptAssistantCompatibility.NodeId) await PromptAssistantCompatibility.CheckOrApply(config, stateDir, stage, true, ct);
+            if (entry.Name == ForbiddenVisionCompatibility.NodeId) await ForbiddenVisionCompatibility.CheckOrApply(config, stateDir, stage, true, ct);
             entries[index] = entry with { StagedDirectory = stage, StagedFingerprint = Fingerprint(stage) };
         }
         plan = plan with { Entries = entries, Sam2Commit = runtime.Sam2Commit,
@@ -283,7 +289,7 @@ public sealed class NodeUpdateCoordinator(string stateDir, string git, Action<st
                 throw new InvalidDataException("节点预检 Git 身份已改变，请重新检查。");
             if ((await Git(entry.StagedDirectory, ["submodule", "status", "--recursive"], ct)).Split('\n', StringSplitOptions.RemoveEmptyEntries).Any(line => line[0] != ' '))
                 throw new InvalidDataException("节点预检子模块身份已改变，请重新检查。");
-            await TransferUserFiles(entry.Directory, entry.StagedDirectory, ct, copy: false);
+            await TransferUserFiles(config, entry.Directory, entry.StagedDirectory, entry.Name, ct, copy: false);
         }
         var (files, map) = Inputs(config, plan);
         var snapshot = await Resolve(config, plan, plan.Dependencies, files, map, ct);
@@ -328,7 +334,7 @@ public sealed class NodeUpdateCoordinator(string stateDir, string git, Action<st
                 // submodules, while retaining the old directory intact for recovery.
                 var replacement = Path.Combine(transaction, "replacement-" + index);
                 CopyDirectory(entry.StagedDirectory, replacement, ct);
-                await TransferUserFiles(entry.Directory, replacement, ct, copy: true);
+                await TransferUserFiles(config, entry.Directory, replacement, entry.Name, ct, copy: true);
                 var retired = Path.Combine(transaction, "previous-" + index);
                 Directory.Move(entry.Directory, retired); Directory.Move(replacement, entry.Directory);
                 var marker = Path.Combine(entry.Directory, ".anima-revision.json");
@@ -358,8 +364,21 @@ public sealed class NodeUpdateCoordinator(string stateDir, string git, Action<st
         }
     }
 
-    private async Task TransferUserFiles(string original, string replacement, CancellationToken ct, bool copy)
+    private async Task TransferUserFiles(LauncherConfig config, string original, string replacement, string nodeId, CancellationToken ct, bool copy)
     {
+        Func<string, bool> managed = _ => false;
+        if (nodeId == ForbiddenVisionCompatibility.NodeId)
+        {
+            await ForbiddenVisionCompatibility.CheckOrApply(config, stateDir, original, false, ct);
+            await ForbiddenVisionCompatibility.CheckOrApply(config, stateDir, replacement, false, ct);
+            managed = ForbiddenVisionCompatibility.IsManagedArtifact;
+        }
+        else if (nodeId == PromptAssistantCompatibility.NodeId)
+        {
+            await PromptAssistantCompatibility.CheckOrApply(config, stateDir, original, false, ct);
+            await PromptAssistantCompatibility.CheckOrApply(config, stateDir, replacement, false, ct);
+            managed = relative => relative.Replace('\\', '/') is ".anima-template-only-v1/node/expand_node.py" or ".anima-template-only-v1/services/llm.py";
+        }
         // Preserve ignored/user configuration. Target tracked paths always win; a
         // collision with a previously untracked path is refused before switching.
         var untracked = (await Git(original, ["ls-files", "--others", "-z"], ct)).TrimEnd('\r', '\n').Split('\0', StringSplitOptions.RemoveEmptyEntries);
@@ -367,6 +386,10 @@ public sealed class NodeUpdateCoordinator(string stateDir, string git, Action<st
         {
             var source = Safety.Under(original, relative); CheckParents(original, source);
             if (!File.Exists(source)) continue; RejectLink(source);
+            // Verified compatibility receipts belong to their exact source revision.
+            // The complete old directory is in the rollback backup; keep the newly
+            // prepared revision's receipt instead of copying the old one over it.
+            if (managed(relative)) continue;
             var destination = Safety.Under(replacement, relative); CheckParents(replacement, destination);
             if (File.Exists(destination) || Directory.Exists(destination)) throw new IOException("新版节点与用户文件冲突，未覆盖：" + relative);
             if (copy) { Directory.CreateDirectory(Path.GetDirectoryName(destination)!); File.Copy(source, destination); }
@@ -379,7 +402,7 @@ public sealed class NodeUpdateCoordinator(string stateDir, string git, Action<st
             var source = Safety.Under(original, relative); var destination = Safety.Under(replacement, relative);
             CheckParents(original, source); CheckParents(replacement, destination);
             if (Directory.Exists(source) && (File.Exists(Path.Combine(source, ".git")) || Directory.Exists(Path.Combine(source, ".git"))))
-                await TransferUserFiles(source, destination, ct, copy);
+                await TransferUserFiles(config, source, destination, "", ct, copy);
         }
     }
     private static void CopyConfiguration(string sourceRoot, string destinationRoot, ComfyConfigurationEntry item, CancellationToken ct)

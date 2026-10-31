@@ -7,6 +7,13 @@ namespace Anima.Launcher.Core;
 public static class PromptAssistantCompatibility
 {
     public const string NodeId = "prompt-assistant";
+    public const string SupportedCommit = "e0587e6d50939ae05e92922f1ed2fce008c7f622";
+
+    public static void ValidatePlannedVersion(string nodeId, string commit)
+    {
+        if (nodeId == NodeId && !commit.Equals(SupportedCommit, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("当前提示词助手最新版本尚未通过纯模板兼容验证，请使用更新的启动器再检查；尚未开始安装，也未改动现有环境。");
+    }
     public static string? ResolveDirectory(string comfyRoot)
     {
         var custom = Path.Combine(Path.GetFullPath(comfyRoot), "custom_nodes");

@@ -47,11 +47,20 @@ public sealed record InstallationPlan(
     public long RuntimeReserveBytes { get; init; }
     public ImmutableArray<InstallationDownload> Downloads { get; init; } = [];
     public ImmutableArray<string> ModelIds { get; init; } = [];
+    public ImmutableArray<string> MandatoryModelIds { get; init; } = [];
     public ModelItem[] FrozenModels { get; init; } = [];
     public ModelProfileDefinition? FrozenProfile { get; init; }
     public ImmutableArray<ModelStatus> ModelInventory { get; init; } = [];
     public bool ModelPathsDeferred { get; init; }
     public long DeferredModelBytes { get; init; }
+    // Empty in legacy plans: their frozen dependency scope must not silently gain
+    // new native downloads when resumed by a newer launcher.
+    public string RuntimeArtifactsIdentity { get; init; } = "";
+    public bool RuntimeArtifactsPrepared { get; init; }
+    public Artifact[] FrozenRuntimeArtifacts { get; init; } = [];
+    public RuntimeArtifactHost? RuntimeArtifactHost { get; init; }
+    public long RuntimeArtifactEnvironmentReserve { get; init; }
+    public long RuntimeArtifactCacheReserve { get; init; }
     public LauncherConfig CreateConfig() => JsonSerializer.Deserialize<LauncherConfig>(ConfigurationJson, JsonFile.Options)!;
     public string Describe() => $"{(Fresh ? "新建 NVIDIA 环境" : "补齐现有环境")} · {(SelectedProfile == "anima" ? "Anima" : "Krea 2")}\n" +
         $"ComfyUI：{ComfyRoot}\n" + (Release is null ? "" : $"稳定版本：{Release.Tag} · {Release.Commit[..12]}（已固定，继续安装不会换版）\n") +
@@ -113,6 +122,11 @@ public static class InstallationPlanner
             nodeReleases ??= new NodeReleases(resolveHead: git is null ? null : (repository, token) =>
                 NodeReleases.ResolveHeadWithGit(git, repository, Directory.Exists(stateDir) ? stateDir : Environment.CurrentDirectory, token));
             var versions = await nodeReleases.ResolveAsync(missingNodes, ct);
+            foreach (var version in versions)
+            {
+                PromptAssistantCompatibility.ValidatePlannedVersion(version.Id, version.Commit);
+                ForbiddenVisionCompatibility.ValidatePlannedVersion(version.Id, version.Commit);
+            }
             var byId = versions.ToDictionary(node => node.Id, StringComparer.Ordinal);
             var resolved = runtime with
             {
@@ -148,6 +162,11 @@ public static class InstallationPlanner
         releases ??= new NodeReleases(resolveHead: git is null ? null : (repository, token) =>
             NodeReleases.ResolveHeadWithGit(git, repository, Directory.Exists(stateDir) ? stateDir : Environment.CurrentDirectory, token));
         var versions = await releases.ResolveAsync(missing, ct);
+        foreach (var version in versions)
+        {
+            PromptAssistantCompatibility.ValidatePlannedVersion(version.Id, version.Commit);
+            ForbiddenVisionCompatibility.ValidatePlannedVersion(version.Id, version.Commit);
+        }
         var byId = versions.ToDictionary(node => node.Id, StringComparer.Ordinal);
         runtime = runtime with { Nodes = runtime.Nodes.Select(repository => byId.TryGetValue(repository.Id, out var node)
             ? repository with { Url = node.Url, Commit = node.Commit } : repository).ToArray() };
@@ -211,6 +230,7 @@ public static class InstallationPlanner
             throw new InvalidDataException("所选模型需要完整的模型与档案清单。");
         var required = (fresh || optionalModelIds is not null) && models is not null && profiles is not null
             ? SetupModelSelection.Resolve(models, profiles, snapshot.SelectedProfile, optionalModelIds) : [];
+        var mandatory = required.Length > 0 ? SetupModelSelection.MandatoryModels(models!, profiles!, snapshot.SelectedProfile) : [];
         // A package target must come from the actual path probe. Until then reserve its
         // byte size on the environment volume, without manufacturing a download directory.
         var deferredBytes = required.Where(model => model.IsPackage && model.CanDownload).Sum(model => model.Size);
@@ -236,8 +256,9 @@ public static class InstallationPlanner
         return new(JsonSerializer.Serialize(snapshot, JsonFile.Options), snapshot.ComfyRoot, snapshot.RuntimeRoot,
             snapshot.SelectedProfile, fresh, environmentReserve + environmentDownloads, runtimeReserve + runtimeDownloads, networkDownloads, stages)
         { ResolvedRuntime = fresh ? null : manifest, EnvironmentReserveBytes = environmentReserve, RuntimeReserveBytes = runtimeReserve, Downloads = artifacts.ToImmutableArray(),
-            ModelIds = required.Select(model => model.Id).ToImmutableArray(), FrozenModels = required,
-            FrozenProfile = profiles?.Get(snapshot.SelectedProfile), DeferredModelBytes = deferredBytes, ModelPathsDeferred = deferredBytes > 0 };
+            ModelIds = required.Select(model => model.Id).ToImmutableArray(), MandatoryModelIds = mandatory.Select(model => model.Id).ToImmutableArray(), FrozenModels = required,
+            FrozenProfile = profiles?.Get(snapshot.SelectedProfile), DeferredModelBytes = deferredBytes, ModelPathsDeferred = deferredBytes > 0,
+            RuntimeArtifactsIdentity = RuntimeArtifactPlanning.Identity };
     }
 
     private static (long Environment, long Runtime) RemainingComponentReserves(LauncherConfig config, RuntimeManifest manifest, string stateDir, bool fresh)
@@ -370,6 +391,8 @@ public static class InstallationPlanner
         ModelProfilesManifest profiles, string probeScript, CancellationToken ct, bool requireModelPaths = false)
     {
         ct.ThrowIfCancellationRequested();
+        if (plan.ResolvedRuntime is not null)
+            plan = await RuntimeArtifactPlanning.PrepareAsync(plan, plan.ResolvedRuntime, ct);
         if (!plan.Fresh && plan.ModelIds.IsEmpty) return plan;
         var config = plan.CreateConfig();
         var selected = SelectedModels(plan, models, profiles);
@@ -479,7 +502,7 @@ public static class InstallationPlanner
     private static ModelItem[] SelectedModels(InstallationPlan plan, ModelManifest models, ModelProfilesManifest profiles)
     {
         if (plan.FrozenModels.Length > 0) return plan.FrozenModels;
-        if (plan.ModelIds.IsEmpty) return plan.Fresh ? profiles.RequiredModels(models, plan.SelectedProfile) : [];
+        if (plan.ModelIds.IsEmpty) return plan.Fresh ? SetupModelSelection.RequiredForPlan(plan, models, profiles, plan.SelectedProfile) : [];
         var byId = models.Models.ToDictionary(model => model.Id, StringComparer.Ordinal);
         return plan.ModelIds.Distinct().Select(id => byId.TryGetValue(id, out var model) ? model
             : throw new InvalidDataException("安装计划包含已失效的模型，请重新检查：" + id)).ToArray();

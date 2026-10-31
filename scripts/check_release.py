@@ -52,6 +52,7 @@ def main() -> None:
         run(sys.executable, "-m", "pytest", "-q")
         run("node", "--test", *map(str, sorted((ROOT / "tests").glob("*.test.cjs"))))
         run(sys.executable, "launcher/scripts/test_prompt_assistant_patch.py")
+        run(sys.executable, "launcher/scripts/test_patch_forbidden_vision.py")
 
 
 if __name__ == "__main__":

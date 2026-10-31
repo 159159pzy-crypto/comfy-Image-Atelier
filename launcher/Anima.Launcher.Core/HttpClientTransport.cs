@@ -58,7 +58,8 @@ internal sealed class HttpClientTransport(SafeHttpSourceClient source, DownloadP
 
     internal static bool IsRetryable(Exception ex) => ex is HttpRequestException { StatusCode: null }
         or HttpRequestException { StatusCode: >= HttpStatusCode.InternalServerError }
-        or HttpRequestException { StatusCode: HttpStatusCode.TooManyRequests } or OperationCanceledException;
+        or HttpRequestException { StatusCode: HttpStatusCode.TooManyRequests } or OperationCanceledException
+        or TimeoutException and not SlowDownloadException;
 
     private async Task Attempt(DownloadRequest request, string url, string part, IProgress<DownloadProgress>? progress,
         CancellationToken ct, bool detectSlow, bool forceFull, DownloadDiskSpaceReservation? space)

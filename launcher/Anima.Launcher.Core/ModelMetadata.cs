@@ -1,121 +1,157 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 
 namespace Anima.Launcher.Core;
 
-public sealed record ModelMetadataResult(bool Created, string Status, string MetadataPath);
+public sealed record ModelMetadataResult(bool Created, string Status, string MetadataPath)
+{
+    public bool Queued { get; init; }
+}
 
-/// <summary>Supply the classification absent from the official Anima safetensors header.</summary>
+public sealed record PendingModelClassification(string ModelPath, long Size, string Sha256);
+internal sealed record ModelClassificationJournal(int SchemaVersion, string ComfyRoot, PendingModelClassification[] Pending);
+
+/// <summary>Classify verified official models through the running Manager's public API.</summary>
 public static class ModelMetadata
 {
-    public const string ManagerCommit = "186ef4da786a039ee2a429508c93f5bffaedf1e3";
     public const string AnimaSha256 = "bd43b7cffe1ed1153d9c41e7beb2f18cb1273eafbaa3af3edd6a173dc90a006e";
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> Gates = new(StringComparer.OrdinalIgnoreCase);
+    public static string PendingPath(LauncherConfig config) => Path.Combine(Path.GetFullPath(config.ComfyRoot), ".anima-classification-pending.json");
 
-    /// <summary>
-    /// Only the manifest's verified default Anima model is eligible. Existing metadata,
-    /// including malformed user files and Civitai sidecars, is never overwritten.
-    /// Call after downloads and before the first ComfyUI scan.
-    /// </summary>
-    public static async Task<ModelMetadataResult> EnsureDefaultAsync(LauncherConfig config, RuntimeManifest runtime,
+    // Retain the call shape used by installation, individual downloads and durable-owner recovery.
+    // No plugin code is imported and no sidecar path is assumed to be authoritative here.
+    public static Task<ModelMetadataResult> EnsureDefaultAsync(LauncherConfig config, RuntimeManifest runtime,
         ModelManifest models, ModelProfilesManifest profiles, string modelPath, CancellationToken ct, Action<string>? log = null)
+        => EnsureDefaultCoreAsync(config, models, profiles, modelPath, VerifyFileAsync, ct, log);
+
+    internal static async Task<ModelMetadataResult> EnsureDefaultCoreAsync(LauncherConfig config, ModelManifest models,
+        ModelProfilesManifest profiles, string modelPath, Func<PendingModelClassification, CancellationToken, Task<FileStream>> verify,
+        CancellationToken ct, Action<string>? log = null)
     {
         ct.ThrowIfCancellationRequested();
         var path = Path.GetFullPath(modelPath);
         var sidecar = Path.ChangeExtension(path, ".metadata.json");
-        ModelMetadataResult Result(bool created, string status)
+        ModelMetadataResult Result(string status, bool queued = false)
         {
             log?.Invoke(status);
-            return new(created, status, sidecar);
+            return new(false, status, sidecar) { Queued = queued };
         }
-
-        var profile = profiles.Get(config.SelectedProfile);
-        if (profile.Id != "anima") return Result(false, "此模型档案不需要自动补全 Anima 分类。");
+        var profile = profiles.Get("anima");
         var model = models.Models.SingleOrDefault(m => m.Category == "diffusion_models" && m.RelativePath == profile.ModelName);
         if (model is null || !model.CanDownload || !model.Sha256.Equals(AnimaSha256, StringComparison.OrdinalIgnoreCase)
             || !Path.GetFileName(path).Equals(Path.GetFileName(model.RelativePath), StringComparison.OrdinalIgnoreCase))
-            return Result(false, "模型未匹配已锁定的官方 Anima 底模，保留原有分类。");
+            return Result("模型未匹配已锁定的官方 Anima 底模，保留原有分类。");
 
-        bool HasExisting() => File.Exists(sidecar) || Directory.Exists(sidecar)
-            || File.Exists(Path.ChangeExtension(path, ".civitai.info")) || File.Exists(path + ".civitai.info");
-        if (HasExisting()) return Result(false, "保留已有 Anima 模型元数据。");
-
-        // Retain the read handle through publication, preventing Windows writers from
-        // replacing a model between its SHA check and classification.
-        await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 131072, true);
-        if (input.Length != model.Size || !Convert.ToHexString(await SHA256.HashDataAsync(input, ct)).Equals(model.Sha256, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("默认 Anima 底模的大小或 SHA-256 与清单不符，未写入模型分类。");
-
-        var manager = runtime.Nodes.SingleOrDefault(n => n.Id == "ComfyUI-Lora-Manager");
-        if (manager?.Commit != ManagerCommit) throw new InvalidDataException("LoRA Manager 清单版本不支持自动补全模型分类。");
-        var managerRoot = Safety.Under(Path.Combine(config.ComfyRoot, "custom_nodes"), manager.Id);
-        var json = await Commands.Run(config.Python, ["-I", "-B", "-X", "utf8", "-c", BuildMetadataScript, managerRoot, path, model.Sha256],
-            config.ComfyRoot, null, ct, timeout: TimeSpan.FromSeconds(30));
-        using var document = JsonDocument.Parse(json);
-        var metadata = document.RootElement;
-        if (metadata.GetProperty("base_model").GetString() != "Anima"
-            || metadata.GetProperty("sha256").GetString() != model.Sha256.ToLowerInvariant()
-            || metadata.GetProperty("size").GetInt64() != model.Size
-            || !Path.GetFullPath(metadata.GetProperty("file_path").GetString()!).Equals(path, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("LoRA Manager 返回的模型元数据与已验证文件不符。");
-
-        ct.ThrowIfCancellationRequested();
-        if (HasExisting()) return Result(false, "保留已有 Anima 模型元数据。");
-        var temporary = sidecar + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        try
-        {
-            await File.WriteAllTextAsync(temporary, json, new UTF8Encoding(false), ct);
-            ct.ThrowIfCancellationRequested();
-            if (HasExisting()) return Result(false, "保留已有 Anima 模型元数据。");
-            try { File.Move(temporary, sidecar, false); }
-            catch (IOException) when (File.Exists(sidecar)) { return Result(false, "保留已有 Anima 模型元数据。"); }
-            return Result(true, "官方 Anima 底模已校验，并补全 LoRA Manager 的 Anima 分类。");
-        }
-        finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        // An adjacent sidecar may be stale when Manager uses centralized storage.
+        // It neither authorizes nor suppresses classification: the running Manager
+        // alone identifies its effective, valid metadata and preserves explicit edits.
+        await using var input = await verify(new(path, model.Size, model.Sha256), ct);
+        await RegisterPendingAsync(config, new(path, model.Size, model.Sha256.ToLowerInvariant()), ct);
+        return Result("官方 Anima 底模已校验；已保存分类待办，启动后由 LoRA Manager 完成。", true);
     }
 
-    // These are the canonical LF source hashes from the pinned official commit.
-    // Execute only these two stdlib-only modules; loading the plugin entrypoint
-    // would start ComfyUI services and mutate its settings during installation.
-    public const string BuildMetadataScript = """
-        import hashlib
-        import json
-        import pathlib
-        import sys
-        import types
-
-        plugin_root, model_path, verified_sha = sys.argv[1:]
-        sources = {
-            'model_utils': '5522d56844b56443405b32a6dd6170e708127ba1f8c80f6987b54e0da42ed3a5',
-            'models': '3abc6a2deb70490a04d0352cccae421fc6eb47fb87a4f98f2a36f52c4a7018d3',
+    internal static async Task<FileStream> VerifyFileAsync(PendingModelClassification item, CancellationToken ct)
+    {
+        var input = new FileStream(item.ModelPath, FileMode.Open, FileAccess.Read, FileShare.Read, 131072, true);
+        try
+        {
+            if (input.Length != item.Size || !Convert.ToHexString(await SHA256.HashDataAsync(input, ct)).Equals(item.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("默认 Anima 底模的大小或 SHA-256 与已验证清单不符，未修改模型分类。");
+            return input;
         }
-        package_name = '_anima_launcher_metadata'
-        package = types.ModuleType(package_name)
-        package.__path__ = []
-        sys.modules[package_name] = package
-        for module_name, expected in sources.items():
-            source_path = pathlib.Path(plugin_root) / 'py' / 'utils' / (module_name + '.py')
-            source = source_path.read_bytes().replace(b'\r\n', b'\n')
-            if hashlib.sha256(source).hexdigest() != expected:
-                raise RuntimeError('LoRA Manager source differs from locked revision: ' + str(source_path))
-            name = package_name + '.' + module_name
-            module = types.ModuleType(name)
-            module.__file__ = str(source_path)
-            module.__package__ = package_name
-            sys.modules[name] = module
-            exec(compile(source, str(source_path), 'exec'), module.__dict__)
+        catch { await input.DisposeAsync(); throw; }
+    }
 
-        from _anima_launcher_metadata.models import CheckpointMetadata
-        path = pathlib.Path(model_path).absolute()
-        stat = path.stat()
-        metadata = CheckpointMetadata(
-            file_name=path.stem, model_name='Anima', file_path=path.as_posix(),
-            size=stat.st_size, modified=stat.st_mtime, sha256=verified_sha.lower(),
-            base_model='Anima', preview_url='', tags=[], modelDescription='',
-            sub_type='diffusion_model', from_civitai=False, hash_status='completed',
-        )
-        payload = metadata.to_dict()
-        assert CheckpointMetadata.from_dict(payload).base_model == 'Anima'
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        """;
+    internal static async Task RegisterPendingAsync(LauncherConfig config, PendingModelClassification item, CancellationToken ct)
+    {
+        var file = PendingPath(config);
+        var gate = Gates.GetOrAdd(file, _ => new(1));
+        await gate.WaitAsync(ct);
+        try
+        {
+            var pending = ReadPending(config).Where(value => !SamePath(value.ModelPath, item.ModelPath)).Append(item).ToArray();
+            JsonFile.Write(file, new ModelClassificationJournal(1, Path.GetFullPath(config.ComfyRoot), pending));
+        }
+        finally { gate.Release(); }
+    }
+
+    public static PendingModelClassification[] ReadPending(LauncherConfig config)
+    {
+        var file = PendingPath(config);
+        if (!File.Exists(file)) return [];
+        var journal = JsonFile.Read<ModelClassificationJournal>(file);
+        if (journal.SchemaVersion != 1 || !SamePath(journal.ComfyRoot, config.ComfyRoot) || journal.Pending is null
+            || journal.Pending.Any(item => item is null || !Path.IsPathFullyQualified(item.ModelPath) || item.Size <= 0
+                || !string.Equals(item.Sha256, AnimaSha256, StringComparison.OrdinalIgnoreCase)
+                || !Path.GetFileName(item.ModelPath).Equals("anima-base-v1.0.safetensors", StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidDataException("模型分类待办身份无效；原文件已保留，请重新检查安装任务。");
+        return journal.Pending;
+    }
+
+    /// <summary>Call after ComfyUI starts, before WebUI starts. Pending work survives this call.</summary>
+    public static async Task SynchronizePendingAsync(LauncherConfig config, CancellationToken ct, Action<string>? log = null)
+    {
+        using var client = new LoraManagerClassificationClient(config);
+        await SynchronizePendingCoreAsync(config, client, VerifyFileAsync, ct, log);
+    }
+
+    internal static async Task SynchronizePendingCoreAsync(LauncherConfig config, LoraManagerClassificationClient client,
+        Func<PendingModelClassification, CancellationToken, Task<FileStream>> verify, CancellationToken ct, Action<string>? log = null)
+    {
+        var pending = ReadPending(config);
+        if (pending.Length == 0) return;
+        await client.InitializeAsync(ct, log);
+        foreach (var item in pending)
+        {
+            await using var input = await verify(item, ct);
+            await client.ClassifyAsync(item, ct, log);
+        }
+    }
+
+    /// <summary>Call after WebUI starts. Only its authoritative classification clears a durable pending item.</summary>
+    public static async Task ConfirmPendingAsync(LauncherConfig config, CancellationToken ct, Action<string>? log = null)
+    {
+        using var http = new HttpClient(new HttpClientHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(45) };
+        await ConfirmPendingCoreAsync(config, http, ct, log);
+    }
+
+    internal static async Task ConfirmPendingCoreAsync(LauncherConfig config, HttpClient http, CancellationToken ct, Action<string>? log = null)
+    {
+        var pending = ReadPending(config);
+        if (pending.Length == 0) return;
+        using var response = await http.GetAsync(config.WebUrl + "/api/resources?model_profile=anima&refresh=true", ct);
+        response.EnsureSuccessStatusCode();
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+        foreach (var item in pending) ValidateClassification(document.RootElement, item);
+        var file = PendingPath(config);
+        var gate = Gates.GetOrAdd(file, _ => new(1));
+        await gate.WaitAsync(ct);
+        try
+        {
+            var remaining = ReadPending(config).Where(item => !pending.Any(done => done == item)).ToArray();
+            JsonFile.Write(file, new ModelClassificationJournal(1, Path.GetFullPath(config.ComfyRoot), remaining));
+        }
+        finally { gate.Release(); }
+        log?.Invoke("工作台已确认官方 Anima 模型分类；分类待办已完成。");
+    }
+
+    internal static void ValidateClassification(JsonElement resources, PendingModelClassification pending)
+    {
+        if (!resources.TryGetProperty("model_items", out var items) || items.ValueKind != JsonValueKind.Array)
+            throw new InvalidDataException("工作台未返回模型分类清单；分类待办已保留。");
+        var matches = items.EnumerateArray().Where(item => item.TryGetProperty("file_path", out var path)
+            && path.ValueKind == JsonValueKind.String && SamePath(path.GetString()!, pending.ModelPath)).ToArray();
+        if (matches.Length != 1 || !matches[0].TryGetProperty("model_profile", out var profile) || profile.ValueKind != JsonValueKind.String || profile.GetString() != "anima"
+            || !matches[0].TryGetProperty("classification_status", out var status) || status.ValueKind != JsonValueKind.String || status.GetString() != "recognized")
+            throw new InvalidDataException("工作台尚未识别已校验的 Anima 底模；分类待办已保留，请重试运行检查。");
+    }
+
+    internal static bool SamePath(string first, string second)
+    {
+        if (string.IsNullOrWhiteSpace(first) || string.IsNullOrWhiteSpace(second)) return false;
+        try { return Path.GetFullPath(first.Replace('/', Path.DirectorySeparatorChar)).TrimEnd(Path.DirectorySeparatorChar)
+            .Equals(Path.GetFullPath(second.Replace('/', Path.DirectorySeparatorChar)).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase); }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException) { return false; }
+    }
 }

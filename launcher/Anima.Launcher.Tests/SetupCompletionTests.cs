@@ -96,16 +96,21 @@ internal static class SetupCompletionTests
         var confirmed = SetupCompletionPresentation.Resolve(SetupModelReadiness.NeedsDownload, reviewVisible: true, canDownload: true);
         Check(beforeReview.PrimaryAction == SetupCompletionAction.ReviewModels && confirmed.PrimaryAction == SetupCompletionAction.DownloadModels,
             "completion requires a visible review before offering the download action");
-        Check(beforeReview.AllowOpenAnyway && confirmed.AllowOpenAnyway,
-            "model recommendations never force downloads before opening the workbench");
+        Check(!beforeReview.AllowOpenAnyway && !confirmed.AllowOpenAnyway,
+            "mandatory models cannot be skipped by opening the workbench from onboarding");
         Check(SetupCompletionPresentation.Resolve(SetupModelReadiness.NeedsAttention, true, true).PrimaryAction == SetupCompletionAction.DownloadModels
             && SetupCompletionPresentation.Resolve(SetupModelReadiness.NeedsAttention, true, false).PrimaryAction == SetupCompletionAction.ReviewModels,
             "mixed model issues offer safe downloads while manual-only issues offer recheck");
         foreach (var state in new[] { SetupModelReadiness.Unknown, SetupModelReadiness.ScanFailed })
             Check(SetupCompletionPresentation.Resolve(state).PrimaryAction == SetupCompletionAction.ReviewModels
-                && SetupCompletionPresentation.Resolve(state).AllowOpenAnyway, $"{state} stays distinct from ready but permits explicit opening");
+                && !SetupCompletionPresentation.Resolve(state).AllowOpenAnyway, $"{state} cannot bypass required verification");
         Check(SetupCompletionPresentation.Resolve(SetupModelReadiness.Checking).PrimaryAction == SetupCompletionAction.None,
             "in-flight checks cannot expose a stale confirmation action");
+        var filesOnly = SetupCompletionPresentation.Resolve(SetupModelReadiness.Ready);
+        var runtimeReady = SetupCompletionPresentation.Resolve(SetupModelReadiness.Ready, runtimeVerified: true);
+        Check(filesOnly.Title != runtimeReady.Title && filesOnly.Title.Contains("还需检查")
+            && runtimeReady.Description.Contains("运行检查已通过"),
+            "verified files alone cannot display the successful runtime completion message");
         Check(SetupCompletionPresentation.Resolve(SetupModelReadiness.NeedsDownload, canResume: true).PrimaryLabel == "继续下载"
             && SetupCompletionPresentation.Resolve(SetupModelReadiness.NeedsDownload, canResume: true, hasError: true).PrimaryLabel == "重试下载",
             "paused and failed model tasks lead to the model resume path");

@@ -8,6 +8,31 @@ public enum WorkbenchActivity { Unknown, Idle, Busy }
 /// <summary>Pure decisions shared by the launcher UI and its regression tests.</summary>
 public static class RuntimePolicies
 {
+    /// <summary>Restore omitted launcher-owned paths without changing an explicit source checkout or version pin.</summary>
+    public static bool EnsureWorkbenchDefaults(LauncherConfig config, string bundledAppRoot, string defaultDataDir)
+    {
+        var changed = false;
+        if (string.IsNullOrWhiteSpace(config.AppRoot))
+        {
+            config.AppRoot = string.IsNullOrWhiteSpace(config.PinnedAppRoot) ? bundledAppRoot : config.PinnedAppRoot;
+            changed = true;
+        }
+        if (string.IsNullOrWhiteSpace(config.DataDir))
+        {
+            config.DataDir = defaultDataDir;
+            changed = true;
+        }
+        return changed;
+    }
+
+    public static void ValidateWorkbenchDirectory(string appRoot)
+    {
+        if (string.IsNullOrWhiteSpace(appRoot) || !Path.IsPathFullyQualified(appRoot))
+            throw new InvalidDataException("工作台资源目录未配置为有效的绝对路径；请使用完整安装包启动或重新选择工作台版本。");
+        if (!Directory.Exists(appRoot) || !File.Exists(Path.Combine(appRoot, "run.py")))
+            throw new InvalidDataException("工作台资源目录缺少 run.py，请重新检查安装包或所选工作台版本：" + appRoot);
+    }
+
     public static bool SynchronizeManagedSetupVersion(LauncherConfig draft, LauncherConfig current, string versionsRoot)
     {
         if (string.IsNullOrWhiteSpace(current.AppRoot)) return false;

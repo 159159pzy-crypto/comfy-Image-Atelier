@@ -252,6 +252,9 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
                 var assistant = PromptAssistantCompatibility.ResolveDirectory(config.ComfyRoot);
                 if (assistant is not null)
                     await PromptAssistantCompatibility.CheckOrApply(config, stateDir, assistant, true, ct);
+                var face = ForbiddenVisionCompatibility.ResolveDirectory(config.ComfyRoot);
+                if (face is not null && File.Exists(Path.Combine(config.ComfyRoot, "custom_nodes", "skip_download_model")))
+                    await ForbiddenVisionCompatibility.CheckOrApply(config, stateDir, face, true, ct);
                 var args = ComfyLaunchArguments.Build(config);
                 var env = PrepareRuntimeEnvironment(config);
                 var process = await StartProcess(config.Python, args, config.ComfyRoot, "ComfyUI", ct, env);
@@ -259,13 +262,10 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
                 if (!await CheckComfyReuseAsync(config, ct)) throw new IOException("新启动的 ComfyUI 在身份校验前已退出。");
             }
             var nodes = await Json(config.ComfyUrl + "/object_info", ct) ?? throw new IOException("ComfyUI 节点清单不可读取。");
-            // The v2 graph keeps SeedVR2, RTX and face refinement in optional
-            // groups.  Do not make their plugin classes (or the removed v1
-            // pixel-upscale/detailer classes) a startup prerequisite: the
-            // WebUI removes a disabled group before submission and reports an
-            // actionable resource issue only when the stage is enabled.
+            // Check the full core contract; selected optional capabilities receive
+            // their additional checks in the installation completion probe.
             string[] core = ["UNETLoader", "CLIPLoader", "VAELoader", "KSampler", "KSamplerAdvanced", "VAEDecodeTiled", "EmptyLatentImage"];
-            var missing = manifest.Nodes.SelectMany(n => n.RequiredClasses).Concat(core).Where(n => !nodes.TryGetProperty(n, out _)).ToArray();
+            var missing = RuntimeCapabilities.RequiredClasses(manifest).Concat(core).Distinct().Where(n => !nodes.TryGetProperty(n, out _)).ToArray();
             if (missing.Length > 0) throw new InvalidOperationException("缺少节点或导入失败：" + string.Join("、", missing));
             if (nodes.TryGetProperty("PromptExpand", out var expand) &&
                 (!expand.TryGetProperty("input", out var inputs) ||
@@ -287,11 +287,13 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
     public async Task StartWebUI(LauncherConfig config, RuntimeManifest manifest, CancellationToken ct)
     {
         config.Validate();
+        RuntimePolicies.ValidateWorkbenchDirectory(config.AppRoot);
         var nodeDirectories = Inventory.ResolveNodeDirectories(config.ComfyRoot, manifest);
         var before = owned.Count;
         try
         {
             await StartComfy(config, manifest, ct);
+            await ModelMetadata.SynchronizePendingAsync(config, ct, log);
             var resourceFile = Path.Combine(stateDir, "resource-paths.json");
             if (await PortOpen(config.WebPort, ct))
             {
@@ -313,6 +315,7 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
             }
             var status = await Json(config.WebUrl + "/api/status", ct);
             if (status is null || !status.Value.TryGetProperty("online", out var online) || !online.GetBoolean()) throw new IOException("工作台已启动，但尚未连接 ComfyUI，请查看日志。");
+            await ModelMetadata.ConfirmPendingAsync(config, ct, log);
             log("ComfyUI 与工作台已就绪。");
         }
         catch
@@ -341,6 +344,7 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
     public async Task StartWebUIForSoftwareUpdateAsync(LauncherConfig config, RuntimeManifest manifest, CancellationToken ct)
     {
         config.Validate();
+        RuntimePolicies.ValidateWorkbenchDirectory(config.AppRoot);
         ct.ThrowIfCancellationRequested();
         if (!await PortOpen(config.WebPort, ct))
         {
@@ -435,10 +439,22 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
                 if (choices[0].ValueKind == JsonValueKind.Array) values = choices[0].EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToArray();
                 else if (choices.GetArrayLength() > 1 && choices[1].ValueKind == JsonValueKind.Object && choices[1].TryGetProperty("options", out var options) && options.ValueKind == JsonValueKind.Array) values = options.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToArray();
             }
-            var exact = values.FirstOrDefault(x => x.Replace('\\', '/') == item.Name);
-            var matches = values.Where(x => Path.GetFileName(x.Replace('\\', '/')) == Path.GetFileName(item.Name)).ToArray();
+            values = values.Select(value => value.Replace('\\', '/')).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            var exact = values.FirstOrDefault(value => value.Equals(item.Name, StringComparison.OrdinalIgnoreCase));
+            var matches = values.Where(value => Path.GetFileName(value).Equals(Path.GetFileName(item.Name), StringComparison.OrdinalIgnoreCase)).ToArray();
             if (exact is not null) bindings[item.Name] = exact;
-            else if (matches.Length == 1) bindings[item.Name] = matches[0].Replace('\\', '/');
+            else if (matches.Length == 1) bindings[item.Name] = matches[0];
+            else if (matches.Length == 0 && item.Name == "ema_vae_fp16.safetensors")
+            {
+                // The model manifest declares this historical name for the same
+                // verified SeedVR2 VAE. Bind its real ComfyUI path so an imported
+                // installation works without renaming a user's existing model.
+                const string alias = "seedvr2_ema_vae_fp16.safetensors";
+                var aliasExact = values.FirstOrDefault(value => value.Equals(alias, StringComparison.OrdinalIgnoreCase));
+                var aliases = values.Where(value => Path.GetFileName(value).Equals(alias, StringComparison.OrdinalIgnoreCase)).ToArray();
+                if (aliasExact is not null) bindings[item.Name] = aliasExact;
+                else if (aliases.Length == 1) bindings[item.Name] = aliases[0];
+            }
             // Missing or ambiguous resources belong in the workbench's resource checks.
             // They must not prevent opening the workbench to configure another model.
         }

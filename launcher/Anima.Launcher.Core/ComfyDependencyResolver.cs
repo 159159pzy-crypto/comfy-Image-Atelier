@@ -76,22 +76,25 @@ public static class ComfyDependencyResolver
         if (inputs.Select(item => item.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count() != inputs.Length)
             throw new InvalidDataException("节点预检路径映射发生冲突。");
         var input = string.Join("\n", inputs.Select(item => item.Path + "\n" + item.Text)) + "\nSAM2=" + sam2Commit;
+        if (inputs.Any(item => NvidiaRuntimePreparation.HasVfxRequirement(item.Text))) input += "\nNVIDIA_VFX=" + NvidiaRuntimePreparation.RequirementsIdentity;
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(input))).ToLowerInvariant();
     }
 
     public static string PrepareNodeRequirements(string path, string directory, string? sam2Commit, string? sam2Directory = null)
     {
         var files = RequirementFiles([path]);
-        if (sam2Commit is null || !files.Any(file => Installer.PinSam2(File.ReadAllText(file), sam2Commit) is not null)) return path;
+        if (!files.Any(file => NvidiaRuntimePreparation.HasVfxRequirement(File.ReadAllText(file))
+            || sam2Commit is not null && Installer.PinSam2(File.ReadAllText(file), sam2Commit) is not null)) return path;
         Directory.CreateDirectory(directory);
-        // Rewrite the whole include graph only when SAM2 needs pinning. Absolute include paths
+        // Rewrite the include graph only when a source runtime needs pinning. Absolute include paths
         // preserve its original meaning, including nested files and cyclic references.
         var destinations = files.ToDictionary(file => file, file => Path.Combine(directory,
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(file)))[..16] + ".txt"), StringComparer.OrdinalIgnoreCase);
         foreach (var file in files)
         {
             var content = File.ReadAllText(file);
-            var pinned = Installer.PinSam2(content, sam2Commit) ?? content;
+            var pinned = sam2Commit is null ? content : Installer.PinSam2(content, sam2Commit) ?? content;
+            pinned = NvidiaRuntimePreparation.PinRequirements(pinned);
             if (sam2Directory is not null)
                 pinned = pinned.Replace("SAM-2 @ git+" + DependencySources.Sam2Url + "@" + sam2Commit,
                     "SAM-2 @ " + new Uri(Path.GetFullPath(sam2Directory) + Path.DirectorySeparatorChar).AbsoluteUri);

@@ -171,7 +171,7 @@ public sealed partial class SetupPage : LauncherPage
             && step != SetupStep.Review
             && step != SetupStep.Complete;
         LocationFields.IsEnabled = !State.Busy;
-        BackButton.IsEnabled = !State.Busy;
+        BackButton.IsEnabled = !State.Busy && (step != SetupStep.Complete || State.Setup.RuntimeVerified);
         SecondaryButton.IsEnabled = !State.Busy;
         DetectAgainButton.IsEnabled = !State.Busy;
         DetectAgainButton.Content = State.Busy ? "正在检测…" : "重新检测";
@@ -275,7 +275,7 @@ public sealed partial class SetupPage : LauncherPage
         RootLabel.Text = fresh && !directRoot ? "安装文件夹" : "ComfyUI 文件夹";
         RootBox.PlaceholderText = fresh && !directRoot ? @"例如 D:\AnimaStudio" : @"例如 D:\ComfyUI";
         ImportPythonPanel.Visibility = Visible(!fresh);
-        ModelSummary.Text = fresh ? "将准备 Anima 基础模型：底模、文本编码器和 VAE。"
+        ModelSummary.Text = fresh ? "将准备 Anima 三件套和 SeedVR2 两个修复模型，共五项必装模型。"
             : "复用现有模型和节点；导入完成后，会列出仍需补齐的模型。";
         UpdateDetectedPython();
         try
@@ -361,10 +361,10 @@ public sealed partial class SetupPage : LauncherPage
         renderedChoiceSelection = selection;
         SetupModelChoices.Children.Clear();
         var profile = State.Setup.Fresh ? "anima" : State.Setup.Draft.SelectedProfile;
-        var required = Program.ModelProfiles.RequiredModels(Program.Models, profile);
+        var required = SetupModelSelection.MandatoryModels(Program.Models, Program.ModelProfiles, profile);
         SetupModelChoices.Children.Add(new TextBlock
         {
-            Text = "基础生成模型 · 必需", FontWeight = FontWeights.SemiBold,
+            Text = "生成与 SeedVR2 修复模型 · 必装", FontWeight = FontWeights.SemiBold,
             Foreground = PageBrush("StudioTextBrush")
         });
         foreach (var model in required) SetupModelChoices.Children.Add(ModelChoiceDetails(model));
@@ -475,7 +475,7 @@ public sealed partial class SetupPage : LauncherPage
         State.SetupModelsReadiness, State.SetupModelReviewVisible, State.SetupCanDownloadModels,
         State.SetupCanResumeModels,
         State.SetupCompletionOperation == SetupCompletionOperation.StartWorkbench && State.SetupError.Length > 0,
-        State.SetupError.Length > 0);
+        State.SetupError.Length > 0, State.Setup.RuntimeVerified);
 
     private void UpdateCompletion()
     {
@@ -542,8 +542,8 @@ public sealed partial class SetupPage : LauncherPage
             : State.SetupCompletionOperation == SetupCompletionOperation.StartWorkbench && State.SetupError.Length > 0
                 ? "启动未完成。查看日志并处理问题后，可以重试。"
                 : State.SetupCanResumeModels ? "已完成的下载会保留，可以继续下载或稍后再开始。"
-                : State.SetupModelsReadiness == SetupModelReadiness.ScanFailed ? "检查未完成。可以查看日志、重新检查或先打开工作台。"
-                : ready ? "服务连接检查通过后打开工作台。" : "推荐先准备基础模型；已有其他模型时，也可先打开工作台。";
+                : State.SetupModelsReadiness == SetupModelReadiness.ScanFailed ? "检查未完成，请查看日志并重新检查。"
+                : ready ? "必需运行检查通过后打开工作台。" : "请先准备全部必需模型，再完成运行检查。";
     }
 
     private static TextBlock BodyText(string text) => new()

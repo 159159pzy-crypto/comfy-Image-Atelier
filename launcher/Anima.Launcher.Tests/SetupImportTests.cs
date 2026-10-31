@@ -72,7 +72,7 @@ folder_names_and_paths = {key: ([str(Path(models_dir) / key)], set()) for key in
         Check(existingNodes.NeedsRepair && existingNodes.MissingCoreModules.Length == 3,
             "existing node directories do not make a clean venv falsely ready");
 
-        var tinyModels = new ModelManifest(models.SchemaVersion, profiles.RequiredModels(models, "anima")
+        var tinyModels = new ModelManifest(models.SchemaVersion, SetupModelSelection.MandatoryModels(models, profiles, "anima")
             .Select(model => model with { Size = 1, Sha256 = new string('0', 64) }).ToArray());
         var plan = InstallationPlanner.Create(config, noNodes, Path.Combine(directory, "state"), false, tinyModels, profiles, []);
         var script = Path.Combine(repository, "launcher", "scripts", "probe_comfy.py");
@@ -119,6 +119,52 @@ folder_names_and_paths = {key: ([str(Path(models_dir) / key)], set()) for key in
         var sharedReady = await SetupImportReview.InspectAsync(external, withNode, default);
         Check(!sharedReady.NeedsRepair && sharedReady.MissingCoreModules.Length == 0,
             "a complete external interpreter remains eligible for import without dependency mutations");
+
+        var faceManifest = noNodes with { Nodes = [runtime.Nodes.Single(item => item.Id == ForbiddenVisionCompatibility.NodeId)] };
+        var face = Path.Combine(comfy, "custom_nodes", ForbiddenVisionCompatibility.NodeId);
+        ForbiddenVisionCompatibilityTests.WriteSource(face);
+        var originalFace = File.ReadAllText(Path.Combine(face, "__init__.py"));
+        var facePending = await SetupImportReview.InspectAsync(config, faceManifest, default);
+        Check(facePending.NeedsRepair && facePending.PreparationIssues.Any(issue => issue.Contains("Forbidden Vision"))
+            && File.ReadAllText(Path.Combine(face, "__init__.py")) == originalFace,
+            "an existing unpatched face node schedules installer preparation without changing source during review");
+        await RejectExternal(external, faceManifest, "a shared interpreter cannot bypass required managed face preparation");
+        await ForbiddenVisionCompatibility.CheckOrApply(config, config.RuntimeRoot, face, true, default);
+        var missingMarker = await SetupImportReview.InspectAsync(config, faceManifest, default);
+        Check(missingMarker.NeedsRepair && missingMarker.PreparationIssues.Any(issue => issue.Contains("标记")),
+            "a valid face patch without its download guard still requires installer preparation");
+        var skip = Path.Combine(comfy, "custom_nodes", "skip_download_model");
+        File.WriteAllText(skip, "managed");
+        Check(!(await SetupImportReview.InspectAsync(external, faceManifest, default)).NeedsRepair,
+            "a fully prepared face node can be connected using an external interpreter without mutations");
+        var patchedFace = File.ReadAllText(Path.Combine(face, "__init__.py"));
+        File.AppendAllText(Path.Combine(face, "__init__.py"), "\n# user changed source\n");
+        Check((await SetupImportReview.InspectAsync(config, faceManifest, default)).NeedsRepair,
+            "changed compatibility source cannot reuse an old preparation receipt");
+        File.WriteAllText(Path.Combine(face, "__init__.py"), patchedFace);
+
+        var nvidiaNode = runtime.Nodes.Single(item => item.Id == "nvidia-rtx-vsr-pro");
+        Directory.CreateDirectory(Path.Combine(comfy, "custom_nodes", nvidiaNode.Id));
+        var nvidiaManifest = noNodes with { Nodes = [nvidiaNode] };
+        const string cuda = "__version__ = 'fixture'\nclass cuda:\n    @staticmethod\n    def is_available(): return True\n    @staticmethod\n    def get_device_name(index): return 'NVIDIA GeForce RTX 4060'\n";
+        File.WriteAllText(Path.Combine(site, "torch.py"), cuda);
+        File.WriteAllText(Path.Combine(externalSite, "torch.py"), cuda);
+        var nativePending = await SetupImportReview.InspectAsync(config, nvidiaManifest, default);
+        Check(nativePending.NeedsRepair && nativePending.PreparationIssues.Any(issue => issue.Contains("NVIDIA")),
+            "supported NVIDIA hardware cannot bypass missing native runtime preparation merely because nodes exist");
+        var plannedGpu = await RuntimeArtifactPlanning.ProbeAsync(config, nvidiaManifest, false, default);
+        Check(plannedGpu.TorchCuda == true && plannedGpu.Generation == "rtx40" && plannedGpu.Gpu == "NVIDIA GeForce RTX 4060",
+            "native planning uses the imported Torch device instead of a different physical GPU index");
+        await RejectExternal(external, nvidiaManifest,
+            "a shared interpreter missing NVIDIA verification is rejected before a mutating repair starts");
+        File.WriteAllText(Path.Combine(externalSite, "torch.py"), cuda.Replace("return True", "return False"));
+        Check(!(await SetupImportReview.InspectAsync(external, nvidiaManifest, default)).NeedsRepair,
+            "hardware without the optional NVIDIA capability can connect without a native runtime receipt");
+        var plannedCpu = await RuntimeArtifactPlanning.ProbeAsync(external, nvidiaManifest, false, default);
+        Check(plannedCpu.TorchCuda == false && plannedCpu.Generation.Length == 0,
+            "an imported CPU Torch does not acquire NVIDIA downloads merely because the machine has an RTX card");
+        AddModules(site);
+        AddModules(externalSite);
         Directory.Delete(nodeDirectory);
         await RejectExternal(external, withNode,
             "an external interpreter needing a missing node is rejected before installation");
