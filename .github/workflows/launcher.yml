@@ -26,6 +26,13 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install -e '.[dev]'
+      - name: Prepare isolated Python for dependency acceptance
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./.venv/Scripts/python.exe -m pip --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: python launcher/scripts/export_model_profiles.py --check
       - run: python launcher/scripts/test_bundle_manifest.py
       - name: Audit launcher dependencies
