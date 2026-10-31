@@ -518,10 +518,27 @@ def build_wheel(wheel_directory,config_settings=None,metadata_directory=None):
         Check(oldLongest.Length > 260, "source fixture reproduces a real legacy Win32 path beyond MAX_PATH");
         var baselineWheels = Path.Combine(root, "baseline-wheels"); Directory.CreateDirectory(baselineWheels);
         var failure = "";
-        try { await Commands.Run(hostPython, ["-B", "-c", "import backend,sys; backend.build_wheel(sys.argv[1])", baselineWheels], project, null, ct, env); }
+        var baselineSucceeded = false;
+        try
+        {
+            await Commands.Run(hostPython, ["-B", "-c", "import backend,sys; backend.build_wheel(sys.argv[1])", baselineWheels], project, null, ct, env);
+            baselineSucceeded = true;
+        }
         catch (CommandFailureException error) { failure = error.Message; }
-        Check(failure.Contains("[WinError 206]", StringComparison.Ordinal) || failure.Contains("[WinError 3]", StringComparison.Ordinal),
-            "the original deep source actually fails a legacy Win32 file copy before using the short checkout");
+        // Windows hosts can opt into long-path support; successful native copies
+        // still need the same file and source evidence as the short-checkout build.
+        if (baselineSucceeded)
+        {
+            Check(SuccessfulLongPathBaselineMatches(source, oldLongest, baselineWheels, commit),
+                "a long-path-capable host completes the original copy and records the exact source commit and long path in its wheel");
+            Console.WriteLine("PASS: native long-path baseline copied matching bytes and produced verified wheel evidence");
+        }
+        else
+        {
+            Console.WriteLine("Legacy Win32 long-path baseline failure: " + failure);
+            Check(failure.Contains("[WinError 206]", StringComparison.Ordinal) || failure.Contains("[WinError 3]", StringComparison.Ordinal),
+                "the original deep source fails with a known Win32 path error before using the short checkout: " + failure);
+        }
         var package = new DependencyPackage { Name = "anima-fixture-source", Version = "1.0", Kind = "git", Url = url,
             Commit = commit, Subdirectory = "projects/package", Direct = true };
         var badAlternate = Path.Combine(source, ".git", "objects", "info", "alternates");
@@ -630,6 +647,21 @@ def build_wheel(wheel_directory,config_settings=None,metadata_directory=None):
         JsonFile.Write(Path.Combine(root, "evidence.json"), new { checks, source, oldLongest = oldLongest.Length, failure, commit, moduleCommit,
             shortBuild = evidence.RootElement.Clone(), networkCalls, installed, cancelledPids = pids });
         return checks;
+    }
+
+    private static bool SuccessfulLongPathBaselineMatches(string source, string target, string wheels, string commit)
+    {
+        var wheel = Path.Combine(wheels, "anima_fixture_source-1.0-py3-none-any.whl");
+        if (target.Length <= 260 || !File.Exists(target) || !File.Exists(wheel)
+            || !File.ReadAllBytes(target).SequenceEqual(File.ReadAllBytes(Path.Combine(source, "sibling", "tracked.txt")))) return false;
+        using var archive = ZipFile.OpenRead(wheel);
+        var entry = archive.GetEntry("anima_fixture_source-1.0.dist-info/build-evidence.json");
+        if (entry is null) return false;
+        using var stream = entry.Open();
+        using var evidence = JsonDocument.Parse(stream);
+        return Path.GetFullPath(evidence.RootElement.GetProperty("root").GetString()!).Equals(Path.GetFullPath(source), StringComparison.OrdinalIgnoreCase)
+            && evidence.RootElement.GetProperty("commit").GetString() == commit
+            && evidence.RootElement.GetProperty("longest").GetInt32() == target.Length;
     }
 
     private static string FindRepository()
