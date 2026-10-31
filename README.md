@@ -10,8 +10,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/download/1.5.1/AnimaRandomStudio.exe"><strong>下载单文件版</strong></a> ·
-  <a href="https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/download/1.5.1/AnimaRandomStudio-Setup-win-x64.exe">下载安装版</a> ·
+  <a href="https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/latest/download/AnimaRandomStudio.exe"><strong>下载单文件版</strong></a> ·
+  <a href="https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/latest/download/AnimaRandomStudio-Setup-win-x64.exe">下载安装版</a> ·
   <a href="#开始使用">开始使用</a> ·
   <a href="docs/guide.md">使用指南</a> ·
   <a href="https://qm.qq.com/q/M9MbjzaAUA">QQ 交流群</a>
@@ -251,11 +251,11 @@ Anima 与 Krea 2 的提示词收藏关联源词条：编辑或覆盖词条时同
 
 | 下载 | 适合怎样使用 |
 | --- | --- |
-| [**AnimaRandomStudio.exe**](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/download/1.5.1/AnimaRandomStudio.exe) | 单文件直接运行，适合想先打开体验的用户 |
-| [**Windows 安装版**](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/download/1.5.1/AnimaRandomStudio-Setup-win-x64.exe) | 按当前用户安装，创建开始菜单及可选桌面入口，无需管理员权限 |
-| [**便携 ZIP**](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/download/1.5.1/AnimaRandomStudio-portable-win-x64.zip) | 解压后是同一份 EXE，适合通过压缩包下载、保存或传输 |
+| [**AnimaRandomStudio.exe**](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/latest/download/AnimaRandomStudio.exe) | 单文件直接运行，适合想先打开体验的用户 |
+| [**Windows 安装版**](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/latest/download/AnimaRandomStudio-Setup-win-x64.exe) | 按当前用户安装，创建开始菜单及可选桌面入口，无需管理员权限 |
+| [**便携 ZIP**](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/latest/download/AnimaRandomStudio-portable-win-x64.zip) | 解压后是同一份 EXE，适合通过压缩包下载、保存或传输 |
 
-发布页的 Source code 是开发源码，不包含启动器。ComfyUI、节点与模型在配置环境时另行准备；文件校验值见 [1.5.1 发布页](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/tag/1.5.1) 的 `SHA256SUMS.txt`。
+发布页的 Source code 是开发源码，不包含启动器。ComfyUI、节点与模型在配置环境时另行准备；文件校验值见 [`SHA256SUMS.txt`](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/latest/download/SHA256SUMS.txt)。
 
 ### 三步生成第一张图
 
