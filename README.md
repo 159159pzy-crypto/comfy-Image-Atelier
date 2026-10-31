@@ -26,7 +26,9 @@
 Comfy Image Atelier 基于 [ComfyUI](https://github.com/Comfy-Org/ComfyUI) 与 Anima Tools 生态构建，把提示词池、单图编辑、图生图、AI 提示词工具、LoRA、放大修复和作品历史放进同一个工作台。配套原生 Windows 启动器，负责环境准备、模型下载、服务管理与更新，让日常精力更多留在选词、看图和调整画面上。
 
 > [!NOTE]
-> **Comfy Image Atelier 1.5.1 正式版**聚焦新机安装与依赖补齐。Anima 原规则不变，SeedVR2 两模型必装；完成向导后即可使用默认生图功能。项目已由 Anima Random Studio 更名并迁移至本仓库，仍使用旧仓库版本的用户请手动下载本版一次。版本变化与验证范围见 [发行说明](RELEASE_NOTES.md)；[最新正式 Release](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/latest)。
+> 首次使用请从[最新发布页](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/latest)下载 Windows 版，跟随新手向导完成环境与模型安装，即可打开工作台开始生图。
+>
+> 项目原名 **Anima Random Studio**。仍在使用旧仓库版本的用户，请手动下载新版。版本变化见[发行说明](RELEASE_NOTES.md)。
 
 ## 你可以用它做什么
 
