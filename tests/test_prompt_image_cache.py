@@ -31,7 +31,7 @@ def png(color="blue"):
 class PromptCacheTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.history = HistoryStore(self.root / "history.sqlite3")
         self.inputs = InputImageStore(self.root / "input-images")
         self.prompts = PromptImageStore(self.root / "prompt-images")
