@@ -38,8 +38,26 @@ def test_single_defaults_preserve_random_contract():
     assert single["base_mode"] == "normal"
     assert single["single"]["resize_mode"] == "crop"
     assert single["single"]["dual"]["scale"] == 1.0
+    assert single["single"]["lora_prefix_managed_triggers"] == []
     assert not any(stage["enabled"] for stage in single["upscalers"].values())
     assert not any(stage["enabled"] for stage in single["single"]["prompt_processing"].values())
+
+
+def test_single_prefix_trigger_ownership_is_independent_of_generation_triggers():
+    raw = {"workbench": "single", "lora_managed_triggers": ["handwritten", "auto word"],
+           "single": {"prefix": "handwritten, auto word",
+                      "lora_prefix_managed_triggers": [" auto word ", "AUTO WORD", ""]}}
+    before = copy.deepcopy(raw)
+    settings = validate_settings(raw)
+    assert settings["single"]["prefix"] == "handwritten, auto word"
+    assert settings["single"]["lora_prefix_managed_triggers"] == ["auto word"]
+    assert settings["lora_managed_triggers"] == ["handwritten", "auto word"]
+    assert raw == before
+    # Historical settings predate ownership tracking: do not claim handwritten text.
+    del raw["single"]["lora_prefix_managed_triggers"]
+    legacy = validate_settings(raw)
+    assert legacy["single"]["lora_prefix_managed_triggers"] == []
+    assert legacy["single"]["prefix"] == raw["single"]["prefix"]
 
 
 @pytest.mark.parametrize("single", [
@@ -49,6 +67,9 @@ def test_single_defaults_preserve_random_contract():
     {"vae_decode": {"temporal_overlap": 0}},
     {"dual": {"scale": 2.1}}, {"dlss": {"intensity": 1.1}},
     {"prompt_processing": {"expand": {"enabled": True}}},
+    {"lora_prefix_managed_triggers": "word"},
+    {"lora_prefix_managed_triggers": [1]},
+    {"lora_prefix_managed_triggers": ["x" * 501]},
 ])
 def test_reject_invalid_single_settings(single):
     with pytest.raises(WorkflowError):
@@ -97,6 +118,27 @@ def test_prompt_composition_never_duplicates_managed_words():
                                   "single": {"prefix": "prefix", "positive_prompt": "cat", "suffix": "suffix", "secondary_managed_triggers": ["dog"]}})
     assert compose_single_prompt(settings) == "prefix, cat, suffix"
     assert effective_single_prompts(settings, "cat") == {"primary": "cat, soft fur", "secondary": "cat, dog"}
+
+
+@pytest.mark.parametrize("prose", ["girl's smile", "don't", "artists' style", "James' style"])
+def test_single_prefix_apostrophes_do_not_duplicate_lora_triggers(prose):
+    settings = validate_settings({"workbench": "single", "lora_managed_triggers": ["blue ink"],
+                                  "single": {"prefix": f"{prose}, blue ink", "positive_prompt": "portrait",
+                                             "lora_prefix_managed_triggers": ["blue ink"]}})
+    positive = compose_single_prompt(settings)
+    assert effective_single_prompts(settings, positive)["primary"] == f"{prose}, blue ink, portrait"
+
+
+@pytest.mark.parametrize("version", [2, 3, 4])
+def test_workflow_export_preserves_nonempty_prefix_ownership(templates, version):
+    result = templates.submission({
+        "pipeline_version": version, "workbench": "single", "base_mode": "normal",
+        "single": {"prefix": "blue ink", "positive_prompt": "portrait",
+                   "lora_prefix_managed_triggers": ["blue ink"]},
+    }, 12345, 67890, "Prefix/export", "client", 1)
+    png = result["extra_data"]["extra_pnginfo"]
+    assert png["workflow"]["extra"]["single_workbench"]["settings"]["lora_prefix_managed_triggers"] == ["blue ink"]
+    assert png["anima_random_webui"]["settings"]["single"]["lora_prefix_managed_triggers"] == ["blue ink"]
 
 
 def test_normal_uses_frozen_per_pipeline_prompt_and_prunes_llm(templates):

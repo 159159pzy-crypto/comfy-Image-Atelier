@@ -486,16 +486,19 @@ test('random workbench does not accept single-only settings when applying a shar
   assert.equal(applied.workbench, 'random'); assert.equal(applied.count, 12); assert.equal(applied.cfg, 4);
   assert.equal(applied.single, undefined); assert.equal(applied.clip_name, undefined);
 });
-test('single source text is not modified by the random LoRA trigger reconciler', () => {
-  const ctx = createFrontendContext({ singleWorkbenchActive: () => true });
+test('shared LoRA reconciliation delegates single mode to its prefix synchronizer', () => {
+  let received;
+  const ctx = createFrontendContext({ singleWorkbenchActive: () => true, singleWorkbenchReconcileLoraTriggers: items => { received = items; } });
   vm.runInContext(functionSource('reconcileLoraTriggers'), ctx);
-  assert.doesNotThrow(() => ctx.reconcileLoraTriggers([{ filename: 'first' }]));
+  const added = [{ filename: 'first', enabled: true }];
+  ctx.reconcileLoraTriggers(added);
+  assert.equal(received, added);
 });
 test('favorite reads cannot replace the active section with a stale response', async () => {
   const pending = [];
   const ctx = createFrontendContext({ favoritesRequest: 0, activeSection: 'pose', favoritesData: {}, favoritesAvailable: false, currentProfile: () => 'anima',
     request: path => new Promise(resolve => pending.push({ path, resolve })), updateFavoriteSelectionButton() {}, toast() {}, currentView: () => ({ filters: {} }) });
-  vm.runInContext(functionSource('loadFavorites'), ctx);
+  for (const name of ['characterPickerSession', 'poolBrowserProfile', 'loadFavorites']) vm.runInContext(functionSource(name), ctx);
   const first = ctx.loadFavorites('pose'); ctx.activeSection = 'character'; const second = ctx.loadFavorites('character');
   pending[1].resolve({ items: ['current'] }); await second;
   pending[0].resolve({ items: ['stale'] }); await first;

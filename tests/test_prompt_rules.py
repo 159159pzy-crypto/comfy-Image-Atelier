@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from anima_webui.prompt_rules import PromptRuleStore
+from anima_webui.prompt_rules import PromptRuleStore, _split_top_level
 from anima_webui.workflow import WorkflowError
 
 
@@ -44,6 +44,23 @@ class PromptRuleStoreTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["fields"]["manual_artist"], "@foo, @bar")
         self.assertEqual(result["fields"]["extra_prompt"], "@Niji9il, blue hair")
+
+    def test_single_prefix_keeps_lora_spelling_when_normalizing(self):
+        result = self.store.normalize_fields(
+            {"single_prefix": "Blue_Hair, My_Trigger"}, ["My_Trigger"],
+        )
+        self.assertEqual(result["fields"]["single_prefix"], "blue hair, My_Trigger")
+
+    def test_prompt_tokens_treat_apostrophes_and_unfinished_quotes_as_prose(self):
+        for prose in ("girl's smile", "don't", "artists' style", "James' style", "'unfinished", '"unfinished'):
+            with self.subTest(prose=prose):
+                self.assertEqual(_split_top_level(f"{prose}, blue ink"), [prose, "blue ink"])
+
+    def test_prompt_tokens_preserve_quoted_weighted_and_escaped_delimiters(self):
+        for phrase in ('"warm light, blue ink"', "'warm light, blue ink'", '(detail, texture:1.2)',
+                       r"warm\, light", r"'warm\'s light, blue ink'", r'"warm\" light, blue ink"'):
+            with self.subTest(phrase=phrase):
+                self.assertEqual(_split_top_level(f"{phrase}, portrait"), [phrase, "portrait"])
 
     def test_score_up_tags_are_normalized_and_preserved(self):
         result = self.store.normalize_fields(

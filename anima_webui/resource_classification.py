@@ -122,5 +122,10 @@ def classify_resources(
             "trigger_metadata_available": bool(metadata),
             "metadata_source": "lora-manager",
             "size": metadata.get("file_size"),
+            "sha256": str(metadata.get("sha256") or ""),
+            "favorite": metadata.get("favorite") is True,
+            "notes": str(metadata.get("notes") or ""),
+            "modified": metadata.get("modified", 0),
+            "usage_count": metadata.get("usage_count", 0),
         })
     return items

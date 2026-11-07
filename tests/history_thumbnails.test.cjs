@@ -121,7 +121,7 @@ test('details load the original for both workbenches and release it only after t
     normalizeSettings: settings => ({ ...settings, loras: [] }), SECTIONS: [], escapeHtml: String,
     detailContext: { origin: 'random' }, closeImagePreview() {}, regenerationRequest: 0, regenerationOptions: {}, document: { querySelector: () => null },
   });
-  load(ctx, 'renderDetail', 'finishDetailClose');
+  load(ctx, 'loraRuntimeMarkup', 'renderDetail', 'finishDetailClose');
   for (const workbench of ['random', 'single']) {
     ctx.renderDetail(record(7, workbench));
     assert.equal(image.src, '/api/images/7');

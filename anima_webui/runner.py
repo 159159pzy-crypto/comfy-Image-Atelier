@@ -17,6 +17,8 @@ from .history import HistoryStore
 from .prompt_rules import PromptRuleStore
 from .prompt_pools import PromptPoolStore
 from .model_profiles import get_model_profile
+from .lora_binding import (append_trigger_words, binding_policy, manual_settings,
+                           resolve_character_loras, runtime_snapshot, validate_frozen_resources)
 from .prompt_jobs import PromptJobStore
 from .prompt_assistant import PromptAssistant, generation_settings, parse_pool_output, request_identity, rewrite_fingerprint
 from .prompt_tagger import PromptTagger
@@ -105,6 +107,7 @@ class BatchManager:
         self.prompt_images = prompt_images
         # Optional service attached by the HTTP application after construction.
         self.imported_images = None
+        self.lora_library = None
         self.prompt_jobs = PromptJobStore(history)
         self.prompt_assistant = PromptAssistant(comfy)
         self.prompt_tagger = PromptTagger(comfy)
@@ -240,6 +243,7 @@ class BatchManager:
             "original_selection",
             "prompt_seed",
             "single_runtime",
+            "lora_runtime",
         }
         if unknown:
             raise WorkflowError(
@@ -252,6 +256,8 @@ class BatchManager:
         result["mode"] = mode
         if "single_runtime" in result and not isinstance(result["single_runtime"], dict):
             raise WorkflowError("历史单图运行快照无效")
+        if "lora_runtime" in result and not isinstance(result["lora_runtime"], dict):
+            raise WorkflowError("历史 LoRA 运行快照无效")
         if mode in {"replay", "prompt_variant"}:
             positive = str(value.get("frozen_positive_prompt") or "")
             if not positive.strip():
@@ -818,6 +824,8 @@ class BatchManager:
                 ensure_writable()
             regeneration = self._validate_regeneration(regeneration)
             overrides = generation_settings(overrides)
+            if binding_policy(regeneration) == "current":
+                overrides = manual_settings(overrides, runtime_snapshot(regeneration))
             normalized_overrides = overrides
             if self.prompt_rules is not None and overrides.get("workbench") != "single" and not (
                 regeneration and regeneration.get("frozen_positive_prompt")
@@ -898,6 +906,11 @@ class BatchManager:
                     }
                     prefix = legacy_messages.get(first["type"], f"{first['label']}不可用")
                     raise WorkflowError(f"{prefix}: {first['name']}")
+            binding_snapshot = None
+            if (self.lora_library is not None and settings.get("workbench") == "random"
+                    and settings["model_profile"] == "anima" and settings.get("random_character")
+                    and binding_policy(regeneration) == "current"):
+                binding_snapshot = copy.deepcopy(await self.lora_library.binding_snapshot())
             self._ensure_accepting()
             if self.active():
                 # 有批次在跑:进入队列,当前批次结束后自动接续。
@@ -908,6 +921,7 @@ class BatchManager:
                     "settings": settings,
                     "seeds": seeds,
                     "regeneration": regeneration,
+                    "binding_snapshot": binding_snapshot,
                     "kind": "generation",
                 }
                 self.queue.append(entry)
@@ -917,7 +931,7 @@ class BatchManager:
                     "position": len(self.queue),
                     "count": settings["count"],
                 }
-            await self._begin_batch(settings, seeds, regeneration)
+            await self._begin_batch(settings, seeds, regeneration, binding_snapshot)
             return self.snapshot()
 
     async def _begin_batch(
@@ -925,6 +939,7 @@ class BatchManager:
         settings: dict[str, Any],
         seeds: dict[str, int] | None,
         regeneration: dict[str, Any] | None = None,
+        binding_snapshot: dict[str, Any] | None = None,
     ) -> None:
         batch_id = uuid.uuid4().hex[:12]
         self.stop_requested = False
@@ -943,7 +958,7 @@ class BatchManager:
             "settings": settings,
         }
         await self.history.create_batch(batch_id, settings["count"], settings)
-        self.task = asyncio.create_task(self._run(batch_id, settings, seeds, regeneration))
+        self.task = asyncio.create_task(self._run(batch_id, settings, seeds, regeneration, binding_snapshot))
         self._ensure_monitor()
 
     def queue_snapshot(self) -> list[dict[str, Any]]:
@@ -1041,12 +1056,45 @@ class BatchManager:
             await asyncio.sleep(0)
         return self.snapshot()
 
+    async def _binding_inventory(self) -> dict[str, Any]:
+        classify = getattr(self.comfy, "resource_classifications", None)
+        if classify is None:
+            raise ComfyError("无法核验人物 LoRA 的模型归属")
+        inventory = await classify("loras", refresh=True)
+        if not isinstance(inventory, dict) or not isinstance(inventory.get("items"), list):
+            raise ComfyError("LoRA Manager 返回了无效分类清单")
+        return inventory
+
+    async def _prepare_character_loras(self, settings: dict[str, Any], resolved: dict[str, Any],
+                                      snapshot: dict[str, Any] | None,
+                                      regeneration: dict[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        historical = runtime_snapshot(regeneration)
+        policy = binding_policy(regeneration)
+        if settings.get("workbench") != "random" or settings.get("model_profile") != "anima":
+            return settings, resolved, {}
+        if historical and policy != "current":
+            # Unlike a new binding, every enabled historical resource is
+            # required. Recheck at execution, since this task may have queued.
+            validate_frozen_resources(settings, historical, await self._binding_inventory())
+            historical["effective_loras"] = copy.deepcopy(settings["loras"])
+            if policy == "preserve_character":
+                resolved = append_trigger_words(resolved, historical.get("automatic_trigger_words", []))
+            return copy.deepcopy(settings), resolved, historical
+        if snapshot is None:
+            return settings, resolved, {}
+        characters = resolved.get("selected", {}).get("character", [])
+        has_bindings = any((snapshot.get("bindings") or {}).get(item.get("id"), {}).get("loras") for item in characters)
+        inventory = await self._binding_inventory() if has_bindings else {"items": []}
+        effective, runtime = resolve_character_loras(settings, resolved.get("selected", {}), snapshot, inventory)
+        return effective, append_trigger_words(resolved, runtime["automatic_trigger_words"]), runtime
+
     async def _run(
         self,
         batch_id: str,
         settings: dict[str, Any],
         seeds: dict[str, int] | None = None,
         regeneration: dict[str, Any] | None = None,
+        binding_snapshot: dict[str, Any] | None = None,
     ) -> None:
         try:
             single_runtime = await self._prepare_single_runtime(settings, regeneration) if settings.get("workbench") == "single" else None
@@ -1076,10 +1124,16 @@ class BatchManager:
                             break
                     else:
                         raise WorkflowError("所选维度无可用替代组合")
+                effective_settings, resolved, lora_runtime = await self._prepare_character_loras(
+                    settings, resolved, binding_snapshot, regeneration,
+                )
+                if lora_runtime:
+                    self.state["lora_runtime"] = copy.deepcopy(lora_runtime)
+                    self.state["lora_warning_count"] = self.state.get("lora_warning_count", 0) + len(lora_runtime.get("skipped", []))
                 if self.prompt_rules is not None and settings.get("workbench") != "single" and not (
                     regeneration and regeneration.get("frozen_positive_prompt")
                 ):
-                    protected = settings.get("lora_managed_triggers", [])
+                    protected = effective_settings.get("lora_managed_triggers", [])
                     composer_prompt, _ = self.prompt_rules.normalize_text(
                         resolved["composer_prompt"],
                         "positive",
@@ -1115,7 +1169,7 @@ class BatchManager:
                         "selected": selected,
                     }
                 submission_args = (
-                    settings, sample_seed, prompt_seed, prefix, self.client_id, sequence
+                    effective_settings, sample_seed, prompt_seed, prefix, self.client_id, sequence
                 )
                 execution_context = new_execution_context() if settings.get("pipeline_version", 2) >= 3 else None
                 # The renderer receives the resolved prompt for both model
@@ -1140,6 +1194,9 @@ class BatchManager:
                     metadata = payload.setdefault("extra_data", {}).setdefault("extra_pnginfo", {}).setdefault("anima_random_webui", {})
                     metadata["execution_context"] = copy.deepcopy(execution_context)
                     self.state["execution_context"] = copy.deepcopy(execution_context)
+                if lora_runtime:
+                    metadata = payload.setdefault("extra_data", {}).setdefault("extra_pnginfo", {}).setdefault("anima_random_webui", {})
+                    metadata["lora_runtime"] = copy.deepcopy(lora_runtime)
                 self.state["current"] = sequence
                 self.state["prompt_id"] = ""
                 self._clear_preview()
@@ -1170,7 +1227,9 @@ class BatchManager:
                 if single_runtime:
                     active_pipeline = settings["single"]["dual"]["second_pipeline"] if settings.get("base_mode") == "dual_sampler" else settings["single"]["normal_pipeline"]
                 positive = (single_runtime["effective_positive"][active_pipeline] if single_runtime else frozen_positive or extract_positive_prompt(entry))
-                bound_resources = self._bound_resources(settings)
+                if lora_runtime:
+                    positive = frozen_positive or resolved["full_prompt"]
+                bound_resources = self._bound_resources(effective_settings)
                 for image in images:
                     await self.history.add_image(
                         batch_id=batch_id,
@@ -1181,12 +1240,13 @@ class BatchManager:
                         negative_prompt=frozen_negative or settings["negative_prompt"],
                         sample_seed=sample_seed,
                         prompt_seed=prompt_seed,
-                        settings=settings,
+                        settings=effective_settings,
                         resolved_selection=resolved["selected"],
                         resolved_prompt=positive or resolved["full_prompt"],
                         bound_resources=bound_resources,
                         **({"single_runtime": single_runtime} if single_runtime is not None else {}),
                         **({"execution_context": execution_context} if execution_context is not None else {}),
+                        **({"lora_runtime": lora_runtime} if lora_runtime else {}),
                     )
                 self.state["completed"] = sequence
                 await self.history.update_batch(batch_id, completed=sequence)
@@ -1236,7 +1296,7 @@ class BatchManager:
                             continue
                         await self._begin_prompt_preview(job)
                     else:
-                        await self._begin_batch(entry["settings"], entry["seeds"], entry.get("regeneration"))
+                        await self._begin_batch(entry["settings"], entry["seeds"], entry.get("regeneration"), entry.get("binding_snapshot"))
                     return
                 except Exception as error:
                     logger.warning("队列任务启动失败: %s", error)

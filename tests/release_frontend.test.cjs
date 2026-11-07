@@ -18,14 +18,14 @@ function normalizationContext() {
   const requests = [], changes = [];
   const ctx = vm.createContext({
     promptNormalizationEpoch: 0, promptNormalizationRequests: new Map(),
-    draft: { fixed: {}, managedTriggers: [] }, clone: plain,
+    draft: { fixed: {}, managedTriggers: [], loras: [] }, clone: plain, loraItem: () => null,
     ui: { extra_prompt: { value: 'old' }, dimensionList: { querySelector: () => null } },
     document: { getElementById: () => null },
     currentProfile: () => 'anima', singleWorkbenchState: { ready: true, mode: 'random' },
-    request: () => { const gate = deferred(); requests.push(gate); return gate.promise; },
+    request: (url, options) => { const gate = deferred(); gate.url = url; gate.body = JSON.parse(options.body); requests.push(gate); return gate.promise; },
     setNormalizationUndo: value => changes.push(value), schedulePersist() {},
   });
-  load(ctx, 'promptNormalizationContext', 'promptElementForField', 'invalidatePromptNormalization', 'applyPromptField', 'normalizePromptFields');
+  load(ctx, 'normalizeTriggerWords', 'promptNormalizationContext', 'promptElementForField', 'invalidatePromptNormalization', 'applyPromptField', 'normalizePromptFields');
   return { ctx, requests, changes };
 }
 test('normalization cannot replace a newer edit or a different workbench draft', async () => {
@@ -90,6 +90,24 @@ test('unchanged single normalization preserves independent rewrite preview and c
   await pending;
   assert.equal(invalidations, 0);
   assert.equal(changes.length, 0);
+});
+
+test('single normalization protects owned prefix words and enabled metadata without using random or disabled triggers', async () => {
+  const { ctx, requests } = normalizationContext();
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../static/single-workbench.js'), 'utf8'), ctx);
+  const state = vm.runInContext('singleWorkbenchState', ctx);
+  Object.assign(state, { ready: true, mode: 'single', single: { lora_prefix_managed_triggers: ['Prefix_Owned'] } });
+  ctx.draft.loras = [{ filename: 'active', enabled: true }, { filename: 'disabled', enabled: false }];
+  ctx.draft.managedTriggers = ['Random_Only'];
+  ctx.loraItem = name => ({ trigger_words: name === 'active' ? ['prefix_owned', 'Enabled_Word'] : ['Disabled_Word'] });
+  const pending = ctx.normalizePromptFields({ single_prefix: 'Prefix_Owned, Enabled_Word' }, { apply: false });
+  assert.equal(requests[0].url, '/api/prompts/normalize');
+  assert.deepEqual(requests[0].body, {
+    fields: { single_prefix: 'Prefix_Owned, Enabled_Word' },
+    managedTriggers: ['Prefix_Owned', 'Enabled_Word'], model_profile: 'anima',
+  });
+  requests[0].resolve({ fields: { single_prefix: 'Prefix_Owned, Enabled_Word' }, changed: false });
+  await pending;
 });
 
 function submitContext() {

@@ -8,6 +8,94 @@ const singleWorkbenchState = {
   reading: false, restoring: false, resourceValues: {}, promptSeed: 0,
 };
 function singleWorkbenchActive() { return singleWorkbenchState.ready && singleWorkbenchState.mode === "single"; }
+// Keep source offsets so removing an automatic tag does not rewrite user prose.
+// Delimiters inside weights, brackets, quotes or escapes belong to the tag.
+function singleWorkbenchTriggerTokens(value) {
+  const text = String(value || ""), tokens = [], stack = [], pairs = { "(": ")", "[": "]", "{": "}" };
+  let start = 0, quote = "", escaped = false;
+  const push = end => { const word = text.slice(start, end).trim(); if (word) tokens.push({ word, start, end }); };
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    if (escaped) { escaped = false; continue; }
+    if (char === "\\") { escaped = true; continue; }
+    if (quote) { if (char === quote) quote = ""; continue; }
+    if ((char === '"' || char === "'") && !(char === "'" && /[\p{L}\p{N}_]/u.test(text[index - 1] || ""))) {
+      // Possessives/contractions and unfinished quotes are ordinary prose.
+      let closing = index + 1;
+      for (; closing < text.length; closing++) {
+        if (text[closing] === "\\") { closing++; continue; }
+        if (text[closing] === char) break;
+      }
+      if (closing < text.length) { quote = char; continue; }
+    }
+    if (pairs[char]) { stack.push(pairs[char]); continue; }
+    if (stack.length && char === stack.at(-1)) { stack.pop(); continue; }
+    if (!stack.length && ",，､\r\n".includes(char)) { push(index); start = index + 1; }
+  }
+  push(text.length);
+  return tokens;
+}
+function singleWorkbenchRemoveTriggerWords(value, removed) {
+  const tokens = singleWorkbenchTriggerTokens(value), ranges = [];
+  for (let index = 0; index < tokens.length; index++) {
+    if (!removed.has(triggerIdentity(tokens[index].word))) continue;
+    const first = index;
+    while (index + 1 < tokens.length && removed.has(triggerIdentity(tokens[index + 1].word))) index++;
+    const next = tokens[index + 1];
+    ranges.push(next ? [tokens[first].start, next.start] : [first ? tokens[first - 1].end : 0, value.length]);
+  }
+  for (const [start, end] of ranges.reverse()) value = value.slice(0, start) + value.slice(end);
+  return value;
+}
+function singleWorkbenchForgetRemovedTriggers() {
+  if (!singleWorkbenchActive()) return;
+  const prefix = document.getElementById("single_prefix");
+  if (!prefix) return;
+  const present = new Set(singleWorkbenchTriggerTokens(prefix.value).map(token => triggerIdentity(token.word)));
+  const single = singleWorkbenchState.single;
+  single.lora_prefix_managed_triggers = normalizeTriggerWords(
+    (single.lora_prefix_managed_triggers || []).filter(word => present.has(triggerIdentity(word))),
+  );
+}
+function singleWorkbenchReconcileLoraTriggers(addFor = []) {
+  if (!singleWorkbenchActive() || !loraInventoryLoaded) return;
+  const prefix = document.getElementById("single_prefix");
+  if (!prefix) return;
+  singleWorkbenchForgetRemovedTriggers();
+  const single = singleWorkbenchState.single;
+  const managed = new Map(single.lora_prefix_managed_triggers.map(word => [triggerIdentity(word), word]));
+  const currentIds = new Set(["single_prefix", "single_positive_prompt", "single_suffix"].flatMap(id =>
+    singleWorkbenchTriggerTokens(document.getElementById(id)?.value).map(token => triggerIdentity(token.word))));
+  const required = new Set(), added = [];
+  let metadataUnknown = false;
+  for (const selection of draft.loras.filter(item => item.enabled)) {
+    const item = loraItem(selection.filename);
+    if (!item || item.trigger_metadata_available === false) metadataUnknown = true;
+    for (const word of normalizeTriggerWords(item?.trigger_words || [])) required.add(triggerIdentity(word));
+  }
+  for (const selection of addFor) {
+    if (!selection.enabled) continue;
+    for (const word of normalizeTriggerWords(loraItem(selection.filename)?.trigger_words || [])) {
+      const identity = triggerIdentity(word);
+      required.add(identity);
+      if (currentIds.has(identity)) continue;
+      added.push(word);
+      currentIds.add(identity);
+      managed.set(identity, word);
+    }
+  }
+  const removed = new Set([...managed.keys()].filter(identity => !metadataUnknown && !required.has(identity)));
+  let next = singleWorkbenchRemoveTriggerWords(prefix.value, removed);
+  if (added.length) next += (next.trim() && !/[,，､\r\n]\s*$/.test(next) ? ", " : "") + added.join(", ");
+  single.lora_prefix_managed_triggers = [...managed].filter(([identity]) => !removed.has(identity)).map(([, word]) => word);
+  single.prefix = next;
+  if (prefix.value !== next) {
+    prefix.value = next;
+    if (typeof invalidatePromptNormalization === "function") invalidatePromptNormalization();
+    if (typeof clearNormalizationUndo === "function") clearNormalizationUndo();
+    prefix.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+}
 function singleWorkbenchClone(value) { return JSON.parse(JSON.stringify(value)); }
 function singleWorkbenchMerge(base, value) {
   const result = singleWorkbenchClone(base || {});
@@ -23,7 +111,7 @@ function singleWorkbenchDefaultSettings(profile = "anima") {
   const encode = { tiled: true, tile_size: 512, overlap: 64, temporal_size: 64, temporal_overlap: 8 };
   const processing = { enabled: false, rule: "扩写-通用", custom_rule: false, custom_rule_content: "", user_prompt: "", llm_service: "", ollama_auto_unload: true, seed: 0 };
   const single = {
-    positive_prompt: "", prefix: "", suffix: "", input_image_id: "", denoise: .65, resize_mode: "crop", unlock_resources: true, weight_dtype: "default",
+    positive_prompt: "", prefix: "", suffix: "", lora_prefix_managed_triggers: [], input_image_id: "", denoise: .65, resize_mode: "crop", unlock_resources: true, weight_dtype: "default",
     vae_encode: encode, vae_decode: encode, loras_secondary: [], secondary_managed_triggers: [], normal_pipeline: "primary",
     dual: { switch_step: 15, scale: 1.0, upscale_method: "sesqui", model_format: "Wan 2.1", half_precision: true, first_pipeline: "primary", second_pipeline: "primary", second_cfg: 8, second_sampler_name: "euler", second_scheduler: "simple", first_add_noise: true, second_add_noise: true, first_leftover_noise: true, second_leftover_noise: false },
     zero_negative: false, secondary_zero_negative: false,
@@ -107,6 +195,7 @@ function singleWorkbenchRead(settings) {
   if (!singleWorkbenchActive() || singleWorkbenchState.reading) return singleWorkbenchState.ready ? { ...settings, workbench: "random", generation_mode: "txt2img" } : settings;
   const single = singleWorkbenchState.single;
   document.querySelectorAll("[data-single-path]").forEach(element => singleWorkbenchPath(single, element.dataset.singlePath, element.type === "checkbox" ? element.checked : element.type === "number" ? Number(element.value) : element.value));
+  singleWorkbenchForgetRemovedTriggers();
   const result = { ...settings, workbench: "single", generation_mode: singleWorkbenchState.generationMode, count: 1, single: singleWorkbenchClone(single), negative_prompt: document.getElementById("singleNegative").value,
     ...singleWorkbenchResourceValues({ ...settings, single, ...singleWorkbenchState.resourceValues }),
     extra_prompt: "", quality_prompt: "", manual_artist: "", krea_prompt_pool: { enabled: false, ids: [] } };
@@ -467,6 +556,7 @@ async function singleWorkbenchFromHistory(record, asImage = false) {
   settings.single = singleWorkbenchMerge(singleWorkbenchDefaultSettings(profile).single, record.settings?.workbench === "single" ? record.settings.single || {} : {});
   if (typeof adaptPostprocessSettings === "function") adaptPostprocessSettings(settings, record.settings || {}, "single");
   settings.single.prefix = ""; settings.single.suffix = "";
+  settings.single.lora_prefix_managed_triggers = [];
   settings.single.positive_prompt = (record.settings?.workbench === "single" ? record.single_runtime?.positive : "") || record.positive_prompt || record.resolved_prompt || "";
   settings.single.prompt_processing.expand.enabled = false; settings.single.prompt_processing.oc.enabled = false;
   settings.single.prompt_job_id = ""; settings.single.processed_prompt_override = null; settings.single.input_image_id = "";
@@ -492,6 +582,7 @@ function singleWorkbenchApplyPreset(item) {
   delete snapshot.workbench; delete snapshot.generation_mode;
   if (singleWorkbenchActive()) {
     snapshot.single = singleWorkbenchMerge(current.single, sourceWorkbench === "single" ? snapshot.single || {} : {});
+    if (sourceWorkbench === "single") snapshot.single.lora_prefix_managed_triggers = singleWorkbenchClone(item.settings?.single?.lora_prefix_managed_triggers || []);
     if (typeof adaptPostprocessSettings === "function") adaptPostprocessSettings(snapshot, item.settings || {}, "single");
     if (sourceWorkbench !== "single" && (!snapshot.model_profile || snapshot.model_profile === current.model_profile)) {
       for (const key of ["clip_name", "vae_name", "clip_type"]) delete snapshot[key];
@@ -530,6 +621,7 @@ function initializeSingleWorkbench({ legacyRestored = false } = {}) {
     state.switchObserver.observe(document.getElementById("workbenchSwitch"));
   }
   document.querySelectorAll("[data-single-prompt]").forEach(element => { element.addEventListener("focus", () => state.promptTarget = element); if (element.id !== "singleNegative") element.addEventListener("input", singleWorkbenchInvalidatePrompt); });
+  document.getElementById("single_prefix").addEventListener("input", singleWorkbenchForgetRemovedTriggers);
   for (const id of ["single_dual_upscale_method", "single_latent_upscale_method"]) document.getElementById(id).addEventListener("change", singleWorkbenchRefreshLimits);
   ui.settingsForm.addEventListener("change", () => singleWorkbenchLayout());
   document.getElementById("singleResetCompatibility").addEventListener("click", singleWorkbenchResetCompatibility);

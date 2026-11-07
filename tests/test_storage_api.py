@@ -10,7 +10,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from anima_webui.persistence import StorageReadOnlyError
 from anima_webui.server import (
-    CUSTOM_PROMPTS_KEY, HISTORY_KEY, LORA_TRIGGER_OVERRIDES_KEY, MANAGER_KEY,
+    CUSTOM_PROMPTS_KEY, HISTORY_KEY, LORA_LIBRARY_KEY, LORA_TRIGGER_OVERRIDES_KEY, MANAGER_KEY,
     PROMPT_POOLS_KEY, PROMPT_RULES_KEY, STYLE_PRESETS_KEY,
     create_app,
 )
@@ -67,6 +67,7 @@ STORE_FILES = {
     "prompt_rules": "prompt_replacements.json",
     "prompt_pools": "prompt_pools.json",
     "favorite_extensions": "favorite_extensions.json",
+    "lora_library": "lora_library.json",
 }
 STORE_KEYS = {
     "history": HISTORY_KEY,
@@ -75,14 +76,16 @@ STORE_KEYS = {
     "lora_triggers": LORA_TRIGGER_OVERRIDES_KEY,
     "prompt_rules": PROMPT_RULES_KEY,
     "prompt_pools": PROMPT_POOLS_KEY,
+    "lora_library": LORA_LIBRARY_KEY,
 }
 
 
 def state(store):
+    store = getattr(store, "store", store)
     return copy.deepcopy({
         key: getattr(store, key)
         for key in ("items", "groups", "profile_overrides", "overrides", "custom_rules",
-                    "disabled_builtins", "assignments", "initialized")
+                    "disabled_builtins", "assignments", "initialized", "data")
         if hasattr(store, key)
     })
 
@@ -144,6 +147,7 @@ class StorageApiTests(unittest.IsolatedAsyncioTestCase):
             "/api/history", "/api/custom-prompts", "/api/style-presets", "/api/prompt-rules",
             "/api/prompt-pools?model_profile=krea2", "/api/resources", "/api/loras",
             "/api/resource-ownership?kind=models",
+            "/api/lora-library", "/api/lora-collections", "/api/character-lora-bindings",
         ):
             response = await self.client.get(endpoint)
             self.assertEqual(response.status, 200, (endpoint, await response.text()))
@@ -193,6 +197,15 @@ class StorageApiTests(unittest.IsolatedAsyncioTestCase):
             "lora_triggers": [
                 ("put", "/api/loras/triggers", {"filename": "test.safetensors", "triggerWords": ["test"]}),
                 ("delete", "/api/loras/triggers?filename=test.safetensors", None),
+            ],
+            "lora_library": [
+                ("post", "/api/lora-collections", {"name": "Test"}),
+                ("patch", "/api/lora-collections/missing", {"name": "Test"}),
+                ("delete", "/api/lora-collections/missing", None),
+                ("patch", "/api/lora-library/items/missing", {"favorite": True}),
+                ("put", "/api/character-lora-bindings/missing", {"loras": []}),
+                ("delete", "/api/character-lora-bindings/missing", None),
+                ("post", "/api/lora-library/jobs", {"ids": ["missing"], "action": "favorite", "values": {"favorite": True}}),
             ],
             "prompt_rules": [
                 ("post", "/api/prompt-rules", {"from": "old", "to": "new"}),

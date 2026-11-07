@@ -31,6 +31,7 @@ OC_DEFAULT_RULE = (
 )
 SINGLE_DEFAULTS: dict[str, Any] = {
     "positive_prompt": "", "prefix": "", "suffix": "",
+    "lora_prefix_managed_triggers": [],
     "input_image_id": "", "denoise": 0.65, "resize_mode": "crop",
     "unlock_resources": True, "weight_dtype": "default",
     "vae_decode": copy.deepcopy(_TILING), "vae_encode": copy.deepcopy(_TILING),
@@ -101,6 +102,7 @@ def validate_single_settings(value: Any, settings: dict[str, Any]) -> dict[str, 
         enum(s, key, {"primary", "secondary"})
     s["loras_secondary"] = _normalize_loras(s["loras_secondary"])
     s["secondary_managed_triggers"] = _normalize_managed_triggers(s["secondary_managed_triggers"])
+    s["lora_prefix_managed_triggers"] = _normalize_managed_triggers(s["lora_prefix_managed_triggers"])
     for group in ("vae_decode", "vae_encode"):
         tile = s[group]
         tile["tiled"] = _boolean(f"single.{group}.tiled", tile["tiled"])
@@ -433,8 +435,13 @@ def render_single_workflows(api_template: dict[str, Any], ui_template: dict[str,
         api = _prune_graph(api, V2_OUTPUT_ID)
     # The API graph is authoritative; keep it with the attached UI workflow so
     # advanced settings and newly inserted input nodes remain auditable.
+    editor_settings = copy.deepcopy(s)
+    if settings.get("pipeline_version", 2) < 4 and not editor_settings["lora_prefix_managed_triggers"]:
+        # Empty ownership did not exist in historical editable workflows.
+        # Keep their frozen export unchanged while retaining nonempty records.
+        editor_settings.pop("lora_prefix_managed_triggers")
     ui.setdefault("extra", {})["single_workbench"] = {
-        "settings": copy.deepcopy(s), "effective_positive": copy.deepcopy(effective),
+        "settings": editor_settings, "effective_positive": copy.deepcopy(effective),
         "positive": positive, "negative": negative, "api_prompt": copy.deepcopy(api),
     }
     return api, ui

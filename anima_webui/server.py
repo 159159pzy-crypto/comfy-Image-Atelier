@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import hmac
 import ipaddress
 import json
@@ -39,6 +40,8 @@ from .http_security import (
     strict_json_loads,
 )
 from .lora_triggers import LoraTriggerOverrideStore
+from .lora_library import LoraLibraryService, LoraLibraryStore, register_lora_routes
+from .lora_binding import validate_frozen_resources
 from .prompt_rules import PromptRuleStore
 from .prompt_assistant import generation_settings
 from .prompt_pools import PromptPoolStore, parse_prompt_import_details, parse_prompt_records
@@ -68,6 +71,7 @@ CUSTOM_PROMPTS_KEY: web.AppKey[Any] = web.AppKey("custom_prompts", object)
 FAVORITES_KEY: web.AppKey[Any] = web.AppKey("favorites", object)
 STYLE_PRESETS_KEY: web.AppKey[Any] = web.AppKey("style_presets", object)
 LORA_TRIGGER_OVERRIDES_KEY: web.AppKey[Any] = web.AppKey("lora_trigger_overrides", object)
+LORA_LIBRARY_KEY: web.AppKey[Any] = web.AppKey("lora_library", object)
 PROMPT_RULES_KEY: web.AppKey[Any] = web.AppKey("prompt_rules", object)
 PROMPT_POOLS_KEY: web.AppKey[Any] = web.AppKey("prompt_pools", object)
 INPUT_IMAGES_KEY: web.AppKey[Any] = web.AppKey("input_images", object)
@@ -337,6 +341,8 @@ def create_app(
     lora_trigger_overrides = LoraTriggerOverrideStore(
         lora_trigger_overrides_path or storage / "lora_trigger_overrides.json"
     )
+    lora_library_store = LoraLibraryStore(storage / "lora_library.json")
+    lora_library = LoraLibraryService(client, lora_library_store, lora_trigger_overrides, catalog)
     style_presets = StylePresetStore(
         style_presets_path or storage / "style_presets.json", prompt_rules
     )
@@ -349,6 +355,7 @@ def create_app(
     manager = BatchManager(
         templates, history, client, catalog, prompt_rules, prompt_pools, input_images, prompt_images
     )
+    manager.lora_library = lora_library
     imported_images = ImportedImageService(history, input_images, prompt_images, client)
     manager.imported_images = imported_images
     artwork_deletion = ArtworkDeletionService(history, thumbnails)
@@ -359,6 +366,7 @@ def create_app(
         *custom_prompts.load_warnings,
         *style_presets.load_warnings,
         *lora_trigger_overrides.load_warnings,
+        *lora_library_store.load_warnings,
         *prompt_rules.load_warnings,
         *prompt_pools.load_warnings,
         *favorite_extensions.load_warnings,
@@ -379,6 +387,7 @@ def create_app(
     app[FAVORITES_KEY] = favorites
     app[STYLE_PRESETS_KEY] = style_presets
     app[LORA_TRIGGER_OVERRIDES_KEY] = lora_trigger_overrides
+    app[LORA_LIBRARY_KEY] = lora_library
     app[PROMPT_RULES_KEY] = prompt_rules
     app[PROMPT_POOLS_KEY] = prompt_pools
     app[INPUT_IMAGES_KEY] = input_images
@@ -427,7 +436,7 @@ def create_app(
                 },
                 "storage_status": {
                     store.store_name: {**store.storage_status(), "path": str(store.path)}
-                    for store in (history, custom_prompts, style_presets, lora_trigger_overrides, prompt_rules, prompt_pools, favorite_extensions)
+                    for store in (history, custom_prompts, style_presets, lora_trigger_overrides, lora_library_store, prompt_rules, prompt_pools, favorite_extensions)
                 },
                 "warnings": startup_warnings,
             }
@@ -743,6 +752,7 @@ def create_app(
         value["source_trigger_words"] = source_words
         value["trigger_words"] = effective_words
         value["trigger_override"] = overridden
+        value["default_strength"] = lora_library.default_strength(value["filename"])
         if overridden:
             value["trigger_metadata_available"] = True
         preview = str(value.get("preview") or "")
@@ -1482,16 +1492,34 @@ def create_app(
                 if normalized != saved_prompt:
                     preserve_issues[section] = "当前提示词规则会改变历史快照，请同时重抽此维度，或使用同提示词变体"
                     break
-        resource_issues = []
-        try:
-            await validate_resource_ownership(settings)
-        except (WorkflowError, ComfyError) as error:
-            resource_issues.append({"type": "classification", "name": str(error), "label": "模型分类"})
-        try:
-            resource_issues.extend(await manager.resource_issues(settings))
-        except ComfyError as error:
-            if not resource_issues:
-                resource_issues.append({"type": "classification", "name": str(error), "label": "模型分类"})
+        async def inspect_resources(values: dict[str, Any]) -> list[dict[str, Any]]:
+            issues = []
+            try:
+                await validate_resource_ownership(values)
+            except (WorkflowError, ComfyError) as error:
+                issues.append({"type": "classification", "name": str(error), "label": "模型分类"})
+            try:
+                issues.extend(await manager.resource_issues(values))
+            except ComfyError as error:
+                if not issues:
+                    issues.append({"type": "classification", "name": str(error), "label": "模型分类"})
+            return issues
+
+        frozen_resource_issues = await inspect_resources(settings)
+        runtime = record.get("lora_runtime") or {}
+        has_lora_runtime = isinstance(runtime, dict) and runtime.get("version") == 1 and isinstance(runtime.get("manual_loras"), list)
+        resource_issues = frozen_resource_issues
+        if has_lora_runtime:
+            if not frozen_resource_issues:
+                try:
+                    validate_frozen_resources(settings, runtime, await client.resource_classifications("loras", refresh=True))
+                except (WorkflowError, ComfyError) as error:
+                    frozen_resource_issues = [{"type": "lora", "name": str(error), "label": "历史 LoRA"}]
+            manual_settings = copy.deepcopy(settings)
+            manual_settings["loras"] = copy.deepcopy(runtime["manual_loras"])
+            resource_issues = await inspect_resources(manual_settings)
+            if frozen_resource_issues and not resource_issues:
+                preserve_issues["character"] = "历史人物 LoRA 已失效，请同时重抽人物以使用当前绑定"
         sections: dict[str, Any] = {}
         for section in SECTIONS:
             random_enabled = bool(settings.get(f"random_{section}"))
@@ -1514,6 +1542,7 @@ def create_app(
             "selected": selected,
             "restored": restored,
             "resourceIssues": resource_issues,
+            "frozenResourceIssues": frozen_resource_issues,
             "sections": sections,
             "warnings": warnings,
         }
@@ -1524,6 +1553,8 @@ def create_app(
             _image_id(request.match_info["image_id"])
         )
         resources_ok = not context["resourceIssues"] and not history.read_only_reason
+        frozen_context = {**context, "resourceIssues": context["frozenResourceIssues"]}
+        frozen_resources_ok = not context["frozenResourceIssues"] and not history.read_only_reason
         positive_ok = bool(context["positive"])
         random_sections = [
             section for section, value in context["sections"].items() if value["random"]
@@ -1532,12 +1563,14 @@ def create_app(
             {
                 "modes": {
                     "replay": {
-                        "available": resources_ok and positive_ok,
-                        "reasons": _regeneration_reasons(context, require_prompt=True),
+                        "available": frozen_resources_ok and positive_ok,
+                        "reasons": _regeneration_reasons(frozen_context, require_prompt=True),
+                        "resourceIssues": context["frozenResourceIssues"],
                     },
                     "prompt_variant": {
-                        "available": resources_ok and positive_ok,
-                        "reasons": _regeneration_reasons(context, require_prompt=True),
+                        "available": frozen_resources_ok and positive_ok,
+                        "reasons": _regeneration_reasons(frozen_context, require_prompt=True),
+                        "resourceIssues": context["frozenResourceIssues"],
                     },
                     "content_redraw": {
                         "available": resources_ok and bool(random_sections),
@@ -1590,12 +1623,13 @@ def create_app(
         mode = body.get("mode")
         if not isinstance(mode, str) or mode not in {"replay", "prompt_variant", "content_redraw", "settings_reroll"}:
             raise WorkflowError("mode 无效")
-        if context["resourceIssues"]:
+        relevant_issues = context["frozenResourceIssues"] if mode in {"replay", "prompt_variant"} else context["resourceIssues"]
+        if relevant_issues:
             missing = "；".join(
-                f"{item['label']}: {item['name']}" for item in context["resourceIssues"]
+                f"{item['label']}: {item['name']}" for item in relevant_issues
             )
             raise WorkflowError(f"历史资源不可用: {missing}")
-        settings = dict(record.get("settings") or {})
+        settings = copy.deepcopy(record.get("settings") or {})
         if mode == "replay":
             if set(body) - {"mode"}:
                 raise WorkflowError("replay 不接受 count 或 sections")
@@ -1674,6 +1708,15 @@ def create_app(
                     "fixed_selection": fixed_selection,
                     "original_selection": context["selected"],
                 }
+        lora_runtime = record.get("lora_runtime") or {}
+        if isinstance(lora_runtime, dict) and lora_runtime.get("version") == 1 and isinstance(lora_runtime.get("manual_loras"), list):
+            regeneration["lora_runtime"] = copy.deepcopy(lora_runtime)
+            uses_current_bindings = mode == "settings_reroll" or (
+                mode == "content_redraw" and "character" in regeneration.get("redraw_sections", [])
+            )
+            if uses_current_bindings:
+                settings["loras"] = copy.deepcopy(lora_runtime["manual_loras"])
+                settings["lora_managed_triggers"] = copy.deepcopy(lora_runtime.get("manual_managed_triggers", []))
         await validate_resource_ownership(settings)
         if settings.get("workbench") == "single" and mode in {"replay", "prompt_variant"}:
             runtime = record.get("single_runtime") or {}
@@ -1806,6 +1849,7 @@ def create_app(
     app.router.add_get("/api/loras/preview", lora_preview)
     app.router.add_put("/api/loras/triggers", update_lora_triggers)
     app.router.add_delete("/api/loras/triggers", reset_lora_triggers)
+    register_lora_routes(app, lora_library)
     app.router.add_get("/api/resources", resources)
     app.router.add_get("/api/resource-ownership", resource_ownership)
     app.router.add_put("/api/resource-ownership", update_resource_ownership)
@@ -1909,7 +1953,10 @@ def create_app(
         try:
             try:
                 try:
-                    await imported_images.prompt_cache.stop()
+                    try:
+                        await lora_library.close()
+                    finally:
+                        await imported_images.prompt_cache.stop()
                 finally:
                     await manager.shutdown()
             finally:

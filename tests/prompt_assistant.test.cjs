@@ -1,4 +1,5 @@
 const test = require('node:test');
+const createFrontendContext = require('./helpers/frontend-context.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -20,7 +21,7 @@ function setup(saved = null) {
   };
   element('single_positive_prompt').value = 'existing body';
   const options = { available: true, template_only: true, services: [{ id: 'service', name: 'Service', models: [{ name: 'model' }] }], templates: [{ id: 'template', name: 'Template', category: 'user' }] };
-  const ctx = vm.createContext({
+  const ctx = createFrontendContext({
     currentProfile: () => ctx.profile, profile: 'anima',
     document: { getElementById: element }, Option: function(name, id) { this.text = name; this.value = id; },
     Event: function(type) { this.type = type; }, setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout() {},

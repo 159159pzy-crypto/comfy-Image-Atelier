@@ -11,7 +11,7 @@ from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
 
 from anima_webui.server import HISTORY_KEY, MANAGER_KEY, create_app
-from anima_webui.style_presets import PRESET_SETTING_KEYS, preset_settings
+from anima_webui.style_presets import PRESET_SETTING_KEYS, StylePresetStore, preset_settings
 from anima_webui.workflow import WorkflowTemplates, validate_settings
 from test_server import APP_DIR, _write_fake_tools
 from test_single_backend import SingleComfy, png
@@ -147,7 +147,9 @@ def test_legacy_defaults_and_two_stack_preset_remain_compatible(templates):
 @pytest.mark.parametrize("base,mode", [
     ("normal", "txt2img"), ("normal", "img2img"), ("dual_sampler", "txt2img"),
 ])
-def test_real_upload_generation_and_replay_keep_unified_triggers(tmp_path, base, mode):
+@pytest.mark.parametrize("prefix_ownership", [None, [], ["blue ink"]],
+                         ids=["legacy-no-prefix", "handwritten-prefix", "mixed-prefix"])
+def test_real_upload_generation_and_replay_keep_unified_triggers(tmp_path, base, mode, prefix_ownership):
     """Real HTTP/storage/runner boundaries, with only Comfy inference replaced."""
     async def run():
         comfy = SingleComfy()
@@ -162,6 +164,12 @@ def test_real_upload_generation_and_replay_keep_unified_triggers(tmp_path, base,
         await client.start_server()
         try:
             settings = single_settings(base=base, mode=mode)
+            if prefix_ownership is not None:
+                settings["single"]["prefix"] = "paper grain, blue ink"
+                settings["single"]["lora_prefix_managed_triggers"] = prefix_ownership
+            # Generation refreshes all effective words without taking ownership
+            # of handwritten prefix words or overwriting the frontend's subset.
+            settings["lora_managed_triggers"] = ["stale inventory trigger"]
             if mode == "img2img":
                 form = FormData()
                 form.add_field("image", png(), filename="reference.png", content_type="image/png")
@@ -177,10 +185,26 @@ def test_real_upload_generation_and_replay_keep_unified_triggers(tmp_path, base,
             await app[MANAGER_KEY].wait()
             assert app[MANAGER_KEY].snapshot()["status"] == "completed", app[MANAGER_KEY].snapshot()
             original = (await app[HISTORY_KEY].list_images())["items"][0]
-            expected = "portrait, shared word, blue ink, paper grain"
+            expected = ("portrait, shared word, blue ink, paper grain" if prefix_ownership is None
+                        else "paper grain, blue ink, portrait, shared word")
             assert original["single_runtime"]["effective_positive"]["primary"] == expected
             assert "disabled trigger" not in original["positive_prompt"]
+            assert original["settings"]["lora_managed_triggers"] == ["shared word", "blue ink", "paper grain"]
+            assert original["settings"]["single"]["prefix"] == settings["single"]["prefix"]
+            assert original["settings"]["single"]["lora_prefix_managed_triggers"] == (prefix_ownership or [])
             assert len(comfy.uploads) == int(mode == "img2img")
+
+            response = await client.post("/api/style-presets", json={
+                "name": "Prefix ownership", "settings": {
+                    key: value for key, value in original["settings"].items() if key in PRESET_SETTING_KEYS
+                },
+            })
+            assert response.status == 201, await response.text()
+            preset = await response.json()
+            saved = StylePresetStore(tmp_path / "data" / "style_presets.json").list()["items"][0]
+            assert saved["id"] == preset["id"]
+            assert saved["settings"]["single"]["prefix"] == settings["single"]["prefix"]
+            assert saved["settings"]["single"]["lora_prefix_managed_triggers"] == (prefix_ownership or [])
 
             # Simulate inventory changes after the artwork was saved. Replay
             # must retain its recorded trigger words and complete stage routes.
@@ -195,6 +219,8 @@ def test_real_upload_generation_and_replay_keep_unified_triggers(tmp_path, base,
             assert replay["sample_seed"] == original["sample_seed"]
             assert replay["prompt_seed"] == original["prompt_seed"]
             assert replay["settings"]["loras"] == original["settings"]["loras"]
+            assert replay["settings"]["single"]["lora_prefix_managed_triggers"] == (prefix_ownership or [])
+            assert replay["settings"]["single"]["prefix"] == original["settings"]["single"]["prefix"]
             api = comfy.submissions[-1]["prompt"]
             assert_connected(api)
             assert "243" not in api

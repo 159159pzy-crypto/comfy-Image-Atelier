@@ -64,7 +64,7 @@ function setup({ reduced = false } = {}) {
   });
   vm.runInContext(runtime, ctx);
   vm.runInContext('const poolTreeRowMotion = new WeakMap();', ctx);
-  for (const name of ['animateTreeRow', 'animateTreeRowsIn', 'animateTreeRowsOut', 'renderPoolSidebarAnimated', 'toggleFavoriteTreeGroup', 'toggleCustomTreeGroup']) {
+  for (const name of ['characterPickerSession', 'poolCollapsedGroups', 'animateTreeRow', 'animateTreeRowsIn', 'animateTreeRowsOut', 'renderPoolSidebarAnimated', 'toggleFavoriteTreeGroup', 'toggleCustomTreeGroup']) {
     const start = source.indexOf(`function ${name}(`);
     vm.runInContext(source.slice(start, source.indexOf('\n}', start) + 2), ctx);
   }

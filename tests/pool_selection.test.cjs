@@ -32,7 +32,7 @@ function setup({ items = ['a', 'b', 'c'], request } = {}) {
       return { ...stats, page, pages, items: matches.slice((page - 1) * body.limit, page * body.limit).map(id => ({ id })), facets: {} };
     },
   });
-  for (const name of ['selectedCount', 'poolQueryBody', 'invalidatePoolContext', 'poolSelectionContext', 'poolSelectionQuery', 'updatePoolSelectionControls', 'poolSelectionChanged', 'selectFilteredPool', 'setPoolMoreSelection', 'useEntirePool', 'clearPoolSelection', 'loadPool', 'toggleSelection', 'selectCurrentPage']) {
+  for (const name of ['characterPickerSession', 'poolBrowserProfile', 'poolBrowserSelection', 'poolBrowserCount', 'selectedCount', 'poolQueryBody', 'invalidatePoolContext', 'poolSelectionContext', 'poolSelectionQuery', 'updatePoolSelectionControls', 'poolSelectionChanged', 'selectFilteredPool', 'setPoolMoreSelection', 'useEntirePool', 'clearPoolSelection', 'loadPool', 'toggleSelection', 'selectCurrentPage']) {
     const start = source.search(new RegExp(`^(?:async )?function ${name}\\(`, 'm'));
     assert.ok(start >= 0, name);
     vm.runInContext(source.slice(start, source.indexOf('\n}', start) + 2), ctx);

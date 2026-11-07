@@ -83,7 +83,7 @@ def _split_top_level(value: str) -> list[str]:
     quote = ""
     escaped = False
     pairs = {"(": ")", "[": "]", "{": "}"}
-    for char in text:
+    for index, char in enumerate(text):
         if escaped:
             current.append(char)
             escaped = False
@@ -97,10 +97,21 @@ def _split_top_level(value: str) -> list[str]:
             if char == quote:
                 quote = ""
             continue
-        if char in {'"', "'"}:
-            quote = char
-            current.append(char)
-            continue
+        previous = text[index - 1] if index else ""
+        if char in {'"', "'"} and not (char == "'" and (previous.isalnum() or previous == "_")):
+            # Possessives, contractions and unfinished quotes are plain prose.
+            closing = index + 1
+            while closing < len(text):
+                if text[closing] == "\\":
+                    closing += 2
+                    continue
+                if text[closing] == char:
+                    break
+                closing += 1
+            if closing < len(text):
+                quote = char
+                current.append(char)
+                continue
         if char in pairs:
             stack.append(pairs[char])
             current.append(char)
@@ -333,7 +344,7 @@ class PromptRuleStore(StorageProtection):
                 raw,
                 FIELD_SCOPES[field],
                 artist_field=field == "manual_artist",
-                protected_lora_words=protected if field == "extra_prompt" else [],
+                protected_lora_words=protected if field in {"extra_prompt", "single_prefix"} else [],
                 model_profile=model_profile,
                 apply_custom=apply_custom,
             )

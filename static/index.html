@@ -19,6 +19,8 @@
   <link rel="stylesheet" href="/static/single-details.css?v=20261024-motion">
   <link rel="stylesheet" href="/static/history-detail.css?v=20261028-remove-artwork-management">
   <link rel="stylesheet" href="/static/artwork-favorites.css?v=20261029-favorites-motion">
+  <link rel="stylesheet" href="/static/lora-manager.css?v=20261107-settle">
+  <link rel="stylesheet" href="/static/pool-browser.css?v=20261107-binding">
 </head>
 <body>
   <div class="ambient" aria-hidden="true"></div>
@@ -331,6 +333,7 @@
       <div class="progress-track"><div id="progressFill"></div></div>
       <div class="progress-track sample" hidden><div id="sampleFill"></div></div>
       <p id="batchError" hidden></p>
+      <p id="loraBatchNotice" class="lora-batch-notice" role="status" hidden></p>
     </div>
     <div class="top-actions">
       <button id="stopButton" class="button ghost" type="button" disabled>停止</button>
@@ -561,7 +564,7 @@
 
   <dialog id="groupDialog" class="compact-dialog">
     <form id="groupForm" method="dialog">
-      <div class="dialog-heading"><div><span class="kicker">COLLECTION</span><h2 id="groupDialogTitle">新建收藏分组</h2></div><button id="closeGroup" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
+      <div class="dialog-heading"><div><h2 id="groupDialogTitle">新建收藏分组</h2></div><button id="closeGroup" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
       <input id="groupId" type="hidden">
       <label id="groupNameField" class="field"><span>分组名称</span><input id="groupName" type="text" maxlength="100" required></label>
       <button id="importChildGroup" class="button secondary import-child-button" type="button" hidden><span aria-hidden="true">＋</span> 导入自定义分组为子分组</button>
@@ -598,14 +601,69 @@
   </dialog>
 
   <dialog id="loraDialog" class="compact-dialog lora-dialog">
-    <form method="dialog">
-      <div class="dialog-heading"><div><span class="kicker">LOCAL LORA</span><h2>添加本地 LoRA</h2></div><button id="closeLora" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
+    <div id="lmShellSurface" aria-hidden="true"></div>
+    <form id="lmCompactPane" method="dialog">
+      <div class="dialog-heading"><div><span class="kicker">LOCAL LORA</span><h2>添加本地 LoRA</h2></div><div class="lm-compact-actions"><button id="lmExpandCompact" class="icon-button" type="button" title="展开 LoRA 管理" aria-label="展开 LoRA 管理" aria-expanded="false" aria-controls="lmExpandedPane"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6M20 4l-7 7M10 20H4v-6M4 20l7-7"/></svg></button><button id="closeLora" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div></div>
       <label class="search-field lora-search"><span aria-hidden="true">⌕</span><input id="loraSearch" type="search" placeholder="搜索 LoRA、目录或触发词"></label>
       <div id="loraCatalog" class="lora-catalog"></div>
       <div id="loraCatalogEmpty" class="inline-empty" hidden>没有匹配的本地 LoRA。</div>
       <div class="dialog-actions"><span id="loraCatalogMeta">正在读取本地列表</span><span></span><button id="cancelLora" class="button ghost" type="button">完成</button></div>
     </form>
+    <section id="lmExpandedPane" class="lm-shell" aria-labelledby="lmTitle" hidden inert>
+      <header class="dialog-heading lm-header">
+        <div><span class="kicker">LOCAL LORA</span><h2 id="lmTitle">LoRA 管理</h2></div>
+        <div class="lm-header-actions"><button id="lmExpand" class="icon-button" type="button" aria-expanded="true" aria-controls="lmCompactPane" title="返回快速添加" aria-label="返回快速添加"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 4l-7 7m0-6v6h6M4 20l7-7m-6 0h6v6"/></svg></button><button id="lmClose" class="icon-button dark" type="button" title="关闭" aria-label="关闭 LoRA 管理">×</button></div>
+      </header>
+      <div class="lm-toolbar">
+        <label class="search-field lm-search"><span aria-hidden="true">⌕</span><input id="lmSearch" type="search" placeholder="搜索名称、标签、目录或触发词" aria-label="搜索 LoRA" autocomplete="off"><kbd>Ctrl K</kbd></label>
+        <div class="lm-toolbar-actions">
+        <button id="lmSidebarToggle" class="icon-button lm-icon" type="button" aria-label="显示目录与收藏" aria-expanded="false" aria-controls="lmSidebar"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg></button>
+        <button id="lmFiltersToggle" class="icon-button lm-icon" type="button" aria-label="筛选" aria-expanded="false" aria-controls="lmFilters" title="筛选"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="17" r="2"/></svg></button>
+        <label class="lm-sort-control"><span class="sr-only">排序</span><select id="lmSort"><option value="name">名称</option><option value="modified">最近修改</option><option value="size">文件大小</option><option value="usage">使用次数</option><option value="favorite">收藏优先</option></select></label>
+        <button id="lmSortOrder" class="icon-button lm-icon" type="button" aria-label="切换为降序" title="当前升序 · 切换为降序">↑</button>
+        <div class="lm-view-switch" role="group" aria-label="显示方式"><button id="lmGridView" type="button" aria-label="图库视图" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1.2"/><rect x="14" y="4" width="6" height="6" rx="1.2"/><rect x="4" y="14" width="6" height="6" rx="1.2"/><rect x="14" y="14" width="6" height="6" rx="1.2"/></svg></button><button id="lmListView" type="button" aria-label="列表视图" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg></button></div>
+        <button id="lmSelectToggle" class="button ghost compact" type="button" aria-pressed="false">选择</button>
+        <button id="lmRefresh" class="icon-button lm-icon" type="button" aria-label="刷新 LoRA 资料库" title="刷新"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 18 17"/></svg></button>
+        </div>
+        <section id="lmFilters" class="lm-filters" aria-label="筛选 LoRA" hidden>
+        <div class="lm-filter-heading"><strong>筛选</strong><button id="lmClearFilters" class="lm-text-button" type="button">清除筛选</button></div>
+        <div class="lm-filter-fields">
+        <label><span>模型范围</span><select id="lmProfile"><option value="current">当前模型</option><option value="all">全部模型</option><option value="anima">Anima</option><option value="krea2">Krea 2</option></select></label>
+        <label><span>基础模型</span><select id="lmBaseModelFilter"><option value="">全部基础模型</option></select></label>
+        <label><span>预览</span><select id="lmPreviewFilter"><option value="">全部预览状态</option><option value="true">有预览</option><option value="false">无预览</option></select></label>
+        <label><span>人物绑定</span><select id="lmBoundFilter"><option value="">全部绑定状态</option><option value="true">已绑定人物</option><option value="false">未绑定人物</option></select></label>
+        <label><span>标签匹配</span><select id="lmTagMode"><option value="all">包含全部所选</option><option value="any">包含任意所选</option></select></label>
+        <label><span>当前配置</span><select id="lmConfiguredFilter"><option value="">全部</option><option value="true">已加入</option><option value="false">未加入</option></select></label>
+        </div>
+        <div class="lm-filter-tags"><label class="search-field lm-search"><span aria-hidden="true">⌕</span><input id="lmFilterTagSearch" type="search" placeholder="查找标签" aria-label="查找筛选标签" autocomplete="off"></label><div class="lm-filter-tag-columns"><fieldset><legend>包含标签</legend><div id="lmIncludeTags" class="lm-tag-options"></div></fieldset><fieldset><legend>排除标签</legend><div id="lmExcludeTags" class="lm-tag-options"></div></fieldset></div><select id="lmTagFilter" multiple hidden aria-hidden="true" tabindex="-1"></select><select id="lmExcludeTagFilter" multiple hidden aria-hidden="true" tabindex="-1"></select></div>
+        </section>
+      </div>
+      <div id="lmFilterChips" class="lm-filter-chips" aria-label="已应用的筛选" hidden></div>
+      <div id="lmNotice" class="lm-notice" role="status" hidden></div>
+      <div class="lm-body">
+        <nav id="lmSidebar" class="lm-sidebar" aria-label="LoRA 资料库导航">
+          <div class="lm-nav-section"><div class="lm-section-heading"><span class="lm-section-label">文件夹</span><label class="lm-recursive" title="包含子文件夹"><input id="lmRecursive" type="checkbox" checked><span>含子目录</span></label></div><div id="lmFolders" role="tree" aria-label="LoRA 文件夹"></div></div>
+          <div class="lm-nav-section"><span class="lm-section-label">资料库</span><button class="lm-nav-item active" type="button" data-lm-collection=""><span aria-hidden="true">▦</span> 全部 LoRA</button><button class="lm-nav-item" type="button" data-lm-collection="__all__"><span class="lm-star-color" aria-hidden="true">★</span> 全部收藏</button><button class="lm-nav-item" type="button" data-lm-collection="__ungrouped__"><span aria-hidden="true">◇</span> 未分组收藏</button></div>
+          <div class="lm-nav-section"><div class="lm-section-heading"><span class="lm-section-label">收藏分组</span><button id="lmNewGroup" class="icon-button lm-icon" type="button" aria-label="新建收藏分组">+</button></div><div id="lmGroups" role="tree" aria-label="收藏分组"></div><p id="lmGroupsEmpty" class="lm-sidebar-hint">尚未创建收藏分组</p></div>
+        </nav>
+        <main class="lm-content">
+          <div class="lm-results-heading"><div><h3 id="lmLocation">全部 LoRA</h3><span id="lmCatalogMeta" role="status" aria-live="polite">正在读取资料库</span></div><span id="lmSelectionCount" class="lm-selection-count" hidden></span></div>
+          <div id="lmSelectionTools" class="lm-selection-tools" hidden><button id="lmSelectPage" type="button">选择本页</button><button id="lmSelectAll" type="button">选择全部筛选结果</button><button id="lmClearSelection" type="button">清空选择</button></div>
+          <div id="lmCatalogScroll" class="lm-catalog-scroll"><div id="lmCatalog" class="lm-catalog" aria-label="LoRA 结果"></div><div id="lmCatalogEmpty" class="lm-empty" hidden><span aria-hidden="true">◇</span><h3>这里还没有 LoRA</h3><p id="lmEmptyMessage">试试其他关键词，或清除筛选。</p><button id="lmEmptyReset" class="button ghost compact" type="button">清除筛选</button></div></div>
+          <div id="lmBatchBar" class="lm-batch-bar" hidden aria-label="批量操作"><button id="lmBatchAdd" class="button primary compact" type="button">加入当前配置</button><button id="lmBatchRemove" class="button ghost compact" type="button">移出当前配置</button><button type="button" data-lm-batch="favorite">收藏</button><button type="button" data-lm-batch="unfavorite">取消收藏</button><button type="button" data-lm-batch="groups">分组</button><button type="button" data-lm-batch="tags">标签</button><button type="button" data-lm-batch="strength">权重</button><button type="button" data-lm-batch="bind">绑定人物</button></div>
+          <div id="lmJob" class="lm-job" role="status" hidden><div><strong id="lmJobTitle">正在处理</strong><span id="lmJobCount"></span></div><progress id="lmJobProgress" max="1" value="0"></progress><div class="lm-job-actions"><span id="lmJobError"></span><button id="lmJobCancel" class="lm-text-button" type="button">取消剩余任务</button><button id="lmJobRetry" class="lm-text-button" type="button" hidden>重试失败项</button></div></div>
+        </main>
+        <aside id="lmDetail" class="lm-detail" aria-labelledby="lmDetailTitle" hidden>
+          <div class="lm-detail-toolbar"><span class="lm-section-label">LoRA 详情</span><button id="lmCloseDetail" class="icon-button dark lm-icon" type="button" aria-label="关闭详情">×</button></div>
+          <div id="lmDetailBody" class="lm-detail-body"></div>
+        </aside>
+      </div>
+      <footer class="lm-footer"><span id="lmFooterHint">点击卡片查看详情 · Ctrl K 搜索</span><div class="lm-pagination"><button id="lmPrev" class="icon-button lm-icon" type="button" aria-label="上一页">‹</button><span id="lmPage">1 / 1</span><button id="lmNext" class="icon-button lm-icon" type="button" aria-label="下一页">›</button></div><button id="lmDone" class="button ghost compact" type="button">完成</button></footer>
+    </section>
   </dialog>
+  <dialog id="lmGroupDialog" class="compact-dialog lm-editor-dialog" aria-labelledby="lmGroupTitle"><form id="lmGroupForm"><div class="dialog-heading"><div><h2 id="lmGroupTitle">新建分组</h2></div><button class="lm-icon" type="button" data-lm-close="lmGroupDialog" aria-label="关闭分组编辑">×</button></div><label class="field"><span>名称</span><input id="lmGroupName" maxlength="100" required placeholder="例如：喜欢的画风"></label><label class="field"><span>所在位置</span><select id="lmGroupParent"><option value="">顶层</option></select></label><p id="lmGroupError" class="field-error" role="alert" hidden></p><div class="lm-editor-actions"><button id="lmGroupDelete" class="lm-text-button danger" type="button" hidden>删除分组</button><span></span><button class="button ghost" type="button" data-lm-close="lmGroupDialog">取消</button><button class="button primary" type="submit">保存</button></div><div id="lmGroupDeleteConfirm" class="lm-inline-confirm" hidden><p>删除此分组及子分组？LoRA 的星标、文件和人物绑定都会保留。</p><button id="lmGroupDeleteCommit" class="button danger compact" type="button">删除分组</button><button id="lmGroupDeleteCancel" class="button ghost compact" type="button">保留</button></div></form></dialog>
+  <dialog id="lmBatchDialog" class="compact-dialog lm-editor-dialog" aria-labelledby="lmBatchTitle"><form id="lmBatchForm"><div class="dialog-heading"><div><h2 id="lmBatchTitle">整理所选 LoRA</h2></div><button class="lm-icon" type="button" data-lm-close="lmBatchDialog" aria-label="关闭批量编辑">×</button></div><p id="lmBatchSummary" class="lm-muted"></p><div id="lmBatchFields"></div><p id="lmBatchError" class="field-error" role="alert" hidden></p><div class="lm-editor-actions"><span></span><button class="button ghost" type="button" data-lm-close="lmBatchDialog">取消</button><button class="button primary" type="submit">应用</button></div></form></dialog>
+  <dialog id="lmBindingDialog" class="compact-dialog lm-binding-dialog" aria-labelledby="lmBindingTitle"><div class="lm-binding-shell"><header class="dialog-heading"><div><h2 id="lmBindingTitle">人物 LoRA 绑定</h2></div><button class="lm-icon" type="button" data-lm-close="lmBindingDialog" aria-label="关闭人物绑定">×</button></header><p class="lm-muted">抽到这位人物时，按顺序自动启用绑定的 LoRA。手动配置的同一 LoRA 优先。</p><div id="lmCharacterPicker"><label class="lm-search"><span aria-hidden="true">⌕</span><input id="lmCharacterSearch" type="search" placeholder="搜索人物名称或系列" aria-label="搜索绑定人物"></label><div id="lmCharacterResults" class="lm-picker-results"></div><button id="lmCharacterMore" class="lm-text-button" type="button" hidden>更多人物</button></div><div id="lmBindingEditor" hidden><div class="lm-binding-person"><div><strong id="lmBindingCharacterName"></strong><small id="lmBindingCharacterId"></small></div><button id="lmChangeCharacter" class="lm-text-button" type="button">更换人物</button></div><div id="lmBindingRows" class="lm-binding-rows"></div><div class="lm-binding-add"><label class="lm-search"><span aria-hidden="true">⌕</span><input id="lmBindingLoraSearch" type="search" placeholder="搜索并添加 Anima LoRA" aria-label="搜索可绑定 LoRA"></label><div id="lmBindingLoraResults" class="lm-picker-results"></div></div></div><p id="lmBindingError" class="field-error" role="alert" hidden></p><footer class="lm-editor-actions"><span id="lmBindingStatus" class="lm-muted"></span><button class="button ghost" type="button" data-lm-close="lmBindingDialog">取消</button><button id="lmBindingSave" class="button primary" type="button" disabled>保存绑定</button></footer></div></dialog>
 
   <dialog id="favoriteSelectionDialog" class="compact-dialog favorite-selection-dialog">
     <form id="favoriteSelectionForm" method="dialog">
@@ -783,7 +841,7 @@
   <script src="/static/shared-favorites.js?v=20261030-source-lifecycle" defer></script>
   <script src="/static/prompt-reverse.js?v=20261028-remove-artwork-management" defer></script>
   <script src="/static/prompt-assistant.js?v=20261024-pools" defer></script>
-  <script src="/static/single-workbench.js?v=20261028-remove-artwork-management" defer></script>
+  <script src="/static/single-workbench.js?v=20261107-single-lora-prefix" defer></script>
   <script src="/static/single-input.js?v=20261028-remove-artwork-management" defer></script>
   <script src="/static/single-compatibility.js?v=20261024-single-ui" defer></script>
   <script src="/static/single-details.js?v=20261027-history-polish" defer></script>
@@ -791,6 +849,8 @@
   <script src="/static/history-detail.js?v=20261029-artwork-favorites" defer></script>
   <script src="/static/artwork-favorites.js?v=20261029-favorites-motion" defer></script>
   <script src="/static/detail-actions.js?v=20261027-history-polish" defer></script>
-  <script src="/static/app.js?v=20261030-source-lifecycle" defer></script>
+  <script src="/static/lora-manager.js?v=20261107-settle" defer></script>
+  <script src="/static/pool-browser.js?v=20261107-binding" defer></script>
+  <script src="/static/app.js?v=20261107-single-lora-prefix" defer></script>
 </body>
 </html>

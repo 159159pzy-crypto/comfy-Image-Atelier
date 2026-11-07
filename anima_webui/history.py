@@ -128,6 +128,7 @@ class HistoryStore(StorageProtection):
         needs_backup = not {"batches", "images"}.issubset(tables)
         needs_single_backup = "prompt_jobs" not in tables
         needs_execution_backup = False
+        needs_lora_backup = False
         for table in ("batches", "images"):
             if table not in tables:
                 continue
@@ -140,6 +141,8 @@ class HistoryStore(StorageProtection):
                 needs_single_backup = True
             if table == "images" and "execution_context_json" not in columns:
                 needs_execution_backup = True
+            if table == "images" and "lora_runtime_json" not in columns:
+                needs_lora_backup = True
             if "settings_json" not in columns:
                 continue
             for row in connection.execute(f"SELECT settings_json FROM {table}"):
@@ -158,6 +161,8 @@ class HistoryStore(StorageProtection):
             HistoryStore._backup_before_migration(connection)
         if needs_execution_backup:
             HistoryStore._backup_before_single_workbench(connection, suffix="execution-context", label="执行上下文")
+        if needs_lora_backup:
+            HistoryStore._backup_before_single_workbench(connection, suffix="lora-bindings", label="人物 LoRA 绑定")
 
     @staticmethod
     def _backup_before_artwork_favorites(connection: sqlite3.Connection) -> Path | None:
@@ -296,6 +301,8 @@ class HistoryStore(StorageProtection):
             connection.execute("ALTER TABLE images ADD COLUMN single_runtime_json TEXT NOT NULL DEFAULT '{}'")
         if "execution_context_json" not in image_columns:
             connection.execute("ALTER TABLE images ADD COLUMN execution_context_json TEXT NOT NULL DEFAULT '{}'")
+        if "lora_runtime_json" not in image_columns:
+            connection.execute("ALTER TABLE images ADD COLUMN lora_runtime_json TEXT NOT NULL DEFAULT '{}'")
         # Migrate before the normal restart-status update so the pre-migration
         # backup contains the exact legacy database state.
         HistoryStore._migrate_unprofiled_history(connection)
@@ -609,6 +616,7 @@ class HistoryStore(StorageProtection):
         bound_resources: dict[str, Any] | None = None,
         single_runtime: dict[str, Any] | None = None,
         execution_context: dict[str, Any] | None = None,
+        lora_runtime: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.ensure_writable()
         cursor = self.connection.execute(
@@ -617,8 +625,8 @@ class HistoryStore(StorageProtection):
                 batch_id, sequence, prompt_id, filename, subfolder, file_type,
                 positive_prompt, negative_prompt, sample_seed, prompt_seed,
                 settings_json, created_at, resolved_selection_json, resolved_prompt,
-                bound_resources_json, single_runtime_json, execution_context_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                bound_resources_json, single_runtime_json, execution_context_json, lora_runtime_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 batch_id,
@@ -638,6 +646,7 @@ class HistoryStore(StorageProtection):
                 json.dumps(bound_resources or {}, ensure_ascii=False),
                 json.dumps(single_runtime or {}, ensure_ascii=False),
                 json.dumps(execution_context or {}, ensure_ascii=False),
+                json.dumps(lora_runtime or {}, ensure_ascii=False),
             ),
         )
         self.connection.commit()
@@ -673,6 +682,7 @@ class HistoryStore(StorageProtection):
         result["bound_resources"] = json.loads(result.pop("bound_resources_json", "{}") or "{}")
         result["single_runtime"] = json.loads(result.pop("single_runtime_json", "{}") or "{}")
         result["execution_context"] = json.loads(result.pop("execution_context_json", "{}") or "{}")
+        result["lora_runtime"] = json.loads(result.pop("lora_runtime_json", "{}") or "{}")
         result["workbench"] = result["settings"].get("workbench", "random")
         result["folder_ids"] = folder_ids if folder_ids is not None else self._artwork_memberships([result["id"]])[result["id"]]
         return result

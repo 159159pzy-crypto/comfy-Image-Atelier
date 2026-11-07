@@ -64,6 +64,7 @@ function historyRecord(workbench) {
         latent: { pipeline: 'secondary' }, face_pipeline: 'secondary',
         loras_secondary: [{ filename: 'legacy.safetensors', enabled: true, strength: 0.4 }],
         secondary_managed_triggers: ['legacy trigger'],
+        prefix: 'saved prefix', lora_prefix_managed_triggers: ['saved prefix'],
         vae_encode: { tile_size: 1536 }, weight_dtype: 'fp8_e4m3fn',
       },
     },
@@ -83,6 +84,7 @@ test('sending random history into single uses the unified defaults and keeps its
     single.latent.pipeline, single.face_pipeline], Array(5).fill('primary'));
   assert.deepEqual(single.loras_secondary, []);
   assert.deepEqual(single.secondary_managed_triggers, []);
+  assert.deepEqual(single.lora_prefix_managed_triggers, []);
   assert.equal(single.vae_encode.tile_size, 512);
   assert.equal(single.weight_dtype, 'default');
   assert.equal(single.positive_prompt, 'saved final prompt');
@@ -104,6 +106,8 @@ test('sending legacy single history preserves secondary routes and low frequency
   assert.equal(single.vae_encode.tile_size, 1536);
   assert.equal(single.weight_dtype, 'fp8_e4m3fn');
   assert.equal(single.positive_prompt, 'saved authored prompt');
+  assert.equal(single.prefix, '');
+  assert.deepEqual(single.lora_prefix_managed_triggers, []);
   assert.equal(state.promptSeed, 77);
   assert.equal(elements.singleSampleSeed.disabled, false);
 });
@@ -148,6 +152,8 @@ test('restoring single history makes the fixed seed editable before persisting',
   assert.equal(state.promptSeed, 77);
   assert.deepEqual(layouts, [{ mode: 'fixed', seed: 4444 }]);
   assert.deepEqual(saved, [{ seed: 4444, disabled: false }]);
+  assert.equal(state.single.prefix, 'saved prefix');
+  assert.deepEqual(state.single.lora_prefix_managed_triggers, ['saved prefix']);
 });
 
 test('rolling a new seed changes random mode to an editable fixed seed', () => {
@@ -169,7 +175,7 @@ test('random presets change shared style while retaining the current single prom
     generation_mode: 'img2img', clip_name: 'custom-clip', vae_name: 'custom-vae', clip_type: 'custom-type', cfg: 3,
   });
   Object.assign(current.single, {
-    positive_prompt: 'my unfinished scene', prefix: 'my prefix', suffix: 'my suffix',
+    positive_prompt: 'my unfinished scene', prefix: 'my prefix', suffix: 'my suffix', lora_prefix_managed_triggers: ['my prefix'],
     input_image_id: 'current-reference', prompt_job_id: 'old-job', processed_prompt_override: 'old result',
   });
   const before = plain(current);
@@ -192,6 +198,7 @@ test('random presets change shared style while retaining the current single prom
     assert.equal(applied.generation_mode, 'img2img');
     assert.equal(applied.single.positive_prompt, 'my unfinished scene');
     assert.equal(applied.single.prefix, 'my prefix');
+    assert.deepEqual(applied.single.lora_prefix_managed_triggers, ['my prefix']);
     assert.equal(applied.single.suffix, 'my suffix');
     assert.equal(applied.single.input_image_id, 'current-reference');
     assert.equal(applied.single.prompt_job_id, '');
@@ -225,6 +232,8 @@ test('single presets still load their saved prompt, secondary routes and resourc
   assert.equal(applied.workbench, 'single');
   assert.equal(applied.generation_mode, 'img2img');
   assert.equal(applied.single.positive_prompt, 'saved single scene');
+  assert.equal(applied.single.prefix, 'saved prefix');
+  assert.deepEqual(applied.single.lora_prefix_managed_triggers, ['saved prefix']);
   assert.deepEqual([applied.single.normal_pipeline, applied.single.dual.first_pipeline,
     applied.single.dual.second_pipeline, applied.single.latent.pipeline, applied.single.face_pipeline], Array(5).fill('secondary'));
   assert.deepEqual(applied.single.loras_secondary, preset.settings.single.loras_secondary);
@@ -234,6 +243,21 @@ test('single presets still load their saved prompt, secondary routes and resourc
   assert.equal(applied.single.prompt_job_id, '');
   assert.equal(applied.single.processed_prompt_override, null);
   assert.deepEqual(preset, before);
+});
+
+test('legacy single presets do not inherit automatic prefix ownership from the current draft', () => {
+  const { ctx } = setup();
+  const current = plain(ctx.singleWorkbenchDefaultSettings('anima'));
+  current.single.prefix = 'same words';
+  current.single.lora_prefix_managed_triggers = ['same words'];
+  ctx.readSettings = () => current;
+  let applied;
+  ctx.applySettings = value => { applied = plain(value); };
+  ctx.singleWorkbenchApplyPreset({ settings: {
+    workbench: 'single', single: { prefix: 'same words', positive_prompt: 'legacy authored description' },
+  } });
+  assert.equal(applied.single.prefix, 'same words');
+  assert.deepEqual(applied.single.lora_prefix_managed_triggers, []);
 });
 
 test('changing the main model cancels an in-flight upload but preserves reference restoration and random mode', () => {

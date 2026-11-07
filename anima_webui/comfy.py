@@ -23,6 +23,10 @@ class ComfyAborted(RuntimeError):
     """等待 ComfyUI 结果时收到停止请求。不是错误,由调用方决定如何收尾。"""
 
 
+class ComfyMetadataPendingError(ComfyError):
+    """The plugin acknowledged a save; only verification remains retryable."""
+
+
 def validate_comfy_url(value: str) -> str:
     parsed = urlparse(value)
     if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
@@ -198,12 +202,41 @@ class ComfyClient:
                 "count": len(items),
                 "source": "lora-manager",
                 "manager_url": f"{self.base_url}/{prefix}",
+                "roots": roots,
+                "manager_items": manager_items,
             }
             self._classification_cache[kind] = (loop.time(), result)
             return result
 
     async def lora_inventory(self, *, refresh: bool = False) -> dict[str, Any]:
         return await self.resource_classifications("loras", refresh=refresh)
+
+    async def update_lora_metadata(self, file_path: str, updates: dict[str, Any]) -> dict[str, Any]:
+        """Write only library metadata for an exact, currently indexed file."""
+        from .resource_classification import _absolute_path, _path_key
+
+        if not updates or set(updates) - {"favorite", "tags", "notes"}:
+            raise ComfyError("不支持此 LoRA 元数据修改")
+        inventory = await self.lora_inventory(refresh=True)
+        identity = _path_key(_absolute_path(file_path))
+        matches = [item for item in inventory["manager_items"]
+                   if _path_key(_absolute_path(item["file_path"])) == identity]
+        if len(matches) != 1:
+            raise ComfyError("LoRA 文件不存在或路径不唯一，请刷新后重试")
+        response = await self._json("POST", "/api/lm/loras/save-metadata",
+                                    json={"file_path": matches[0]["file_path"], **updates})
+        self._classification_cache.pop("loras", None)
+        if response.get("success") is not True:
+            raise ComfyError("LoRA Manager 未确认元数据已保存")
+        try:
+            checked = await self.lora_inventory(refresh=True)
+            result = next((item for item in checked["manager_items"]
+                           if _path_key(_absolute_path(item["file_path"])) == identity), None)
+            if result is None or any(result.get(key) != value for key, value in updates.items()):
+                raise ComfyError("LoRA 元数据写入后回读不一致")
+        except (ComfyError, ValueError) as error:
+            raise ComfyMetadataPendingError(f"插件已确认保存，回读待确认：{error}") from error
+        return result
 
     async def lora_preview(self, filename: str) -> tuple[bytes, str, str]:
         normalized = normalize_lora_path(filename)
@@ -218,20 +251,35 @@ class ComfyClient:
         )
         if not item or not item.get("preview"):
             raise KeyError(filename)
-        preview = str(item["preview"])
+        return await self.lora_preview_asset(str(item["preview"]))
+
+    async def lora_preview_asset(self, preview: str) -> tuple[bytes, str, str]:
+        """Proxy only bounded raster/video assets from the configured local plugin."""
         parsed = urlparse(preview)
         if parsed.scheme or parsed.netloc or not parsed.path.startswith("/"):
             raise ComfyError("LoRA 预览地址无效")
         session = await self._get_session()
         try:
-            async with session.get(f"{self.base_url}{preview}") as response:
+            async with session.get(f"{self.base_url}{preview}", allow_redirects=False) as response:
                 if response.status == 404:
-                    raise KeyError(filename)
-                if response.status >= 400:
+                    raise KeyError(preview)
+                if response.status >= 300:
                     raise ComfyError(f"ComfyUI 返回 {response.status}: 无法读取 LoRA 预览")
                 content_type = response.headers.get("Content-Type", "application/octet-stream")
+                media_type = content_type.split(";", 1)[0].strip().lower()
+                if media_type not in {"image/png", "image/jpeg", "image/webp", "image/gif", "image/avif", "video/mp4", "video/webm"}:
+                    raise ComfyError("LoRA 预览格式不支持")
+                limit = 32 * 1024 * 1024
+                if response.content_length is not None and response.content_length > limit:
+                    raise ComfyError("LoRA 预览超过 32 MiB 限制")
+                chunks, size = [], 0
+                async for chunk in response.content.iter_chunked(64 * 1024):
+                    size += len(chunk)
+                    if size > limit:
+                        raise ComfyError("LoRA 预览超过 32 MiB 限制")
+                    chunks.append(chunk)
                 cache_control = response.headers.get("Cache-Control", "private, max-age=300")
-                return await response.read(), content_type, cache_control
+                return b"".join(chunks), content_type, cache_control
         except (aiohttp.ClientError, asyncio.TimeoutError) as error:
             raise ComfyError(f"无法连接 ComfyUI: {error}") from error
 

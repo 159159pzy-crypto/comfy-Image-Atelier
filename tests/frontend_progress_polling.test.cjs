@@ -109,7 +109,7 @@ test('slow startup resources do not delay polling or visibility recovery', async
   const resources = deferred();
   let finished = false, connectionChecks = 0, progress = 0;
   Object.assign(ctx, {
-    initialTheme: () => 'dark', applyTheme() {}, renderStorageStatus() {},
+    initialTheme: () => 'dark', applyTheme() {}, renderStorageStatus() {}, initializeLoraManager() {},
     loadStoredView() {}, loadStoredDraft: () => true,
     ui: { appError: {}, draftStatus: {} }, initialized: false,
     loadResources: () => resources.promise,

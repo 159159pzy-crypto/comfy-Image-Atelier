@@ -813,9 +813,14 @@ async function normalizePromptFields(fields, { apply = true, recordUndo = true, 
     promptNormalizationRequests.set(field, revision);
     return [field, { value, revision, element: elements[field] || promptElementForField(field) }];
   }));
+  const managedTriggers = typeof singleWorkbenchActive === "function" && singleWorkbenchActive()
+    ? normalizeTriggerWords([
+      ...(singleWorkbenchState.single.lora_prefix_managed_triggers || []),
+      ...draft.loras.filter(item => item.enabled).flatMap(item => loraItem(item.filename)?.trigger_words || []),
+    ]) : draft.managedTriggers || [];
   const payload = await request("/api/prompts/normalize", {
     method: "POST",
-    body: JSON.stringify({ fields, managedTriggers: clone(draft.managedTriggers || []), model_profile: currentProfile() }),
+    body: JSON.stringify({ fields, managedTriggers: clone(managedTriggers), model_profile: currentProfile() }),
   });
   const appliedFields = [];
   if (apply && context === promptNormalizationContext()) {
@@ -859,7 +864,30 @@ function defaultPools() {
   return Object.fromEntries(SECTIONS.map((section) => [section, { mode: "include", ids: [], excluded_ids: [] }]));
 }
 function currentView() {
+  const picker = characterPickerSession();
+  if (picker) return picker.view;
   return poolViews[activeSection] || (poolViews[activeSection] = defaultView());
+}
+function characterPickerSession() {
+  return typeof PoolBrowser !== "undefined" ? PoolBrowser.active : null;
+}
+function poolBrowserProfile() {
+  return characterPickerSession()?.profile || currentProfile();
+}
+function poolBrowserSelection(section = activeSection) {
+  return characterPickerSession()?.selection || draft.pools[section];
+}
+function persistPoolView() {
+  if (!characterPickerSession()) schedulePersist();
+}
+function poolBrowserCount() {
+  const picker = characterPickerSession();
+  return picker ? picker.selectedTotal ?? picker.selection.ids.length : selectedCount(activeSection);
+}
+function poolCollapsedGroups(kind) {
+  const picker = characterPickerSession();
+  if (picker) return kind === "favorite" ? picker.collapsedFavorites : picker.collapsedCustom;
+  return (kind === "favorite" ? collapsedFavoriteGroups : collapsedCustomGroups)[activeSection];
 }
 
 function applyTheme(theme, persist = false) {
@@ -1254,7 +1282,6 @@ function applySettings(raw, { useProfileDraft = false } = {}) {
   const storedExtraPrompt = useProfileDraft ? storedProfileState?.extra_prompt : null;
   if (typeof storedExtraPrompt === "string") ui.extra_prompt.value = storedExtraPrompt;
   else if (typeof settings.extra_prompt === "string") ui.extra_prompt.value = settings.extra_prompt;
-  if (loraInventoryLoaded) reconcileLoraTriggers(draft.loras.filter((item) => item.enabled));
   renderDimensions();
   renderLoras();
   renderKreaPromptPool();
@@ -1262,6 +1289,7 @@ function applySettings(raw, { useProfileDraft = false } = {}) {
   updatePoolOverview();
   updateRepairControls();
   if (typeof singleWorkbenchApply === "function") singleWorkbenchApply(raw || {});
+  if (loraInventoryLoaded) reconcileLoraTriggers(draft.loras.filter((item) => item.enabled));
   if (initialized && previousProfile !== settings.model_profile) void refreshProfileData();
 }
 
@@ -1316,7 +1344,7 @@ function persistNow() {
   try {
     localStorage.setItem(DRAFT_KEY, JSON.stringify({ version: 4, savedAt, settings: readSettings(), profileDrafts: clone(profileDrafts) }));
     for (const key of LEGACY_DRAFT_KEYS) localStorage.removeItem(key);
-    localStorage.setItem(VIEW_KEY, JSON.stringify({ version: 1, activeSection, views: poolViews }));
+    localStorage.setItem(VIEW_KEY, JSON.stringify({ version: 1, activeSection: characterPickerSession()?.generationSection || activeSection, views: poolViews }));
     ui.draftStatus.textContent = `本地草稿已保存 ${formatSavedTime(savedAt)}`;
   } catch {
     ui.draftStatus.textContent = "浏览器未允许保存草稿";
@@ -1514,7 +1542,7 @@ function forgetRemovedManagedTriggers() {
   );
 }
 function reconcileLoraTriggers(addFor = []) {
-  if (typeof singleWorkbenchActive === "function" && singleWorkbenchActive()) return;
+  if (typeof singleWorkbenchActive === "function" && singleWorkbenchActive()) return singleWorkbenchReconcileLoraTriggers(addFor);
   if (!loraInventoryLoaded) return;
   const enabledItems = draft.loras.filter((item) => item.enabled);
   const metadataUnknown = enabledItems.some((item) => {
@@ -1685,6 +1713,7 @@ function renderLoras() {
     }),
   );
   updateGenerationAvailability();
+  if (typeof LoraManager !== "undefined") LoraManager.refreshConfigured?.();
 }
 function moveLora(index, delta) {
   const next = index + delta;
@@ -1769,7 +1798,7 @@ function renderLoraCatalog() {
         event.currentTarget.remove();
       });
       button.addEventListener("click", () => {
-        const lora = { filename: item.filename, enabled: true, strength: 1 };
+        const lora = { filename: item.filename, enabled: true, strength: item.default_strength ?? 1 };
         draft.loras.push(lora);
         reconcileLoraTriggers([lora]);
         renderLoras();
@@ -1786,6 +1815,56 @@ async function openLoraDialog() {
   motionDialog(ui.loraDialog, true);
   await loadLoraInventory();
   renderLoraCatalog();
+}
+function addManagedLoras(items) {
+  const configured = new Set(draft.loras.map(item => normalizedPath(item.filename)));
+  const added = [], skipped = [];
+  for (const item of items || []) {
+    const filename = item.filename;
+    const inventory = item.classification_status ? item : loraItem(filename) || item;
+    const reason = configured.has(normalizedPath(filename)) ? "已配置"
+      : inventory.available === false ? "资源当前不可用"
+      : inventory.model_profile !== currentProfile() || inventory.classification_status !== "recognized" ? "与当前模型档案不兼容"
+      : draft.loras.length >= 64 ? "最多配置 64 个 LoRA" : "";
+    if (reason) { skipped.push({ filename, reason }); continue; }
+    // The library can discover newer metadata than the quick-add cache. Keep
+    // classification and effective triggers current before changing the draft.
+    replaceLoraInventoryItem(inventory);
+    const strength = Number(item.default_strength ?? 1);
+    const value = { filename, enabled: true, strength: Number.isFinite(strength) ? Math.min(100, Math.max(-100, strength)) : 1 };
+    draft.loras.push(value);
+    added.push(value);
+    configured.add(normalizedPath(filename));
+  }
+  reconcileLoraTriggers(added);
+  renderLoras();
+  schedulePersist();
+  return { added, skipped };
+}
+function removeManagedLoras(items) {
+  const names = new Set((items || []).map(item => normalizedPath(typeof item === "string" ? item : item.filename)));
+  const removed = draft.loras.filter(item => names.has(normalizedPath(item.filename)));
+  const found = new Set(removed.map(item => normalizedPath(item.filename)));
+  draft.loras = draft.loras.filter(item => !names.has(normalizedPath(item.filename)));
+  reconcileLoraTriggers();
+  renderLoras();
+  renderLoraCatalog();
+  schedulePersist();
+  return { removed, skipped: [...names].filter(name => !found.has(name)).map(filename => ({ filename, reason: "未配置" })) };
+}
+function initializeLoraManager() {
+  if (typeof LoraManager === "undefined") return;
+  LoraManager.init({
+    getProfile: currentProfile,
+    getLoras: () => draft.loras,
+    addLoras: addManagedLoras,
+    removeLoras: removeManagedLoras,
+    openCharacterPicker,
+    onCompactRestore: query => { ui.loraSearch.value = query ?? ui.loraSearch.value; renderLoraCatalog(); },
+    request,
+    notify: toast,
+    onInventoryChanged: () => loadLoraInventory({ refresh: true }),
+  });
 }
 function parseLoraTriggerInput(value) {
   return normalizeTriggerWords(
@@ -1985,6 +2064,23 @@ function batchProgressLabel(batch) {
   if (batch.progress_node === "") return "正在收取生成结果";
   return batch.prompt_id ? "等待生成进度" : "正在提交任务";
 }
+function loraRuntimeSummary(runtime, warningCount = 0) {
+  if (!runtime || typeof runtime !== "object") return "";
+  const applied = Array.isArray(runtime.applied) ? runtime.applied : [];
+  const skipped = Array.isArray(runtime.skipped) ? runtime.skipped : [];
+  const parts = [];
+  if (applied.length) parts.push(`本张人物自动启用 ${applied.length} 个 LoRA`);
+  if (skipped.length) parts.push(`本张跳过 ${skipped.length} 项：${skipped.map(item => `${item.character_name || "人物"} · ${item.filename}（${item.message || item.reason || "不可用"}）`).join("；")}`);
+  if (warningCount) parts.push(`本批累计跳过 ${warningCount} 项，原因已保存在图片详情`);
+  return parts.join("\n");
+}
+function loraRuntimeMarkup(runtime) {
+  if (!runtime || typeof runtime !== "object" || !runtime.version) return "";
+  const groups = [["人物自动启用", runtime.applied], ["已跳过", runtime.skipped], ["合并说明", runtime.conflicts]];
+  const rows = groups.filter(([, items]) => Array.isArray(items) && items.length).map(([label, items]) =>
+    `<section><strong>${label}</strong><ul>${items.map(item => `<li>${escapeHtml(item.character_name || item.character_id || "人物")} · ${escapeHtml(item.filename)}${item.strength != null ? ` × ${escapeHtml(item.strength)}` : ""}${item.message ? ` — ${escapeHtml(item.message)}` : item.reason === "manual_override" ? " — 使用手动设置" : item.reason === "duplicate" ? " — 已合并，采用首个人物权重" : ""}</li>`).join("")}</ul></section>`).join("");
+  return rows ? `<details class="lora-runtime-details"><summary>人物 LoRA · 本张实际应用记录</summary>${rows}<small>绑定规则在入队时固定；复现使用本张实际生效的配置。</small></details>` : "";
+}
 function setProgressValue(fill, ratio, active, stage) {
   if (!fill) return;
   const value = Math.max(0, Math.min(1, Number(ratio) || 0));
@@ -2043,6 +2139,12 @@ function renderBatch(batch, queue = currentQueue) {
   const batchMessage = [batch?.error && (failurePrefix && !String(batch.error).startsWith(failurePrefix) ? `${failurePrefix}${batch.error}` : batch.error), batch?.cancel_warning].filter(Boolean).join("\n");
   ui.batchError.hidden = !batchMessage;
   ui.batchError.textContent = batchMessage;
+  const loraNotice = typeof document !== "undefined" ? document.getElementById("loraBatchNotice") : null;
+  if (loraNotice) {
+    const text = loraRuntimeSummary(batch?.lora_runtime, batch?.lora_warning_count || 0);
+    loraNotice.hidden = !text;
+    loraNotice.textContent = text;
+  }
   if (batch && !promptOnly && !active && lastTerminalBatch !== `${batch.id}:${batch.status}:${completed}`) {
     lastTerminalBatch = `${batch.id}:${batch.status}:${completed}`;
     if (batch.status === "completed" && typeof StudioMotion !== "undefined") {
@@ -2320,7 +2422,7 @@ function renderDetail(record) {
   const loraText = activeLoras.length
     ? activeLoras.map((item) => `${escapeHtml(item.filename)} × ${escapeHtml(item.strength)}`).join("、")
     : "未使用";
-  ui.detailSelection.innerHTML = `<span class="kicker">ACTUAL DRAW</span><div>${SECTIONS.map((section) => `<span><b>${SECTION_META[section].label}</b>${(selected[section] || []).map((item) => escapeHtml(item.title)).join("、") || "未使用"}</span>`).join("")}<span><b>LoRA</b>${loraText}</span></div>`;
+  ui.detailSelection.innerHTML = `<span class="kicker">ACTUAL DRAW</span><div>${SECTIONS.map((section) => `<span><b>${SECTION_META[section].label}</b>${(selected[section] || []).map((item) => escapeHtml(item.title)).join("、") || "未使用"}</span>`).join("")}<span><b>LoRA</b>${loraText}</span></div>${loraRuntimeMarkup(record.lora_runtime)}`;
 }
 
 function updateDetailRecord(record) {
@@ -3417,7 +3519,7 @@ function regenerationReasons(mode) {
 
 function renderRegenerationOptions() {
   if (!regenerationOptions || !selectedRecord) return;
-  const issues = regenerationOptions.resourceIssues || [];
+  const issues = regenerationOptions.modes?.replay?.resourceIssues || regenerationOptions.resourceIssues || [];
   const issueText = issues.length
     ? `<strong>无法生成</strong><span>${issues.map((item) => `${escapeHtml(item.label)}：${escapeHtml(item.name)}`).join("<br>")}</span>`
     : `<strong>资源检查通过</strong><span>模型、已启用 LoRA、高清模型与采样资源均可用。</span>`;
@@ -3558,11 +3660,18 @@ async function submitRegeneration(mode, count = 1, sections = []) {
 }
 
 function selectionHas(section, id) {
+  const picker = characterPickerSession();
+  if (picker) return picker.alreadyBound.has(id) || picker.selection.ids.includes(id);
   const selection = draft.pools[section];
   return selection.mode === "all" ? !selection.excluded_ids.includes(id) : selection.ids.includes(id);
 }
 function toggleSelection(section, id, checked) {
   if (section !== activeSection || poolResultContext !== poolSelectionContext()) return;
+  const picker = characterPickerSession();
+  if (picker) {
+    try { picker.toggle(id, checked); } catch (error) { toast(error.message); renderPoolItems(); return; }
+    return poolSelectionChanged();
+  }
   const selection = draft.pools[section];
   if (selection.mode === "all")
     selection.excluded_ids = checked
@@ -3586,10 +3695,10 @@ function invalidatePoolContext() {
   if (typeof invalidateKreaPoolSelection === "function") invalidateKreaPoolSelection();
 }
 function poolSelectionContext() {
-  return JSON.stringify({ section: activeSection, query: poolQueryBody(), selectedOnly: currentView().selectedOnly, selection: draft.pools[activeSection] });
+  return JSON.stringify({ session: characterPickerSession()?.id || "generation", section: activeSection, query: poolQueryBody(), selectedOnly: currentView().selectedOnly, selection: poolBrowserSelection() });
 }
 function poolSelectionQuery() {
-  const selection = clone(draft.pools[activeSection]);
+  const selection = clone(poolBrowserSelection());
   return { ...poolQueryBody(), selection_state: selection, ...(currentView().selectedOnly ? { selection } : {}) };
 }
 function updatePoolSelectionControls() {
@@ -3599,15 +3708,27 @@ function updatePoolSelectionControls() {
   ui.selectPage.disabled = !current || !poolItems.length || busy;
   ui.selectFilteredPool.disabled = busy || (current && poolQueryCount === 0);
   ui.selectFilteredPool.textContent = busy ? "正在选择…" : "选择全部筛选结果";
-  const all = draft.pools[activeSection]?.mode === "all";
+  const picker = characterPickerSession();
+  const all = poolBrowserSelection()?.mode === "all";
   ui.poolModeNote.hidden = !all;
   ui.poolModeNote.textContent = all ? "整个词库参与随机抽取，新增词条也会自动参与；手动取消的词条除外。" : "";
-  ui.poolSelectionLabel.textContent = `${all ? "整个词库" : "已选择"} · ${selectedCount(activeSection)} 项`;
-  ui.poolMeta.textContent = `${poolQueryCount ?? "—"} 项匹配 · ${selectedCount(activeSection)} 项已选${favoritesAvailable ? "" : " · 收藏离线"}`;
+  ui.poolSelectionLabel.textContent = picker ? `已绑定 ${picker.alreadyBound.size} 位 · 待新增 ${poolBrowserCount()} 位` : `${all ? "整个词库" : "已选择"} · ${selectedCount(activeSection)} 项`;
+  ui.poolMeta.textContent = `${poolQueryCount ?? "—"} 项匹配 · ${poolBrowserCount()} 项已选${favoritesAvailable ? "" : " · 收藏离线"}`;
+  if (picker) {
+    ui.poolModeNote.hidden = false;
+    ui.poolModeNote.textContent = "仅追加到所选人物，保留原有绑定；这里不会更改生成随机池。";
+    ui.confirmPool.textContent = picker.selectionMode === "single" ? "确认选择这位人物" : `确认选择 ${poolBrowserCount()} 位人物`;
+    if (picker.selectionMode === "single") {
+      ui.poolSelectionLabel.textContent = `选择 1 位人物 · 已选 ${poolBrowserCount()} 位`;
+      ui.selectPage.disabled = true; ui.selectFilteredPool.disabled = true;
+    }
+    ui.confirmPool.disabled = busy || !current || !picker.selection.ids.length;
+  }
 }
 function poolSelectionChanged() {
   invalidatePoolContext();
   renderPoolItems();
+  if (characterPickerSession()) return loadPool();
   renderDimensions();
   updatePoolOverview();
   updatePoseConflict();
@@ -3615,7 +3736,8 @@ function poolSelectionChanged() {
   return loadPool();
 }
 async function selectFilteredPool() {
-  if (poolSelectionOperation || currentProfile() !== "anima") return;
+  if (characterPickerSession()?.selectionMode === "single") return;
+  if (poolSelectionOperation || poolBrowserProfile() !== "anima") return;
   clearTimeout(ui.poolSearch._timer);
   invalidatePoolContext();
   const operation = { revision: poolContextRevision, context: poolSelectionContext(), section: activeSection };
@@ -3628,6 +3750,8 @@ async function selectFilteredPool() {
     if (!current()) return;
     const ids = new Set(data.ids || []);
     if (!ids.size) { toast("没有匹配的词条，选择未改变"); return; }
+    const picker = characterPickerSession();
+    if (picker) { picker.append([...ids]); await poolSelectionChanged(); return; }
     const selection = draft.pools[operation.section];
     if (selection.mode === "all") selection.excluded_ids = selection.excluded_ids.filter(id => !ids.has(id));
     else selection.ids = [...new Set([...selection.ids, ...ids])];
@@ -3657,11 +3781,14 @@ function setPoolMoreSelection(open, { immediate = false, restoreFocus = false } 
 }
 
 function useEntirePool() {
+  if (characterPickerSession()) return;
   setPoolMoreSelection(false, { immediate: true, restoreFocus: true });
   draft.pools[activeSection] = { mode: "all", ids: [], excluded_ids: [] };
   return poolSelectionChanged();
 }
 function clearPoolSelection() {
+  const picker = characterPickerSession();
+  if (picker) { picker.clear(); return poolSelectionChanged(); }
   draft.pools[activeSection] = { mode: "include", ids: [], excluded_ids: [] };
   return poolSelectionChanged();
 }
@@ -3684,15 +3811,15 @@ function isFavorite(item) {
 let favoritesRequest = 0;
 async function loadFavorites(section = activeSection, { throwOnError = false } = {}) {
   const requestId = ++favoritesRequest;
-  const profile = currentProfile();
+  const profile = poolBrowserProfile();
   if (profile !== "anima") { favoritesData = { groups: [], items: [], favorite_keys: [] }; favoritesAvailable = false; return; }
   try {
     const payload = await request(`/api/favorites/${section}?model_profile=${profile}`);
-    if (requestId !== favoritesRequest || section !== activeSection || profile !== currentProfile()) return;
+    if (requestId !== favoritesRequest || section !== activeSection || profile !== poolBrowserProfile()) return;
     favoritesData = payload;
     favoritesAvailable = true;
   } catch (error) {
-    if (requestId !== favoritesRequest || section !== activeSection || profile !== currentProfile()) return;
+    if (requestId !== favoritesRequest || section !== activeSection || profile !== poolBrowserProfile()) return;
     favoritesData = { groups: [], items: [], favorite_keys: [] };
     favoritesAvailable = false;
     if (currentView().filters.collection) currentView().filters.collection = "";
@@ -3700,20 +3827,20 @@ async function loadFavorites(section = activeSection, { throwOnError = false } =
     toast(`收藏不可用：${error.message}`);
     if (throwOnError) throw error;
   }
-  updateFavoriteSelectionButton();
+  if (!characterPickerSession()) updateFavoriteSelectionButton();
 }
 async function loadCustomGroups(section = activeSection, { throwOnError = false } = {}) {
-  const requestedProfile = currentProfile();
+  const requestedProfile = poolBrowserProfile();
   const requestId = ++customGroupsRequest;
   try {
     const payload = await request(`/api/custom-groups/${section}?model_profile=${encodeURIComponent(requestedProfile)}`);
-    if (requestId !== customGroupsRequest || requestedProfile !== currentProfile() || section !== activeSection) return;
+    if (requestId !== customGroupsRequest || requestedProfile !== poolBrowserProfile() || section !== activeSection) return;
     customGroups = payload.groups || [];
-    if (!customTreeInitialized.has(section)) {
-      collapsedCustomGroups[section] = new Set(
-        customGroups.filter((group) => group.kind !== "group").map((group) => group.id),
-      );
-      customTreeInitialized.add(section);
+    const picker = characterPickerSession();
+    if (picker ? !picker.customInitialized : !customTreeInitialized.has(section)) {
+      const collapsed = new Set(customGroups.filter((group) => group.kind !== "group").map((group) => group.id));
+      if (picker) { picker.collapsedCustom = collapsed; picker.customInitialized = true; }
+      else { collapsedCustomGroups[section] = collapsed; customTreeInitialized.add(section); }
       persistCustomTree();
     }
     if (currentView().filters.customGroup && !customGroup(currentView().filters.customGroup)) {
@@ -3722,11 +3849,11 @@ async function loadCustomGroups(section = activeSection, { throwOnError = false 
     const activeGroup = customGroup(currentView().filters.customGroup);
     let ancestor = activeGroup?.parentId ? customGroup(activeGroup.parentId) : null;
     while (ancestor) {
-      collapsedCustomGroups[section].delete(ancestor.id);
+      poolCollapsedGroups("custom").delete(ancestor.id);
       ancestor = ancestor.parentId ? customGroup(ancestor.parentId) : null;
     }
   } catch (error) {
-    if (requestId !== customGroupsRequest || requestedProfile !== currentProfile() || section !== activeSection) return;
+    if (requestId !== customGroupsRequest || requestedProfile !== poolBrowserProfile() || section !== activeSection) return;
     customGroups = [];
     toast(`自定义分组不可用：${error.message}`);
     if (throwOnError) throw error;
@@ -3734,7 +3861,116 @@ async function loadCustomGroups(section = activeSection, { throwOnError = false 
 }
 
 let drawerTrigger = null;
+let characterPickerView = null;
+function openCharacterPicker(options = {}) {
+  if (typeof PoolBrowser === "undefined") return Promise.reject(new Error("人物浏览器尚未就绪"));
+  if (characterPickerSession()) return characterPickerSession().promise;
+  // Lease the real browser nodes. Only the visual session is suspended; the
+  // generation draft is never swapped or used as the picker's selection store.
+  const saved = { activeSection, poolPage, poolPages, poolItems, poolFacets, poolQueryCount,
+    favoritesData, favoritesAvailable, customGroups, drawerTrigger,
+    scrollTop: ui.poolGrid.scrollTop, sidebarScroll: ui.poolSidebar.scrollTop,
+    sidebarOpen: ui.poolSidebar.classList.contains("mobile-open"), drawerOpen: ui.poolDrawer.classList.contains("open") };
+  const session = PoolBrowser.createSession({ ...options,
+    view: characterPickerView || { ...defaultView(), language: poolViews.character?.language || "zh" } });
+  session.generationSection = saved.activeSection;
+  const opener = document.activeElement;
+  const dialog = document.createElement("dialog");
+  dialog.id = "characterPickerDialog";
+  dialog.className = "pool-character-picker glass";
+  dialog.dataset.selectionMode = session.selectionMode;
+  dialog.setAttribute("aria-labelledby", "poolTitle");
+  dialog.setAttribute("aria-describedby", "poolModeNote");
+  const nodes = [...ui.poolDrawer.childNodes];
+  const footer = ui.confirmPool.parentElement;
+  const cancel = document.createElement("button");
+  cancel.type = "button"; cancel.className = "button ghost"; cancel.textContent = "取消";
+  const actions = document.createElement("div"); actions.className = "pool-picker-footer-actions";
+  actions.append(cancel, ui.confirmPool); footer.append(actions);
+  const selectedLabel = ui.selectedOnly.parentElement.querySelector("span");
+  const selectedLabelText = selectedLabel?.textContent;
+  const hostProfile = currentProfile();
+  clearTimeout(ui.poolSearch._timer);
+  invalidatePoolContext(); ++favoritesRequest; ++customGroupsRequest;
+  PoolBrowser.activate(session);
+  activeSection = "character"; poolPage = 1; poolPages = 1; poolItems = []; poolFacets = {};
+  poolQueryCount = null; poolResultContext = "";
+  favoritesData = { groups: [], items: [], favorite_keys: [] }; favoritesAvailable = false; customGroups = [];
+  ui.poolDrawer.classList.remove("open");
+  ui.poolDrawer.inert = true;
+  ui.poolDrawer.setAttribute("aria-hidden", "true");
+  if (saved.drawerOpen) animatePoolSurface(ui.poolDrawer, ui.drawerBackdrop, false);
+  nodes.forEach(node => dialog.append(node));
+  document.body.append(dialog);
+  ui.poolTitle.textContent = "选择绑定人物"; ui.poolKicker.textContent = "CHARACTER CONNECTION";
+  ui.poolSearch.value = session.view.query; ui.poolSort.value = session.view.sort;
+  ui.poolLanguage.value = session.view.language; ui.selectedOnly.checked = session.view.selectedOnly;
+  if (selectedLabel) selectedLabel.textContent = "仅看待新增";
+  ui.poolGrid.replaceChildren(); ui.poolSidebar.replaceChildren(); ui.poseConflict.hidden = true;
+  ui.poolPageLabel.textContent = "1 / 1";
+  setPoolSidebarOpen(false, { immediate: true }); updatePoolSelectionControls();
+  let resolveResult;
+  session.promise = new Promise(resolve => { resolveResult = resolve; });
+  let finishing = false;
+  session.finish = async result => {
+    if (finishing) return; finishing = true;
+    session.closed = true;
+    clearTimeout(ui.poolSearch._timer); invalidatePoolContext(); ++favoritesRequest; ++customGroupsRequest;
+    ui.confirmPool.disabled = true;
+    characterPickerView = clone(session.view);
+    ui.model_profile?.removeEventListener("change", changedProfile);
+    if (typeof StudioMotion !== "undefined" && dialog.open) await new Promise(resolve => {
+      dialog.addEventListener("close", resolve, { once: true });
+      StudioMotion.dialog(dialog, false, { restoreFocus: false });
+    });
+    else if (dialog.open) dialog.close();
+    PoolBrowser.release(session);
+    nodes.forEach(node => ui.poolDrawer.append(node));
+    footer.append(ui.confirmPool); actions.remove(); dialog.remove();
+    ({ activeSection, poolPage, poolPages, poolItems, poolFacets, poolQueryCount,
+      favoritesData, favoritesAvailable, customGroups, drawerTrigger } = saved);
+    poolResultContext = "";
+    const view = currentView();
+    ui.poolTitle.textContent = `${SECTION_META[activeSection].label}池`; ui.poolKicker.textContent = "PROMPT POOL";
+    ui.poolSearch.value = view.query; ui.poolSort.value = view.sort; ui.poolLanguage.value = view.language;
+    ui.selectedOnly.checked = view.selectedOnly;
+    if (selectedLabel) selectedLabel.textContent = selectedLabelText;
+    ui.confirmPool.textContent = "完成"; ui.confirmPool.disabled = false;
+    ui.poolPageLabel.textContent = `${poolPage} / ${poolPages}`;
+    ui.poolPrev.disabled = poolPage <= 1; ui.poolNext.disabled = poolPage >= poolPages;
+    poolResultContext = poolSelectionContext(); renderPoolSidebar(); renderPoolItems(); updatePoseConflict();
+    ui.poolGrid.scrollTop = saved.scrollTop; ui.poolSidebar.scrollTop = saved.sidebarScroll;
+    setPoolSidebarOpen(saved.sidebarOpen, { immediate: true });
+    if (saved.drawerOpen) {
+      ui.poolDrawer.inert = false; ui.poolDrawer.classList.add("open"); ui.poolDrawer.setAttribute("aria-hidden", "false");
+      animatePoolSurface(ui.poolDrawer, ui.drawerBackdrop, true);
+    }
+    if (opener?.isConnected) opener.focus({ preventScroll: true });
+    resolveResult(result);
+    try { if (result) await options.onConfirm?.(result); else await options.onCancel?.(); }
+    catch (error) { toast(error.message); }
+  };
+  const changedProfile = () => { if (currentProfile() !== hostProfile) void session.finish(null); };
+  ui.model_profile?.addEventListener("change", changedProfile);
+  cancel.addEventListener("click", () => session.finish(null));
+  dialog.addEventListener("cancel", event => { event.preventDefault(); event.stopImmediatePropagation(); session.finish(null); });
+  dialog.addEventListener("close", () => { if (!finishing) session.finish(null); });
+  dialog.addEventListener("keydown", event => { if (event.key === "Escape") event.stopPropagation(); });
+  motionDialog(dialog, true); ui.poolSearch.focus({ preventScroll: true });
+  void (async () => {
+    await Promise.all([loadFavorites("character"), loadCustomGroups("character")]);
+    if (characterPickerSession() !== session || session.closed) return;
+    await loadPool();
+  })();
+  return session.promise;
+}
+function confirmPoolSelection() {
+  const session = characterPickerSession();
+  if (!session) { closePool(); return; }
+  if (!session.closed && !ui.confirmPool.disabled) session.finish(session.result());
+}
 async function openPool(section) {
+  if (characterPickerSession()) return;
   invalidatePoolContext();
   const revision = poolContextRevision;
   activeSection = section;
@@ -3784,6 +4020,8 @@ function hideDrawerBackdrop() {
 }
 
 function closePool() {
+  const picker = characterPickerSession();
+  if (picker) { picker.finish(null); return; }
   invalidatePoolContext();
   setPoolMoreSelection(false, { immediate: true });
   currentView().scrollTop = ui.poolGrid.scrollTop;
@@ -3834,7 +4072,7 @@ function readKreaPoolSelection() {
 function poolQueryBody() {
   const view = currentView();
   return {
-    model_profile: currentProfile(),
+    model_profile: poolBrowserProfile(),
     page: poolPage,
     limit: 48,
     q: view.query,
@@ -3850,7 +4088,7 @@ function poolQueryBody() {
   };
 }
 async function loadPool({ throwOnError = false } = {}) {
-  const requestedProfile = currentProfile();
+  const requestedProfile = poolBrowserProfile();
   if (requestedProfile === "krea2") {
     await loadKreaPromptPool({ throwOnError });
     return;
@@ -3860,7 +4098,7 @@ async function loadPool({ throwOnError = false } = {}) {
   const requestId = poolRequest;
   const view = currentView();
   const context = poolSelectionContext();
-  const current = () => requestId === poolRequest && requestedProfile === currentProfile() && context === poolSelectionContext();
+  const current = () => requestId === poolRequest && requestedProfile === poolBrowserProfile() && context === poolSelectionContext();
   updatePoolSelectionControls();
   try {
     const data = await request(`/api/pools/${requestedSection}/query`, {
@@ -3873,19 +4111,24 @@ async function loadPool({ throwOnError = false } = {}) {
     poolPage = data.page;
     poolQueryCount = data.total;
     poolResultContext = poolSelectionContext();
-    if (Number.isFinite(data.pool_total)) config.catalog.counts[requestedSection] = data.pool_total;
-    if (Number.isFinite(data.selected_total)) poolSelectionStats.set(requestedSection, {
-      selectionKey: JSON.stringify(draft.pools[requestedSection]), selectedTotal: data.selected_total,
-    });
+    const picker = characterPickerSession();
+    if (picker) {
+      picker.remember(poolItems);
+      picker.poolTotal = Number(data.pool_total || 0);
+      picker.selectedTotal = Number.isFinite(data.selected_total) ? data.selected_total : null;
+    } else {
+      if (Number.isFinite(data.pool_total)) config.catalog.counts[requestedSection] = data.pool_total;
+      if (Number.isFinite(data.selected_total)) poolSelectionStats.set(requestedSection, {
+        selectionKey: JSON.stringify(draft.pools[requestedSection]), selectedTotal: data.selected_total,
+      });
+    }
     if (activeSection === "pose") poolItems.forEach((item) => poseItemCache.set(item.id, item));
     ui.poolPageLabel.textContent = `${data.page} / ${data.pages}`;
     ui.poolPrev.disabled = data.page <= 1;
     ui.poolNext.disabled = data.page >= data.pages;
     renderPoolSidebar();
     renderPoolItems();
-    renderDimensions();
-    updatePoolOverview();
-    updatePoseConflict();
+    if (!picker) { renderDimensions(); updatePoolOverview(); updatePoseConflict(); }
     requestAnimationFrame(() => {
       if (requestId === poolRequest && view.scrollTop && poolPage === 1) {
         ui.poolGrid.scrollTop = view.scrollTop;
@@ -3921,7 +4164,7 @@ function sidebarSection(title, items, kind, activeValues, multi = false) {
         filters[kind] = [...values];
       } else filters[kind] = filters[kind] === item.value ? "" : item.value;
       poolPage = 1;
-      schedulePersist();
+      persistPoolView();
       loadPool();
     });
     body.append(button);
@@ -3986,15 +4229,19 @@ function customGroupPath(group) {
   return names.join(" / ");
 }
 function persistFavoriteTree() {
+  if (characterPickerSession()) return;
   const value = Object.fromEntries(SECTIONS.map((section) => [section, [...collapsedFavoriteGroups[section]]]));
   localStorage.setItem(GROUP_TREE_KEY, JSON.stringify(value));
 }
 function persistCustomTree() {
+  if (characterPickerSession()) return;
   const value = Object.fromEntries(SECTIONS.map((section) => [section, [...collapsedCustomGroups[section]]]));
   localStorage.setItem(CUSTOM_GROUP_TREE_KEY, JSON.stringify(value));
 }
 function focusFavoriteTreeRow(groupId) {
+  const view = currentView();
   queueMicrotask(() => {
+    if (currentView() !== view) return;
     const row = ui.poolSidebar.querySelector(`.favorite-tree-row[data-group-id="${CSS.escape(groupId)}"]`);
     if (!row) return;
     ui.poolSidebar.querySelectorAll('.favorite-tree [role="treeitem"]').forEach((item) => {
@@ -4112,7 +4359,7 @@ function renderPoolSidebarAnimated(enteredIds = new Set(), kind = null) {
 }
 
 function toggleFavoriteTreeGroup(groupId, restoreFocus = false) {
-  const collapsed = collapsedFavoriteGroups[activeSection];
+  const collapsed = poolCollapsedGroups("favorite");
   const collapsing = !collapsed.has(groupId);
   const descendants = favoriteDescendantIds(groupId);
   if (collapsing) collapsed.add(groupId); else collapsed.delete(groupId);
@@ -4121,7 +4368,9 @@ function toggleFavoriteTreeGroup(groupId, restoreFocus = false) {
   if (restoreFocus) focusFavoriteTreeRow(groupId);
 }
 function focusCustomTreeRow(groupId) {
+  const view = currentView();
   queueMicrotask(() => {
+    if (currentView() !== view) return;
     const tree = ui.poolSidebar.querySelector(".custom-group-tree");
     const row = tree?.querySelector(`.favorite-tree-row[data-group-id="${CSS.escape(groupId)}"]`);
     if (!row) return;
@@ -4132,7 +4381,7 @@ function focusCustomTreeRow(groupId) {
   });
 }
 function toggleCustomTreeGroup(groupId, restoreFocus = false) {
-  const collapsed = collapsedCustomGroups[activeSection];
+  const collapsed = poolCollapsedGroups("custom");
   const collapsing = !collapsed.has(groupId);
   const descendants = customDescendantIds(groupId);
   if (collapsing) collapsed.add(groupId); else collapsed.delete(groupId);
@@ -4154,12 +4403,12 @@ function renderFavoriteTree(container, view) {
     view.filters.collection = "";
     poolPage = 1;
     loadPool();
-    schedulePersist();
+    persistPoolView();
     renderPoolSidebar();
   });
   container.append(allRow);
 
-  const collapsed = collapsedFavoriteGroups[activeSection];
+  const collapsed = poolCollapsedGroups("favorite");
   const appendGroup = (group, depth) => {
     const children = favoriteChildren(group.id);
     const isCollapsed = collapsed.has(group.id);
@@ -4196,7 +4445,7 @@ function renderFavoriteTree(container, view) {
       view.filters.collection = group.id;
       poolPage = 1;
       loadPool();
-      schedulePersist();
+      persistPoolView();
       renderPoolSidebar();
     });
     const edit = document.createElement("button");
@@ -4229,7 +4478,7 @@ function renderCustomTree(container, view) {
   allRow.querySelector(".group-select").addEventListener("click", async () => {
     view.filters.customGroup = "";
     poolPage = 1;
-    schedulePersist();
+    persistPoolView();
     renderPoolSidebar();
     focusCustomTreeRow("");
     await loadPool();
@@ -4237,7 +4486,7 @@ function renderCustomTree(container, view) {
   });
   container.append(allRow);
 
-  const collapsed = collapsedCustomGroups[activeSection];
+  const collapsed = poolCollapsedGroups("custom");
   const appendGroup = (group, depth) => {
     const children = customChildren(group.id);
     const isCollapsed = collapsed.has(group.id);
@@ -4273,11 +4522,11 @@ function renderCustomTree(container, view) {
     button.addEventListener("click", async () => {
       view.filters.customGroup = group.id;
       poolPage = 1;
-      schedulePersist();
+      persistPoolView();
       renderPoolSidebar();
       focusCustomTreeRow(group.id);
       await loadPool();
-      if (view.filters.customGroup === group.id) focusCustomTreeRow(group.id);
+      if (currentView() === view && view.filters.customGroup === group.id) focusCustomTreeRow(group.id);
     });
     const edit = document.createElement("button");
     edit.type = "button";
@@ -4370,6 +4619,7 @@ function renderPoolSidebar() {
     nav.append(sidebarSection(labels.traits, poolFacets.traits, "traits", view.filters.traits, true));
   }
   ui.poolSidebar.replaceChildren(nav);
+  if (characterPickerSession()) ui.poolSidebar.querySelectorAll(".facet-heading > button, .collection-edit").forEach(button => { button.hidden = true; });
 }
 
 function displayTitle(item) {
@@ -4409,6 +4659,7 @@ function itemBadges(item) {
   return values.filter(Boolean);
 }
 function renderPoolItems() {
+  const picker = characterPickerSession();
   const favMap = favoriteMap();
   ui.poolEmpty.hidden = poolItems.length > 0;
   ui.poolGrid.replaceChildren(
@@ -4428,6 +4679,18 @@ function renderPoolItems() {
       article
         .querySelector("label input")
         .addEventListener("change", (event) => toggleSelection(activeSection, item.id, event.target.checked));
+      if (picker) {
+        article.querySelector(".item-tools").hidden = true;
+        if (picker.selectionMode === "single") {
+          const input = article.querySelector("label input"); input.type = "radio"; input.name = "bound-character-choice";
+        }
+        if (picker.alreadyBound.has(item.id)) {
+          article.classList.add("already-bound");
+          article.querySelector("label input").disabled = true;
+          const status = document.createElement("span"); status.className = "pool-bound-label"; status.textContent = "已绑定 · 保留原设置";
+          article.querySelector(".pool-item-copy").append(status);
+        }
+      }
       article.querySelector("img")?.addEventListener("error", (event) => (event.target.style.display = "none"));
       article.querySelector(".favorite-toggle").disabled = !favoritesAvailable;
       article.querySelector(".favorite-toggle").addEventListener("click", (event) => {
@@ -4442,11 +4705,23 @@ function renderPoolItems() {
         event.stopPropagation();
         openCustom(item);
       });
+      if (!picker && activeSection === "character" && currentProfile() === "anima" && typeof LoraManager !== "undefined") {
+        const binding = document.createElement("button");
+        binding.type = "button";
+        binding.className = "lora-character-binding button ghost compact";
+        binding.textContent = "绑定 LoRA";
+        binding.setAttribute("aria-label", `管理 ${displayTitle(item)} 的 LoRA 绑定`);
+        binding.addEventListener("click", (event) => {
+          event.stopPropagation();
+          LoraManager.openCharacter({ ...item, title: displayTitle(item) });
+        });
+        article.querySelector(".item-tools").append(binding);
+      }
       return article;
     }),
   );
   updatePoolSelectionControls();
-  updateFavoriteSelectionButton();
+  if (!picker) updateFavoriteSelectionButton();
 }
 
 function updatePoseConflict() {
@@ -4884,6 +5159,14 @@ function deleteFavoriteGroup() {
 
 function selectCurrentPage(checked) {
   if (poolResultContext !== poolSelectionContext() || poolSelectionOperation) return;
+  const picker = characterPickerSession();
+  if (picker) {
+    try {
+      if (checked) picker.append(poolItems.map(item => item.id));
+      else for (const item of poolItems) picker.toggle(item.id, false);
+    } catch (error) { toast(error.message); return; }
+    return poolSelectionChanged();
+  }
   for (const item of poolItems) {
     const selection = draft.pools[activeSection];
     if (selection.mode === "all")
@@ -6250,7 +6533,7 @@ function deleteSelectedHistoryRecord() {
 }
 ui.deleteRecord.addEventListener("click", deleteSelectedHistoryRecord);
 ui.closePool.addEventListener("click", closePool);
-ui.confirmPool.addEventListener("click", closePool);
+ui.confirmPool.addEventListener("click", confirmPoolSelection);
 ui.drawerBackdrop.addEventListener("click", closePool);
 ui.togglePoolSidebar.addEventListener("click", () =>
   setPoolSidebarOpen(!ui.poolSidebar.classList.contains("mobile-open")),
@@ -6275,35 +6558,37 @@ ui.poolSearch.addEventListener("input", () => {
   updatePoolSelectionControls();
   clearTimeout(ui.poolSearch._timer);
   ui.poolSearch._timer = setTimeout(loadPool, 220);
-  schedulePersist();
+  persistPoolView();
 });
 ui.poolSort.addEventListener("change", () => {
   currentView().sort = ui.poolSort.value;
   poolPage = 1;
   loadPool();
-  schedulePersist();
+  persistPoolView();
 });
 ui.poolLanguage.addEventListener("change", () => {
   currentView().language = ui.poolLanguage.value;
   renderPoolItems();
   renderPoolSidebar(); // 侧栏分类标签同步切换语言
-  schedulePersist();
+  persistPoolView();
 });
 ui.selectedOnly.addEventListener("change", () => {
   currentView().selectedOnly = ui.selectedOnly.checked;
   poolPage = 1;
   loadPool();
-  schedulePersist();
+  persistPoolView();
 });
 ui.clearFilters.addEventListener("click", () => {
   const language = currentView().language;
-  poolViews[activeSection] = { ...defaultView(), language };
+  const picker = characterPickerSession();
+  if (picker) picker.view = { ...defaultView(), language };
+  else poolViews[activeSection] = { ...defaultView(), language };
   ui.poolSearch.value = "";
   ui.poolSort.value = "";
   ui.selectedOnly.checked = false;
   poolPage = 1;
   loadPool();
-  schedulePersist();
+  persistPoolView();
 });
 ui.poolPrev.addEventListener("click", () => {
   poolPage -= 1;
@@ -6550,6 +6835,7 @@ async function initialize() {
     if (typeof initializeSingleWorkbench === "function") initializeSingleWorkbench({ legacyRestored: Boolean(restored) });
     if (typeof initializeHistoryDetail === "function") initializeHistoryDetail();
     if (typeof initializeArtworkFavorites === "function") initializeArtworkFavorites();
+    initializeLoraManager();
     if (typeof StudioMotion !== "undefined") {
       StudioMotion.bindDisclosures(document);
       StudioMotion.bindDialogs(document);
