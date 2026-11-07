@@ -2,7 +2,7 @@
 
 ## 安装与使用
 
-当前版本说明为 **1.5.1**，正式安装包及发布状态以 [GitHub Releases](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases) 为准。软件由 Anima Random Studio 更名，旧仓库版本用户需从新仓库手动下载一次，之后启动器从新仓库检查正式 Release。为兼容现有安装与用户数据，保留 EXE 文件名、安装标识和数据目录。**推荐下载 `AnimaRandomStudio-Setup-win-x64.exe` 安装**，也可直接下载 `AnimaRandomStudio.exe` 运行。`AnimaRandomStudio-portable-win-x64.zip` 仅包含同一份 EXE。源码 ZIP 不包含 EXE。运行依赖自动提取到用户缓存，EXE 旁无需 DLL 或资源文件。
+当前版本说明为 **1.6.0**，正式安装包及发布状态以 [GitHub Releases](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases) 为准。软件由 Anima Random Studio 更名，旧仓库版本用户需从新仓库手动下载一次，之后启动器从新仓库检查正式 Release。为兼容现有安装与用户数据，保留 EXE 文件名、安装标识和数据目录。**推荐下载 `AnimaRandomStudio-Setup-win-x64.exe` 安装**，也可直接下载 `AnimaRandomStudio.exe` 运行。`AnimaRandomStudio-portable-win-x64.zip` 仅包含同一份 EXE。源码 ZIP 不包含 EXE。运行依赖自动提取到用户缓存，EXE 旁无需 DLL 或资源文件。
 
 安装版默认按用户安装到 `%LOCALAPPDATA%/Programs/AnimaRandomStudio`，也可选择其他位置；创建开始菜单入口，可选桌面快捷方式；卸载保留用户数据、模型和环境。
 
@@ -25,7 +25,13 @@
 
 默认 ComfyUI 端口为 8188，工作台端口为 8190；端口冲突时按提示修改。
 
-## 1.5.1 修复与验证范围
+## 1.6.0 更新与验证范围
+
+本版重点为工作台 LoRA 管理：目录与图库浏览、组合筛选、多层收藏组、资料编辑、跨页批量操作、Anima 人物绑定与单图触发词同步；同时更新 v4 放大修复流程。启动器继续提供单文件版、安装版和便携 ZIP，沿用已有环境与数据目录。
+
+本版的发布检查与验证边界见[发行说明](../RELEASE_NOTES.md)。下列 1.5.1 记录仅作为上一版的安装验收历史，不代表 1.6.0 已重新完成这些 GPU 和新机安装测试。
+
+### 1.5.1 安装修复与历史验证
 
 本版补齐新机缺失的放大、脸部细化和 NVIDIA 节点及运行文件，修复 LoRA Manager 首次扫描和集中式元数据分类、旧任务补齐、工作台缺省目录启动错误，以及官方下载中断后的恢复。默认五项必装为 Anima v1 主模型、Qwen 文本编码器、Qwen VAE、SeedVR2 3B INT8 和 SeedVR2 EMA VAE FP16；脸部检测、分割、校正三模型是默认不勾选的可选组。必需项通过实际检查后才能完成向导，提示词助手可稍后配置。
 
@@ -35,7 +41,7 @@
 
 用户另已确认在全新 Windows 系统的电脑上安装测试通过。该安装反馈与上述本机 f GUI、g 六项 GPU 验收分别记录；不据此推断其他显卡或全部模型分支均已通过实机测试。
 
-上述记录的 GPU 实测限于 RTX 4060 Laptop、驱动 610.74。RTX 30/50 专用 DLL、缺失 VC++ 的自动安装、其他解压分支及可选 Krea/本地反推模型的完整实机推理未覆盖；清单和自动契约检查不等于这些硬件与模型已经实测。详见[发布说明](../RELEASE_NOTES.md)。
+上述记录的 GPU 实测限于 RTX 4060 Laptop、驱动 610.74。RTX 30/50 专用 DLL、缺失 VC++ 的自动安装、其他解压分支及可选 Krea/本地反推模型的完整实机推理未覆盖；清单和自动契约检查不等于这些硬件与模型已经实测。详见 [1.5.1 发布记录](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases/tag/1.5.1)。
 
 ## 在原页面管理下载
 
