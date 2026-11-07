@@ -2,7 +2,7 @@
 
 ## 安装与使用
 
-当前版本说明为 **1.6.0**，正式安装包及发布状态以 [GitHub Releases](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases) 为准。软件由 Anima Random Studio 更名，旧仓库版本用户需从新仓库手动下载一次，之后启动器从新仓库检查正式 Release。为兼容现有安装与用户数据，保留 EXE 文件名、安装标识和数据目录。**推荐下载 `AnimaRandomStudio-Setup-win-x64.exe` 安装**，也可直接下载 `AnimaRandomStudio.exe` 运行。`AnimaRandomStudio-portable-win-x64.zip` 仅包含同一份 EXE。源码 ZIP 不包含 EXE。运行依赖自动提取到用户缓存，EXE 旁无需 DLL 或资源文件。
+当前版本说明为 **1.6.2**，正式安装包及发布状态以 [GitHub Releases](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases) 为准。软件由 Anima Random Studio 更名，旧仓库版本用户需从新仓库手动下载一次，之后启动器从新仓库检查正式 Release。为兼容现有安装与用户数据，保留 EXE 文件名、安装标识和数据目录。**推荐下载 `AnimaRandomStudio-Setup-win-x64.exe` 安装**，也可直接下载 `AnimaRandomStudio.exe` 运行。`AnimaRandomStudio-portable-win-x64.zip` 仅包含同一份 EXE。源码 ZIP 不包含 EXE。运行依赖自动提取到用户缓存，EXE 旁无需 DLL 或资源文件。
 
 安装版默认按用户安装到 `%LOCALAPPDATA%/Programs/AnimaRandomStudio`，也可选择其他位置；创建开始菜单入口，可选桌面快捷方式；卸载保留用户数据、模型和环境。
 
@@ -25,11 +25,11 @@
 
 默认 ComfyUI 端口为 8188，工作台端口为 8190；端口冲突时按提示修改。
 
-## 1.6.0 更新与验证范围
+## 1.6.2 更新与验证范围
 
-本版重点为工作台 LoRA 管理：目录与图库浏览、组合筛选、多层收藏组、资料编辑、跨页批量操作、Anima 人物绑定与单图触发词同步；同时更新 v4 放大修复流程。启动器继续提供单文件版、安装版和便携 ZIP，沿用已有环境与数据目录。
+本版修复 Windows 虚拟环境启动进程与实际监听进程不同引起的空闲停机和软件更新失败，并改进预设保存、词池导入、历史回放及生成结果恢复。从 1.5.1 升级同时获得 LoRA 管理、Anima 人物绑定、单图触发词同步与 v4 放大修复流程。启动器继续提供单文件版、安装版和便携 ZIP，沿用已有环境与数据目录。
 
-本版的发布检查与验证边界见[发行说明](../RELEASE_NOTES.md)。下列 1.5.1 记录仅作为上一版的安装验收历史，不代表 1.6.0 已重新完成这些 GPU 和新机安装测试。
+本版的发布检查与验证边界见[发行说明](../RELEASE_NOTES.md)。下列 1.5.1 记录仅作为该版本的安装验收历史，不代表 1.6.2 已重新完成这些 GPU 和新机安装测试。
 
 ### 1.5.1 安装修复与历史验证
 

@@ -1,12 +1,24 @@
-# Comfy Image Atelier 1.6.0 — LoRA 管理与人物绑定
+# Comfy Image Atelier 1.6.2 — 稳定性修复与 LoRA 管理
 
-本次更新重点是 **LoRA 管理**。从原有快速添加弹窗展开完整管理区，把本地 LoRA 的浏览、资料整理、收藏、批量操作和人物绑定放到同一个工作区；常用模型更容易找到，也能直接用于当前创作。
+发布日期：**2026-11-07**。
 
-![LoRA 管理：目录导航、缩略图卡片、搜索筛选、收藏分组与快捷添加](https://raw.githubusercontent.com/159159pzy-crypto/comfy-Image-Atelier/1.6.0/docs/readme/lora-manager.png)
+本版集中修复 **软件更新、预设与词池导入、历史回放及生成结果恢复**。从最新公开版 1.5.1 升级，还将获得 1.6.0 引入的完整 LoRA 管理、人物绑定、触发词同步与 v4 放大修复流程。
 
-截图中的模型与作品为本机使用示例，安装包不包含这些 LoRA 和预览资源。
+## 本次修复
 
-## 本次重点：LoRA 管理
+- **软件更新与空闲停机。** 修复 Windows 虚拟环境的 Python 启动进程与实际监听进程不同导致的失败，兼容已有启动器记录；正常退出不再误报进程身份变化，保留进程归属校验与退出后的端口检查。
+- **预设与词池导入。** 保存风格预设时切换模型档案，不再造成预设列表串档案或参数误写；更换导入文件、关闭重开弹窗、切换词池或档案后，旧预览与迟到响应不会覆盖当前操作。
+- **历史变体与复现。** 单图历史变体保留请求的 1–100 张数量；复现和同提示词变体使用保存的最终提示词，删除原 Krea 词池条目不再阻止回放。必要的模型、LoRA 和参考图仍须可用。
+- **生成结果恢复。** 已提交任务在结果查询短暂断连时，按原任务 ID 有界重试，不重复提交生成；重试耗尽会记录结果未确认及任务 ID，保留已完成图片并继续后续任务。停止和关闭可中断等待。
+- **LoRA 查询与保存。** 单项和封面查询复用清单索引并按资源变化刷新缓存；触发词写盘失败时不发布未保存内容。人物绑定统一从 LoRA 详情的「选择人物」进入，已有绑定仍可编辑。
+
+## 从 1.5.1 升级：LoRA 管理与人物绑定
+
+从原有快速添加弹窗展开完整管理区，把本地 LoRA 的浏览、资料整理、收藏、批量操作和人物绑定放到同一个工作区。
+
+![LoRA 管理：目录导航、缩略图卡片、搜索筛选、收藏分组与快捷添加](https://raw.githubusercontent.com/159159pzy-crypto/comfy-Image-Atelier/1.6.2/docs/readme/lora-manager.png)
+
+截图摄于 1.6.0，模型与作品为本机使用示例，安装包不包含这些 LoRA 和预览资源。
 
 - **从快速添加展开完整资料库。** 保留原快速添加入口，点击右上角展开图标进入管理区。目录导航支持多个模型根目录，图库与列表可切换，搜索覆盖名称、路径、标签和触发词，筛选与排序即时生效。
 - **按自己的方式整理模型。** 星标、多层收藏分组、标签与备注集中管理；详情先阅读、需要时再编辑，统一保存触发词覆盖、默认权重等资料。星标、标签和备注与 LoRA Manager 共用。
@@ -17,7 +29,7 @@
 
 管理区沿用工作台明暗主题与玻璃材质，支持窄屏分层返回、键盘和系统辅助设置；修复展开／收起结束时内容跳位与详情间距问题。
 
-人物自动绑定适用于 **Anima 随机人物池**，不从自由文本推断角色，也不应用于 Krea 2 或单图工作台。LoRA 文件移动、重命名、删除、在线更新和封面替换仍在原插件中完成。详见 [LoRA 管理与人物绑定指南](https://github.com/159159pzy-crypto/comfy-Image-Atelier/blob/1.6.0/docs/guide.md#lora-管理与人物绑定)。
+人物自动绑定适用于 **Anima 随机人物池**，不从自由文本推断角色，也不应用于 Krea 2 或单图工作台。LoRA 文件移动、重命名、删除、在线更新和封面替换仍在原插件中完成。详见 [LoRA 管理与人物绑定指南](https://github.com/159159pzy-crypto/comfy-Image-Atelier/blob/1.6.2/docs/guide.md#lora-管理与人物绑定)。
 
 ## 同步更新：v4 放大修复流程
 
@@ -26,8 +38,6 @@
 - 只开启像素高清时，默认缩至模型原生输出的 50%；开启整图后采样时跳过这次缩图，使用原生输出尺寸，可能增加显存和耗时。
 - 修复固定种子时采样被 ComfyUI 缓存跳过的问题，每张新版任务从底图开始完整执行所选流程，保留种子与模型加载缓存。
 - v2/v3 历史继续按原链路复现；载入旧设置创建新任务时提示升级到 v4，不改写原历史。
-
-另外修复软件更新等待工作台空闲停机时的退出竞态：工作台正常退出后，不再因重复查询进程身份而误报更新失败；保留请求前身份校验、退出后的端口检查与不强制结束进程的规则。
 
 ## 下载与升级
 
@@ -39,8 +49,8 @@
 
 ## 验证范围
 
-本版使用仓库统一发布检查：Python 与前端回归、发行内容与版本检查、依赖审计，以及 Windows 启动器构建、包体完整性和隔离安装／修复／卸载测试。标签对应的自动发布流程全部通过后才公开附件，运行结果可在 [GitHub Actions](https://github.com/159159pzy-crypto/comfy-Image-Atelier/actions/workflows/launcher.yml) 查看。
+本地发布准备仅运行版本、发行内容、静态规则和语法检查。GitHub 标签发布沿用现有自动流程，执行 Python 与前端回归、Chromium 集成测试、依赖审计，以及 Windows 启动器构建、包体完整性和隔离安装／修复／卸载测试；全部通过后才公开附件，运行结果可在 [GitHub Actions](https://github.com/159159pzy-crypto/comfy-Image-Atelier/actions/workflows/launcher.yml) 查看。
 
-本次打包发布未重新进行完整新机冷安装或 GPU 生图实测；1.5.1 的硬件与安装验收属于历史记录，不作为 1.6.0 新增功能的实测结论。
+本次打包发布未重新进行完整新机冷安装或 GPU 生图实测；1.5.1 的硬件与安装验收属于历史记录，不作为 1.6.2 的实测结论。
 
-[完整更新日志](https://github.com/159159pzy-crypto/comfy-Image-Atelier/blob/1.6.0/CHANGELOG.md) · [使用指南](https://github.com/159159pzy-crypto/comfy-Image-Atelier/blob/1.6.0/docs/guide.md) · [启动器说明](https://github.com/159159pzy-crypto/comfy-Image-Atelier/blob/1.6.0/launcher/README.md)
+[完整更新日志](https://github.com/159159pzy-crypto/comfy-Image-Atelier/blob/1.6.2/CHANGELOG.md) · [使用指南](https://github.com/159159pzy-crypto/comfy-Image-Atelier/blob/1.6.2/docs/guide.md) · [启动器说明](https://github.com/159159pzy-crypto/comfy-Image-Atelier/blob/1.6.2/launcher/README.md)
