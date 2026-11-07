@@ -231,7 +231,6 @@ body[data-workbench="single"] .single-prompt-main textarea,
 body[data-workbench="single"] #singleNegative { height: 110px; min-height: 90px; }
 body[data-workbench="single"] .single-job-status { margin-bottom: 0; }
 body[data-workbench="single"] .single-postprocess-card .sampling-stage { padding: 0; margin: 0; background: transparent; border: 0; }
-body[data-workbench="single"] .single-postprocess-card .sampling-stage > .switch-row small { display: none; }
 body[data-workbench="single"] .single-postprocess-card .repair-parameters { margin-top: 16px; }
 body[data-workbench="single"] .single-postprocess-card .repair-parameters.disabled { display: none; }
 body[data-workbench="single"] #latentUpscaleFields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }

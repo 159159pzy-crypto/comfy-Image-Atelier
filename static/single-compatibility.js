@@ -41,6 +41,7 @@ function singleWorkbenchCompatibilityEntries(settings) {
     // The Krea controls were removed, not their saved execution settings.
     // Exclude the entire group from both this display and its reset action.
     if (path.startsWith("krea_variance.")) continue;
+    if (Number(settings.pipeline_version || 2) >= 3 && (path === "latent.pipeline" || path.startsWith("dlss."))) continue;
     if (!SINGLE_VISIBLE_PATHS.has(path)) add(`single.${path}`, path.split(".").map(part => SINGLE_COMPATIBILITY_LABELS[part] || part).join(" · "));
   }
   for (const [key, label] of [["clip_name", "CLIP"], ["vae_name", "VAE"], ["clip_type", "编码类型"]]) add(key, label);
@@ -59,7 +60,8 @@ function postprocessCompatibilityEntries(settings, baseline) {
   }
   add("upscalers.nvidia.resize_type", "N 卡放大 · 缩放方式");
   add("upscalers.nvidia.quality", "N 卡放大 · 质量");
-  add("upscalers.latent.second_sampler.enabled", "潜空间放大 · 二次采样");
+  if (Number(settings.pipeline_version || 2) < 3) add("upscalers.latent.second_sampler.enabled", "潜空间放大 · 二次采样");
+  else for (const [key, label] of [["output_view", "输出视图"], ["gpu_gen", "显卡代际"]]) add(`upscalers.dlss.${key}`, `DLSS · ${label}`);
   for (const key of ["steps", "cfg", "sampler_name", "scheduler", "denoise"]) add(`upscalers.seedvr2.sampler.${key}`, `SeedVR2 · 采样 · ${key}`);
   const faceVisible = new Set(["enabled", "steps", "cfg_scale", "sampler", "scheduler", "denoise_strength"]);
   if (typeof UPSCALER_CONTROL_IDS !== "undefined") for (const [key, id] of Object.entries(UPSCALER_CONTROL_IDS.face_refine)) {

@@ -22,6 +22,16 @@ function batch(overrides = {}) {
     prompt_id: 'prompt-1', settings: { workbench: 'random', model_profile: 'krea2' }, ...overrides };
 }
 
+test('server stage labels describe v3 progress and identify a failed stage', () => {
+  const { ctx, ui } = setup();
+  ctx.renderBatch(batch({ progress_stage: 'post_sampler', progress_stage_label: '整图后采样', progress_node: 'v3:post', progress: { value: 3, max: 16 } }));
+  assert.equal(ui.sampleProgress.textContent, '整图后采样 3/16');
+  ctx.renderBatch(batch({ status: 'error', error: '显存不足', failed_stage_label: '像素高清' }));
+  assert.match(ui.batchError.textContent, /像素高清失败：显存不足/);
+  ctx.renderBatch(batch({ status: 'error', error: '像素高清失败：显存不足', failed_stage_label: '像素高清' }));
+  assert.equal(ui.batchError.textContent, '像素高清失败：显存不足');
+});
+
 test('preview-bearing batches update controls and reach the single workbench without an extra image request', async () => {
   for (const workbench of ['random', 'single']) {
     const { ctx, ui } = setup();

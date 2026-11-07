@@ -22,7 +22,7 @@ function context() {
     profileSettingsDefaults: () => ({ random_character: true, fixed_pose: '', pools: {}, loras: [] }),
     profileConfig: () => ({}),
   });
-  for (const name of ['profileStateFrom', 'profileDraftFromDraft', 'restoreProfileDraft']) vm.runInContext(functionSource(name), ctx);
+  for (const name of ['defaultUpscalers', 'normalizeUpscalers', 'profileStateFrom', 'profileDraftFromDraft', 'restoreProfileDraft']) vm.runInContext(functionSource(name), ctx);
   return ctx;
 }
 function plain(value) { return JSON.parse(JSON.stringify(value)); }
@@ -62,6 +62,7 @@ test('generation omits inactive fixed drafts while retaining pools and count', (
   ctx.ui.count.value = '7';
   ctx.draft = { modes: { character: 'pool', clothing: 'off', pose: 'fixed' }, fixed: { character: 'hidden identity', clothing: 'hidden coat', pose: 'standing' }, counts: {}, pools: { pose: { ids: ['pose:one'] } }, loras: [] };
   const settings = ctx.readSettings();
+  assert.equal(settings.pipeline_version, 4);
   assert.equal(settings.fixed_character, '');
   assert.equal(settings.fixed_clothing, '');
   assert.equal(settings.fixed_pose, 'standing');
@@ -69,6 +70,19 @@ test('generation omits inactive fixed drafts while retaining pools and count', (
   assert.deepEqual(plain(settings.pools.pose.ids), ['pose:one']);
   assert.equal(ctx.draft.fixed_character, undefined);
   assert.equal(ctx.draft.fixed.character, 'hidden identity');
+});
+test('profile drafts isolate v4 latent sampling and upgrade older drafts without borrowing post settings', () => {
+  const ctx = context();
+  ctx.profileDrafts.anima = { pipeline_version: 4, upscalers: { latent: { enabled: true, sampler: { steps: 32, cfg: 3.3, denoise: .42 } }, post_sampler: { enabled: false, steps: 21 } } };
+  ctx.profileDrafts.krea2 = { pipeline_version: 3, upscalers: { latent: { enabled: true, second_sampler: { enabled: true, steps: 99, denoise: 1 } }, post_sampler: { enabled: true, steps: 25, denoise: .15 } } };
+  ctx.restoreProfileDraft('anima'); ctx.restoreProfileDraft('krea2'); ctx.restoreProfileDraft('anima');
+  assert.equal(ctx.profileDrafts.anima.pipeline_version, 4); assert.equal(ctx.profileDrafts.krea2.pipeline_version, 4);
+  assert.equal(ctx.profileDrafts.anima.upscalers.latent.sampler.steps, 32);
+  assert.equal(ctx.profileDrafts.anima.upscalers.latent.sampler.denoise, .42);
+  assert.equal(ctx.profileDrafts.krea2.upscalers.latent.sampler.steps, 10);
+  assert.equal(ctx.profileDrafts.krea2.upscalers.latent.sampler.denoise, .3);
+  assert.equal(ctx.profileDrafts.krea2.upscalers.post_sampler.steps, 25);
+  assert.equal(ctx.profileDrafts.krea2.upscalers.post_sampler.denoise, .15);
 });
 test('partial redraw requires selecting every non-preservable dimension', () => {
   const ctx = context();
@@ -129,6 +143,20 @@ test('enabled incompatible LoRAs remain saved and block generation with the Mana
   ctx.draft.loras[0].enabled = false;
   ctx.updateGenerationAvailability();
   assert.equal(ctx.ui.startButton.disabled, false);
+});
+
+test('v3 ignores obsolete latent LoRA routes but still validates an active face or final base route', () => {
+  const ctx = classificationContext();
+  const saved = { pipeline_version: 3, workbench: 'single', base_mode: 'normal', model_name: 'anima.safetensors', loras: [],
+    single: { normal_pipeline: 'primary', face_pipeline: 'primary', latent: { pipeline: 'secondary' }, loras_secondary: [{ filename: 'missing.safetensors', enabled: true }] },
+    upscalers: { latent: { enabled: true, second_sampler: { enabled: true } }, post_sampler: { enabled: true }, face_refine: { enabled: false } } };
+  assert.deepEqual(plain(ctx.generationClassificationIssues(saved)), []);
+  assert.match(ctx.generationClassificationIssues({ ...saved, pipeline_version: 2 }).join(), /missing.safetensors/);
+  saved.single.face_pipeline = 'secondary'; saved.upscalers.face_refine.enabled = true;
+  assert.match(ctx.generationClassificationIssues(saved).join(), /missing.safetensors/);
+  saved.upscalers.face_refine.enabled = false; saved.base_mode = 'dual_sampler'; saved.single.dual = { first_pipeline: 'primary', second_pipeline: 'secondary' };
+  assert.match(ctx.generationClassificationIssues(saved).join(), /missing.safetensors/);
+  assert.equal(saved.single.loras_secondary[0].enabled, true);
 });
 
 test('unknown and unsupported classifications display the backend reason', () => {
@@ -322,11 +350,12 @@ function profileResourceContext() {
     krea2: { id: 'krea2', model_name: 'krea2_turbo_int8_convrot.safetensors', clip_name: 'qwen3vl_4b_fp8_scaled.safetensors', vae_name: 'qwen_image_vae.safetensors', clip_type: 'krea2', defaults: { steps: 30, cfg: 4, base_mode: 'normal' } },
   };
   const result = singleContext({
+    clone: plain,
     config: { model_profiles: profiles }, resources: {}, profileResources: {},
     defaults: { ...profiles.anima, ...profiles.anima.defaults, model_profile: 'anima', loras: [{ filename: 'anima-lora' }] },
     normalizeProfileId: value => value === 'krea2' ? 'krea2' : 'anima', defaultPools: () => ({}),
   });
-  for (const name of ['profileConfig', 'profileSettingsDefaults']) vm.runInContext(functionSource(name), result.ctx);
+  for (const name of ['defaultUpscalers', 'normalizeUpscalers', 'profileConfig', 'profileSettingsDefaults']) vm.runInContext(functionSource(name), result.ctx);
   return { ...result, profiles };
 }
 test('Krea single defaults bind its encoder before the live resource inventory loads', () => {

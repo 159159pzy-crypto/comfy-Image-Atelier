@@ -49,6 +49,17 @@ def _write_fake_tools(root: Path) -> Path:
     return root / "tools"
 
 
+def effective_base_seed(graph):
+    """Read the sampling seed through the v3 execution-only cache gate."""
+    sampler = graph["701:1245"]["inputs"] if "701:1245" in graph else graph["691:1240"]["inputs"]
+    seed = sampler.get("noise_seed", sampler.get("seed"))
+    if isinstance(seed, list):
+        gate = graph[seed[0]]["inputs"]
+        assert gate["expression"] == "a"
+        seed = graph[gate["values.a"][0]]["inputs"]["value"]
+    return seed
+
+
 class FakeComfy:
     base_url = "http://127.0.0.1:8188"
 
@@ -96,7 +107,7 @@ class FakeComfy:
         return {
             "models": [DEFAULT_SETTINGS["model_name"]],
             "upscale_models": [DEFAULT_SETTINGS["hires"]["model_name"]],
-            "samplers": [DEFAULT_SETTINGS["sampler_name"], "euler", DEFAULT_SETTINGS["upscalers"]["face_refine"]["sampler"]],
+            "samplers": [DEFAULT_SETTINGS["sampler_name"], "euler", DEFAULT_SETTINGS["upscalers"]["face_refine"]["sampler"], DEFAULT_SETTINGS["upscalers"]["latent"]["sampler"]["sampler_name"]],
             "schedulers": [DEFAULT_SETTINGS["scheduler"], "karras", DEFAULT_SETTINGS["upscalers"]["face_refine"]["scheduler"]],
         }
 
@@ -607,7 +618,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_resources_and_style_preset_crud(self):
         resources = await (await self.client.get("/api/resources")).json()
         self.assertEqual(resources["models"], [DEFAULT_SETTINGS["model_name"]])
-        self.assertEqual(resources["samplers"], [DEFAULT_SETTINGS["sampler_name"], "euler", DEFAULT_SETTINGS["upscalers"]["face_refine"]["sampler"]])
+        self.assertEqual(resources["samplers"], [DEFAULT_SETTINGS["sampler_name"], "euler", DEFAULT_SETTINGS["upscalers"]["face_refine"]["sampler"], DEFAULT_SETTINGS["upscalers"]["latent"]["sampler"]["sampler_name"]])
         self.assertEqual(resources["schedulers"], [DEFAULT_SETTINGS["scheduler"], "karras", DEFAULT_SETTINGS["upscalers"]["face_refine"]["scheduler"]])
         snapshot = {
             key: copy.deepcopy(DEFAULT_SETTINGS[key])
@@ -991,8 +1002,8 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         await self.client.server.app[MANAGER_KEY].wait()
         submitted = self.comfy.submissions[-1]["prompt"]
         final_prompt = "year 2025, score_9, blue hair, 1girl, @Niji9il"
-        self.assertEqual(submitted["168"]["inputs"]["value"], final_prompt)
         self.assertEqual(submitted["1010:995"]["inputs"]["text"], final_prompt)
+        self.assertEqual(submitted["1026:1011"]["inputs"]["text"], final_prompt)
         self.assertNotIn("42", submitted)
         self.assertNotIn("60", submitted)
 
@@ -1258,6 +1269,108 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         history = await (await self.client.get("/api/history")).json()
         return history["items"][0]
 
+    async def test_new_workbench_submission_upgrades_legacy_settings_to_v4(self):
+        response = await self.client.post("/api/batches", json={"count": 1, "base_mode": "normal"})
+        self.assertEqual(response.status, 201)
+        result = await self.client.server.app[MANAGER_KEY].wait()
+        self.assertEqual(result["status"], "completed")
+        image = (await (await self.client.get("/api/history")).json())["items"][0]
+        self.assertEqual(image["settings"]["pipeline_version"], 4)
+        self.assertFalse(image["settings"]["upscalers"]["post_sampler"]["enabled"])
+
+    async def test_v3_replay_refreshes_execution_identity_without_changing_seeds_or_settings(self):
+        image = await self._create_history_image()
+        original_context = image["execution_context"]
+        self.assertTrue(original_context["execution_id"])
+        response = await self.client.post(f"/api/history/{image['id']}/regenerate", json={"mode": "replay"})
+        self.assertEqual(response.status, 201, await response.text())
+        await self.client.server.app[MANAGER_KEY].wait()
+        replayed = (await self.client.server.app[HISTORY_KEY].list_images())["items"][0]
+        context = replayed["execution_context"]
+        self.assertNotEqual(context["execution_id"], original_context["execution_id"])
+        self.assertNotEqual(context["execution_nonce"], original_context["execution_nonce"])
+        self.assertEqual(replayed["settings"], image["settings"])
+        self.assertEqual((replayed["sample_seed"], replayed["prompt_seed"]), (image["sample_seed"], image["prompt_seed"]))
+        payload = self.comfy.submissions[-1]
+        self.assertEqual(effective_base_seed(payload["prompt"]), image["sample_seed"])
+        self.assertEqual(payload["prompt"]["v3:run:nonce"]["inputs"]["value"], context["execution_nonce"])
+        metadata = payload["extra_data"]["extra_pnginfo"]["anima_random_webui"]
+        self.assertEqual(metadata["execution_context"], context)
+        self.assertNotIn("execution_context", metadata["settings"])
+
+    async def test_launcher_defaults_do_not_cross_model_profile_stage_settings(self):
+        client = FakeComfy()
+        original_inventory = client.resource_inventory
+
+        async def inventory():
+            result = await original_inventory()
+            result["models"].append("krea2_turbo_int8_convrot.safetensors")
+            return result
+
+        client.resource_inventory = inventory
+        app = create_app(app_dir=APP_DIR, data_dir=Path(self.temp.name) / "launcher-data", comfy=client,
+                         anima_tools_dir=Path(self.temp.name) / "tools", resource_paths={})
+        launched = TestClient(TestServer(app))
+        await launched.start_server()
+        try:
+            response = await launched.post("/api/batches", json={"model_profile": "krea2", "pipeline_version": 3, "count": 1})
+            self.assertEqual(response.status, 201, await response.text())
+            stages = (await response.json())["settings"]["upscalers"]
+            self.assertEqual(stages["pixel_hires"]["model_name"], "4x-AnimeSharp.pth")
+            self.assertEqual((stages["post_sampler"]["steps"], stages["post_sampler"]["cfg"], stages["post_sampler"]["denoise"]), (10, 1, .3))
+            self.assertEqual((await app[MANAGER_KEY].wait())["status"], "completed")
+        finally:
+            await launched.close()
+
+    async def test_history_regeneration_keeps_versionless_legacy_pipeline(self):
+        settings = {"model_profile": "anima", "count": 1, "base_mode": "normal", "random_pose": True}
+        store = self.client.server.app[HISTORY_KEY]
+        await store.create_batch("legacy-pipeline", 1, settings)
+        image = await store.add_image(batch_id="legacy-pipeline", sequence=1, prompt_id="legacy",
+                                      image={"filename": "legacy.png", "type": "output", "subfolder": ""},
+                                      positive_prompt="standing", negative_prompt="", sample_seed=123,
+                                      prompt_seed=456, settings=settings)
+        for mode in ("replay", "prompt_variant", "settings_reroll", "content_redraw"):
+            with self.subTest(mode=mode):
+                payload = {"mode": mode}
+                if mode != "replay":
+                    payload["count"] = 1
+                if mode == "content_redraw":
+                    payload["sections"] = ["pose"]
+                response = await self.client.post(f"/api/history/{image['id']}/regenerate", json=payload)
+                self.assertEqual(response.status, 201, await response.text())
+                result = await self.client.server.app[MANAGER_KEY].wait()
+                self.assertEqual(result["status"], "completed", result)
+                saved = self.comfy.submissions[-1]["extra_data"]["extra_pnginfo"]["anima_random_webui"]["settings"]
+                self.assertEqual(saved["pipeline_version"], 2)
+        self.assertNotIn("pipeline_version", (await store.get_image(image["id"]))["settings"])
+
+    async def test_v3_history_replay_is_frozen_but_new_workbench_task_uses_v4_latent_sampling(self):
+        from anima_webui.workflow import validate_settings
+
+        settings = validate_settings({"pipeline_version": 3, "base_mode": "normal", "count": 1,
+                                      "upscalers": {"latent": {"enabled": True}}})
+        store = self.client.server.app[HISTORY_KEY]
+        await store.create_batch("frozen-v3", 1, settings)
+        image = await store.add_image(batch_id="frozen-v3", sequence=1, prompt_id="old",
+                                      image={"filename": "v3.png"}, positive_prompt="cat", negative_prompt="",
+                                      sample_seed=12, prompt_seed=34, settings=settings)
+        response = await self.client.post(f"/api/history/{image['id']}/regenerate", json={"mode": "replay"})
+        self.assertEqual(response.status, 201, await response.text())
+        self.assertEqual((await self.client.server.app[MANAGER_KEY].wait())["status"], "completed")
+        replay = self.comfy.submissions[-1]
+        self.assertEqual(replay["extra_data"]["extra_pnginfo"]["anima_random_webui"]["settings"]["pipeline_version"], 3)
+        self.assertNotIn("v4:latent:sample", replay["prompt"])
+        self.assertEqual(sum(node["class_type"] == "KSampler" for node in replay["prompt"].values()), 1)
+
+        response = await self.client.post("/api/batches", json=settings)
+        self.assertEqual(response.status, 201, await response.text())
+        self.assertEqual((await self.client.server.app[MANAGER_KEY].wait())["status"], "completed")
+        fresh = self.comfy.submissions[-1]
+        self.assertEqual(fresh["extra_data"]["extra_pnginfo"]["anima_random_webui"]["settings"]["pipeline_version"], 4)
+        self.assertEqual(fresh["prompt"]["v4:latent:sample"]["inputs"]["steps"], 16)
+        self.assertEqual((await store.get_image(image["id"]))["settings"], settings)
+
     async def test_regeneration_options_and_frozen_modes(self):
         image = await self._create_history_image()
         options = await (
@@ -1275,12 +1388,12 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         await self.client.server.app[MANAGER_KEY].wait()
         replay_prompt = self.comfy.submissions[original_submissions]["prompt"]
         self.assertEqual(
-            replay_prompt["701:1245"]["inputs"]["noise_seed"], image["sample_seed"]
+            effective_base_seed(replay_prompt), image["sample_seed"]
         )
         self.assertEqual(
-            replay_prompt["701:1242"]["inputs"]["values.a"], image["prompt_seed"]
+            self.comfy.submissions[original_submissions]["extra_data"]["extra_pnginfo"]["anima_random_webui"]["prompt_seed"], image["prompt_seed"]
         )
-        self.assertEqual(replay_prompt["168"]["inputs"]["value"], "generated")
+        self.assertEqual(replay_prompt["1010:995"]["inputs"]["text"], "generated")
         for removed_id in ("37", "42", "49", "60"):
             self.assertNotIn(removed_id, replay_prompt)
 
@@ -1293,13 +1406,13 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         variant_prompts = self.comfy.submissions[-2:]
         self.assertTrue(
             all(
-                item["prompt"]["701:1242"]["inputs"]["values.a"] == image["prompt_seed"]
+                item["extra_data"]["extra_pnginfo"]["anima_random_webui"]["prompt_seed"] == image["prompt_seed"]
                 for item in variant_prompts
             )
         )
         self.assertTrue(
             all(
-                item["prompt"]["701:1245"]["inputs"]["noise_seed"] != image["sample_seed"]
+                effective_base_seed(item["prompt"]) != image["sample_seed"]
                 for item in variant_prompts
             )
         )

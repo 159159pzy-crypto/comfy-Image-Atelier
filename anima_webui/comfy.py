@@ -13,7 +13,10 @@ from .workflow import WorkflowError, normalize_lora_path
 
 
 class ComfyError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, node_id: str = "", node_type: str = ""):
+        super().__init__(message)
+        self.node_id = node_id
+        self.node_type = node_type
 
 
 class ComfyAborted(RuntimeError):
@@ -270,7 +273,8 @@ class ComfyClient:
         nvidia_nodes = sorted(
             name
             for name in node_names
-            if any(token in name.casefold() for token in ("dlss", "vsr", "nvidia"))
+            if name == "RTXVideoSuperResolution"
+            or any(token in name.casefold() for token in ("dlss", "vsr", "nvidia"))
         )
         face_node = "ForbiddenVisionFaceProcessorIntegrated"
         seedvr2_models = [
@@ -298,12 +302,18 @@ class ComfyClient:
                 "CLIPLoader": "CLIPLoader" in node_names,
                 "VAELoader": "VAELoader" in node_names,
                 "SeedVR2": bool(seedvr_nodes),
-                "NvidiaUpscale": bool(nvidia_nodes),
+                "NvidiaUpscale": "RTXVideoSuperResolution" in node_names,
+                "RTXVideoSuperResolution": "RTXVideoSuperResolution" in node_names,
+                "DLSS5NeuralRender": "DLSS5NeuralRender" in node_names,
+                "UpscaleModelLoader": "UpscaleModelLoader" in node_names,
+                "ImageUpscaleWithModel": "ImageUpscaleWithModel" in node_names,
                 "ForbiddenVisionFaceProcessorIntegrated": face_node in node_names,
             },
             "plugins": {
                 "seedvr2": bool(seedvr_nodes),
-                "nvidia_upscale": bool(nvidia_nodes),
+                "nvidia_upscale": "RTXVideoSuperResolution" in node_names,
+                "dlss": "DLSS5NeuralRender" in node_names,
+                "pixel_hires": {"UpscaleModelLoader", "ImageUpscaleWithModel"}.issubset(node_names),
                 "forbidden_vision_face": face_node in node_names,
             },
             "prompt_processing": {
@@ -316,7 +326,9 @@ class ComfyClient:
                 for name in ("UNETLoader", "CLIPLoader", "VAELoader", "KSampler", "KSamplerAdvanced",
                              "VAEDecodeTiled", "VAEEncodeTiled", "VAEDecode", "VAEEncode", "LoadImage",
                              "SesquiLatentUpscale", "LatentUpscaleBy", "DLSS5NeuralRender", "KreaSeedVarianceEnhancer",
-                             "ForbiddenVisionFaceProcessorIntegrated", "RTXVideoSuperResolution", "SeedVR2PostProcessing", "PromptExpand")
+                             "ForbiddenVisionFaceProcessorIntegrated", "RTXVideoSuperResolution", "SeedVR2PostProcessing", "PromptExpand",
+                             "UpscaleModelLoader", "ImageUpscaleWithModel", "ImageScale", "ImageScaleBy",
+                             "PrimitiveInt", "ComfyMathExpression")
                 if name in object_info
             },
             "node_types": sorted(node_names),
@@ -494,6 +506,7 @@ class ComfyClient:
                 if status.get("status_str") == "error" or status.get("completed") is False:
                     messages = status.get("messages") or []
                     detail = "未知错误"
+                    failed_node_id = failed_node_type = ""
                     for message in reversed(messages):
                         if isinstance(message, (list, tuple)) and len(message) > 1 and isinstance(message[1], dict):
                             data = message[1]
@@ -501,13 +514,15 @@ class ComfyClient:
                                 detail = "任务已中断"
                                 break
                             if data.get("exception_message"):
+                                failed_node_id = str(data.get("node_id") or "")
+                                failed_node_type = str(data.get("node_type") or "")
                                 node = str(data.get("node_type") or data.get("node_id") or "节点")
                                 summary = str(data["exception_message"]).strip().splitlines()[0][:600]
                                 detail = f"{node}: {summary}"
                                 break
                         elif isinstance(message, str):
                             detail = message[:600]
-                    raise ComfyError(f"ComfyUI 执行失败: {detail}")
+                    raise ComfyError(f"ComfyUI 执行失败: {detail}", node_id=failed_node_id, node_type=failed_node_type)
                 return entry
             # 任务既不在 history 也不在队列时(历史被清空、ComfyUI 重启丢任务),
             # 持续 missing_timeout 秒即放弃,避免批次永久卡死。

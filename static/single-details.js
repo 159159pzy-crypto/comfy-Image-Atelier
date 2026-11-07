@@ -18,7 +18,9 @@ function singleDetailData(record) {
   const settings = record.settings || {}, single = settings.single || {}, runtime = record.single_runtime || {}, bound = record.bound_resources || {};
   const mode = settings.generation_mode, dual = (settings.workbench === "single" ? single.dual : settings.dual) || {}, post = settings.upscalers || {};
   const variance = settings.krea_variance || single.krea_variance;
-  const dlss = post.nvidia?.dlss || single.dlss;
+  const v3 = Number(settings.pipeline_version || 2) >= 3;
+  const v4 = Number(settings.pipeline_version || 2) >= 4;
+  const dlss = v3 ? post.dlss : post.nvidia?.dlss || single.dlss;
   const primaryNegative = runtime.negative ?? record.negative_prompt ?? settings.negative_prompt;
   const pipelinePrompt = name => runtime.effective_positive?.[name];
   const zeroFor = name => name === "primary" ? single.zero_negative : name === "secondary" ? single.secondary_zero_negative : undefined;
@@ -50,7 +52,8 @@ function singleDetailData(record) {
   const basePipeline = settings.base_mode === "dual_sampler" ? dual.second_pipeline : single.normal_pipeline;
   const positive = pipelinePrompt(basePipeline) ?? record.positive_prompt ?? record.resolved_prompt ?? runtime.positive;
   const negative = primaryNegative, zeroNegative = zeroFor(basePipeline);
-  if (post.latent?.enabled && post.latent.second_sampler?.enabled) stages.push({ title: "潜空间二次采样", pipeline: single.latent?.pipeline, rows: [] });
+  if (v4 && post.latent?.enabled) stages.push({ title: "潜空间采样", pipeline: basePipeline, rows: [] });
+  if (v3 ? post.post_sampler?.enabled : post.latent?.enabled && post.latent.second_sampler?.enabled) stages.push({ title: v3 ? "整图后采样" : "潜空间二次采样", pipeline: v3 ? basePipeline : single.latent?.pipeline, rows: [] });
   if (post.face_refine?.enabled) stages.push({ title: "脸部细化", pipeline: single.face_pipeline, rows: [] });
   for (const stage of stages) {
     stage.positive = pipelinePrompt(stage.pipeline);
@@ -76,7 +79,23 @@ function singleDetailData(record) {
       { title: "修复选项", rows: fields(face, [["enable_color_correction", "色彩校正"], ["enable_segmentation", "图像分割"], ["enable_differential_diffusion", "差分扩散"], ["enable_lightness_rescue", "亮度修复"], ["enable_final_refinement", "最终细化"], ["offload_models_to_cpu", "模型卸载到处理器"]]) },
     ] },
   ];
-  const repairOrder = ["潜空间放大", "脸部细化", "SeedVR2", "N 卡放大"];
+  if (v3) {
+    const latent = repairs.find(stage => stage.title === "潜空间放大");
+    const latentConfig = settings.workbench === "single" ? { ...post.latent, ...single.latent } : post.latent;
+    latent.rows = v4
+      ? [["倍率", post.latent?.scale_by], ["缩放方法", latentConfig?.upscale_method], ...(latentConfig?.upscale_method === "sesqui" ? [["模型格式", latentConfig?.model_format]] : []), ...sampler(post.latent?.sampler), ["模型与 LoRA", "继承底图最后一段"]]
+      : [["倍率", post.latent?.scale_by], ["缩放方法", single.latent?.model_format ?? post.latent?.model_format]];
+    if (v4) latent.otherGroups = [...sesqui(latentConfig), tiles("潜空间 VAE 编码", single.vae_encode), tiles("潜空间 VAE 解码", single.vae_decode)];
+    const nvidia = repairs.find(stage => stage.title === "N 卡放大");
+    nvidia.title = "N 卡 VSR"; nvidia.rows = [["倍率", post.nvidia?.scale]]; nvidia.otherGroups = [{ title: "放大参数", rows: [["质量", post.nvidia?.quality], ["缩放方式", post.nvidia?.resize_type]] }];
+    repairs.push(
+      { title: "像素高清", enabled: post.pixel_hires?.enabled, rows: [["模型", bound.pixel_hires_model ?? post.pixel_hires?.model_name], ["缩图比例", post.post_sampler?.enabled ? "后采样开启，跳过缩图" : `${post.pixel_hires?.percent ?? "未记录"}%`], ["缩图算法", post.pixel_hires?.upscale_method]], otherGroups: [] },
+      { title: "整图后采样", enabled: post.post_sampler?.enabled, rows: [...sampler(post.post_sampler), ["模型与 LoRA", "继承底图最后一段"]], otherGroups: [] },
+      { title: "DLSS", enabled: post.dlss?.enabled, rows: fields(dlss, [["style", "风格"], ["intensity", "强度"], ["local_tone", "局部光影"], ["local_struct", "局部细节"], ["output_mix", "输出混合"]]), otherGroups: [{ title: "输出参数", rows: fields(dlss, [["output_view", "输出视图"], ["gpu_gen", "显卡代际"]]) }] },
+    );
+  }
+  const repairOrder = v4 ? ["像素高清", "潜空间放大", "整图后采样", "脸部细化", "SeedVR2", "N 卡 VSR", "DLSS"]
+    : v3 ? ["像素高清", "N 卡 VSR", "SeedVR2", "潜空间放大", "整图后采样", "脸部细化", "DLSS"] : ["潜空间放大", "脸部细化", "SeedVR2", "N 卡放大"];
   repairs.sort((a, b) => repairOrder.indexOf(a.title) - repairOrder.indexOf(b.title));
   const profile = bound.model_profile ?? settings.model_profile;
   const basic = [["模型档案", profile === "anima" ? "Anima" : profile === "krea2" ? "Krea 2" : profile], ["主模型", bound.unet ?? settings.model_name],

@@ -32,6 +32,9 @@ class RegenerationPreservationApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def create_legacy_image(self, *, positive="1girl, alpha, series, standing", character=None):
         settings = copy.deepcopy(DEFAULT_SETTINGS)
+        # A historical snapshot predating pipeline v3 must remain versionless;
+        # copying today's public defaults must not silently opt it into v3.
+        settings.pop("pipeline_version", None)
         settings.update({
             "count": 1, "random_character": True, "random_pose": True,
             "character_detail": "trigger", "quality_prompt": "", "manual_artist": "",
@@ -77,11 +80,13 @@ class RegenerationPreservationApiTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.wait()
         self.assertEqual(self.manager.snapshot()["status"], "completed")
         submitted = self.comfy.submissions[-1]
-        text = submitted["prompt"]["168"]["inputs"]["value"]
+        text = submitted["prompt"]["1010:995"]["inputs"]["text"]
         self.assertIn("alpha, series", text)
         self.assertNotIn("blue eyes", text)
         saved = await self.history.get_image(image["id"])
         self.assertEqual(saved["resolved_selection"], image["resolved_selection"])
+        self.assertNotIn("pipeline_version", saved["settings"])
+        self.assertEqual(submitted["extra_data"]["extra_pnginfo"]["anima_random_webui"]["settings"]["pipeline_version"], 2)
 
     async def test_clothing_filter_reaches_workflow_history_and_frozen_regeneration(self):
         catalog = self.manager.catalog
@@ -111,9 +116,11 @@ class RegenerationPreservationApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.manager.snapshot()["status"], "completed")
         expected = "1girl, alpha, series, blue eyes, hair bow, bare shoulders, navel, cleavage"
         submitted = self.comfy.submissions[-1]
-        self.assertEqual(submitted["prompt"]["168"]["inputs"]["value"], expected)
+        self.assertEqual(submitted["prompt"]["1010:995"]["inputs"]["text"], expected)
+        self.assertEqual(submitted["prompt"]["1026:1011"]["inputs"]["text"], expected)
         image = (await self.history.list_images())["items"][0]
         self.assertEqual(image["positive_prompt"], expected)
+        self.assertEqual(image["settings"]["pipeline_version"], 4)
         self.assertEqual(image["settings"]["character_detail"], "trigger_tags_no_clothing")
         role = image["resolved_selection"]["character"][0]
         self.assertEqual(role["prompt"], expected.removeprefix("1girl, "))
@@ -130,7 +137,8 @@ class RegenerationPreservationApiTests(unittest.IsolatedAsyncioTestCase):
                 await self.manager.wait()
                 self.assertEqual(self.manager.snapshot()["status"], "completed")
                 submitted = self.comfy.submissions[-1]
-                self.assertEqual(submitted["prompt"]["168"]["inputs"]["value"], expected)
+                self.assertEqual(submitted["prompt"]["1010:995"]["inputs"]["text"], expected)
+                self.assertEqual(submitted["prompt"]["1026:1011"]["inputs"]["text"], expected)
                 metadata = submitted["extra_data"]["extra_pnginfo"]["anima_random_webui"]
                 self.assertEqual(metadata["resolved_selection"], image["resolved_selection"])
 
@@ -173,8 +181,8 @@ class RegenerationPreservationApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.manager.snapshot()["status"], "completed")
         payload = self.comfy.submissions[-1]
         graph = payload["prompt"]
-        self.assertEqual(graph["168"]["inputs"]["value"], positive)
-        self.assertEqual(graph["250"]["inputs"]["value"], "historical negative")
+        self.assertEqual(graph["1010:995"]["inputs"]["text"], positive)
+        self.assertEqual(graph["1010:1004"]["inputs"]["text"], "historical negative")
         metadata = payload["extra_data"]["extra_pnginfo"]["anima_random_webui"]
         self.assertEqual(metadata["sample_seed"], image["sample_seed"])
         self.assertEqual(metadata["prompt_seed"], image["prompt_seed"])

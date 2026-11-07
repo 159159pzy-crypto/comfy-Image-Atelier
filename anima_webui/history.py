@@ -127,6 +127,7 @@ class HistoryStore(StorageProtection):
             HistoryStore._backup_before_artwork_favorites(connection)
         needs_backup = not {"batches", "images"}.issubset(tables)
         needs_single_backup = "prompt_jobs" not in tables
+        needs_execution_backup = False
         for table in ("batches", "images"):
             if table not in tables:
                 continue
@@ -137,6 +138,8 @@ class HistoryStore(StorageProtection):
                 needs_backup = True
             if table == "images" and "single_runtime_json" not in columns:
                 needs_single_backup = True
+            if table == "images" and "execution_context_json" not in columns:
+                needs_execution_backup = True
             if "settings_json" not in columns:
                 continue
             for row in connection.execute(f"SELECT settings_json FROM {table}"):
@@ -153,6 +156,8 @@ class HistoryStore(StorageProtection):
             HistoryStore._backup_before_single_workbench(connection)
         if needs_backup:
             HistoryStore._backup_before_migration(connection)
+        if needs_execution_backup:
+            HistoryStore._backup_before_single_workbench(connection, suffix="execution-context", label="执行上下文")
 
     @staticmethod
     def _backup_before_artwork_favorites(connection: sqlite3.Connection) -> Path | None:
@@ -186,7 +191,8 @@ class HistoryStore(StorageProtection):
         return destination
 
     @staticmethod
-    def _backup_before_single_workbench(connection: sqlite3.Connection) -> Path | None:
+    def _backup_before_single_workbench(connection: sqlite3.Connection, *, suffix: str = "single-workbench",
+                                      label: str = "单图工作台") -> Path | None:
         """Snapshot this upgrade independently of an older profile migration.
 
         A previously restored database may have accumulated new images since
@@ -197,10 +203,10 @@ class HistoryStore(StorageProtection):
         database_path = str(row[2]) if row is not None else ""
         if not database_path:
             return None
-        backup_path = Path(f"{database_path}.pre-single-workbench.bak")
+        backup_path = Path(f"{database_path}.pre-{suffix}.bak")
         number = 2
         while backup_path.exists():
-            backup_path = Path(f"{database_path}.pre-single-workbench-{number}.bak")
+            backup_path = Path(f"{database_path}.pre-{suffix}-{number}.bak")
             number += 1
         reserved = False
         try:
@@ -220,7 +226,7 @@ class HistoryStore(StorageProtection):
                 except OSError:
                     pass
             raise HistoryMigrationError(
-                f"单图工作台升级前无法创建数据库备份: {backup_path.name}"
+                f"{label}升级前无法创建数据库备份: {backup_path.name}"
             ) from error
         return backup_path
 
@@ -288,6 +294,8 @@ class HistoryStore(StorageProtection):
             )
         if "single_runtime_json" not in image_columns:
             connection.execute("ALTER TABLE images ADD COLUMN single_runtime_json TEXT NOT NULL DEFAULT '{}'")
+        if "execution_context_json" not in image_columns:
+            connection.execute("ALTER TABLE images ADD COLUMN execution_context_json TEXT NOT NULL DEFAULT '{}'")
         # Migrate before the normal restart-status update so the pre-migration
         # backup contains the exact legacy database state.
         HistoryStore._migrate_unprofiled_history(connection)
@@ -600,6 +608,7 @@ class HistoryStore(StorageProtection):
         resolved_prompt: str = "",
         bound_resources: dict[str, Any] | None = None,
         single_runtime: dict[str, Any] | None = None,
+        execution_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.ensure_writable()
         cursor = self.connection.execute(
@@ -608,8 +617,8 @@ class HistoryStore(StorageProtection):
                 batch_id, sequence, prompt_id, filename, subfolder, file_type,
                 positive_prompt, negative_prompt, sample_seed, prompt_seed,
                 settings_json, created_at, resolved_selection_json, resolved_prompt,
-                bound_resources_json, single_runtime_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                bound_resources_json, single_runtime_json, execution_context_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 batch_id,
@@ -628,6 +637,7 @@ class HistoryStore(StorageProtection):
                 str(resolved_prompt or ""),
                 json.dumps(bound_resources or {}, ensure_ascii=False),
                 json.dumps(single_runtime or {}, ensure_ascii=False),
+                json.dumps(execution_context or {}, ensure_ascii=False),
             ),
         )
         self.connection.commit()
@@ -662,6 +672,7 @@ class HistoryStore(StorageProtection):
         result["resolved_selection"] = json.loads(result.pop("resolved_selection_json", "{}") or "{}")
         result["bound_resources"] = json.loads(result.pop("bound_resources_json", "{}") or "{}")
         result["single_runtime"] = json.loads(result.pop("single_runtime_json", "{}") or "{}")
+        result["execution_context"] = json.loads(result.pop("execution_context_json", "{}") or "{}")
         result["workbench"] = result["settings"].get("workbench", "random")
         result["folder_ids"] = folder_ids if folder_ids is not None else self._artwork_memberships([result["id"]])[result["id"]]
         return result

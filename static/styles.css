@@ -1281,6 +1281,10 @@ html.image-preview-open { overflow: hidden; }
 .krea-prompt-pool .section-heading h3 { margin:0; font-size:.95rem; }
 .sampling-stage { grid-column:1 / -1; min-width:0; margin-top:.25rem; padding:.85rem; border:1px solid var(--separator); border-radius:var(--r-md); background:color-mix(in srgb,var(--surface) 74%,transparent); }
 .sampling-stage > .switch-row { margin:0; }
+.pipeline-flow { margin:0; color:var(--text); font-size:12px; line-height:1.8; overflow-wrap:anywhere; }
+.pipeline-help { margin-top:.35rem; }
+.pipeline-help > summary { cursor:pointer; color:var(--text-secondary); font-size:11px; }
+.pipeline-help .field-hint { margin-bottom:0; }
 .sampling-stage .repair-parameters { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.65rem; margin:.75rem 0 0; }
 .sampling-stage .compact-parameter-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
 #settingsForm [hidden] { display: none !important; }
@@ -1385,11 +1389,13 @@ html.image-preview-open { overflow: hidden; }
 .shared-seed-controls input { min-width:0; flex:1; }
 .shared-seed-controls select { width:auto; max-width:110px; }
 .shared-seed-controls button { flex-shrink:0; }
-#latentSecondSamplerFields { display:contents; }
-#latentUpscaleFields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
+#latentSecondSamplerFields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.65rem; margin:.75rem 0 0; }
+#pixelHiresResizeHint { grid-column:1 / -1; }
+#latentDoubleSamplingHint { grid-column:1 / -1; }
+#latentUpscaleFields { grid-template-columns:repeat(2,minmax(0,1fr)); }
 body[data-workbench="single"] [data-single-category-layout="repair"] > .single-category-columns { grid-template-columns:1fr; }
 body[data-workbench="single"] [data-single-category-layout="repair"] > .single-category-columns > [data-single-column="right"] { display:none; }
-@media (max-width:600px) { #latentUpscaleFields { grid-template-columns:1fr; } }
+@media (max-width:600px) { #latentUpscaleFields, #latentSecondSamplerFields { grid-template-columns:1fr; } }
 
 /* Motion owns one visual state per surface; CSS only supplies its resting style. */
 [data-motion-state] { animation: none !important; }

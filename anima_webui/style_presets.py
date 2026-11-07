@@ -21,7 +21,7 @@ from .model_profiles import (
     get_model_profile,
     normalize_model_profile,
 )
-from .workflow import DEFAULT_SETTINGS, WorkflowError, migrate_settings, validate_settings
+from .workflow import DEFAULT_SETTINGS, WorkflowError, upgrade_pipeline_settings, validate_settings
 
 
 logger = logging.getLogger(__name__)
@@ -45,6 +45,7 @@ def _locked(method: Any) -> Any:
 
 
 PRESET_SETTING_KEYS = (
+    "pipeline_version",
     "workbench",
     "generation_mode",
     "single",
@@ -99,7 +100,7 @@ def preset_settings(
     unknown = set(value) - set(PRESET_SETTING_KEYS)
     if unknown:
         raise WorkflowError(f"风格预设包含未知参数: {', '.join(sorted(unknown))}")
-    # Start from the clean v2 defaults.  Copying DEFAULT_SETTINGS wholesale
+    # Start from the public defaults.  Copying DEFAULT_SETTINGS wholesale
     # would reintroduce v1 keys and cause validate_settings to serialize them
     # into every newly saved preset.
     candidate = {
@@ -109,7 +110,7 @@ def preset_settings(
     }
     # Presets are snapshots.  Legacy snapshots are migrated before validation
     # so removed v1 controls cannot leak into a new profile's preset.
-    migrated = migrate_settings(value)
+    migrated = upgrade_pipeline_settings(value)
     if force_model_profile is not None:
         forced_profile = normalize_model_profile(force_model_profile)
         profile = get_model_profile(forced_profile)

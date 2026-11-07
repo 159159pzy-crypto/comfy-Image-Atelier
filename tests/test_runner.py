@@ -1,6 +1,7 @@
 import asyncio
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import call, patch
 
@@ -11,7 +12,7 @@ sys.path.insert(0, str(APP_DIR))
 
 from anima_webui.comfy import ComfyAborted  # noqa: E402
 from anima_webui.history import HistoryStore  # noqa: E402
-from anima_webui.runner import BatchConflict, BatchManager  # noqa: E402
+from anima_webui.runner import BatchConflict, BatchManager, MAX_EXECUTION_NONCE, new_execution_context  # noqa: E402
 from anima_webui.workflow import DEFAULT_SETTINGS, MAX_SAMPLE_SEED  # noqa: E402
 
 
@@ -217,6 +218,53 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(item["filename_prefix"].endswith("/image") for item in self.comfy.submissions))
         self.assertEqual((await self.history.list_images())["total"], 3)
 
+    async def test_v3_each_image_and_replay_get_fresh_execution_identity_with_fixed_seeds(self):
+        settings = {**DEFAULT_SETTINGS, "count": 2}
+        seeds = {"sample_seed": 123456, "prompt_seed": 98765}
+        with patch("anima_webui.runner.secrets.randbelow", side_effect=AssertionError("sampling seeds must stay fixed")):
+            await self.manager.start(settings, seeds=seeds)
+            await self.manager.wait()
+            await self.manager.start({**settings, "count": 1}, seeds=seeds, regeneration={
+                "mode": "replay", "frozen_positive_prompt": "same frozen prompt",
+                "frozen_negative_prompt": "same frozen negative", "fixed_selection": {},
+            })
+            await self.manager.wait()
+        submitted = self.comfy.submissions
+        contexts = [item["extra_data"]["extra_pnginfo"]["anima_random_webui"]["execution_context"] for item in submitted]
+        self.assertEqual(len({item["execution_id"] for item in contexts}), 3)
+        self.assertEqual(len({item["execution_nonce"] for item in contexts}), 3)
+        for payload, context in zip(submitted, contexts):
+            self.assertEqual(uuid.UUID(context["execution_id"]).version, 4)
+            self.assertTrue(0 <= context["execution_nonce"] <= MAX_EXECUTION_NONCE)
+            self.assertEqual(payload["execution_nonce"], context["execution_nonce"])
+            self.assertEqual((payload["sample_seed"], payload["prompt_seed"]), (123456, 98765))
+            self.assertNotIn("execution_nonce", payload["settings"])
+            self.assertNotIn("execution_context", payload["settings"])
+        images = (await self.history.list_images())["items"]
+        self.assertEqual({image["execution_context"]["execution_id"] for image in images},
+                         {context["execution_id"] for context in contexts})
+        self.assertEqual(self.manager.snapshot()["execution_context"], contexts[-1])
+        self.assertNotIn("execution_context", settings)
+
+    async def test_v2_submission_and_history_do_not_get_execution_identity(self):
+        with patch("anima_webui.runner.new_execution_context", side_effect=AssertionError("legacy graph must stay unchanged")):
+            await self.manager.start({**DEFAULT_SETTINGS, "pipeline_version": 2, "count": 1},
+                                     seeds={"sample_seed": 1, "prompt_seed": 2})
+            self.assertEqual((await self.manager.wait())["status"], "completed")
+        submitted = self.comfy.submissions[-1]
+        self.assertNotIn("execution_nonce", submitted)
+        self.assertNotIn("extra_data", submitted)
+        self.assertNotIn("execution_context", self.manager.snapshot())
+        self.assertEqual((await self.history.list_images())["items"][0]["execution_context"], {})
+
+    def test_execution_nonce_is_unique_with_frozen_and_reversed_clock(self):
+        with patch("anima_webui.runner._last_execution_nonce", 100), patch(
+            "anima_webui.runner.time.time_ns", side_effect=[100_000, 100_000, 99_000]
+        ):
+            contexts = [new_execution_context() for _ in range(3)]
+        self.assertEqual([context["execution_nonce"] for context in contexts], [101, 102, 103])
+        self.assertEqual(len({context["execution_id"] for context in contexts}), 3)
+
     async def test_second_start_is_queued_and_runs_after_first(self):
         # 0.2.0 起,运行中再开批次不再 409,而是进入队列自动接续。
         self.comfy.block = asyncio.Event()
@@ -278,10 +326,11 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
         # _advance_queue 直接返回,队列中的批次被永久卡死。
         self.comfy.block = asyncio.Event()
         self.comfy.honor_abort = True
-        state = await self.manager.start({**DEFAULT_SETTINGS, "count": 3})
+        seeds = {"sample_seed": 123, "prompt_seed": 456}
+        state = await self.manager.start({**DEFAULT_SETTINGS, "count": 3}, seeds=seeds)
         while not self.comfy.submissions:
             await asyncio.sleep(0)
-        await self.manager.start({**DEFAULT_SETTINGS, "count": 1})
+        await self.manager.start({**DEFAULT_SETTINGS, "count": 1}, seeds=seeds)
         self.assertEqual(len(self.manager.queue), 1)
         await self.manager.request_stop(state["id"], clear_queue=False)
         self.comfy.block.set()
@@ -291,6 +340,9 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.manager.queue), 0)
         self.assertEqual(len(self.comfy.submissions), 2)
         self.assertEqual((await self.history.get_batch(state["id"]))["status"], "stopped")
+        first, second = self.comfy.submissions
+        self.assertNotEqual(first["execution_nonce"], second["execution_nonce"])
+        self.assertEqual([(item["sample_seed"], item["prompt_seed"]) for item in (first, second)], [(123, 456), (123, 456)])
 
     async def test_remove_queued_entry(self):
         self.comfy.block = asyncio.Event()
@@ -483,12 +535,20 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_error_stops_without_retry(self):
         self.comfy.error_at = 2
-        await self.manager.start({**DEFAULT_SETTINGS, "count": 4})
+        seeds = {"sample_seed": 123, "prompt_seed": 456}
+        await self.manager.start({**DEFAULT_SETTINGS, "count": 4}, seeds=seeds)
         result = await self.manager.wait()
         self.assertEqual(result["status"], "error")
         self.assertEqual(result["completed"], 1)
         self.assertEqual(len(self.comfy.submissions), 2)
         self.assertIn("render failed", result["error"])
+        failed = self.comfy.submissions[-1]
+        await self.manager.start({**DEFAULT_SETTINGS, "count": 1}, seeds=seeds)
+        self.assertEqual((await self.manager.wait())["status"], "completed")
+        restarted = self.comfy.submissions[-1]
+        self.assertEqual(len(self.comfy.submissions), 3)
+        self.assertNotEqual(failed["execution_nonce"], restarted["execution_nonce"])
+        self.assertEqual((restarted["sample_seed"], restarted["prompt_seed"]), (123, 456))
 
     async def test_history_uses_actual_comfy_prompt_when_catalog_is_present(self):
         templates = FakeTemplates()
@@ -498,6 +558,7 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
             "qwen_image_vae.safetensors": "VAE/qwen_image_vae.safetensors",
             "seedvr2_3b_int8_convrot.safetensors": "SeedVR2/seedvr2_3b_int8_convrot.safetensors",
             "ema_vae_fp16.safetensors": "SeedVR2/ema_vae_fp16.safetensors",
+            "4x_foolhardy_Remacri.pth": "Upscale/4x_foolhardy_Remacri.pth",
         }
         manager = BatchManager(templates, self.history, self.comfy, FakeCatalog())
 
@@ -516,6 +577,7 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
                 "vae": "VAE/qwen_image_vae.safetensors",
                 "seedvr2_model": "SeedVR2/seedvr2_3b_int8_convrot.safetensors",
                 "seedvr2_vae": "SeedVR2/ema_vae_fp16.safetensors",
+                "pixel_hires_model": "Upscale/4x_foolhardy_Remacri.pth",
                 "loras": [],
             },
         )
@@ -541,12 +603,13 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
         self.comfy.available_models = [DEFAULT_SETTINGS["model_name"]]
         self.comfy.available_upscalers = []
         with self.assertRaisesRegex(ValueError, "高清修复模型不存在"):
-            await self.manager.start(DEFAULT_SETTINGS)
+            await self.manager.start({**DEFAULT_SETTINGS, "pipeline_version": 2})
         self.assertIsNone(self.manager.state)
 
     def test_nvidia_preflight_requires_node_or_plugin_but_no_model_file(self):
         settings = {
             **DEFAULT_SETTINGS,
+            "pipeline_version": 2,
             "upscalers": {
                 **DEFAULT_SETTINGS["upscalers"],
                 "nvidia": {"enabled": True},
@@ -645,6 +708,7 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_second_sampler_resources_are_checked_when_enabled(self):
         settings = {
             **DEFAULT_SETTINGS,
+            "pipeline_version": 2,
             "second_sampler": {
                 **DEFAULT_SETTINGS["second_sampler"],
                 "enabled": True,
@@ -664,6 +728,7 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_second_sampler_resources_are_rejected_only_when_enabled(self):
         settings = {
             **DEFAULT_SETTINGS,
+            "pipeline_version": 2,
             "second_sampler": {
                 **DEFAULT_SETTINGS["second_sampler"],
                 "enabled": True,

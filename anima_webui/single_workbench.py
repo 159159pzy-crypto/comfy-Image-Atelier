@@ -106,7 +106,8 @@ def validate_single_settings(value: Any, settings: dict[str, Any]) -> dict[str, 
         tile["tiled"] = _boolean(f"single.{group}.tiled", tile["tiled"])
         for key, low, high in (("tile_size", 64, 4096), ("overlap", 0, 2048), ("temporal_size", 8, 4096), ("temporal_overlap", 4, 4096)):
             tile[key] = _integer(f"single.{group}.{key}", tile[key], low, high)
-        if tile["overlap"] >= tile["tile_size"] or tile["temporal_overlap"] >= tile["temporal_size"]:
+        spatial_limit = tile["tile_size"] // 2 if group == "vae_encode" else tile["tile_size"]
+        if tile["overlap"] >= spatial_limit or tile["temporal_overlap"] >= tile["temporal_size"]:
             raise WorkflowError(f"single.{group} 重叠必须小于分块大小")
     for group in ("dual", "latent"):
         obj = s[group]
@@ -190,7 +191,8 @@ def active_lora_pipelines(settings: dict[str, Any]) -> frozenset[str]:
     else:
         pipelines = {single["normal_pipeline"]}
     stages = settings["upscalers"]
-    if stages["latent"]["enabled"] and stages["latent"]["second_sampler"]["enabled"]:
+    if (settings.get("pipeline_version", 2) < 3 and stages["latent"]["enabled"]
+            and stages["latent"]["second_sampler"]["enabled"]):
         pipelines.add(single["latent"]["pipeline"])
     if stages["face_refine"]["enabled"]:
         pipelines.add(single["face_pipeline"])
@@ -206,6 +208,13 @@ def single_resource_issues(settings: dict[str, Any], resources: dict[str, Any]) 
     advertised = resources.get("node_types")
     node_types = set(advertised) if isinstance(advertised, list) else None
     required = {"UNETLoader", "CLIPLoader", "VAELoader", "CLIPTextEncode", "Lora Loader (LoraManager)", "SaveImage"}
+    v3 = settings.get("pipeline_version", 2) >= 3
+    if v3:
+        from .pipeline_v3 import needs_main_encode, required_node_classes
+        encode_needed = needs_main_encode(settings) or settings["generation_mode"] == "img2img"
+        required.update(required_node_classes(settings))
+    else:
+        encode_needed = settings["generation_mode"] == "img2img" or settings["upscalers"]["latent"]["enabled"]
     required.add("VAEDecodeTiled" if s["vae_decode"]["tiled"] else "VAEDecode")
     if settings["base_mode"] == "dual_sampler":
         required.add("KSamplerAdvanced")
@@ -218,8 +227,9 @@ def single_resource_issues(settings: dict[str, Any], resources: dict[str, Any]) 
     if ("primary" in active and s["zero_negative"]) or ("secondary" in active and s["secondary_zero_negative"]):
         required.add("ConditioningZeroOut")
     if settings["upscalers"]["latent"]["enabled"]:
-        required.update({"SesquiLatentUpscale" if s["latent"]["upscale_method"] == "sesqui" else "LatentUpscaleBy",
-                         "VAEEncodeTiled" if s["vae_encode"]["tiled"] else "VAEEncode"})
+        required.add("SesquiLatentUpscale" if s["latent"]["upscale_method"] == "sesqui" else "LatentUpscaleBy")
+    if encode_needed:
+        required.add("VAEEncodeTiled" if s["vae_encode"]["tiled"] else "VAEEncode")
     if settings["krea_variance"]["enabled"]:
         required.add("KreaSeedVarianceEnhancer")
     if node_types is not None:
@@ -266,7 +276,7 @@ def single_resource_issues(settings: dict[str, Any], resources: dict[str, Any]) 
     if s["vae_decode"]["tiled"]:
         tiling("VAEDecodeTiled", s["vae_decode"], "主 VAE 解码")
     stages = settings["upscalers"]
-    if s["vae_encode"]["tiled"] and (settings["generation_mode"] == "img2img" or stages["latent"]["enabled"]):
+    if s["vae_encode"]["tiled"] and encode_needed:
         tiling("VAEEncodeTiled", s["vae_encode"], "主 VAE 编码")
     if stages["latent"]["enabled"]:
         resize(s["latent"], stages["latent"]["scale_by"], "潜空间放大")
@@ -297,7 +307,8 @@ def render_single_workflows(api_template: dict[str, Any], ui_template: dict[str,
                             sample_seed: int, prompt_seed: int, filename_prefix: str,
                             *, single_runtime: dict[str, Any] | None = None,
                             frozen_positive_prompt: str = "", frozen_negative_prompt: str = "",
-                            resource_paths: dict[str, str] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+                            resource_paths: dict[str, str] | None = None,
+                            execution_nonce: int | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     from .workflow import (
         WorkflowError, _render_v2_workflows, _mapped_resource_name, normalize_lora_path, V2_OUTPUT_ID,
         _lora_manager_values, _v2_set_ui_loras,
@@ -413,8 +424,13 @@ def render_single_workflows(api_template: dict[str, Any], ui_template: dict[str,
     if settings["upscalers"]["face_refine"]["enabled"]:
         name = s["face_pipeline"]
         api["1253:1215"]["inputs"].update(pipelines[name], clip=["72" if name == "primary" else "243", 1])
-    api[V2_OUTPUT_ID]["_meta"] = {"title": "进阶单图工作台 输出"}
-    api = _prune_graph(api, V2_OUTPUT_ID)
+    if settings.get("pipeline_version", 2) >= 3:
+        from .pipeline_v3 import build_pipeline
+        api, ui = build_pipeline(api, ui_template, settings, sample_seed, prompt_seed, filename_prefix,
+                                 resource_paths=resource_paths, execution_nonce=execution_nonce)
+    else:
+        api[V2_OUTPUT_ID]["_meta"] = {"title": "进阶单图工作台 输出"}
+        api = _prune_graph(api, V2_OUTPUT_ID)
     # The API graph is authoritative; keep it with the attached UI workflow so
     # advanced settings and newly inserted input nodes remain auditable.
     ui.setdefault("extra", {})["single_workbench"] = {

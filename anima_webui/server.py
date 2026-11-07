@@ -45,7 +45,7 @@ from .prompt_pools import PromptPoolStore, parse_prompt_import_details, parse_pr
 from .runner import BatchConflict, BatchManager
 from .style_presets import StylePresetStore
 from .thumbnails import ThumbnailStore
-from .workflow import WorkflowError, WorkflowTemplates, normalize_lora_path, validate_settings
+from .workflow import WorkflowError, WorkflowTemplates, normalize_lora_path, upgrade_pipeline_settings, validate_settings
 from .model_profiles import (
     MODEL_PROFILE_IDS,
     model_profile_defaults,
@@ -1218,28 +1218,30 @@ def create_app(
                         profile_defaults[key] = templates.resource_paths.get(profile_defaults[key], profile_defaults[key])
                     launch_defaults = {**startup_defaults, **profile_defaults}
             body = {**launch_defaults, **supplied}
+            # Only a submitted version chooses interpretation. Fresh launcher
+            # defaults must not hide legacy nested stage settings before upgrade.
+            body["pipeline_version"] = supplied.get("pipeline_version", 2)
             # These fields depend on the submitted mode and legacy values.
             # Launcher defaults must not hide their absence before migration.
-            for key in ("steps", "dual", "krea_variance"):
+            for key in ("steps", "dual", "krea_variance", "upscalers"):
                 if key not in supplied:
                     body.pop(key, None)
-            legacy_single = supplied.get("single")
-            if ("upscalers" not in supplied and isinstance(legacy_single, dict)
-                    and isinstance(legacy_single.get("dlss"), dict)):
-                body["upscalers"] = {
-                    **startup_defaults["upscalers"],
-                    "nvidia": {
-                        **startup_defaults["upscalers"]["nvidia"],
-                        "dlss": dict(legacy_single["dlss"]),
-                    },
-                }
         body = generation_settings(body)
+        requested_model_name = body.get("model_name")
+        # Starting from the workbench creates a current-pipeline task. History
+        # replay uses manager.start directly and retains its recorded version.
+        body = upgrade_pipeline_settings(body)
         # Validate the public shape before resource helpers traverse nested
         # fields. Keep the original payload so legacy migration semantics at
         # the runner boundary remain unchanged.
         validate_settings(body)
         await client.status()
-        await validate_resource_ownership(body)
+        # Migration can replace a known model filename with the selected
+        # profile default. Ownership must still reject an explicitly selected
+        # model from another family rather than silently replacing it.
+        ownership_settings = {**body, "model_name": requested_model_name} if requested_model_name else body
+        await validate_resource_ownership(ownership_settings)
+        body["model_name"] = ownership_settings["model_name"]
         await hydrate_single_triggers(body)
         state = await manager.start(body, seeds=seeds)
         return web.json_response(state, status=201)

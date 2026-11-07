@@ -99,7 +99,7 @@ def test_unused_lora_stack_is_preserved_without_blocking_generation_or_replay(tm
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("stage", ["normal", "dual_first", "dual_second", "latent", "face"])
+@pytest.mark.parametrize("stage", ["normal", "dual_first", "dual_second", "post_sampler", "face"])
 def test_every_used_secondary_lora_stack_is_still_validated(tmp_path, stage):
     async def run():
         async with studio(tmp_path) as (app, client, comfy):
@@ -110,8 +110,10 @@ def test_every_used_secondary_lora_stack_is_still_validated(tmp_path, stage):
             elif stage.startswith("dual_"):
                 payload["base_mode"] = "dual_sampler"
                 payload["single"]["dual"][stage.removeprefix("dual_") + "_pipeline"] = "secondary"
-            elif stage == "latent":
-                payload["upscalers"]["latent"].update(enabled=True, second_sampler={"enabled": True})
+            elif stage == "post_sampler":
+                payload["pipeline_version"] = 3
+                payload["single"]["normal_pipeline"] = "secondary"
+                payload["upscalers"]["post_sampler"].update(enabled=True, sampler_name="euler")
             else:
                 payload["upscalers"]["face_refine"]["enabled"] = True
             response = await client.post("/api/batches", json=payload)
@@ -119,6 +121,44 @@ def test_every_used_secondary_lora_stack_is_still_validated(tmp_path, stage):
             assert "LoRA" in (await response.json())["error"]
             assert comfy.submissions == []
             assert app[MANAGER_KEY].snapshot() is None
+    asyncio.run(run())
+
+
+def test_legacy_latent_sampler_still_requires_its_secondary_stack(tmp_path):
+    async def run():
+        async with studio(tmp_path) as (app, _client, comfy):
+            payload = settings(pipeline_version=2)
+            payload["single"]["loras_secondary"] = [{"filename": "missing.safetensors", "enabled": True, "strength": 1}]
+            payload["upscalers"]["latent"].update(enabled=True, second_sampler={"enabled": True})
+            # Historical replay calls the manager without the editable-draft
+            # HTTP upgrade, retaining v2's independent latent sampling route.
+            with pytest.raises(ValueError, match="LoRA"):
+                await app[MANAGER_KEY].start(payload)
+            assert comfy.submissions == []
+            assert app[MANAGER_KEY].snapshot() is None
+    asyncio.run(run())
+
+
+def test_v3_post_sampler_inherits_base_stack_and_ignores_old_latent_route(tmp_path):
+    async def run():
+        async with studio(tmp_path) as (app, client, comfy):
+            payload = settings(pipeline_version=3)
+            payload["single"]["normal_pipeline"] = "primary"
+            payload["single"]["latent"]["pipeline"] = "secondary"
+            payload["single"]["loras_secondary"] = [{"filename": "missing.safetensors", "enabled": True, "strength": 1}]
+            payload["upscalers"]["latent"].update(enabled=True, second_sampler={"enabled": True})
+            payload["upscalers"]["post_sampler"].update(enabled=True, sampler_name="euler")
+            response = await client.post("/api/batches", json=payload)
+            assert response.status == 201, await response.text()
+            await app[MANAGER_KEY].wait()
+            assert app[MANAGER_KEY].snapshot()["status"] == "completed"
+            graph = comfy.submissions[-1]["prompt"]
+            base = graph["691:1240"]["inputs"]
+            post = next(node["inputs"] for node in graph.values()
+                        if node["class_type"] == "KSampler" and node.get("_meta", {}).get("pipeline_stage") == "post_sampler")
+            for field in ("model", "positive", "negative"):
+                assert post[field] == base[field]
+            assert "243" not in graph
     asyncio.run(run())
 
 

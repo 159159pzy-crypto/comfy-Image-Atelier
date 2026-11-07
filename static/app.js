@@ -355,6 +355,9 @@ const ui = Object.fromEntries(
     "base_denoise",
     "krea_variance_enabled",
     "latent_model_format",
+    "latentModelFormatField", "latentDoubleSamplingHint",
+    "latent_sampler_steps", "latent_sampler_cfg", "latent_sampler_name", "latent_sampler_scheduler", "latent_sampler_denoise",
+    "pixel_hires_enabled", "pixel_hires_model_name", "pixel_hires_percent", "pixel_hires_upscale_method", "pixelHiresFields", "pixelHiresResizeHint", "dlss_enabled", "dlssFields", "pipelineUpgradeHint", "pipelineFlow",
     "nvidia_dlss_style",
     "nvidia_dlss_intensity",
     "nvidia_dlss_local_tone",
@@ -880,23 +883,29 @@ function normalizeProfileId(value) {
   const normalized = String(value || "").trim().toLowerCase();
   return normalized === "krea2" || normalized.includes("krea2") ? "krea2" : "anima";
 }
-function defaultUpscalers() {
+function defaultUpscalers(profile = "anima") {
   return {
-    latent: { enabled: false, scale_by: 1.5, upscale_method: "sesqui", model_format: "Wan 2.1", half_precision: true, second_sampler: { enabled: true, steps: 20, cfg: 8, sampler_name: "euler", scheduler: "simple", denoise: 1 } },
+    pixel_hires: { enabled: false, model_name: profile === "krea2" ? "4x-AnimeSharp.pth" : "4x_foolhardy_Remacri.pth", percent: 50, upscale_method: "lanczos" },
+    post_sampler: { enabled: false, steps: profile === "krea2" ? 10 : 16, cfg: profile === "krea2" ? 1 : 4, sampler_name: "er_sde", scheduler: "simple", denoise: profile === "krea2" ? .3 : .2 },
+    dlss: { enabled: false, style: "电影", intensity: 1, local_tone: 1, local_struct: 1, output_mix: 1, output_view: "处理", gpu_gen: "Auto" },
+    latent: { enabled: false, scale_by: 1.5, upscale_method: "sesqui", model_format: "Wan 2.1", half_precision: true,
+      sampler: { steps: profile === "krea2" ? 10 : 16, cfg: profile === "krea2" ? 1 : 4, sampler_name: "er_sde", scheduler: "simple", denoise: profile === "krea2" ? .3 : .2 },
+      second_sampler: { enabled: true, steps: 20, cfg: 8, sampler_name: "euler", scheduler: "simple", denoise: 1 } },
     seedvr2: { enabled: false, model_name: "", vae_name: "", scale_by: 2, weight_dtype: "default", color_correction_method: "lab", sampler: { steps: 1, cfg: 1, sampler_name: "euler", scheduler: "simple", denoise: 1 }, encode: { tile_size: 512, overlap: 64, temporal_size: 64, temporal_overlap: 8 }, decode: { tile_size: 512, overlap: 128, temporal_size: 4096, temporal_overlap: 8 } },
     nvidia: { enabled: false, resize_type: "scale by multiplier", scale: 2, quality: "ULTRA", dlss: { style: "电影", intensity: 1, local_tone: 1, local_struct: 1, output_mix: 1, output_view: "处理", gpu_gen: "Auto" } },
     face_refine: { enabled: false, steps: 8, cfg_scale: 1, sampler: "res_2m_ode", scheduler: "beta57", denoise_strength: 0.3, face_selection: 0, detection_confidence: 0.75, manual_rotation: "None", processing_resolution: 1024, enable_pre_upscale: true, upscaler_model: "Fast 4x (Lanczos)", crop_padding: 1.6, face_positive_prompt: "", replace_positive_prompt: false, face_negative_prompt: "", replace_negative_prompt: false, exclusions: "", blend_softness: 8, mask_expansion: 2, sampling_mask_blur_size: 21, sampling_mask_blur_strength: 1, enable_color_correction: true, enable_segmentation: true, enable_differential_diffusion: true, enable_lightness_rescue: true, enable_final_refinement: true, offload_models_to_cpu: true },
   };
 }
-function normalizeUpscalers(value, fallback = null) {
-  const base = clone(fallback || defaultUpscalers());
+function normalizeUpscalers(value, fallback = null, profile = "anima", pipelineVersion = 4) {
+  const base = clone(defaultUpscalers(profile));
   const raw = value && typeof value === "object" ? value : {};
-  for (const key of Object.keys(base)) {
-    if (raw[key] && typeof raw[key] === "object") {
-      base[key] = { ...base[key], ...raw[key] };
+  for (const source of [fallback || {}, raw]) for (const key of Object.keys(base)) {
+    if (source[key] && typeof source[key] === "object") {
+      const previous = base[key];
+      base[key] = { ...previous, ...source[key] };
       for (const nested of ["second_sampler", "sampler", "encode", "decode", "dlss"]) {
-        if (base[key][nested] && typeof base[key][nested] === "object" && raw[key][nested] && typeof raw[key][nested] === "object")
-          base[key][nested] = { ...base[key][nested], ...raw[key][nested] };
+        if (previous[nested] && typeof previous[nested] === "object" && source[key][nested] && typeof source[key][nested] === "object")
+          base[key][nested] = { ...previous[nested], ...source[key][nested] };
       }
     }
   }
@@ -913,6 +922,12 @@ function normalizeUpscalers(value, fallback = null) {
   // uses the installed GPU/plugin directly and has no model-file input.
   delete base.nvidia.model_name;
   base.face_refine.enabled = Boolean(base.face_refine.enabled);
+  if (Number(pipelineVersion) < 3) {
+    if (!raw.post_sampler) base.post_sampler = { ...base.post_sampler, ...(base.latent.enabled ? base.latent.second_sampler : {}), enabled: Boolean(base.latent.enabled && base.latent.second_sampler?.enabled) };
+    if (!raw.dlss) base.dlss = { ...base.dlss, ...base.nvidia.dlss, enabled: Boolean(base.nvidia.enabled) };
+  }
+  if (Number(pipelineVersion) < 4) base.latent.sampler = clone(defaultUpscalers(profile).latent.sampler);
+  for (const key of ["pixel_hires", "post_sampler", "dlss"]) base[key].enabled = Boolean(base[key].enabled);
   return base;
 }
 function profileDefaults(profile) {
@@ -928,7 +943,7 @@ function profileSettingsDefaults(profile) {
   const bound = profileConfig(id);
   return { ...defaults, ...bound.defaults, model_profile: id,
     ...Object.fromEntries(["model_name", "clip_name", "vae_name", "clip_type"].map(key => [key, bound[key] || ""])),
-    loras: [], lora_managed_triggers: [], pools: defaultPools() };
+    pipeline_version: 4, upscalers: normalizeUpscalers(null, null, id), loras: [], lora_managed_triggers: [], pools: defaultPools() };
 }
 function defaultLorasForProfile(profile) {
   return clone(profileSettingsDefaults(profile)?.loras || []);
@@ -966,6 +981,7 @@ function saveCurrentProfileDraft() {
 }
 function profileSamplingState() {
   return {
+    pipeline_version: 4,
     model_name: ui.model_name?.value || "",
     base_mode: ui.base_mode?.value || "normal",
     dual: typeof readRandomDualControls === "function" ? readRandomDualControls() : null,
@@ -999,6 +1015,7 @@ function restoreProfileDraft(profile, settings = {}, { preferStored = true } = {
     draft.modes = Object.fromEntries(SECTIONS.map((section) => [section, "off"]));
   }
   profileDrafts[normalizeProfileId(profile)] = {
+    pipeline_version: 4,
     ...clone(profileDraftFromDraft()),
     kreaPromptPoolEnabled: Boolean((preferStored ? stored?.kreaPromptPoolEnabled : undefined) ?? settings.krea_prompt_pool?.enabled),
     kreaPromptPoolSelection: [...((preferStored ? stored?.kreaPromptPoolSelection : null) || settings.krea_prompt_pool?.ids || [])],
@@ -1010,7 +1027,7 @@ function restoreProfileDraft(profile, settings = {}, { preferStored = true } = {
     cfg: (preferStored ? stored?.cfg : undefined) ?? settings.cfg,
     sampler_name: (preferStored ? stored?.sampler_name : undefined) ?? settings.sampler_name,
     scheduler: (preferStored ? stored?.scheduler : undefined) ?? settings.scheduler,
-    upscalers: clone((preferStored ? stored?.upscalers : null) || settings.upscalers || defaults?.upscalers || defaultUpscalers()),
+    upscalers: normalizeUpscalers((preferStored ? stored?.upscalers : null) || settings.upscalers || defaults?.upscalers, null, targetProfile, (preferStored ? stored?.pipeline_version : null) ?? settings.pipeline_version ?? 2),
   };
 }
 function switchProfileDraft(nextProfile, { applyDefaults = true } = {}) {
@@ -1043,7 +1060,7 @@ function switchProfileDraft(nextProfile, { applyDefaults = true } = {}) {
       if (value !== undefined && ui[field]) setControl(field, value);
     }
     const repair = profileSettings.upscalers || profileSettingsDefaults(next).upscalers || defaults?.upscalers || defaultUpscalers();
-    const normalized = normalizeUpscalers(repair);
+    const normalized = normalizeUpscalers(repair, null, next, selectedState.pipeline_version ?? 2);
     normalized.seedvr2.model_name = normalized.seedvr2.model_name || profileConfig(next).seedvr2_model || "";
     normalized.seedvr2.vae_name = normalized.seedvr2.vae_name || profileConfig(next).seedvr2_vae || "";
     setUpscalerControls(normalized);
@@ -1086,14 +1103,14 @@ function normalizeSettings(raw) {
   merged.lora_managed_triggers = normalizeTriggerWords(raw?.lora_managed_triggers || defaults?.lora_managed_triggers || []);
   // 旧设置仅用于读取迁移；提交时 readSettings 只会序列化 upscalers。
   const oldHires = raw?.hires || null;
-  const defaultRepair = normalizeUpscalers(defaults?.upscalers, defaultUpscalers());
-  const migratedRepair = oldHires
-    // v1 applied the percentage after a nominal 4x pixel model.  A direct
-    // latent multiplier therefore preserves the resulting geometry as
-    // percent / 100 * 4, matching the server migration contract.
-    ? { ...defaultRepair, latent: { ...defaultRepair.latent, enabled: Boolean(oldHires.enabled), scale_by: Number(oldHires.percent || 45) / 100 * 4 } }
-    : defaultRepair;
-  merged.upscalers = normalizeUpscalers(raw?.upscalers, migratedRepair);
+  const defaultRepair = normalizeUpscalers(normalizeProfileId(defaults?.model_profile || "anima") === merged.model_profile ? defaults?.upscalers : null, null, merged.model_profile);
+  merged.upscalers = normalizeUpscalers(raw?.upscalers, defaultRepair, merged.model_profile, raw?.pipeline_version ?? 2);
+  if (oldHires && !raw?.upscalers) {
+    merged.upscalers.pixel_hires = { ...defaultUpscalers(merged.model_profile).pixel_hires, ...oldHires };
+    merged.upscalers.latent.enabled = false;
+    merged.upscalers.post_sampler = { ...defaultUpscalers(merged.model_profile).post_sampler, ...(raw?.second_sampler || {}) };
+  }
+  merged.pipeline_version = 4;
   if (raw?.detailers?.face && !raw?.upscalers?.face_refine) merged.upscalers.face_refine.enabled = true;
   const profile = profileConfig(merged.model_profile);
   if (!merged.upscalers.seedvr2.model_name) merged.upscalers.seedvr2.model_name = profile.seedvr2_model || "";
@@ -1103,24 +1120,30 @@ function normalizeSettings(raw) {
   if (raw?.single?.dlss && !raw?.upscalers?.nvidia?.dlss) {
     merged.upscalers.nvidia.dlss = { ...merged.upscalers.nvidia.dlss, ...raw.single.dlss };
     delete merged.upscalers.nvidia.dlss.enabled;
+    if (!raw?.upscalers?.dlss && Number(raw?.pipeline_version ?? 2) < 3) merged.upscalers.dlss = { ...merged.upscalers.dlss, ...raw.single.dlss, enabled: Boolean(merged.upscalers.nvidia.enabled) };
   }
   merged.manual_artist = canonicalArtists(merged.manual_artist);
   return merged;
 }
 
 const UPSCALER_CONTROL_FIELDS = {
+  pixel_hires: ["enabled", "model_name", "percent", "upscale_method"],
+  dlss: ["enabled"],
   latent: ["enabled", "scale_by", "upscale_method"],
   seedvr2: ["enabled", "model_name", "vae_name", "weight_dtype", "scale_by", "color_correction_method"],
   nvidia: ["enabled", "resize_type", "scale", "quality"],
   face_refine: ["enabled", "steps", "cfg_scale", "sampler", "scheduler", "denoise_strength", "face_selection", "detection_confidence", "manual_rotation", "processing_resolution", "upscaler_model", "crop_padding", "blend_softness", "mask_expansion", "sampling_mask_blur_size", "sampling_mask_blur_strength", "face_positive_prompt", "replace_positive_prompt", "face_negative_prompt", "replace_negative_prompt", "exclusions", "enable_pre_upscale", "enable_color_correction", "enable_segmentation", "enable_differential_diffusion", "enable_lightness_rescue", "enable_final_refinement", "offload_models_to_cpu"],
 };
 const UPSCALER_CONTROL_IDS = {
+  pixel_hires: { enabled: "pixel_hires_enabled", model_name: "pixel_hires_model_name", percent: "pixel_hires_percent", upscale_method: "pixel_hires_upscale_method" },
+  dlss: { enabled: "dlss_enabled" },
   latent: { enabled: "latent_upscale_enabled", scale_by: "latent_upscale_scale", upscale_method: "latent_upscale_method" },
   seedvr2: { enabled: "seedvr2_enabled", model_name: "seedvr2_model_name", vae_name: "seedvr2_vae_name", weight_dtype: "seedvr2_weight_dtype", scale_by: "seedvr2_scale_by", color_correction_method: "seedvr2_color_correction_method" },
   nvidia: { enabled: "nvidia_upscale_enabled", resize_type: "nvidia_resize_type", scale: "nvidia_scale", quality: "nvidia_quality" },
   face_refine: { enabled: "face_refine_enabled", steps: "face_steps", cfg_scale: "face_cfg_scale", sampler: "face_sampler", scheduler: "face_scheduler", denoise_strength: "face_denoise_strength", face_selection: "face_selection", detection_confidence: "face_detection_confidence", manual_rotation: "face_manual_rotation", processing_resolution: "face_processing_resolution", upscaler_model: "face_upscaler_model", crop_padding: "face_crop_padding", blend_softness: "face_blend_softness", mask_expansion: "face_mask_expansion", sampling_mask_blur_size: "face_sampling_mask_blur_size", sampling_mask_blur_strength: "face_sampling_mask_blur_strength", face_positive_prompt: "face_positive_prompt", replace_positive_prompt: "face_replace_positive_prompt", face_negative_prompt: "face_negative_prompt", replace_negative_prompt: "face_replace_negative_prompt", exclusions: "face_exclusions", enable_pre_upscale: "face_enable_pre_upscale", enable_color_correction: "face_enable_color_correction", enable_segmentation: "face_enable_segmentation", enable_differential_diffusion: "face_enable_differential_diffusion", enable_lightness_rescue: "face_enable_lightness_rescue", enable_final_refinement: "face_enable_final_refinement", offload_models_to_cpu: "face_offload_models_to_cpu" },
 };
 const POST_SAMPLER_IDS = { steps: "latent_second_sampler_steps", cfg: "latent_second_sampler_cfg", sampler_name: "latent_second_sampler_name", scheduler: "latent_second_scheduler", denoise: "latent_second_sampler_denoise" };
+const LATENT_SAMPLER_IDS = { steps: "latent_sampler_steps", cfg: "latent_sampler_cfg", sampler_name: "latent_sampler_name", scheduler: "latent_sampler_scheduler", denoise: "latent_sampler_denoise" };
 const SEED_SAMPLER_IDS = { steps: "seedvr2_sampler_steps", cfg: "seedvr2_sampler_cfg", sampler_name: "seedvr2_sampler_name", scheduler: "seedvr2_scheduler", denoise: "seedvr2_sampler_denoise" };
 const SEED_TILE_IDS = { encode: { tile_size: "seedvr2_encode_tile_size", overlap: "seedvr2_encode_overlap", temporal_size: "seedvr2_encode_temporal_size", temporal_overlap: "seedvr2_encode_temporal_overlap" }, decode: { tile_size: "seedvr2_decode_tile_size", overlap: "seedvr2_decode_overlap", temporal_size: "seedvr2_decode_temporal_size", temporal_overlap: "seedvr2_decode_temporal_overlap" } };
 
@@ -1147,23 +1170,25 @@ function setUpscalerControls(upscalers) {
     model_format: upscalers?.latent?.model_format || "Wan 2.1", half_precision: upscalers?.latent?.half_precision ?? true,
   };
   for (const [stage, fields] of Object.entries(UPSCALER_CONTROL_FIELDS)) for (const field of fields) setControl(UPSCALER_CONTROL_IDS[stage][field], upscalers?.[stage]?.[field]);
-  setSamplerValues(POST_SAMPLER_IDS, upscalers?.latent?.second_sampler);
-  setControl("latent_second_sampler_enabled", upscalers?.latent?.second_sampler?.enabled);
+  setSamplerValues(POST_SAMPLER_IDS, upscalers?.post_sampler);
+  setSamplerValues(LATENT_SAMPLER_IDS, upscalers?.latent?.sampler);
+  setControl("latent_second_sampler_enabled", upscalers?.post_sampler?.enabled);
   setSamplerValues(SEED_SAMPLER_IDS, upscalers?.seedvr2?.sampler);
   setTileValues(upscalers?.seedvr2);
   if (ui.latent_model_format) ensureSelectValue(ui.latent_model_format, upscalers?.latent?.model_format || "Wan 2.1");
-  if (typeof NVIDIA_DLSS_KEYS !== "undefined") for (const key of NVIDIA_DLSS_KEYS) setControl(`nvidia_dlss_${key}`, upscalers?.nvidia?.dlss?.[key]);
+  if (typeof NVIDIA_DLSS_KEYS !== "undefined") for (const key of NVIDIA_DLSS_KEYS) setControl(`nvidia_dlss_${key}`, upscalers?.dlss?.[key]);
   applyNodeResourceControls();
 }
 function readUpscalerControls() {
   const result = {};
   for (const [stage, fields] of Object.entries(UPSCALER_CONTROL_FIELDS)) result[stage] = Object.fromEntries(fields.map((field) => [field, controlValue(UPSCALER_CONTROL_IDS[stage][field])]));
-  result.latent.second_sampler = { enabled: controlValue("latent_second_sampler_enabled"), ...readSamplerValues(POST_SAMPLER_IDS) };
+  result.post_sampler = { enabled: controlValue("latent_second_sampler_enabled"), ...readSamplerValues(POST_SAMPLER_IDS) };
+  result.latent.sampler = readSamplerValues(LATENT_SAMPLER_IDS);
   if (typeof sharedParameterState !== "undefined") Object.assign(result.latent, sharedParameterState.latent);
   result.seedvr2.sampler = readSamplerValues(SEED_SAMPLER_IDS);
   Object.assign(result.seedvr2, readTileValues());
   if (ui.latent_model_format) result.latent.model_format = typeof sharedLatentFormat === "function" ? sharedLatentFormat(ui.latent_model_format.value, sharedParameterState.latent.model_format) : ui.latent_model_format.value;
-  if (typeof NVIDIA_DLSS_KEYS !== "undefined") result.nvidia.dlss = { ...defaultUpscalers().nvidia.dlss, ...sharedParameterState.dlss, ...Object.fromEntries(NVIDIA_DLSS_KEYS.map(key => [key, controlValue(`nvidia_dlss_${key}`)])) };
+  if (typeof NVIDIA_DLSS_KEYS !== "undefined") result.dlss = { ...defaultUpscalers().dlss, ...sharedParameterState.dlss, ...result.dlss, ...Object.fromEntries(NVIDIA_DLSS_KEYS.map(key => [key, controlValue(`nvidia_dlss_${key}`)])) };
   return result;
 }
 
@@ -1198,6 +1223,7 @@ function applySettings(raw, { useProfileDraft = false } = {}) {
   if (typeof invalidatePoolContext === "function") invalidatePoolContext();
   invalidatePromptNormalization();
   const settings = normalizeSettings(raw || defaults || {});
+  if (ui.pipelineUpgradeHint) ui.pipelineUpgradeHint.hidden = !raw || Number(raw.pipeline_version ?? 2) >= 4;
   const previousProfile = currentProfile();
   activeProfileId = settings.model_profile;
   if (ui.model_profile) ui.model_profile.value = settings.model_profile;
@@ -1239,11 +1265,16 @@ function applySettings(raw, { useProfileDraft = false } = {}) {
   if (initialized && previousProfile !== settings.model_profile) void refreshProfileData();
 }
 
+function showPipelineUpgradeNotice(source) {
+  if (ui.pipelineUpgradeHint) ui.pipelineUpgradeHint.hidden = Number(source?.pipeline_version ?? 2) >= 4;
+}
+
 function readSettings() {
   saveCurrentProfileDraft();
   const normalizedArtist = canonicalArtists(ui.manual_artist.value);
   if (ui.manual_artist.value !== normalizedArtist) ui.manual_artist.value = normalizedArtist;
   const settings = {
+    pipeline_version: 4,
     count: Number(ui.count.value), female_count: Number(ui.female_count.value), male_count: Number(ui.male_count.value),
     character_detail: ui.character_detail.value, manual_artist: normalizedArtist, quality_prompt: ui.quality_prompt.value,
     extra_prompt: ui.extra_prompt.value, negative_prompt: ui.negative_prompt.value, width: Number(ui.width.value), height: Number(ui.height.value),
@@ -1569,13 +1600,24 @@ function generationClassificationIssues(settings = null) {
   const modelName = settings?.model_name ?? ui.model_name?.value ?? "";
   const modelIssue = modelSelectionIssue(modelName);
   if (modelIssue) issues.push(`主模型：${modelIssue}`);
+  const singleActive = settings ? settings.workbench === "single" : typeof singleWorkbenchActive === "function" && singleWorkbenchActive();
+  let activeRoutes = new Set(["primary"]), single = null;
+  if (singleActive) {
+    single = settings?.single || singleWorkbenchState.single || {};
+    const dual = (settings?.base_mode || ui.base_mode?.value) === "dual_sampler";
+    activeRoutes = new Set(dual ? [single.dual?.first_pipeline || "primary", single.dual?.second_pipeline || "primary"] : [single.normal_pipeline || "primary"]);
+    const stages = settings?.upscalers || (typeof readUpscalerControls === "function" ? readUpscalerControls() : {});
+    if (Number(settings?.pipeline_version ?? 3) < 3 && stages.latent?.enabled && stages.latent.second_sampler?.enabled) activeRoutes.add(single.latent?.pipeline || "secondary");
+    if (stages.face_refine?.enabled) activeRoutes.add(single.face_pipeline || "secondary");
+  }
+  const activeLoras = [...(activeRoutes.has("primary") ? settings?.loras || draft.loras || [] : []), ...(activeRoutes.has("secondary") ? single?.loras_secondary || [] : [])];
   if (!loraInventoryLoaded || loraInventoryProfile !== currentProfile()) issues.push(loraInventoryError || "正在读取 LoRA Manager 分类");
-  else for (const item of [...(settings?.loras || draft.loras || []), ...(settings?.single?.loras_secondary || (typeof singleWorkbenchActive === "function" && singleWorkbenchActive() ? singleWorkbenchState.single.loras_secondary || [] : []))]) {
+  else for (const item of activeLoras) {
     if (!item.enabled) continue;
     const reason = loraSelectionIssue(item.filename);
     if (reason) issues.push(`${item.filename}：${reason}`);
   }
-  if (typeof sharedParameterResourceIssues === "function") issues.push(...sharedParameterResourceIssues(settings || { model_profile: currentProfile(), krea_variance: { enabled: ui.krea_variance_enabled?.checked }, upscalers: { face_refine: { enabled: ui.face_refine_enabled?.checked, sampler: ui.face_sampler?.value, scheduler: ui.face_scheduler?.value } } }));
+  if (typeof sharedParameterResourceIssues === "function") issues.push(...sharedParameterResourceIssues(settings || { model_profile: currentProfile(), krea_variance: { enabled: ui.krea_variance_enabled?.checked }, upscalers: typeof readUpscalerControls === "function" ? readUpscalerControls() : { face_refine: { enabled: ui.face_refine_enabled?.checked, sampler: ui.face_sampler?.value, scheduler: ui.face_scheduler?.value } } }));
   return [...new Set(issues)];
 }
 function updateGenerationAvailability() {
@@ -1923,6 +1965,7 @@ function renderQueue(queue) {
 function batchProgressLabel(batch) {
   if (batch.stage === "prompt_processing") return batch.settings?.kind === "reverse" ? "正在反推图像提示词" : "正在处理提示词";
   if (batch.preview_status === "disconnected") return "进度连接已断开，正在重连";
+  if (batch.progress_stage_label) return batch.progress?.max > 0 ? `${batch.progress_stage_label} ${batch.progress.value}/${batch.progress.max}` : `正在处理${batch.progress_stage_label}`;
   const node = String(batch.progress_node || "");
   const sampler = { "5": "底图采样", "691:1240": "底图采样", "701:1245": "第一段采样", "701:1246": "第二段采样", "704:1248": "潜空间二次采样", "712:1208": "SeedVR2 采样" }[node];
   const progress = batch.progress;
@@ -1996,7 +2039,8 @@ function renderBatch(batch, queue = currentQueue) {
   // 运行中仍可加入队列，但分类有效性与连接状态共用同一守卫。
   updateGenerationAvailability();
   ui.startButton.textContent = active ? "加入队列" : "开始生成";
-  const batchMessage = [batch?.error, batch?.cancel_warning].filter(Boolean).join("\n");
+  const failurePrefix = batch?.failed_stage_label ? `${batch.failed_stage_label}失败：` : "";
+  const batchMessage = [batch?.error && (failurePrefix && !String(batch.error).startsWith(failurePrefix) ? `${failurePrefix}${batch.error}` : batch.error), batch?.cancel_warning].filter(Boolean).join("\n");
   ui.batchError.hidden = !batchMessage;
   ui.batchError.textContent = batchMessage;
   if (batch && !promptOnly && !active && lastTerminalBatch !== `${batch.id}:${batch.status}:${completed}`) {
@@ -5165,6 +5209,7 @@ function applyNodeResourceControls() {
   applyNodeInputControl(ui.nvidia_quality, nvidia.quality);
   const scale = nvidia.resize_type?.[1]?.options?.find(option => option.key === "scale by multiplier")?.inputs?.required?.scale;
   applyNodeInputControl(ui.nvidia_scale, scale);
+  applyNodeInputControl(ui.pixel_hires_upscale_method, nodeInputs.ImageScaleBy?.upscale_method);
 }
 function resolveInventoryPath(selected, values) {
   const requested = String(selected || "").trim().replaceAll("\\", "/");
@@ -5274,7 +5319,7 @@ async function loadResources({ refresh = false } = {}) {
     ui.scheduler.disabled = true;
     ui.seedvr2_model_name.disabled = true;
     ui.seedvr2_vae_name.disabled = true;
-    for (const id of ["latent_second_sampler_name", "latent_second_scheduler", "seedvr2_sampler_name", "seedvr2_scheduler", "face_sampler", "face_scheduler"]) ui[id].disabled = true;
+    for (const id of ["latent_sampler_name", "latent_sampler_scheduler", "latent_second_sampler_name", "latent_second_scheduler", "seedvr2_sampler_name", "seedvr2_scheduler", "face_sampler", "face_scheduler"].filter(id => ui[id])) ui[id].disabled = true;
   }
   // Retain selected values while disabled: autosave and overlapping reads must
   // not capture placeholder values and silently replace them with defaults.
@@ -5310,6 +5355,7 @@ async function loadResources({ refresh = false } = {}) {
       plugins: payload.plugins && typeof payload.plugins === "object" ? payload.plugins : {},
       prompt_processing: payload.prompt_processing || {},
       node_inputs: payload.node_inputs || {},
+      node_types: Array.isArray(payload.node_types) ? payload.node_types : [],
     };
     profileResources = modelProfiles;
     const profileOptions = profileOptionsFromResources();
@@ -5323,16 +5369,17 @@ async function loadResources({ refresh = false } = {}) {
     populateResourceSelect(ui.seedvr2_model_name, seedValues, resolveInventoryPath(ui.seedvr2_model_name.value || selectedSeed, resources.seedvr2_models), "没有可用 SeedVR2 模型");
     const seedVaeValues = resources.seedvr2_vaes;
     populateResourceSelect(ui.seedvr2_vae_name, seedVaeValues, resolveInventoryPath(ui.seedvr2_vae_name.value || selectedSeedVae, resources.seedvr2_vaes), "没有可用 SeedVR2 VAE");
-    for (const id of ["latent_second_sampler_name", "seedvr2_sampler_name", "face_sampler"]) populateResourceSelect(ui[id], resources.samplers, controlValue(id), "没有可用 Sampler");
-    for (const id of ["latent_second_scheduler", "seedvr2_scheduler", "face_scheduler"]) populateResourceSelect(ui[id], resources.schedulers, controlValue(id), "没有可用 Scheduler");
+    if (ui.pixel_hires_model_name) populateResourceSelect(ui.pixel_hires_model_name, resources.upscale_models, resolveInventoryPath(ui.pixel_hires_model_name.value, resources.upscale_models), "没有可用像素放大模型");
+    for (const id of ["latent_sampler_name", "latent_second_sampler_name", "seedvr2_sampler_name", "face_sampler"].filter(id => ui[id])) populateResourceSelect(ui[id], resources.samplers, controlValue(id), "没有可用 Sampler");
+    for (const id of ["latent_sampler_scheduler", "latent_second_scheduler", "seedvr2_scheduler", "face_scheduler"].filter(id => ui[id])) populateResourceSelect(ui[id], resources.schedulers, controlValue(id), "没有可用 Scheduler");
     resourcesLoaded = true;
     ui.model_profile.disabled = profileOptions.length < 2;
     ui.model_name.disabled = modelValues.length === 0;
     ui.sampler_name.disabled = resources.samplers.length === 0;
     ui.scheduler.disabled = resources.schedulers.length === 0;
     ui.seedvr2_vae_name.disabled = resources.seedvr2_vaes.length === 0;
-    for (const id of ["latent_second_sampler_name", "seedvr2_sampler_name", "face_sampler"]) ui[id].disabled = resources.samplers.length === 0;
-    for (const id of ["latent_second_scheduler", "seedvr2_scheduler", "face_scheduler"]) ui[id].disabled = resources.schedulers.length === 0;
+    for (const id of ["latent_sampler_name", "latent_second_sampler_name", "seedvr2_sampler_name", "face_sampler"].filter(id => ui[id])) ui[id].disabled = resources.samplers.length === 0;
+    for (const id of ["latent_sampler_scheduler", "latent_second_scheduler", "seedvr2_scheduler", "face_scheduler"].filter(id => ui[id])) ui[id].disabled = resources.schedulers.length === 0;
     applyNodeResourceControls();
     if (typeof sharedParameterResources === "function") sharedParameterResources();
   } catch (error) {
@@ -5346,35 +5393,56 @@ async function loadResources({ refresh = false } = {}) {
     populateResourceSelect(ui.seedvr2_model_name, [], ui.seedvr2_model_name.value || selectedSeed, "SeedVR2 资源离线");
     populateResourceSelect(ui.seedvr2_vae_name, [], ui.seedvr2_vae_name.value || selectedSeedVae, "SeedVR2 VAE 资源离线");
     populateResourceSelect(ui.face_upscaler_model, [], ui.face_upscaler_model.value, "脸部放大模型资源离线");
+    if (ui.pixel_hires_model_name) populateResourceSelect(ui.pixel_hires_model_name, [], ui.pixel_hires_model_name.value, "像素放大模型资源离线");
   }
   updateProfileResources();
   updateRepairControls();
   if (typeof singleWorkbenchResources === "function") singleWorkbenchResources();
 }
+function pipelineFlowText(enabled) {
+  const stages = [
+    ["pixel_hires", "像素高清"], ["latent", "潜空间放大"], ["post_sampler", "整图后采样"],
+    ["face", "脸部细化"], ["seedvr2", "SeedVR2"], ["nvidia", "N 卡 VSR"], ["dlss", "DLSS"],
+  ];
+  return ["底图", ...stages.filter(([key]) => enabled[key]).map(([, label]) => label), "保存"].join(" → ");
+}
 function updateRepairControls() {
   refreshCurrentModelSelection();
   const upscalers = {
+    pixel_hires: Boolean(ui.pixel_hires_enabled?.checked),
+    post_sampler: ui.latent_second_sampler_enabled.checked,
+    dlss: Boolean(ui.dlss_enabled?.checked),
     latent: ui.latent_upscale_enabled.checked,
     seedvr2: ui.seedvr2_enabled.checked,
     nvidia: ui.nvidia_upscale_enabled.checked,
     face: ui.face_refine_enabled.checked,
   };
   const activeCount = Object.values(upscalers).filter(Boolean).length;
+  if (ui.pipelineFlow) ui.pipelineFlow.textContent = pipelineFlowText(upscalers);
   const baseLabel = ui.base_mode.value === "dual_sampler" ? "底图－双采样器" : "普通底图";
   ui.repairSummary.textContent = `${profileLabel(currentProfile())} · ${baseLabel} · ${activeCount} 项后处理`;
   ui.latentUpscaleFields.classList.toggle("disabled", !upscalers.latent);
+  ui.latentUpscaleFields.hidden = !upscalers.latent;
+  if (ui.latentDoubleSamplingHint) ui.latentDoubleSamplingHint.hidden = !upscalers.latent || !upscalers.post_sampler;
   ui.seedvr2Fields.classList.toggle("disabled", !upscalers.seedvr2);
   ui.nvidiaUpscaleFields.classList.toggle("disabled", !upscalers.nvidia);
   ui.faceRefineFields.classList.toggle("disabled", !upscalers.face);
-  ui.latentSecondSamplerFields.classList.toggle("disabled", !upscalers.latent || !ui.latent_second_sampler_enabled.checked);
+  ui.latentSecondSamplerFields.classList.toggle("disabled", !upscalers.post_sampler);
   ui.latent_upscale_scale.disabled = !upscalers.latent;
   ui.latent_upscale_method.disabled = !upscalers.latent;
-  ui.latent_second_sampler_enabled.disabled = !upscalers.latent;
-  for (const id of Object.values(POST_SAMPLER_IDS)) ui[id].disabled = !upscalers.latent || !ui.latent_second_sampler_enabled.checked;
+  for (const id of Object.values(LATENT_SAMPLER_IDS)) if (ui[id]) ui[id].disabled = !upscalers.latent;
+  ui.latent_second_sampler_enabled.disabled = false;
+  for (const id of Object.values(POST_SAMPLER_IDS)) ui[id].disabled = !upscalers.post_sampler;
+  ui.pixelHiresFields?.classList.toggle("disabled", !upscalers.pixel_hires);
+  ui.dlssFields?.classList.toggle("disabled", !upscalers.dlss);
+  if (ui.pixel_hires_model_name) ui.pixel_hires_model_name.disabled = !upscalers.pixel_hires || !resourcesLoaded;
+  for (const id of ["pixel_hires_percent", "pixel_hires_upscale_method"]) if (ui[id]) ui[id].disabled = !upscalers.pixel_hires || upscalers.post_sampler;
+  if (ui.pixelHiresResizeHint) ui.pixelHiresResizeHint.textContent = upscalers.post_sampler ? "后采样已开启，跳过缩图" : "按原生放大结果缩图";
   ui.seedvr2_model_name.disabled = !upscalers.seedvr2 || !resourcesLoaded;
   ui.seedvr2_vae_name.disabled = !upscalers.seedvr2 || !resourcesLoaded;
   for (const id of ["seedvr2_weight_dtype", "seedvr2_scale_by", "seedvr2_color_correction_method", ...Object.values(SEED_SAMPLER_IDS), ...Object.values(SEED_TILE_IDS.encode), ...Object.values(SEED_TILE_IDS.decode)]) ui[id].disabled = !upscalers.seedvr2;
-  for (const id of ["nvidia_resize_type", "nvidia_scale", "nvidia_quality", "nvidia_dlss_style", "nvidia_dlss_intensity", "nvidia_dlss_local_tone", "nvidia_dlss_local_struct", "nvidia_dlss_output_mix"]) ui[id].disabled = !upscalers.nvidia;
+  for (const id of ["nvidia_resize_type", "nvidia_scale", "nvidia_quality"]) ui[id].disabled = !upscalers.nvidia;
+  for (const id of ["nvidia_dlss_style", "nvidia_dlss_intensity", "nvidia_dlss_local_tone", "nvidia_dlss_local_struct", "nvidia_dlss_output_mix"]) ui[id].disabled = !upscalers.dlss;
   for (const id of Object.values(UPSCALER_CONTROL_IDS.face_refine).filter((id) => id !== "face_refine_enabled")) ui[id].disabled = !upscalers.face;
   if (typeof sharedParameterVisibility === "function") sharedParameterVisibility();
   if (typeof singleWorkbenchLayout === "function" && typeof singleWorkbenchState !== "undefined" && singleWorkbenchState.ready) singleWorkbenchLayout();
@@ -5500,6 +5568,7 @@ async function refreshResourceClassification() {
 }
 
 const PRESET_SETTING_KEYS = [
+  "pipeline_version",
   "workbench", "generation_mode", "single", "clip_name", "vae_name", "clip_type",
   "model_profile",
   "model_name",
@@ -6353,6 +6422,7 @@ ui.ownershipSearch.addEventListener("input", renderResourceOwnership);
 ui.refreshResourceClassification.addEventListener("click", refreshResourceClassification);
 initializeKreaPromptPool();
 for (const control of [
+  ui.pixel_hires_enabled, ui.pixel_hires_model_name, ui.pixel_hires_percent, ui.pixel_hires_upscale_method, ui.dlss_enabled,
   ui.latent_second_sampler_enabled,
   ui.base_mode,
   ui.latent_upscale_enabled,
@@ -6360,6 +6430,7 @@ for (const control of [
   ui.latent_upscale_method,
   ui.latent_model_format,
   ...Object.values(POST_SAMPLER_IDS).map((id) => ui[id]),
+  ...Object.values(LATENT_SAMPLER_IDS).map((id) => ui[id]),
   ui.seedvr2_enabled,
   ui.seedvr2_model_name,
   ui.seedvr2_vae_name,

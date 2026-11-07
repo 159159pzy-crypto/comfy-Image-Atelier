@@ -140,6 +140,7 @@ test('stored prompt seeds keep numeric validation after the prompt seed input is
 test('compatibility lists hidden differences but excludes editable prompt, sampler and enhancement fields', () => {
   const { ctx, defaults } = setup();
   const customized = ctx.singleWorkbenchMerge(defaults, {
+    pipeline_version: 2,
     clip_name: 'custom-clip', width: 768, cfg: 5, loras: [{ filename: 'common.safetensors', enabled: true, strength: .8 }],
     single: {
       positive_prompt: 'custom prompt', prefix: 'prefix', suffix: 'suffix', input_image_id: 'asset', denoise: .4, resize_mode: 'pad',
@@ -169,6 +170,7 @@ test('resetting compatibility resets hidden differences and keeps authored promp
   const { ctx, state, defaults, persisted, invalidations } = setup();
   const commonLoras = [{ filename: 'common.safetensors', enabled: true, strength: .7 }];
   const original = ctx.singleWorkbenchMerge(defaults, {
+    pipeline_version: 2,
     generation_mode: 'img2img', clip_name: 'old-clip', loras: commonLoras, width: 768, steps: 42,
     single: {
       positive_prompt: 'keep this prompt', prefix: 'prefix', suffix: 'suffix', input_image_id: 'owned-reference', denoise: .27, resize_mode: 'pad',

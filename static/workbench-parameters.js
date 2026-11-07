@@ -24,14 +24,13 @@ function randomDualFromSettings(settings = {}) {
 }
 function randomWorkbenchDefaultSettings(profile = "anima") {
   const settings = JSON.parse(JSON.stringify(profileSettingsDefaults(profile)));
-  const upscalers = normalizeUpscalers(settings.upscalers);
+  const upscalers = normalizeUpscalers(settings.upscalers, null, profile, settings.pipeline_version ?? 4);
   Object.assign(upscalers.latent, { upscale_method: "sesqui", model_format: "Wan 2.1", half_precision: true, scale_by: 1.5 });
-  Object.assign(upscalers.latent.second_sampler, { steps: 20, cfg: 8, sampler_name: "euler", scheduler: "simple", denoise: 1 });
   Object.assign(upscalers.face_refine, { steps: 8, cfg_scale: 1, sampler: "res_2m_ode", scheduler: "beta57", denoise_strength: .3 });
   const mode = settings.base_mode === "dual_sampler" ? "dual_sampler" : "normal";
   const sampling = sharedSamplingDefaults(mode);
   delete sampling.seedMode; delete sampling.seed;
-  return { ...settings, ...sampling, base_mode: mode, model_profile: profile, workbench: "random", upscalers };
+  return { ...settings, ...sampling, pipeline_version: 4, base_mode: mode, model_profile: profile, workbench: "random", upscalers };
 }
 function sharedLatentFormat(value, fallback = "Wan 2.1") {
   return String(value || "").startsWith("legacy:") ? fallback : value || fallback;
@@ -74,9 +73,9 @@ function sharedParametersApply(settings, raw = settings) {
   if (latent) {
     sharedParameterState.latent = { model_format: latent.model_format || "Wan 2.1", half_precision: latent.half_precision ?? true };
     ensureSelectValue(ui.latent_upscale_method, latent.upscale_method || "sesqui");
-    sharedLatentMethodChoice(ui.latent_model_format, latent.upscale_method, sharedParameterState.latent.model_format);
+    ensureSelectValue(ui.latent_model_format, sharedParameterState.latent.model_format);
   }
-  sharedParameterState.dlss = { ...defaultUpscalers().nvidia.dlss, ...(raw?.single?.dlss || {}), ...(raw?.upscalers?.nvidia?.dlss || {}) };
+  sharedParameterState.dlss = { ...defaultUpscalers().dlss, ...(raw?.single?.dlss || {}), ...(raw?.upscalers?.nvidia?.dlss || {}), ...(settings.upscalers?.dlss || {}) };
   delete sharedParameterState.dlss.enabled;
   for (const key of NVIDIA_DLSS_KEYS) setControl(`nvidia_dlss_${key}`, sharedParameterState.dlss[key]);
   sharedParameterState.activeMode = settings.base_mode || "normal";
@@ -145,10 +144,14 @@ function sharedParameterVisibility() {
   const denoise = ui.base_denoise?.closest?.("label"); if (denoise) denoise.hidden = dual;
   if (ui.base_denoise) ui.base_denoise.disabled = dual;
   const method = ui.latent_upscale_method.value;
-  ui.latent_upscale_scale.min = method === "sesqui" ? "1" : "0.01";
-  ui.latent_upscale_scale.max = method === "sesqui" ? "2" : "64";
-  ui.latent_upscale_scale.title = method === "sesqui" ? "SesquiLSR 倍率为 1–2" : "潜空间放大倍率为 0.01–64";
-  if (ui.latent_model_format) ui.latent_model_format.disabled = !ui.latent_upscale_enabled.checked;
+  const sesqui = method === "sesqui";
+  const schema = typeof resources !== "undefined" ? resources.node_inputs?.[sesqui ? "SesquiLatentUpscale" : "LatentUpscaleBy"] : null;
+  const bounds = schema?.[sesqui ? "scale" : "scale_by"]?.[1] || {};
+  ui.latent_upscale_scale.min = String(bounds.min ?? (sesqui ? 1 : .01));
+  ui.latent_upscale_scale.max = String(bounds.max ?? (sesqui ? 2 : 8));
+  ui.latent_upscale_scale.title = `倍率范围 ${ui.latent_upscale_scale.min}–${ui.latent_upscale_scale.max}`;
+  if (ui.latentModelFormatField) ui.latentModelFormatField.hidden = !sesqui;
+  if (ui.latent_model_format) ui.latent_model_format.disabled = !ui.latent_upscale_enabled?.checked || !sesqui;
   const seedMode = document.getElementById("singleSeedMode"), seed = document.getElementById("singleSampleSeed");
   if (seedMode) seedMode.disabled = false;
   if (seed) seed.disabled = seedMode?.value !== "fixed";
@@ -169,8 +172,7 @@ function sharedParameterResources() {
       const selected = element.value || "Wan 2.1";
       populateSelect(element, ["SDXL", "Flux", "Flux2", "Ideogram 4", "Wan 2.1"], selected);
     }
-    const dual = id === "random_dual_model_format";
-    sharedLatentMethodChoice(element, dual ? document.getElementById("random_dual_upscale_method")?.value : ui.latent_upscale_method.value, dual ? sharedParameterState.dual.model_format : sharedParameterState.latent.model_format);
+    if (id === "random_dual_model_format") sharedLatentMethodChoice(element, document.getElementById("random_dual_upscale_method")?.value, sharedParameterState.dual.model_format);
   }
   const dlss = resources.node_inputs?.DLSS5NeuralRender || {};
   for (const key of NVIDIA_DLSS_KEYS) applyNodeInputControl(ui[`nvidia_dlss_${key}`], dlss[key]);
@@ -179,6 +181,23 @@ function sharedParameterResourceIssues(settings) {
   const issues = [];
   if (settings.krea_variance?.enabled && settings.model_profile && settings.model_profile !== "krea2") issues.push("K2 多样性增强仅适用于 Krea 2，请关闭该选项");
   if (typeof resourcesLoaded === "undefined" || !resourcesLoaded) return issues;
+  const post = settings.upscalers || {};
+  const available = Array.isArray(resources.node_types) && resources.node_types.length ? new Set(resources.node_types) : null;
+  const requireNodes = (enabled, label, names) => { if (enabled && available) for (const name of names) if (!available.has(name)) issues.push(`${label}节点不可用：${name}`); };
+  requireNodes(post.pixel_hires?.enabled, "像素高清", ["UpscaleModelLoader", "ImageUpscaleWithModel", ...(!post.post_sampler?.enabled ? ["ImageScaleBy"] : [])]);
+  requireNodes(post.nvidia?.enabled, "N 卡 VSR", ["RTXVideoSuperResolution"]);
+  requireNodes(post.dlss?.enabled, "DLSS", ["DLSS5NeuralRender"]);
+  requireNodes(post.post_sampler?.enabled, "整图后采样", ["KSampler"]);
+  if (Number(settings.pipeline_version ?? 4) >= 4 && post.latent?.enabled) {
+    requireNodes(true, "潜空间放大", [post.latent.upscale_method === "sesqui" ? "SesquiLatentUpscale" : "LatentUpscaleBy", "KSampler"]);
+    if (!(resources.samplers || []).includes(post.latent.sampler?.sampler_name)) issues.push(`潜空间采样器不可用：${post.latent.sampler?.sampler_name || "未选择"}`);
+    if (!(resources.schedulers || []).includes(post.latent.sampler?.scheduler)) issues.push(`潜空间调度器不可用：${post.latent.sampler?.scheduler || "未选择"}`);
+  }
+  if (post.pixel_hires?.enabled && !(resources.upscale_models || []).includes(post.pixel_hires.model_name)) issues.push(`像素高清模型不可用：${post.pixel_hires.model_name || "未选择"}`);
+  if (post.post_sampler?.enabled) {
+    if (!(resources.samplers || []).includes(post.post_sampler.sampler_name)) issues.push(`整图后采样器不可用：${post.post_sampler.sampler_name}`);
+    if (!(resources.schedulers || []).includes(post.post_sampler.scheduler)) issues.push(`整图后采样调度器不可用：${post.post_sampler.scheduler}`);
+  }
   const face = settings.upscalers?.face_refine;
   if (face?.enabled) {
     const schema = resources.node_inputs?.ForbiddenVisionFaceProcessorIntegrated || {};
@@ -207,6 +226,20 @@ function adaptPostprocessSettings(settings, source, targetWorkbench) {
     settings.upscalers ||= {}; settings.upscalers.nvidia ||= {};
     settings.upscalers.nvidia.dlss = { ...source.single.dlss }; delete settings.upscalers.nvidia.dlss.enabled;
   }
+  const profile = source?.model_profile || settings.model_profile || "anima";
+  settings.upscalers = normalizeUpscalers(settings.upscalers || source?.upscalers, null, profile);
+  if (Number(source?.pipeline_version ?? 2) < 3) {
+    const migrated = normalizeUpscalers(source?.upscalers, null, profile, 2);
+    settings.upscalers.post_sampler = migrated.post_sampler;
+    settings.upscalers.dlss = { ...migrated.dlss, ...(!source?.upscalers?.nvidia?.dlss ? source?.single?.dlss || {} : {}), enabled: migrated.dlss.enabled };
+    if (source?.hires && !source.upscalers) {
+      settings.upscalers.pixel_hires = { ...defaultUpscalers(profile).pixel_hires, ...source.hires };
+      settings.upscalers.latent.enabled = false;
+      settings.upscalers.post_sampler = { ...defaultUpscalers(profile).post_sampler, ...(source.second_sampler || {}) };
+    }
+  }
+  if (Number(source?.pipeline_version ?? 2) < 4) settings.upscalers.latent.sampler = clone(defaultUpscalers(profile).latent.sampler);
+  settings.pipeline_version = 4;
   return settings;
 }
 function initializeSharedParameters() {
@@ -215,7 +248,7 @@ function initializeSharedParameters() {
   ui.base_mode.addEventListener("change", sharedSamplingModeChanged);
   ui.krea_variance_enabled?.addEventListener("change", () => { sharedParameterVisibility(); updateRepairControls(); schedulePersist(); });
   for (const key of RANDOM_DUAL_KEYS) document.getElementById(`random_dual_${key}`)?.addEventListener("change", () => { sharedParameterVisibility(); schedulePersist(); });
-  for (const [id, target] of [["random_dual_model_format", "random_dual_upscale_method"], ["latent_model_format", "latent_upscale_method"]]) document.getElementById(id)?.addEventListener("change", () => {
+  for (const [id, target] of [["random_dual_model_format", "random_dual_upscale_method"]]) document.getElementById(id)?.addEventListener("change", () => {
     const selected = document.getElementById(id).value;
     ensureSelectValue(document.getElementById(target), selected.startsWith("legacy:") ? selected.slice(7) : "sesqui");
     if (!selected.startsWith("legacy:")) {
@@ -223,6 +256,10 @@ function initializeSharedParameters() {
       else sharedParameterState.dual.model_format = selected;
     }
     sharedParameterVisibility(); schedulePersist();
+  });
+  ui.latent_model_format?.addEventListener("change", () => {
+    sharedParameterState.latent.model_format = ui.latent_model_format.value;
+    schedulePersist();
   });
   ui.steps.addEventListener("input", () => { sharedParameterVisibility(); });
   sharedParameterResources(); sharedParameterVisibility();

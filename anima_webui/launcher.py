@@ -12,6 +12,7 @@ REMOVED_SETTINGS = ("hires", "detailers", "cfg_zero_star", "second_sampler")
 
 def _public_defaults() -> dict[str, Any]:
     defaults = copy.deepcopy(DEFAULT_SETTINGS)
+    defaults["pipeline_version"] = 4
     for key in REMOVED_SETTINGS:
         defaults.pop(key, None)
     return defaults

@@ -248,7 +248,10 @@ class ModelProfileContractTests(unittest.TestCase):
             }
         )
         self.assertEqual(settings["base_mode"], "dual_sampler")
-        self.assertTrue(all(settings["upscalers"][key]["enabled"] for key in settings["upscalers"]))
+        self.assertTrue(all(settings["upscalers"][key]["enabled"]
+                            for key in ("latent", "seedvr2", "nvidia", "face_refine")))
+        self.assertTrue(all(not settings["upscalers"][key]["enabled"]
+                            for key in ("pixel_hires", "post_sampler", "dlss")))
 
         for bad in ("both", "dual", "normal+dual"):
             with self.subTest(base_mode=bad), self.assertRaises(WorkflowError):

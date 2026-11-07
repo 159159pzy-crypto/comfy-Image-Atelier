@@ -42,6 +42,15 @@ MODEL_PROFILES: dict[str, dict[str, Any]] = {
         },
         "seedvr2_model": "seedvr2_3b_int8_convrot.safetensors",
         "seedvr2_vae": "ema_vae_fp16.safetensors",
+        "pixel_hires_model": "4x_foolhardy_Remacri.pth",
+        "post_sampler_defaults": {
+            "enabled": False, "steps": 16, "cfg": 4.0, "denoise": 0.2,
+            "sampler_name": "er_sde", "scheduler": "simple",
+        },
+        "latent_sampler_defaults": {
+            "steps": 16, "cfg": 4.0, "denoise": 0.2,
+            "sampler_name": "er_sde", "scheduler": "simple",
+        },
         "lora_namespace": "anima",
         "pool_namespace": "anima",
         "style_namespace": "anima",
@@ -73,6 +82,15 @@ MODEL_PROFILES: dict[str, dict[str, Any]] = {
         },
         "seedvr2_model": "seedvr2_3b_int8_convrot.safetensors",
         "seedvr2_vae": "ema_vae_fp16.safetensors",
+        "pixel_hires_model": "4x-AnimeSharp.pth",
+        "post_sampler_defaults": {
+            "enabled": False, "steps": 10, "cfg": 1.0, "denoise": 0.3,
+            "sampler_name": "er_sde", "scheduler": "simple",
+        },
+        "latent_sampler_defaults": {
+            "steps": 10, "cfg": 1.0, "denoise": 0.3,
+            "sampler_name": "er_sde", "scheduler": "simple",
+        },
         "lora_namespace": "krea2",
         "pool_namespace": "krea2",
         "style_namespace": "krea2",
@@ -261,6 +279,7 @@ def profile_public(
         "clip_type": profile["clip_type"],
         "prompt_mode": profile["prompt_mode"],
         "defaults": copy.deepcopy(profile["defaults"]),
+        "latent_sampler_defaults": copy.deepcopy(profile["latent_sampler_defaults"]),
         "seedvr2_model": profile["seedvr2_model"],
         "seedvr2_vae": profile["seedvr2_vae"],
         "namespaces": {

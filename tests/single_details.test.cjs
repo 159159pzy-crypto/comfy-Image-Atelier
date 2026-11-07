@@ -67,6 +67,42 @@ test('face prompt overrides are identified as node processing, not misreported a
   assert.match(new Map(data.repairs.find(stage => stage.title === '脸部细化').rows).get('提示词处理'), /重新编码/);
 });
 
+test('v3 details separate all seven stages and post sampling inherits the final base LoRA route', () => {
+  const saved = record(); saved.settings.pipeline_version = 3; saved.settings.base_mode = 'dual_sampler';
+  saved.settings.single.dual = { first_pipeline: 'primary', second_pipeline: 'secondary' };
+  saved.settings.single.loras_secondary = [{ filename: 'secondary-lora', enabled: true, strength: .4 }];
+  Object.assign(saved.settings.upscalers, { pixel_hires: { enabled: true, model_name: 'pixel.pth', percent: 50 },
+    post_sampler: { enabled: true, steps: 16, cfg: 4, denoise: .2 }, nvidia: { enabled: false }, dlss: { enabled: true, output_mix: .5 } });
+  const data = context().singleDetailData(saved);
+  assert.deepEqual(Array.from(data.repairs, stage => stage.title), ['像素高清', 'N 卡 VSR', 'SeedVR2', '潜空间放大', '整图后采样', '脸部细化', 'DLSS']);
+  assert.equal(data.repairs[1].enabled, false); assert.equal(data.repairs[6].enabled, true);
+  assert.match(new Map(data.repairs[0].rows).get('缩图比例'), /跳过缩图/);
+  assert.equal(data.stages.find(stage => stage.title === '整图后采样').pipeline, 'secondary');
+  assert.match(data.loras.find(lora => lora.filename === 'secondary-lora').stages, /整图后采样/);
+  assert.equal(data.stages.some(stage => stage.title === '潜空间采样'), false);
+  assert.equal(new Map(data.repairs.find(stage => stage.title === '潜空间放大').rows).has('步数'), false);
+});
+
+test('v4 details show the new stage order and distinct latent sampling with its effective base LoRA route', () => {
+  const saved = record(); saved.settings.pipeline_version = 4; saved.settings.base_mode = 'dual_sampler';
+  saved.settings.single.dual = { first_pipeline: 'primary', second_pipeline: 'secondary' };
+  saved.settings.single.loras_secondary = [{ filename: 'secondary-lora', enabled: true, strength: .4 }];
+  saved.settings.single.latent = { upscale_method: 'bilinear', model_format: 'SDXL', pipeline: 'primary' };
+  Object.assign(saved.settings.upscalers.latent, { upscale_method: 'sesqui', model_format: 'Wan 2.1', sampler: { steps: 29, cfg: 2.7, sampler_name: 'heun', scheduler: 'karras', denoise: .41 } });
+  saved.settings.upscalers.post_sampler = { enabled: true, steps: 17, cfg: 4, sampler_name: 'euler', scheduler: 'simple', denoise: .22 };
+  const before = JSON.stringify(saved), data = context().singleDetailData(saved);
+  assert.deepEqual(Array.from(data.repairs, stage => stage.title), ['像素高清', '潜空间放大', '整图后采样', '脸部细化', 'SeedVR2', 'N 卡 VSR', 'DLSS']);
+  const latent = new Map(data.repairs[1].rows), post = new Map(data.repairs[2].rows);
+  assert.equal(latent.get('缩放方法'), 'bilinear'); assert.equal(latent.has('模型格式'), false);
+  assert.equal(latent.get('步数'), 29); assert.equal(latent.get('降噪'), .41); assert.equal(post.get('步数'), 17); assert.equal(post.get('降噪'), .22);
+  assert.equal(data.stages.find(stage => stage.title === '潜空间采样').pipeline, 'secondary');
+  assert.match(data.loras.find(lora => lora.filename === 'secondary-lora').stages, /潜空间采样、整图后采样/);
+  assert.equal(JSON.stringify(saved), before);
+  saved.settings.workbench = 'random';
+  const random = new Map(context().singleDetailData(saved).repairs[1].rows);
+  assert.equal(random.get('缩放方法'), 'sesqui'); assert.equal(random.get('模型格式'), 'Wan 2.1');
+});
+
 test('dual noise and actual Sesqui and VAE settings are retained in collapsed historical groups', () => {
   const saved = record(); saved.settings.base_mode = 'dual_sampler';
   saved.settings.single.dual = { first_pipeline: 'primary', second_pipeline: 'primary', upscale_method: 'sesqui',

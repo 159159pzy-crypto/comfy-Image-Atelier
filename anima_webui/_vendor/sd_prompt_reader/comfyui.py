@@ -46,6 +46,11 @@ def parse_comfyui(graph: dict[str, Any]) -> dict[str, Any]:
         if kind == "SDParameterGenerator":
             field = target if target in values else "seed" if target == "noise_seed" else target
             return scalar(values.get(field), visited, target=field)
+        if kind == "ComfyMathExpression" and value[1] == 1 and values.get("expression") == "a":
+            # The execution gate returns its integer seed unchanged. Recognize
+            # only that identity; imported metadata must never evaluate code.
+            original = scalar(values.get("values.a"), visited, target=target)
+            return original if type(original) is int else None
         if kind in {"CR Seed", "PrimitiveNode", "PrimitiveInt", "PrimitiveFloat", "String", "Text Multiline", "SDParameterGenerator"}:
             for key in ("seed", "value", "text"):
                 if key in values:

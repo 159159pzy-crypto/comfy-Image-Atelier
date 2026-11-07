@@ -16,7 +16,7 @@ from anima_webui._vendor.sd_prompt_reader import UPSTREAM_COMMIT
 from anima_webui._vendor.sd_prompt_reader.comfyui import parse_comfyui
 from anima_webui._vendor.sd_prompt_reader.formats import MAX_METADATA_BYTES, decode_user_comment, draw_things
 from anima_webui.prompt_images import PromptImageStore
-from anima_webui.workflow import WorkflowError
+from anima_webui.workflow import MAX_SAMPLE_SEED, WorkflowError, WorkflowTemplates
 
 
 def image_bytes(info=None, *, format="PNG", exif=None, comment=None, image=None):
@@ -250,6 +250,38 @@ def test_comfyui_sampler_custom_advanced_guider_and_linked_seed(tmp_path):
     parsed = assert_prompt(tmp_path, image_bytes({"prompt": data}))
     assert parsed["parameters"]["seed"] == "18446744073709551615"
     assert parsed["parameters"]["steps"] == 25
+
+
+@pytest.mark.parametrize("seed", [0, MAX_SAMPLE_SEED])
+def test_exported_v3_png_without_native_metadata_preserves_execution_gate_seed(tmp_path, seed):
+    templates = WorkflowTemplates.load(Path(__file__).resolve().parents[1] / "templates")
+    settings = {"pipeline_version": 3, "workbench": "single", "base_mode": "normal",
+                "upscalers": {name: {"enabled": False} for name in (
+                    "pixel_hires", "nvidia", "seedvr2", "latent", "post_sampler", "face_refine", "dlss")}}
+    payload = templates.submission(settings, seed, 0, "test", "client", 1, execution_nonce=9000000000000001,
+                                   single_runtime={"positive": "a blue bird", "negative": "blur",
+                                                   "effective_positive": {"primary": "a blue bird", "secondary": "a blue bird"}})
+    # ComfyUI only writes its API/UI graph metadata after an exported workflow
+    # is queued there, so no application-native seed metadata is available.
+    parsed = assert_prompt(tmp_path, image_bytes({"prompt": payload["prompt"],
+                           "workflow": payload["extra_data"]["extra_pnginfo"]["workflow"]}), format_contains="ComfyUI")
+    assert parsed["parameters"]["seed"] == str(seed)
+    assert "execution_nonce" not in parsed["parameters"]
+
+
+@pytest.mark.parametrize("expression,slot,value", [
+    ("a + b", 1, 123), ("a", 0, 123), ("a", 2, 123),
+    ("a", 1, 123.5), ("a", 1, "123"), ("a", 1, True),
+    ("__import__('os').system('must not execute')", 1, 123),
+])
+def test_comfyui_math_metadata_never_guesses_or_evaluates_other_expressions(tmp_path, expression, slot, value):
+    data = graph(seed=["gate", slot])
+    data["gate"] = {"class_type": "ComfyMathExpression", "inputs": {
+        "expression": expression, "values.a": ["seed", 0], "values.b": ["nonce", 0]}}
+    data["seed"] = {"class_type": "PrimitiveInt", "inputs": {"value": value}}
+    data["nonce"] = {"class_type": "PrimitiveInt", "inputs": {"value": 987654321}}
+    parsed = assert_prompt(tmp_path, image_bytes({"prompt": data}), format_contains="ComfyUI")
+    assert "seed" not in parsed["parameters"]
 
 
 def test_comfyui_parameter_generator_resolves_each_target_field(tmp_path):

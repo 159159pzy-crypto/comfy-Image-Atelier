@@ -1,5 +1,6 @@
 """The installer must cover executable product graphs, not every UI-template node."""
 import copy
+import itertools
 import json
 from pathlib import Path
 import unittest
@@ -19,14 +20,14 @@ class RuntimeDependencyContractTests(unittest.TestCase):
 
     def test_all_supported_rendered_classes_have_an_installed_owner(self):
         declared = {name for repo in [self.manifest["comfy"], *self.manifest["nodes"]] for name in repo["requiredClasses"]}
-        seen = set()
-        for workbench in ("random", "single"):
-            for profile in ("anima", "krea2"):
+        seen = {2: set(), 3: set(), 4: set()}
+        for version in (2, 3, 4):
+            for workbench, profile in itertools.product(("random", "single"), ("anima", "krea2")):
                 for variant in ("default", "all-postprocess", "legacy-interpolation", "untiled-img2img"):
                     if variant == "untiled-img2img" and workbench != "single":
                         continue
                     settings = copy.deepcopy(DEFAULT_SETTINGS)
-                    settings.update(model_profile_defaults(profile), workbench=workbench)
+                    settings.update(model_profile_defaults(profile), workbench=workbench, pipeline_version=version)
                     if variant == "all-postprocess":
                         for stage in settings["upscalers"].values():
                             stage["enabled"] = True
@@ -41,10 +42,17 @@ class RuntimeDependencyContractTests(unittest.TestCase):
                     api, _ = render_workflows(self.api, self.ui, settings, 1, 2, "contract",
                         resolved_prompt="a cat", single_runtime={"input_image": "fixture.png", "positive": "a cat"} if workbench == "single" else None)
                     actual = {node["class_type"] for node in api.values()}
-                    seen.update(actual)
-                    self.assertFalse(actual - declared, (workbench, profile, variant, actual - declared))
-        self.assertEqual(50, len(seen))
-        self.assertFalse({"AaaliceImagePicker", "ConditionalSaveImage", "SimpleNotify", "ImpactIfNone", "PreviewImage"} & seen)
+                    seen[version].update(actual)
+                    self.assertFalse(actual - declared, (version, workbench, profile, variant, actual - declared))
+        self.assertTrue({"UpscaleModelLoader", "ImageUpscaleWithModel", "ImageScaleBy", "SeedVR2Preprocess",
+                         "SeedVR2PostProcessing", "SesquiLatentUpscale", "LatentUpscaleBy",
+                         "RTXVideoSuperResolution", "DLSS5NeuralRender"} <= seen[3])
+        self.assertNotIn("UpscaleModelLoader", seen[2])
+        self.assertLess(len(seen[3]), len(seen[2]))
+        self.assertEqual(seen[4], seen[3])
+        for classes in seen.values():
+            self.assertFalse({"AaaliceImagePicker", "ConditionalSaveImage", "SimpleNotify", "ImpactIfNone",
+                              "PreviewImage", "PreviewAny", "MaskPreview", "PromptExpand"} & classes)
 
     def test_source_ownership_and_optional_auxiliary_contract(self):
         nodes = {node["id"]: node for node in self.manifest["nodes"]}

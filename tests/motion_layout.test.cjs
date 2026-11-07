@@ -229,8 +229,9 @@ test('workbench switch waits for draft restoration before retargeting, and saved
       ? buttons.find(button => selector.includes(`"${button.dataset.workbench}"`)) : { textContent: '' };
   h.document.querySelectorAll = selector => selector === '[data-workbench]' ? buttons : [];
   for (const id of ['singleWorkbenchControls', 'singlePreview', 'singleSeedMode', 'singleSampleSeed']) h.element(id);
+  const latentMethodField = { hidden: false };
   Object.assign(h.ctx, { currentProfile: () => 'anima', clearTimeout() {}, profileDrafts: {},
-    ui: { count: {}, base_mode: {}, latent_upscale_method: { closest: () => ({ hidden: false }) } },
+    ui: { count: {}, base_mode: {}, latent_upscale_method: { value: 'bilinear', closest: () => latentMethodField } },
     updateGenerationAvailability() {} });
   vm.runInContext(source('single-workbench.js'), h.ctx);
   for (const name of ['singleWorkbenchPersist', 'singleWorkbenchCancelInput', 'singleWorkbenchRenderInput',
@@ -239,15 +240,19 @@ test('workbench switch waits for draft restoration before retargeting, and saved
   state.ready = true;
   h.ctx.singleWorkbenchRenderMode();
   assert.equal(h.springs[0].options.immediate, true);
+  assert.equal(latentMethodField.hidden, false, 'initial random-mode render must expose the shared latent algorithm');
   const intermediate = [];
   h.ctx.applySettings = () => { h.ctx.singleWorkbenchRenderMode(); intermediate.push(h.springs.length); };
   h.ctx.singleWorkbenchSwitch('single', 'anima', { settings: {} });
+  assert.equal(latentMethodField.hidden, false, 'entering single mode cannot apply the old hidden-algorithm policy');
   assert.equal(intermediate[0], 1, 'nested restoring render cannot move the indicator to the destination early');
   assert.equal(h.springs.length, 2); assert.equal(h.springs.at(-1).options.immediate, false);
   assert.equal(h.appearances.length, 1); assert.equal(h.appearances[0].owner, workspace);
   h.ctx.singleWorkbenchRenderMode();
   assert.equal(h.springs.length, 2, 'background render keeps the active spring untouched');
   h.ctx.singleWorkbenchSwitch('random', 'anima', { save: false, settings: {} });
+  assert.equal(latentMethodField.hidden, false, 'returning to random mode keeps the same algorithm field visible');
+  assert.equal(h.ctx.ui.latent_upscale_method.value, 'bilinear');
   assert.equal(h.springs.at(-1).options.immediate, true);
   assert.equal(h.appearances.length, 1, 'saved mode restoration does not replay the content entrance');
 });

@@ -7,6 +7,7 @@ import random
 import secrets
 import uuid
 import hashlib
+import time
 from datetime import datetime
 from typing import Any
 
@@ -20,6 +21,7 @@ from .prompt_jobs import PromptJobStore
 from .prompt_assistant import PromptAssistant, generation_settings, parse_pool_output, request_identity, rewrite_fingerprint
 from .prompt_tagger import PromptTagger
 from .single_workbench import active_lora_pipelines
+from .pipeline_v3 import STAGE_LABELS
 from .prompt_processing import (build_prompt_graph, build_reverse_graph, build_tagger_graph, build_rewrite_graph, compose_prompt, extract_prompt_result,
                                 final_prompts, prompt_fingerprint, validate_prompt_nodes)
 from .workflow import MAX_SAMPLE_SEED, WorkflowError, WorkflowTemplates, migrate_settings, validate_loras, validate_settings
@@ -38,6 +40,21 @@ SHUTDOWN_GRACE = 2.0
 CANCEL_PROMPT_TIMEOUT = 5.0
 REGENERATION_MODES = {"replay", "prompt_variant", "content_redraw", "settings_reroll"}
 PROMPT_SECTIONS = ("character", "clothing", "pose", "background", "expression")
+MAX_EXECUTION_NONCE = 2**53 - 1
+_last_execution_nonce = 0
+
+
+def new_execution_context() -> dict[str, Any]:
+    """Allocate an execution identity without consuming either sampling seed.
+
+    A process-wide monotonic microsecond counter also separates images created
+    in the same clock tick or after a clock adjustment. The UUID identifies
+    the execution independently across server processes and restarts.
+    """
+    global _last_execution_nonce
+    clock_nonce = max(0, time.time_ns() // 1_000) % (MAX_EXECUTION_NONCE + 1)
+    _last_execution_nonce = max(clock_nonce, _last_execution_nonce + 1) % (MAX_EXECUTION_NONCE + 1)
+    return {"execution_id": uuid.uuid4().hex, "execution_nonce": _last_execution_nonce}
 
 
 def validate_seeds(value: Any) -> dict[str, int] | None:
@@ -103,6 +120,7 @@ class BatchManager:
         self._monitor_tasks: set[asyncio.Task[None]] = set()
         self._preview_seq = 0
         self._preview_epoch = 0
+        self._submitted_node_stages: dict[str, tuple[str, str]] = {}
         # start 里的资源校验要 await 多次 ComfyUI 请求,期间若不上锁,
         # 第二个并发 start 也能通过 active() 检查并启动重复批次。
         self._start_lock = asyncio.Lock()
@@ -201,6 +219,8 @@ class BatchManager:
                 (settings.get("upscalers") or {}).get("seedvr2", {}).get("vae_name")
                 or profile["seedvr2_vae"]
             ),
+            **({"pixel_hires_model": resolve(settings["upscalers"]["pixel_hires"]["model_name"])}
+               if settings.get("pipeline_version", 2) >= 3 else {}),
             "loras": lora_values,
             **({"loras_secondary": [resolve(item["filename"]) for item in settings["single"]["loras_secondary"] if "secondary" in active and item["enabled"]]} if settings.get("workbench") == "single" else {}),
         }
@@ -282,6 +302,7 @@ class BatchManager:
         v2_workflow = self._uses_v2_workflow()
         legacy_requested = (
             not v2_workflow
+            and (overrides or {}).get("pipeline_version", 2) < 3
             and any(
                 key in (overrides or {})
                 for key in ("hires", "detailers", "cfg_zero_star", "second_sampler")
@@ -331,7 +352,7 @@ class BatchManager:
         *,
         legacy_requested: bool = False,
     ) -> list[dict[str, str]]:
-        """Validate only resources used by the v2 graph.
+        """Validate only resources used by the selected pipeline graph.
 
         Older ComfyUI clients return only UNet/sampler inventories.  Empty
         optional lists therefore mean "not advertised" and are tolerated for
@@ -385,6 +406,7 @@ class BatchManager:
         # v2.  Their node flags come from /object_info and are checked even
         # when the optional model inventory is not exposed by ComfyUI.
         upscalers = settings.get("upscalers") or {}
+        v3 = settings.get("pipeline_version", 2) >= 3
         nodes = resources.get("nodes")
         plugins = resources.get("plugins")
 
@@ -400,9 +422,40 @@ class BatchManager:
                 return False
             return any(name.casefold() in available for name in names)
 
+        def stage_node(node_name: str, kind: str, label: str, plugin: str) -> None:
+            # Exact node inventories are authoritative. A broadly named plugin
+            # (in particular DLSS) cannot stand in for a different VSR node.
+            advertised = resources.get("node_types")
+            if isinstance(advertised, list):
+                available = node_name in advertised
+            elif isinstance(nodes, dict) and node_name in nodes:
+                available = nodes[node_name] is True
+            else:
+                available = advertised_node(nodes, node_name)
+                plugin_available = advertised_node(plugins, plugin)
+                if available is None and plugin_available is None:
+                    return
+                available = available is True or plugin_available is True
+            if not available:
+                issues.append({"type": kind, "name": node_name, "label": label})
+
+        pixel = upscalers.get("pixel_hires") or {}
+        if v3 and pixel.get("enabled"):
+            check("upscale_model", "像素高清模型", pixel.get("model_name"), resources.get("upscale_models"))
+            stage_node("UpscaleModelLoader", "pixel_hires_node", "像素高清模型加载节点", "pixel_hires")
+            stage_node("ImageUpscaleWithModel", "pixel_hires_node", "像素高清放大节点", "pixel_hires")
+        post_sampler = upscalers.get("post_sampler") or {}
+        if v3 and post_sampler.get("enabled"):
+            check("post_sampler", "整图后采样 Sampler", post_sampler.get("sampler_name"), resources.get("samplers"))
+            check("post_scheduler", "整图后采样 Scheduler", post_sampler.get("scheduler"), resources.get("schedulers"))
+
         latent = upscalers.get("latent") or {}
+        if settings.get("pipeline_version", 2) >= 4 and latent.get("enabled"):
+            latent_sampler = latent.get("sampler") or {}
+            check("latent_sampler", "潜空间重采样 Sampler", latent_sampler.get("sampler_name"), resources.get("samplers"))
+            check("latent_scheduler", "潜空间重采样 Scheduler", latent_sampler.get("scheduler"), resources.get("schedulers"))
         second_sampler = latent.get("second_sampler") or {}
-        if latent.get("enabled") and second_sampler.get("enabled"):
+        if not v3 and latent.get("enabled") and second_sampler.get("enabled"):
             check(
                 "second_sampler",
                 "潜空间后二次采样 Sampler",
@@ -446,7 +499,9 @@ class BatchManager:
             check("seedvr2_sampler", "SeedVR2 Sampler", sampler.get("sampler_name"), resources.get("samplers"))
             check("seedvr2_scheduler", "SeedVR2 Scheduler", sampler.get("scheduler"), resources.get("schedulers"))
         nvidia = upscalers.get("nvidia") or {}
-        if nvidia.get("enabled"):
+        if v3 and nvidia.get("enabled"):
+            stage_node("RTXVideoSuperResolution", "nvidia_node", "N 卡 VSR 节点", "nvidia_upscale")
+        elif nvidia.get("enabled"):
             node_available = advertised_node(
                 nodes, "NvidiaUpscale", "RTXVideoSuperResolution"
             )
@@ -455,6 +510,8 @@ class BatchManager:
                 node_available is True or plugin_available is True
             ):
                 issues.append({"type": "nvidia_node", "name": "RTXVideoSuperResolution", "label": "N 卡放大节点"})
+        if v3 and (upscalers.get("dlss") or {}).get("enabled"):
+            stage_node("DLSS5NeuralRender", "dlss_node", "DLSS 节点", "dlss")
         face = upscalers.get("face_refine") or {}
         if face.get("enabled"):
             node_available = advertised_node(nodes, "ForbiddenVisionFaceProcessorIntegrated")
@@ -480,6 +537,12 @@ class BatchManager:
             check("second_scheduler", "2ndSampler Scheduler", second["scheduler"], resources.get("schedulers"))
         if legacy_requested and "hires" in settings and (settings.get("hires") or {}).get("enabled"):
             check("upscale_model", "高清模型", settings["hires"]["model_name"], resources.get("upscale_models"))
+        if v3 and isinstance(resources.get("node_types"), list):
+            from .pipeline_v3 import required_node_classes
+            advertised = set(resources["node_types"])
+            missing = {item["name"] for item in issues if item["type"].endswith("_node")}
+            for node_name in sorted(required_node_classes(settings) - advertised - missing):
+                issues.append({"type": "pipeline_node", "name": node_name, "label": "当前处理链节点"})
         if single:
             from .single_workbench import single_resource_issues
             issues.extend(single_resource_issues(settings, resources))
@@ -816,6 +879,7 @@ class BatchManager:
                     resources,
                     legacy_requested=(
                         not v2_workflow
+                        and settings.get("pipeline_version", 2) < 3
                         and any(
                             key in (overrides or {})
                             for key in ("hires", "detailers", "cfg_zero_star", "second_sampler")
@@ -865,6 +929,7 @@ class BatchManager:
         batch_id = uuid.uuid4().hex[:12]
         self.stop_requested = False
         self._clear_preview()
+        self._submitted_node_stages = {}
         self.state = {
             "id": batch_id,
             "kind": "generation",
@@ -1052,6 +1117,7 @@ class BatchManager:
                 submission_args = (
                     settings, sample_seed, prompt_seed, prefix, self.client_id, sequence
                 )
+                execution_context = new_execution_context() if settings.get("pipeline_version", 2) >= 3 else None
                 # The renderer receives the resolved prompt for both model
                 # profiles.  Krea 2 deliberately has no Anima catalog, so
                 # gating these arguments on ``self.catalog`` would silently
@@ -1068,10 +1134,23 @@ class BatchManager:
                         "frozen_negative_prompt", ""
                     ),
                     **({"single_runtime": single_runtime} if single_runtime is not None else {}),
+                    **({"execution_nonce": execution_context["execution_nonce"]} if execution_context is not None else {}),
                 )
+                if execution_context is not None:
+                    metadata = payload.setdefault("extra_data", {}).setdefault("extra_pnginfo", {}).setdefault("anima_random_webui", {})
+                    metadata["execution_context"] = copy.deepcopy(execution_context)
+                    self.state["execution_context"] = copy.deepcopy(execution_context)
                 self.state["current"] = sequence
                 self.state["prompt_id"] = ""
                 self._clear_preview()
+                self._submitted_node_stages = {
+                    str(node_id): (str(meta["pipeline_stage"]), STAGE_LABELS.get(meta["pipeline_stage"], str(meta.get("title") or meta["pipeline_stage"])))
+                    for node_id, node in (payload.get("prompt") or {}).items()
+                    if isinstance(node, dict) and isinstance(meta := node.get("_meta"), dict)
+                    and meta.get("pipeline_stage")
+                }
+                for key in ("progress_stage", "progress_stage_label", "failed_stage", "failed_stage_label"):
+                    self.state.pop(key, None)
                 self.state["preview_status"] = "waiting"
                 prompt_id = await self.comfy.submit(payload)
                 self.state["prompt_id"] = prompt_id
@@ -1107,6 +1186,7 @@ class BatchManager:
                         resolved_prompt=positive or resolved["full_prompt"],
                         bound_resources=bound_resources,
                         **({"single_runtime": single_runtime} if single_runtime is not None else {}),
+                        **({"execution_context": execution_context} if execution_context is not None else {}),
                     )
                 self.state["completed"] = sequence
                 await self.history.update_batch(batch_id, completed=sequence)
@@ -1123,12 +1203,17 @@ class BatchManager:
         except Exception as error:
             logger.warning("批次 %s 出错: %s", batch_id, error)
             self.state["status"] = "error"
-            self.state["error"] = str(error)
+            error_text = str(error)
+            failed_stage = self._submitted_node_stages.get(str(getattr(error, "node_id", "")))
+            if failed_stage:
+                self.state["failed_stage"], self.state["failed_stage_label"] = failed_stage
+                error_text = f"{failed_stage[1]}失败：{error_text}"
+            self.state["error"] = error_text
             await self.history.update_batch(
                 batch_id,
                 completed=self.state["completed"],
                 status="error",
-                error=str(error),
+                error=error_text,
             )
         finally:
             await self._advance_queue()
@@ -1258,6 +1343,12 @@ class BatchManager:
                 state.setdefault("preview_epoch", self._preview_epoch)
                 state["progress_node"] = node
                 state["progress"] = {"value": min(value, maximum), "max": maximum}
+            progress_stage = self._submitted_node_stages.get(node)
+            if progress_stage:
+                state["progress_stage"], state["progress_stage_label"] = progress_stage
+            else:
+                state.pop("progress_stage", None)
+                state.pop("progress_stage_label", None)
             if state.get("preview_status") == "disconnected":
                 state["preview_status"] = "live" if self.preview else "waiting"
             return

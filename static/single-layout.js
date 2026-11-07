@@ -78,8 +78,8 @@ function initializeSingleLayout() {
   document.getElementById("singleNegative")?.closest("label")?.classList.add("single-prompt-negative");
 
   for (const [name, enabledId] of [
-    ["latent", "latent_upscale_enabled"], ["face", "face_refine_enabled"],
-    ["seedvr2", "seedvr2_enabled"], ["nvidia", "nvidia_upscale_enabled"],
+    ["pixel_hires", "pixel_hires_enabled"], ["latent", "latent_upscale_enabled"], ["post_sampler", "latent_second_sampler_enabled"],
+    ["face", "face_refine_enabled"], ["seedvr2", "seedvr2_enabled"], ["nvidia", "nvidia_upscale_enabled"], ["dlss", "dlss_enabled"], ["plan", null],
   ]) {
     const node = document.querySelector(`.sampling-stage-${name}`);
     if (!node) continue;
@@ -88,7 +88,7 @@ function initializeSingleLayout() {
     wrapper.hidden = true;
     controls.append(wrapper);
     mark(wrapper, `post-${name}`, 24 + state.moves.length, "repair");
-    state.moves.push({ ...makeMove(node), wrapper, enabled: document.getElementById(enabledId) });
+    state.moves.push({ ...makeMove(node), wrapper, enabled: enabledId ? document.getElementById(enabledId) : null });
   }
   state.seed = null;
   state.seedSection = document.getElementById("singleSeedSection");
@@ -102,7 +102,7 @@ function initializeSingleLayout() {
   };
   hide(document.getElementById("seedvr2_weight_dtype")?.closest("label"));
   document.querySelectorAll(".sampling-stage-seedvr2 .sampling-fieldset").forEach(hide);
-  for (const id of ["nvidia_resize_type", "nvidia_quality", "latent_upscale_method", "latent_second_sampler_enabled", "seedvr2_sampler_steps", "seedvr2_sampler_cfg", "seedvr2_sampler_name", "seedvr2_scheduler", "seedvr2_sampler_denoise"]) hide(document.getElementById(id)?.closest("label"));
+  for (const id of ["nvidia_resize_type", "nvidia_quality", "seedvr2_sampler_steps", "seedvr2_sampler_cfg", "seedvr2_sampler_name", "seedvr2_scheduler", "seedvr2_sampler_denoise"]) hide(document.getElementById(id)?.closest("label"));
   const faceKeep = new Set(["face_steps", "face_cfg_scale", "face_sampler", "face_scheduler", "face_denoise_strength"]);
   for (const node of document.querySelectorAll("#faceRefineFields > label")) {
     if (!faceKeep.has(node.querySelector("input, select, textarea")?.id)) hide(node);
@@ -113,7 +113,7 @@ function initializeSingleLayout() {
     || document.querySelector(`[data-single-path="prompt_processing.${stage}.enabled"]`)?.closest(".control-section");
   for (const [category, leftCards, rightCards, tailCards] of [
     ["prompt", [processingCard("expand")], [processingCard("oc")], [document.getElementById("singleProcessedSection")]],
-    ["repair", [postCard("latent"), postCard("face"), postCard("seedvr2"), postCard("nvidia")], [], []],
+    ["repair", [postCard("pixel_hires"), postCard("latent"), postCard("post_sampler"), postCard("face"), postCard("seedvr2"), postCard("nvidia"), postCard("dlss"), postCard("plan")], [], []],
     ["more", [], [], [cardFor("savePreset"), document.getElementById("singleCompatibilitySection")]],
   ]) {
     const container = document.createElement("div");

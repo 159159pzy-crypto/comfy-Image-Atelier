@@ -67,11 +67,27 @@ test('Sesqui constraints follow each workbench algorithm and never clamp a store
   ctx.ui.latent_upscale_method.value = 'bicubic';
   elements.random_dual_upscale_method.value = 'bilinear';
   ctx.sharedParameterVisibility();
-  assert.deepEqual([ctx.ui.latent_upscale_scale.min, ctx.ui.latent_upscale_scale.max, elements.random_dual_scale.max], ['0.01', '64', '8']);
+  assert.deepEqual([ctx.ui.latent_upscale_scale.min, ctx.ui.latent_upscale_scale.max, elements.random_dual_scale.max], ['0.01', '8', '8']);
   ctx.singleWorkbenchActive = () => true;
   ctx.ui.latent_upscale_method.value = 'sesqui';
   ctx.sharedParameterVisibility();
   assert.equal(ctx.ui.latent_upscale_scale.max, '2');
+  ctx.ui.latent_upscale_method.value = 'bilinear';
+  ctx.resources = { node_inputs: { LatentUpscaleBy: { scale_by: ['FLOAT', { min: .05, max: 6 }] } } };
+  ctx.sharedParameterVisibility();
+  assert.deepEqual([ctx.ui.latent_upscale_scale.min, ctx.ui.latent_upscale_scale.max, ctx.ui.latent_upscale_scale.value], ['0.05', '6', '3']);
+});
+
+test('v4 latent sampling checks its own sampler resources only while enabled', () => {
+  const { ctx } = setup(); ctx.resourcesLoaded = true;
+  ctx.resources = { node_types: ['LatentUpscaleBy'], samplers: ['euler'], schedulers: ['simple'] };
+  const settings = { pipeline_version: 4, upscalers: { latent: { enabled: false, upscale_method: 'bilinear', sampler: { sampler_name: 'er_sde', scheduler: 'karras' } } } };
+  assert.deepEqual(plain(ctx.sharedParameterResourceIssues(settings)), []);
+  settings.upscalers.latent.enabled = true;
+  const errors = ctx.sharedParameterResourceIssues(settings).join(' ');
+  assert.match(errors, /KSampler/); assert.match(errors, /er_sde/); assert.match(errors, /karras/);
+  settings.pipeline_version = 3;
+  assert.deepEqual(plain(ctx.sharedParameterResourceIssues(settings)), [], 'v3 resize-only history cannot require a new sampler');
 });
 test('cross-workbench imports transfer effective dual and latent parameters while keeping single routes', () => {
   const { ctx } = setup();

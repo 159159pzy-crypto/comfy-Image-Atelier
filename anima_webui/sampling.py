@@ -186,7 +186,8 @@ def enabled_postprocess_parameter_issues(settings: dict[str, Any], resources: di
     issues: list[dict[str, str]] = []
     issue_type = "single_parameter" if settings.get("workbench") == "single" else "sampling_parameter"
     advertised = resources.get("node_types")
-    if stages.get("nvidia", {}).get("enabled") and isinstance(advertised, list) and "DLSS5NeuralRender" not in advertised:
+    v3 = settings.get("pipeline_version", 2) >= 3
+    if not v3 and stages.get("nvidia", {}).get("enabled") and isinstance(advertised, list) and "DLSS5NeuralRender" not in advertised:
         issues.append({"type": "nvidia_node", "name": "DLSS5NeuralRender", "label": "N 卡 DLSS 色彩处理节点"})
     # Older callers expose plugin availability and partial settings only.
     if not isinstance(resources.get("node_inputs"), dict) or not resources["node_inputs"]:
@@ -195,7 +196,16 @@ def enabled_postprocess_parameter_issues(settings: dict[str, Any], resources: di
     def check(node_type: str, values: dict[str, Any], label: str) -> None:
         issues.extend(node_input_issues(resources, node_type, values, label, issue_type=issue_type))
 
-    if stages["latent"]["enabled"] and stages["latent"]["second_sampler"]["enabled"]:
+    if v3 and stages.get("pixel_hires", {}).get("enabled"):
+        pixel = stages["pixel_hires"]
+        check("UpscaleModelLoader", {"model_name": pixel["model_name"]}, "像素高清模型")
+        if not stages.get("post_sampler", {}).get("enabled"):
+            check("ImageScaleBy", {"upscale_method": pixel["upscale_method"], "scale_by": pixel["percent"] / 100}, "像素高清缩图")
+    if v3 and stages.get("post_sampler", {}).get("enabled"):
+        check("KSampler", stages["post_sampler"], "整图后采样")
+    if settings.get("pipeline_version", 2) >= 4 and stages["latent"]["enabled"]:
+        check("KSampler", stages["latent"]["sampler"], "潜空间重采样")
+    if not v3 and stages["latent"]["enabled"] and stages["latent"]["second_sampler"]["enabled"]:
         check("KSampler", stages["latent"]["second_sampler"], "潜空间重采样")
     if stages["seedvr2"]["enabled"]:
         seed = stages["seedvr2"]
@@ -206,9 +216,12 @@ def enabled_postprocess_parameter_issues(settings: dict[str, Any], resources: di
         check("SeedVR2PostProcessing", {"color_correction_method": seed["color_correction_method"]}, "SeedVR2 色彩校正")
     if stages["nvidia"]["enabled"]:
         nvidia = stages["nvidia"]
-        check("DLSS5NeuralRender", nvidia.get("dlss", DLSS_DEFAULTS), "NVIDIA DLSS 色彩处理")
+        if not v3:
+            check("DLSS5NeuralRender", nvidia.get("dlss", DLSS_DEFAULTS), "NVIDIA DLSS 色彩处理")
         check("RTXVideoSuperResolution", {"resize_type": nvidia["resize_type"],
               "resize_type.scale": nvidia["scale"], "quality": nvidia["quality"]}, "NVIDIA 放大")
+    if v3 and stages.get("dlss", {}).get("enabled"):
+        check("DLSS5NeuralRender", stages["dlss"], "DLSS")
     if stages["face_refine"]["enabled"]:
         check("ForbiddenVisionFaceProcessorIntegrated", stages["face_refine"], "脸部细化")
     return issues

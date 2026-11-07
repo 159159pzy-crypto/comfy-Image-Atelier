@@ -52,7 +52,7 @@
         <div class="panel-title">
           <div><span class="kicker">COMPOSITION</span><h1>生成设置</h1><small id="draftStatus" class="draft-status">本地草稿待保存</small></div>
           <div class="draft-actions"><button id="resetSettings" class="icon-button dark" type="button" title="恢复默认设置" aria-label="恢复默认设置">↺</button><button id="clearDraft" class="icon-button dark" type="button" title="清除本地草稿" aria-label="清除本地草稿">⌫</button></div>
-          
+
         </div>
 
         <div id="singleWorkbenchControls" role="tabpanel" aria-labelledby="singleWorkbenchTab" hidden></div>
@@ -162,13 +162,31 @@
                 <label hidden><select id="random_dual_upscale_method"><option value="sesqui">sesqui</option><option value="bilinear">bilinear</option><option value="bislerp">bislerp</option><option value="nearest-exact">nearest-exact</option><option value="area">area</option><option value="bicubic">bicubic</option></select></label>
               </div></section>
             </div></section>
+            <div class="sampling-stage sampling-stage-pixel_hires">
+              <label class="switch-row"><span><strong>像素高清</strong><small>像素模型放大</small></span><input id="pixel_hires_enabled" type="checkbox"></label>
+              <div id="pixelHiresFields" class="repair-parameters parameter-grid">
+                <label class="field"><span>像素放大模型</span><select id="pixel_hires_model_name"><option value="">读取中...</option></select></label>
+                <label class="field"><span>缩图比例（%）</span><input id="pixel_hires_percent" type="number" min="1" max="100" step="1" value="50"></label>
+                <label class="field"><span>缩图算法</span><select id="pixel_hires_upscale_method"><option value="lanczos">lanczos</option><option value="bicubic">bicubic</option><option value="bilinear">bilinear</option><option value="area">area</option><option value="nearest-exact">nearest-exact</option></select></label>
+                <p id="pixelHiresResizeHint" class="field-hint">按原生放大结果缩图</p>
+              </div>
+            </div>
             <div class="sampling-stage sampling-stage-latent">
-              <label class="switch-row"><span><strong>潜空间放大</strong><small>放大并使用当前模型及 LoRA 细化</small></span><input id="latent_upscale_enabled" type="checkbox"></label>
-              <div id="latentUpscaleFields" class="repair-parameters">
-                <label class="field"><span>放大倍数</span><input id="latent_upscale_scale" type="number" min="0.01" max="64" step="0.01"></label>
-                <label class="field"><span>缩放方法</span><select id="latent_model_format"><option value="Wan 2.1">Wan 2.1</option></select></label>
-                <label class="field" hidden><span>旧放大算法</span><select id="latent_upscale_method"><option value="sesqui">sesqui</option><option value="bilinear">bilinear</option><option value="bislerp">bislerp</option><option value="nearest-exact">nearest-exact</option><option value="area">area</option><option value="bicubic">bicubic</option></select></label>
-                <label class="switch-row" hidden><span><strong>后二次采样</strong><small>使用当前主模型及 LoRA</small></span><input id="latent_second_sampler_enabled" type="checkbox"></label>
+              <label class="switch-row"><span><strong>潜空间放大</strong><small>放大后采样重绘</small></span><input id="latent_upscale_enabled" type="checkbox"></label>
+              <div id="latentUpscaleFields" class="repair-parameters" hidden>
+                <label class="field"><span>放大倍数</span><input id="latent_upscale_scale" type="number" min="1" max="2" step="0.01"></label>
+                <label class="field"><span>缩放方法</span><select id="latent_upscale_method"><option value="sesqui">Sesqui</option><option value="bilinear">bilinear</option><option value="bislerp">bislerp</option><option value="nearest-exact">nearest-exact</option><option value="area">area</option><option value="bicubic">bicubic</option></select></label>
+                <label id="latentModelFormatField" class="field"><span>模型格式</span><select id="latent_model_format"><option value="Wan 2.1">Wan 2.1</option></select></label>
+                <label class="field"><span>步数</span><input id="latent_sampler_steps" type="number" min="1" max="150" step="1"></label>
+                <label class="field"><span>CFG</span><input id="latent_sampler_cfg" type="number" min="0.1" max="30" step="0.1"></label>
+                <label class="field"><span>采样器</span><select id="latent_sampler_name"><option value="">读取中...</option></select></label>
+                <label class="field"><span>调度器</span><select id="latent_sampler_scheduler"><option value="">读取中...</option></select></label>
+                <label class="field"><span>降噪幅度</span><input id="latent_sampler_denoise" type="number" min="0" max="1" step="0.01"></label>
+                <p id="latentDoubleSamplingHint" class="field-hint" hidden>整图后采样也已开启，将连续重绘两次。</p>
+              </div>
+            </div>
+            <div class="sampling-stage sampling-stage-post_sampler">
+                <label class="switch-row"><span><strong>整图后采样</strong><small>重绘整图细节</small></span><input id="latent_second_sampler_enabled" type="checkbox"></label>
                 <div id="latentSecondSamplerFields" class="parameter-grid compact-parameter-grid">
                   <label class="field"><span>步数</span><input id="latent_second_sampler_steps" type="number" min="1" max="150" step="1"></label>
                   <label class="field"><span>CFG</span><input id="latent_second_sampler_cfg" type="number" min="0.1" max="30" step="0.1"></label>
@@ -176,10 +194,9 @@
                   <label class="field"><span>调度器</span><select id="latent_second_scheduler"><option value="">读取中...</option></select></label>
                   <label class="field"><span>降噪幅度</span><input id="latent_second_sampler_denoise" type="number" min="0" max="1" step="0.01"></label>
                 </div>
-              </div>
             </div>
             <div class="sampling-stage sampling-stage-face">
-              <label class="switch-row"><span><strong>脸部细化</strong><small>脸部采样与降噪</small></span><input id="face_refine_enabled" type="checkbox"></label>
+              <label class="switch-row"><span><strong>脸部细化</strong><small>重绘脸部细节</small></span><input id="face_refine_enabled" type="checkbox"></label>
               <div id="faceRefineFields" class="repair-parameters parameter-grid">
                 <label class="field"><span>步数</span><input id="face_steps" type="number" min="1" max="150" step="1"></label>
                 <label class="field"><span>CFG</span><input id="face_cfg_scale" type="number" min="0.1" max="30" step="0.1"></label>
@@ -213,7 +230,7 @@
               </div>
             </div>
             <div class="sampling-stage sampling-stage-seedvr2">
-              <label class="switch-row"><span><strong>SeedVR2 放大与修复</strong><small>选择模型、VAE 和颜色匹配方法</small></span><input id="seedvr2_enabled" type="checkbox"></label>
+              <label class="switch-row"><span><strong>SeedVR2</strong><small>放大并修复细节</small></span><input id="seedvr2_enabled" type="checkbox"></label>
               <div id="seedvr2Fields" class="repair-parameters parameter-grid">
                 <label class="field"><span>SeedVR2 模型</span><select id="seedvr2_model_name"><option value="">读取中...</option></select></label>
                 <label class="field"><span>配套 VAE</span><select id="seedvr2_vae_name"><option value="">读取中...</option></select></label>
@@ -240,17 +257,31 @@
               </div>
             </div>
             <div class="sampling-stage sampling-stage-nvidia">
-              <label class="switch-row"><span><strong>N 卡放大</strong><small>N 卡放大后应用 DLSS 色彩处理</small></span><input id="nvidia_upscale_enabled" type="checkbox"></label>
+              <label class="switch-row"><span><strong>N 卡 VSR</strong><small>显卡超分辨率</small></span><input id="nvidia_upscale_enabled" type="checkbox"></label>
               <div id="nvidiaUpscaleFields" class="repair-parameters parameter-grid">
                 <label class="field"><span>缩放方式</span><select id="nvidia_resize_type"><option value="scale by multiplier">scale by multiplier</option></select></label>
                 <label class="field"><span>放大倍数</span><input id="nvidia_scale" type="number" min="1" max="4" step="0.01"></label>
                 <label class="field" hidden><span>质量</span><select id="nvidia_quality"><option value="LOW">LOW</option><option value="MEDIUM">MEDIUM</option><option value="HIGH">HIGH</option><option value="ULTRA">ULTRA</option></select></label>
+
+              </div>
+            </div>
+            <div class="sampling-stage sampling-stage-dlss">
+              <label class="switch-row"><span><strong>DLSS</strong><small>导出前增强画面</small></span><input id="dlss_enabled" type="checkbox"></label>
+              <div id="dlssFields" class="repair-parameters parameter-grid">
                 <label class="field"><span>风格</span><select id="nvidia_dlss_style"><option value="默认">默认</option><option value="自然">自然</option><option value="电影">电影</option><option value="风格3">风格3</option></select></label>
                 <label class="field"><span>强度</span><input id="nvidia_dlss_intensity" type="number" min="0" max="1" step="0.01" value="1"></label>
                 <label class="field"><span>局部光影</span><input id="nvidia_dlss_local_tone" type="number" min="0" max="1" step="0.05" value="1"></label>
                 <label class="field"><span>局部细节</span><input id="nvidia_dlss_local_struct" type="number" min="0" max="1" step="0.05" value="1"></label>
                 <label class="field"><span>输出混合</span><input id="nvidia_dlss_output_mix" type="number" min="0" max="1" step="0.01" value="1"></label>
               </div>
+            </div>
+            <div class="sampling-stage sampling-stage-plan pipeline-plan">
+              <p class="pipeline-flow"><strong>流程：</strong><span id="pipelineFlow" aria-live="polite">底图 → 保存</span></p>
+              <details class="pipeline-help">
+                <summary>流程说明</summary>
+                <p class="field-hint">潜空间放大包含采样；与整图后采样同时开启会重绘两次。两者均继承底图最后一段的模型、LoRA 和提示词。</p>
+                <p id="pipelineUpgradeHint" class="field-hint" role="status" hidden>旧参数已适配新顺序，潜空间放大现在包含采样。历史原样复现仍使用原链路。</p>
+              </details>
             </div>
           </div>
         </details>

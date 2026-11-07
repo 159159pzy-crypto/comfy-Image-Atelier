@@ -33,7 +33,7 @@ function singleWorkbenchDefaultSettings(profile = "anima") {
     latent: { upscale_method: "sesqui", model_format: "Wan 2.1", half_precision: true, pipeline: "secondary" }, face_pipeline: "secondary",
     dlss: { enabled: false, style: "电影", intensity: 1, local_tone: 1, local_struct: 1, output_view: "处理", output_mix: 1, gpu_gen: "Auto" },
   };
-  return { ...settings, ...(typeof sharedSamplingDefaults === "function" ? (() => { const value = sharedSamplingDefaults(); delete value.seedMode; delete value.seed; return value; })() : {}), workbench: "single", generation_mode: "txt2img", model_profile: profile, count: 1, base_mode: "normal",
+  return { ...settings, ...(typeof sharedSamplingDefaults === "function" ? (() => { const value = sharedSamplingDefaults(); delete value.seedMode; delete value.seed; return value; })() : {}), pipeline_version: 4, upscalers: typeof normalizeUpscalers === "function" ? normalizeUpscalers(settings.upscalers, null, profile, settings.pipeline_version ?? 4) : settings.upscalers, workbench: "single", generation_mode: "txt2img", model_profile: profile, count: 1, base_mode: "normal",
     clip_name: settings.clip_name || profileConfig(profile).clip_name || "", vae_name: settings.vae_name || profileConfig(profile).vae_name || "", clip_type: settings.clip_type || profileConfig(profile).clip_type || "",
     single: singleWorkbenchUnifiedDefaults(singleWorkbenchMerge(single, typeof config !== "undefined" ? config.single_defaults || config.defaults?.single : {})) };
 }
@@ -158,7 +158,9 @@ function singleWorkbenchLegacyDrafts(settings, legacyProfiles) {
   const drafts = {};
   for (const [profile, stored] of Object.entries(legacyProfiles || {})) {
     if (!["anima", "krea2"].includes(profile) || !stored || typeof stored !== "object") continue;
-    const restored = { ...singleWorkbenchClone(settings), model_profile: profile, workbench: "random", generation_mode: "txt2img" };
+    // Inactive v4 profile drafts may still contain nested v2 stages even when
+    // the active profile was upgraded while loading the page.
+    const restored = { ...singleWorkbenchClone(settings), pipeline_version: stored.pipeline_version ?? 2, model_profile: profile, workbench: "random", generation_mode: "txt2img" };
     for (const key of ["model_name", "base_mode", "base_denoise", "krea_variance", "dual", "steps", "cfg", "sampler_name", "scheduler", "upscalers", "extra_prompt", "loras", "pools"]) if (stored[key] !== undefined) restored[key] = singleWorkbenchClone(stored[key]);
     restored.base_denoise = stored.base_denoise ?? 1;
     restored.krea_variance = typeof sharedKreaFromSettings === "function" ? sharedKreaFromSettings({ ...stored, workbench: "random", model_profile: profile }) : { enabled: profile === "krea2", ...(stored.krea_variance || {}) };
@@ -244,7 +246,6 @@ function singleWorkbenchRenderMode({ animate = false } = {}) {
   document.querySelector(".panel-title .kicker").textContent = active ? "ADVANCED WORKBENCH" : "COMPOSITION";
   if (active) ui.count.value = 1;
   ui.base_mode.disabled = active && singleWorkbenchState.generationMode === "img2img";
-  ui.latent_upscale_method.closest("label").hidden = true;
   singleWorkbenchRefreshLimits();
   updateGenerationAvailability();
   if (typeof singleWorkbenchLayout === "function") singleWorkbenchLayout();
@@ -472,6 +473,7 @@ async function singleWorkbenchFromHistory(record, asImage = false) {
   settings.negative_prompt = record.negative_prompt || settings.negative_prompt || "";
   settings.lora_managed_triggers = [];
   singleWorkbenchSwitch("single", profile, { settings });
+  if (typeof showPipelineUpgradeNotice === "function") showPipelineUpgradeNotice(record.settings);
   document.getElementById("singleSampleSeed").value = record.sample_seed || 0;
   singleWorkbenchState.promptSeed = record.prompt_seed || 0;
   document.getElementById("singleSeedMode").value = "fixed";
@@ -505,6 +507,7 @@ function singleWorkbenchApplyPreset(item) {
   }
   const modes = typeof sharedSamplingDrafts === "function" ? sharedSamplingDrafts() : null;
   applySettings({ ...current, ...snapshot, workbench: singleWorkbenchState.mode });
+  if (typeof showPipelineUpgradeNotice === "function") showPipelineUpgradeNotice(item.settings);
   if (typeof sharedSamplingRestoreDrafts === "function") sharedSamplingRestoreDrafts(modes);
 }
 function initializeSingleWorkbench({ legacyRestored = false } = {}) {

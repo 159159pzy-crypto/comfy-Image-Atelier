@@ -18,6 +18,10 @@ from anima_webui.workflow import (  # noqa: E402
     validate_settings,
 )
 
+# These fixtures exercise the persisted v2 attachment contract. New drafts
+# now use v3 explicitly, while versionless historical snapshots remain v2.
+DEFAULT_SETTINGS = {**DEFAULT_SETTINGS, "pipeline_version": 2}
+
 
 class V2WorkflowRendererTests(unittest.TestCase):
     @classmethod
@@ -105,7 +109,7 @@ class V2WorkflowRendererTests(unittest.TestCase):
                 frozen = "historical exact prompt, "
                 payload = templates.submission(settings, 1, 2, "test", "client", 1,
                                                frozen_positive_prompt=frozen)
-                self.assertEqual(payload["prompt"]["168"]["inputs"]["value"], frozen)
+                self.assertEqual(payload["prompt"]["1010:995"]["inputs"]["text"], frozen)
                 self.assertEqual(payload["extra_data"]["extra_pnginfo"]["anima_random_webui"]["resolved_prompt_full"], frozen)
 
     def test_launcher_mapping_is_applied_after_dynamic_profile_switch(self):
@@ -482,8 +486,9 @@ class V2WorkflowRendererTests(unittest.TestCase):
             frozen_positive_prompt="frozen positive",
             frozen_negative_prompt="frozen negative",
         )
-        self.assertEqual(api["168"]["inputs"]["value"], "frozen positive")
-        self.assertEqual(api["250"]["inputs"]["value"], "frozen negative")
+        self.assertEqual(api["1010:995"]["inputs"]["text"], "frozen positive")
+        self.assertEqual(api["1010:1004"]["inputs"]["text"], "frozen negative")
+        self.assertFalse(any(node["class_type"] == "PreviewAny" for node in api.values()))
         self.assertEqual(api["691:1240"]["inputs"]["seed"], 987)
         self.assertEqual(api["691:1241"]["inputs"]["values.a"], 654)
 

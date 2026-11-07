@@ -70,7 +70,7 @@ def assert_pipeline(api, node_id, pipeline="primary", *, zero=False, variance=Fa
         assert inputs["negative"] == [negative_node, 0]
     assert api[f"single:{pipeline}:positive"]["inputs"]["clip"] == [loader, 1]
     assert api[negative_node]["inputs"]["clip"] == [loader, 1]
-    if node_id == "1253:1215":
+    if node_id in {"1253:1215", "v3:face"}:
         assert inputs["clip"] == [loader, 1]
 
 
@@ -126,6 +126,7 @@ def test_legacy_defaults_and_two_stack_preset_remain_compatible(templates):
     legacy["single"]["dual"]["second_pipeline"] = "secondary"
     legacy["single"]["latent"]["pipeline"] = "secondary"
     saved = preset_settings({key: value for key, value in legacy.items() if key in PRESET_SETTING_KEYS})
+    assert saved["pipeline_version"] == 4
     assert saved["loras"] == LORAS
     assert saved["single"]["loras_secondary"] == SECONDARY
     frozen = {"positive": "historical authored text", "negative": "historical negative",
@@ -134,7 +135,7 @@ def test_legacy_defaults_and_two_stack_preset_remain_compatible(templates):
     api = payload["prompt"]
     assert_connected(api)
     assert_pipeline(api, "701:1245")
-    for node_id in ("701:1246", "704:1248", "1253:1215"):
+    for node_id in ("701:1246", "v4:latent:sample", "v3:post", "v3:face"):
         assert_pipeline(api, node_id, "secondary")
     for pipeline in ("primary", "secondary"):
         assert api[f"single:{pipeline}:positive"]["inputs"]["text"] == frozen["effective_positive"][pipeline]
@@ -199,7 +200,8 @@ def test_real_upload_generation_and_replay_keep_unified_triggers(tmp_path, base,
             assert "243" not in api
             assert api["single:primary:positive"]["inputs"]["text"] == expected
             nodes = ["691:1240"] if base == "normal" else ["701:1245", "701:1246"]
-            for node_id in [*nodes, "704:1248", "1253:1215"]:
+            assert replay["settings"]["pipeline_version"] == 4
+            for node_id in [*nodes, "v4:latent:sample", "v3:post", "v3:face"]:
                 assert_pipeline(api, node_id)
             assert len(comfy.uploads) == 2 * int(mode == "img2img")
         finally:
