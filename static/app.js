@@ -4705,18 +4705,6 @@ function renderPoolItems() {
         event.stopPropagation();
         openCustom(item);
       });
-      if (!picker && activeSection === "character" && currentProfile() === "anima" && typeof LoraManager !== "undefined") {
-        const binding = document.createElement("button");
-        binding.type = "button";
-        binding.className = "lora-character-binding button ghost compact";
-        binding.textContent = "绑定 LoRA";
-        binding.setAttribute("aria-label", `管理 ${displayTitle(item)} 的 LoRA 绑定`);
-        binding.addEventListener("click", (event) => {
-          event.stopPropagation();
-          LoraManager.openCharacter({ ...item, title: displayTitle(item) });
-        });
-        article.querySelector(".item-tools").append(binding);
-      }
       return article;
     }),
   );
