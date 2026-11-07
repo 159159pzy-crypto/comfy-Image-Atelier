@@ -46,6 +46,7 @@ from .prompt_rules import PromptRuleStore
 from .prompt_assistant import generation_settings
 from .prompt_pools import PromptPoolStore, parse_prompt_import_details, parse_prompt_records
 from .runner import BatchConflict, BatchManager
+from .regeneration import prompt_source_issues
 from .style_presets import StylePresetStore
 from .thumbnails import ThumbnailStore
 from .workflow import WorkflowError, WorkflowTemplates, normalize_lora_path, upgrade_pipeline_settings, validate_settings
@@ -1508,7 +1509,7 @@ def create_app(
         frozen_resource_issues = await inspect_resources(settings)
         runtime = record.get("lora_runtime") or {}
         has_lora_runtime = isinstance(runtime, dict) and runtime.get("version") == 1 and isinstance(runtime.get("manual_loras"), list)
-        resource_issues = frozen_resource_issues
+        resource_issues = list(frozen_resource_issues)
         if has_lora_runtime:
             if not frozen_resource_issues:
                 try:
@@ -1520,6 +1521,7 @@ def create_app(
             resource_issues = await inspect_resources(manual_settings)
             if frozen_resource_issues and not resource_issues:
                 preserve_issues["character"] = "历史人物 LoRA 已失效，请同时重抽人物以使用当前绑定"
+        resource_issues = [*resource_issues, *prompt_source_issues(settings, manager.prompt_pools)]
         sections: dict[str, Any] = {}
         for section in SECTIONS:
             random_enabled = bool(settings.get(f"random_{section}"))
@@ -1574,12 +1576,14 @@ def create_app(
                     },
                     "content_redraw": {
                         "available": resources_ok and bool(random_sections),
+                        "resourceIssues": context["resourceIssues"],
                         "reasons": _regeneration_reasons(
                             context, require_random=bool(random_sections)
                         ),
                     },
                     "settings_reroll": {
                         "available": resources_ok,
+                        "resourceIssues": context["resourceIssues"],
                         "reasons": _regeneration_reasons(context),
                     },
                 },

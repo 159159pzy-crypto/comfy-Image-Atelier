@@ -945,7 +945,7 @@ def migrate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     if "dual" not in source:
         result["dual"] = None
     if workbench == "single":
-        result["count"] = 1
+        result.setdefault("count", 1)
 
     upscalers = copy.deepcopy(DEFAULT_SETTINGS["upscalers"])
     upscalers["pixel_hires"]["model_name"] = profile["pixel_hires_model"]

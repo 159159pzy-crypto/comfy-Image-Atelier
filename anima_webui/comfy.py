@@ -12,11 +12,31 @@ from .resource_classification import classify_resources
 from .workflow import WorkflowError, normalize_lora_path
 
 
+HISTORY_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0, 8.0)
+HISTORY_RECOVERY_TIMEOUT = 60.0
+
+
 class ComfyError(RuntimeError):
     def __init__(self, message: str, *, node_id: str = "", node_type: str = ""):
         super().__init__(message)
         self.node_id = node_id
         self.node_type = node_type
+
+
+class ComfyTransportError(ComfyError):
+    """A failed connection/read, distinct from a reported execution failure."""
+
+
+class ComfyHTTPError(ComfyError):
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.status = status
+
+
+class ComfyResultUnavailable(ComfyError):
+    def __init__(self, prompt_id: str):
+        super().__init__(f"ComfyUI 结果查询重试已耗尽，结果未确认；任务 {prompt_id} 可能仍在远端执行，请在 ComfyUI 中检查")
+        self.prompt_id = prompt_id
 
 
 class ComfyAborted(RuntimeError):
@@ -45,6 +65,7 @@ class ComfyClient:
         self._object_info_generation = 0
         self._object_info_pending: dict[int, asyncio.Task[dict[str, Any]]] = {}
         self._classification_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._classification_generations = {kind: 0 for kind in ("models", "loras")}
         self._classification_locks = {kind: asyncio.Lock() for kind in ("models", "loras")}
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -75,12 +96,12 @@ class ComfyClient:
                     data = None
                 if response.status >= 400:
                     message = data.get("error") if isinstance(data, dict) else raw[:200]
-                    raise ComfyError(f"ComfyUI 返回 {response.status}: {message}")
+                    raise ComfyHTTPError(f"ComfyUI 返回 {response.status}: {message}", response.status)
                 if not isinstance(data, dict):
                     raise ComfyError("ComfyUI 返回了无效数据")
                 return data
         except (aiohttp.ClientError, asyncio.TimeoutError) as error:
-            raise ComfyError(f"无法连接 ComfyUI: {error}") from error
+            raise ComfyTransportError(f"无法连接 ComfyUI: {error}") from error
 
     async def status(self) -> dict[str, Any]:
         return await self._json("GET", "/system_stats")
@@ -206,7 +227,12 @@ class ComfyClient:
                 "manager_items": manager_items,
             }
             self._classification_cache[kind] = (loop.time(), result)
+            self._classification_generations[kind] += 1
             return result
+
+    def classification_generation(self, kind: str) -> int:
+        """Version of the last successful classification refresh for a kind."""
+        return self._classification_generations[kind]
 
     async def lora_inventory(self, *, refresh: bool = False) -> dict[str, Any]:
         return await self.resource_classifications("loras", refresh=refresh)
@@ -528,11 +554,46 @@ class ComfyClient:
     async def prompt_queued(self, prompt_id: str) -> bool:
         """检查任务是否仍在 ComfyUI 的运行/等待队列中。"""
         data = await self._json("GET", "/queue")
+        return self._queue_contains(data, prompt_id)
+
+    @staticmethod
+    def _queue_contains(data: dict[str, Any], prompt_id: str) -> bool:
+        if not isinstance(data, dict):
+            raise ComfyError("ComfyUI 返回了无效的队列数据")
+        found = False
         for key in ("queue_running", "queue_pending"):
-            for entry in data.get(key) or []:
-                if isinstance(entry, (list, tuple)) and len(entry) > 1 and str(entry[1]) == prompt_id:
-                    return True
-        return False
+            entries = data.get(key, [])
+            if not isinstance(entries, (list, tuple)):
+                raise ComfyError(f"ComfyUI 返回了无效的队列字段: {key}")
+            for entry in entries:
+                if (not isinstance(entry, (list, tuple)) or len(entry) < 2
+                        or type(entry[1]) not in (str, int) or str(entry[1]) == ""):
+                    raise ComfyError(f"ComfyUI 返回了无效的队列条目: {key}")
+                found = found or str(entry[1]) == prompt_id
+        return found
+
+    @staticmethod
+    def _history_entry(data: dict[str, Any], prompt_id: str) -> dict[str, Any] | None:
+        if not isinstance(data, dict):
+            raise ComfyError("ComfyUI 返回了无效的历史数据")
+        if prompt_id not in data:
+            return None
+        entry = data[prompt_id]
+        if not isinstance(entry, dict):
+            raise ComfyError("ComfyUI 返回了无效的历史条目")
+        # Older histories may omit status/outputs. Explicit incompatible
+        # types must not become an empty queue, successful result or retry.
+        status = entry.get("status", {})
+        if not isinstance(status, dict):
+            raise ComfyError("ComfyUI 返回了无效的历史状态")
+        if (("completed" in status and type(status["completed"]) is not bool)
+                or ("status_str" in status and not isinstance(status["status_str"], str))
+                or not isinstance(status.get("messages", []), (list, tuple))):
+            raise ComfyError("ComfyUI 返回了无效的历史状态字段")
+        outputs = entry.get("outputs", {})
+        if not isinstance(outputs, dict) or any(not isinstance(output, dict) for output in outputs.values()):
+            raise ComfyError("ComfyUI 返回了无效的历史输出")
+        return entry
 
     async def wait_for_history(
         self,
@@ -544,11 +605,41 @@ class ComfyClient:
         missing_since: float | None = None
         next_queue_check = 0.0
         queued = True
+        recovery_deadline: float | None = None
+        retries = 0
         while True:
             if should_abort is not None and should_abort():
                 raise ComfyAborted("收到停止请求")
-            data = await self._json("GET", f"/history/{prompt_id}")
-            entry = data.get(prompt_id)
+            try:
+                if recovery_deadline is not None and loop.time() >= recovery_deadline:
+                    raise ComfyResultUnavailable(prompt_id)
+                data = await self._history_read(f"/history/{prompt_id}", should_abort, recovery_deadline)
+                entry = self._history_entry(data, prompt_id)
+                now = loop.time()
+                if not entry and now >= next_queue_check:
+                    queue = await self._history_read("/queue", should_abort, recovery_deadline)
+                    queued = self._queue_contains(queue, prompt_id)
+                    next_queue_check = now + max(self.poll_interval, 5.0)
+            except ComfyError as error:
+                retryable = isinstance(error, ComfyTransportError) or (
+                    isinstance(error, ComfyHTTPError) and error.status in {502, 503, 504}
+                )
+                if not retryable:
+                    raise
+                if recovery_deadline is None:
+                    recovery_deadline = loop.time() + HISTORY_RECOVERY_TIMEOUT
+                remaining = recovery_deadline - loop.time()
+                if retries >= len(HISTORY_RETRY_DELAYS) or remaining <= 0:
+                    raise ComfyResultUnavailable(prompt_id) from error
+                # A failed lookup is not evidence that the prompt vanished.
+                missing_since, next_queue_check = None, 0.0
+                delay = min(HISTORY_RETRY_DELAYS[retries], remaining)
+                retries += 1
+                await self._history_delay(delay, should_abort)
+                continue
+            # Only a complete successful poll (including a required queue
+            # lookup) ends an outage. Empty history alone cannot reset retries.
+            recovery_deadline, retries = None, 0
             if entry:
                 status = entry.get("status") or {}
                 if status.get("status_str") == "error" or status.get("completed") is False:
@@ -575,16 +666,46 @@ class ComfyClient:
             # 任务既不在 history 也不在队列时(历史被清空、ComfyUI 重启丢任务),
             # 持续 missing_timeout 秒即放弃,避免批次永久卡死。
             now = loop.time()
-            if now >= next_queue_check:
-                queued = await self.prompt_queued(prompt_id)
-                next_queue_check = now + max(self.poll_interval, 5.0)
             if queued:
                 missing_since = None
             elif missing_since is None:
                 missing_since = now
             elif now - missing_since >= missing_timeout:
                 raise ComfyError("ComfyUI 的队列与历史中都找不到该任务,已放弃等待(历史可能被清空或 ComfyUI 已重启)")
-            await asyncio.sleep(self.poll_interval)
+            await self._history_delay(self.poll_interval, should_abort)
+
+    @staticmethod
+    async def _history_delay(delay: float, should_abort: Callable[[], bool] | None) -> None:
+        loop = asyncio.get_running_loop()
+        end = loop.time() + delay
+        while True:
+            if should_abort is not None and should_abort():
+                raise ComfyAborted("收到停止请求")
+            remaining = end - loop.time()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(0.1, remaining))
+
+    async def _history_read(self, path: str, should_abort: Callable[[], bool] | None,
+                            recovery_deadline: float | None) -> dict[str, Any]:
+        """Only accepted-job GETs get a cancellable, bounded read wrapper."""
+        loop = asyncio.get_running_loop()
+        deadline = min(loop.time() + 20.0, recovery_deadline) if recovery_deadline is not None else loop.time() + 20.0
+        task = asyncio.create_task(self._json("GET", path))
+        try:
+            while True:
+                if should_abort is not None and should_abort():
+                    raise ComfyAborted("收到停止请求")
+                if task.done():
+                    return task.result()
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise ComfyTransportError("ComfyUI 结果查询超时")
+                await asyncio.wait({task}, timeout=min(0.1, remaining))
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     async def image_bytes(self, image: dict[str, Any]) -> tuple[bytes, str]:
         query = urlencode(

@@ -8,6 +8,28 @@ permissions:
   contents: read
 
 jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install isolated browser test dependencies
+        run: python -m pip install -e '.[dev,browser-test]'
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+      - name: Check complete workbench interactions with FakeComfy
+        run: python -m pytest -q tests/browser
+        env:
+          ANIMA_BROWSER_TESTS: "1"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-failures
+          path: output/playwright
+          if-no-files-found: ignore
   test:
     strategy:
       fail-fast: false

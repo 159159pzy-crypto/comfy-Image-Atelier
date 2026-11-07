@@ -25,6 +25,22 @@ node --test tests/frontend_state.test.cjs
 
 真实联调的启动参数和 Windows 打包步骤见 [启动器开发说明](launcher/README.md)。联调使用独立的 `--data-dir`，不要拿唯一一份作品库测试迁移、删除或恢复。
 
+### 完整页面的浏览器回归
+
+CI 的独立 Chromium 作业加载真实页面脚本和临时后端，使用 FakeComfy 与可控响应顺序验证导入、预设和档案切换，并断言没有提交生成请求。普通质量检查跳过这些用例；本地运行需另外安装浏览器测试依赖：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e '.[dev,browser-test]'
+.\.venv\Scripts\python.exe -m playwright install chromium
+$env:ANIMA_BROWSER_TESTS = '1'
+.\.venv\Scripts\python.exe -m pytest -q tests/browser
+Remove-Item Env:ANIMA_BROWSER_TESTS
+```
+
+Linux CI 使用 `python -m playwright install --with-deps chromium` 安装系统依赖。截图与 trace 输出到 `output/playwright/`；可用 `python -m playwright show-trace <trace.zip>` 检查失败时的页面和请求。浏览器、数据目录与服务均由测试独立创建，不需要正在运行的工作台或 ComfyUI。
+
+LoRA 缓存回归通过标准化重建次数检查性能，避免机器速度影响 CI；本地计时比较应使用相同的 1000 项资源清单，预热后连续执行 60 次单项查询，并同时验证刷新及失效行为。
+
 ## 提交修复
 
 1. 写清触发条件、预期行为和实际行为；异步问题优先用事件控制时序复现，不依赖不稳定的长时间休眠。

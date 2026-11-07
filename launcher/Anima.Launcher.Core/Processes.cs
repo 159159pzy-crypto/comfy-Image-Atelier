@@ -626,13 +626,14 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
             // A reused PID must never change which process we observe for exit.
             _ = process.SafeHandle;
             var identity = new OwnedProcess(pid, process.StartTime.ToUniversalTime().Ticks, process.MainModule!.FileName!, "WebUI");
-            var record = records.SingleOrDefault(r => r.Role == "WebUI" && SameProcessIdentity(r, identity));
+            var ownership = await FindWebUiOwnerAsync(identity, ct);
+            var record = ownership?.Record;
             if (string.IsNullOrEmpty(record?.ShutdownToken)) return IdleShutdownResult.MissingToken;
             if (!SupportsIdleShutdown(health, config.AppRoot)) return IdleShutdownResult.Unsupported;
             var latest = await Json(config.WebUrl + "/api/launcher-health", ct);
             if (!IsWorkbenchHealth(latest) || !IsOurWebUi(latest, config)
                 || !SupportsIdleShutdown(latest, config.AppRoot)
-                || await FindPortOwner(config.WebPort, ct) != pid || !ProcessStillMatches(identity))
+                || await FindPortOwner(config.WebPort, ct) != pid || !await WebUiOwnerStillMatchesAsync(ownership!, ct))
                 return IdleShutdownResult.IdentityMismatch;
             ct.ThrowIfCancellationRequested();
             using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct))
@@ -655,7 +656,7 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
             }
             var result = await ObserveIdleShutdownExitAsync(process, config.WebPort,
                 exitTimeout ?? TimeSpan.FromSeconds(10), ct);
-            if (result != IdleShutdownResult.Failed) ForgetOwned(pid);
+            if (result != IdleShutdownResult.Failed) await ForgetExitedWebUiOwnerAsync(ownership!, ct);
             if (result == IdleShutdownResult.Stopped)
             {
                 log($"工作台进程 {pid} 已空闲停机。");
@@ -735,7 +736,8 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
         {
             using var process = Process.GetProcessById(pid);
             var identity = new OwnedProcess(pid, process.StartTime.ToUniversalTime().Ticks, process.MainModule!.FileName!, "WebUI");
-            var record = records.SingleOrDefault(r => r.Role == "WebUI" && SameProcessIdentity(r, identity));
+            var ownership = await FindWebUiOwnerAsync(identity, ct);
+            var record = ownership?.Record;
             if (record is null)
             {
                 if (!PathUnder(versionsRoot, config.AppRoot)) { log("端口上的工作台不在快照目录内，不接管。"); return false; }
@@ -745,20 +747,29 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
             // token or terminating a process. A reused PID never inherits ownership.
             var latest = await Json(config.WebUrl + "/api/launcher-health", ct);
             if (!IsWorkbenchHealth(latest) || !IsOurWebUi(latest, config)
-                || await FindPortOwner(config.WebPort, ct) != pid || !ProcessStillMatches(identity)) return false;
+                || await FindPortOwner(config.WebPort, ct) != pid || !ProcessStillMatches(identity)
+                || ownership is not null && !await WebUiOwnerStillMatchesAsync(ownership, ct)) return false;
             ct.ThrowIfCancellationRequested();
             if (!string.IsNullOrEmpty(record?.ShutdownToken) && await ShutdownRemote(config.WebUrl, record.ShutdownToken, ct))
             {
                 log($"已请求工作台进程 {pid} 的停机端点。");
                 var closed = await WaitPortClosed(config.WebPort, ct);
-                if (process.HasExited) ForgetOwned(pid);
+                if (closed)
+                {
+                    // Closing the socket can precede Python/venv redirector exit.
+                    try { await process.WaitForExitAsync(ct).WaitAsync(TimeSpan.FromSeconds(2), ct); }
+                    catch (TimeoutException) { }
+                }
+                if (process.HasExited) await ForgetExitedWebUiOwnerAsync(ownership!, ct);
                 return closed;
             }
-            if (!ProcessStillMatches(identity) || await FindPortOwner(config.WebPort, ct) != pid) return false;
+            if (!ProcessStillMatches(identity) || await FindPortOwner(config.WebPort, ct) != pid
+                || ownership is not null && !await WebUiOwnerStillMatchesAsync(ownership, ct)) return false;
             ct.ThrowIfCancellationRequested();
             process.Kill(true);
             await process.WaitForExitAsync(ct).WaitAsync(TimeSpan.FromSeconds(5), ct);
-            ForgetOwned(pid);
+            if (ownership is not null) await ForgetExitedWebUiOwnerAsync(ownership, ct);
+            else ForgetOwned(pid);
             log($"已结束目标工作台进程 {pid}；其他环境的工作台保持运行。");
             return await WaitPortClosed(config.WebPort, ct);
         }
@@ -771,6 +782,65 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
         && recorded.StartTimeUtcTicks == current.StartTimeUtcTicks
         && !string.IsNullOrWhiteSpace(recorded.Executable)
         && string.Equals(recorded.Executable, current.Executable, StringComparison.OrdinalIgnoreCase);
+
+    private sealed record WebUiOwner(OwnedProcess Record, OwnedProcess Listener, OwnedProcess? Parent);
+
+    // Parent snapshots must come from the listener's direct OS parent, never an
+    // executable-name search. Keep the persisted launcher identity/token unchanged
+    // so records saved by older versions also work with Windows venv redirectors.
+    internal static bool WebUiOwnerMatches(OwnedProcess record, OwnedProcess? before, OwnedProcess? after,
+        OwnedProcess? beforeParent = null, OwnedProcess? afterParent = null)
+    {
+        try
+        {
+            if (record.Role != "WebUI" || before is null || after is null || !SameProcessIdentity(before, after)) return false;
+            if (SameProcessIdentity(record, after)) return true;
+            return beforeParent is not null && afterParent is not null
+                && SameProcessIdentity(record, beforeParent) && SameProcessIdentity(record, afterParent)
+                && record.StartTimeUtcTicks <= after.StartTimeUtcTicks
+                && VenvBasePython(record.Executable) is { } basePython && SameExecutable(after.Executable, basePython);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { return false; }
+    }
+
+    private static async Task<OwnedProcess?> ReadWebUiParentAsync(int listenerPid, CancellationToken ct)
+    {
+        var parentPid = await WindowsProcessInspection.FindParentProcessIdAsync(listenerPid, ct);
+        return parentPid > 0 ? ReadProcessIdentity(parentPid, "WebUI launcher") : null;
+    }
+
+    private async Task<WebUiOwner?> FindWebUiOwnerAsync(OwnedProcess listener, CancellationToken ct)
+    {
+        var direct = records.SingleOrDefault(record => WebUiOwnerMatches(record, listener, listener));
+        if (direct is not null) return new(direct, listener, null);
+        var parent = await ReadWebUiParentAsync(listener.Pid, ct);
+        var owner = records.SingleOrDefault(record => WebUiOwnerMatches(record, listener, listener, parent, parent));
+        return owner is null ? null : new(owner, listener, parent);
+    }
+
+    private static async Task<bool> WebUiOwnerStillMatchesAsync(WebUiOwner owner, CancellationToken ct)
+    {
+        var parent = owner.Parent is null ? null : await ReadWebUiParentAsync(owner.Listener.Pid, ct);
+        var listener = ReadProcessIdentity(owner.Listener.Pid, "WebUI");
+        return WebUiOwnerMatches(owner.Record, owner.Listener, listener, owner.Parent, parent);
+    }
+
+    private async Task ForgetExitedWebUiOwnerAsync(WebUiOwner owner, CancellationToken ct)
+    {
+        // Observe the original owned Process handle. The port belongs to the child,
+        // but processes.json and the stop-all list still identify the venv parent.
+        var process = owned.SingleOrDefault(item => item.Id == owner.Record.Pid);
+        if (process is not null && !process.HasExited)
+        {
+            try { await process.WaitForExitAsync(ct).WaitAsync(TimeSpan.FromSeconds(2), ct); }
+            catch (TimeoutException)
+            {
+                log($"工作台已退出，但启动进程 {owner.Record.Pid} 尚未退出，保留其所有权记录。");
+                return;
+            }
+        }
+        ForgetOwned(owner.Record.Pid);
+    }
 
     private static bool ProcessStillMatches(OwnedProcess identity)
     {

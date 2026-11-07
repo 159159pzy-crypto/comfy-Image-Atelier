@@ -75,13 +75,8 @@
     if(key==="Home")return 0;if(key==="End")return count-1;
     return key in offsets?Math.max(0,Math.min(count-1,index+offsets[key])):index;
   }
-  function createRequestGate() {
-    let revision = 0, controller;
-    return {
-      next() { controller?.abort(); controller = typeof AbortController === "undefined" ? null : new AbortController(); const token = ++revision; return { signal: controller?.signal, current: () => token === revision }; },
-      cancel() { ++revision; controller?.abort(); },
-    };
-  }
+  const createRequestGate = (typeof module !== "undefined" && module.exports
+    ? require("./request-state.js") : globalThis.StudioRequestState).createReadGate;
   function createController({ request, getProfile, getLoras = () => [], onChange = () => {} }) {
     const state = { q: "", scope: "current", folder: "", root: "", recursive: true, collection: "", tag: [], tag_exclude: [], tag_mode: "all", base_model: "", in_configured: "", has_preview: "", bound: "", sort: "name", order: "asc", page: 1,
       items: [], total: 0, pages: 1, groups: [], facets: {}, selected: new Set(), selectionResources: new Map(), known: new Map(), loading: false, selectionLoading: false, error: "", profile: getProfile(), revision: null, resultKey: "", offline:false,cached:false,writable:true,lastSyncedAt:null };

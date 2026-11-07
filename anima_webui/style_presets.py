@@ -302,6 +302,18 @@ class StylePresetStore(StorageProtection):
         current = self.items[index]
         incoming_settings = payload.get("settings")
         previous_settings = current.get("settings", {})
+        # Updating an ID edits its existing namespace; it is not a profile move.
+        # Check both envelopes before normalization can replace model resources.
+        profile_id = normalize_model_profile(previous_settings.get("model_profile", DEFAULT_MODEL_PROFILE))
+        for envelope in (payload, incoming_settings):
+            if isinstance(envelope, dict) and "model_profile" in envelope:
+                try:
+                    requested_profile = normalize_model_profile(envelope["model_profile"])
+                except ModelProfileError as error:
+                    raise WorkflowError(str(error)) from error
+                if requested_profile != profile_id:
+                    raise WorkflowError("不能更改已有风格预设的模型档案，请在目标档案另存新预设")
+        payload = {**payload, "model_profile": profile_id}
         if (
             isinstance(incoming_settings, dict)
             and incoming_settings.get("workbench", "random") == "random"
@@ -316,9 +328,6 @@ class StylePresetStore(StorageProtection):
             }
             payload = {**payload, "settings": {**incoming_settings, **preserved}}
         if "name" in payload:
-            profile_id = payload.get("model_profile") or (
-                payload.get("settings") or current.get("settings") or {}
-            ).get("model_profile", DEFAULT_MODEL_PROFILE)
             self._ensure_unique_name(
                 payload.get("name"), excluding_id=preset_id, model_profile=profile_id
             )

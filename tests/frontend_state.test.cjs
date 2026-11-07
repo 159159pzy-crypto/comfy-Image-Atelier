@@ -104,6 +104,32 @@ test('partial redraw requires selecting every non-preservable dimension', () => 
   assert.equal(ctx.ui.variantStatus.dataset.state, 'ok');
 });
 
+test('variant resource feedback follows the selected mode instead of the replay or global result', () => {
+  const ctx = context();
+  let mode = 'prompt_variant';
+  ctx.ui.confirmVariant = {};
+  ctx.ui.variantStatus = { dataset: {} };
+  ctx.selectedRegenerationMode = () => mode;
+  ctx.selectedRedrawSections = () => [];
+  ctx.setRedrawSectionsVisible = () => {};
+  ctx.escapeHtml = x => x;
+  ctx.regenerationOptions = { resourceIssues: [{ label: '词池', name: '已删除' }], modes: {
+    prompt_variant: { available: true, resourceIssues: [], reasons: [] },
+    settings_reroll: { available: false, resourceIssues: [{ label: '词池', name: '已删除' }], reasons: ['词池不可用'] },
+  } };
+  ctx.regenerationReasons = value => ctx.regenerationOptions.modes[value].reasons;
+  vm.runInContext(functionSource('updateVariantDrawer'), ctx);
+  ctx.updateVariantDrawer();
+  assert.equal(ctx.ui.variantStatus.dataset.state, 'ok');
+  mode = 'settings_reroll'; ctx.updateVariantDrawer();
+  assert.equal(ctx.ui.confirmVariant.disabled, true);
+  assert.equal(ctx.ui.variantStatus.dataset.state, 'error');
+  assert.match(ctx.ui.variantStatus.innerHTML, /已删除/);
+  mode = 'prompt_variant'; ctx.updateVariantDrawer();
+  assert.equal(ctx.ui.confirmVariant.disabled, false);
+  assert.equal(ctx.ui.variantStatus.dataset.state, 'ok');
+});
+
 function classificationContext() {
   const ctx = context();
   ctx.URL = URL;

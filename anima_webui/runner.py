@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 from typing import Any
 
-from .comfy import ComfyAborted, ComfyError, extract_images, extract_positive_prompt
+from .comfy import ComfyAborted, ComfyError, ComfyResultUnavailable, extract_images, extract_positive_prompt
 from .catalog import PromptCatalog, resolve_history_selection, split_prompt
 from .history import HistoryStore
 from .prompt_rules import PromptRuleStore
@@ -24,6 +24,7 @@ from .prompt_assistant import PromptAssistant, generation_settings, parse_pool_o
 from .prompt_tagger import PromptTagger
 from .single_workbench import active_lora_pipelines
 from .pipeline_v3 import STAGE_LABELS
+from .regeneration import prompt_source_issues
 from .prompt_processing import (build_prompt_graph, build_reverse_graph, build_tagger_graph, build_rewrite_graph, compose_prompt, extract_prompt_result,
                                 final_prompts, prompt_fingerprint, validate_prompt_nodes)
 from .workflow import MAX_SAMPLE_SEED, WorkflowError, WorkflowTemplates, migrate_settings, validate_loras, validate_settings
@@ -740,7 +741,7 @@ class BatchManager:
             if settings.get("kind") in {"rewrite", "reverse"}:
                 label = "图像反推" if settings["kind"] == "reverse" else "提示词重写"
                 hint = "本地模型与节点" if settings.get("method") == "tagger" else "服务配置"
-                message = str(error) if isinstance(error, WorkflowError) else f"{label}失败，请在启动器中检查{hint}"
+                message = str(error) if isinstance(error, (WorkflowError, ComfyResultUnavailable)) else f"{label}失败，请在启动器中检查{hint}"
                 await self.prompt_jobs.update(job_id, status="error", error=message)
                 raise WorkflowError(message) from None
             await self.prompt_jobs.update(job_id, status="error", error=str(error))
@@ -824,6 +825,13 @@ class BatchManager:
                 ensure_writable()
             regeneration = self._validate_regeneration(regeneration)
             overrides = generation_settings(overrides)
+            # Direct single-image submissions and exact replay remain one
+            # image. Historical variants carry their explicit batch count
+            # through every later settings migration and metadata export.
+            if overrides.get("workbench") == "single" and (
+                regeneration is None or regeneration["mode"] == "replay"
+            ):
+                overrides["count"] = 1
             if binding_policy(regeneration) == "current":
                 overrides = manual_settings(overrides, runtime_snapshot(regeneration))
             normalized_overrides = overrides
@@ -855,11 +863,9 @@ class BatchManager:
                 # schema even when an embedded caller submits DEFAULT_SETTINGS
                 # with the four deprecated aliases attached.
                 settings = migrate_settings(settings)
-            if settings.get("workbench") != "single" and settings["model_profile"] == "krea2" and settings["krea_prompt_pool"]["enabled"]:
-                if self.prompt_pools is None or not self.prompt_pools.resolve(
-                    "krea2", settings["krea_prompt_pool"].get("ids")
-                ):
-                    raise WorkflowError("Krea 2 自然语言提示词池为空，请先导入提示词")
+            source_issues = prompt_source_issues(settings, self.prompt_pools, regeneration)
+            if source_issues:
+                raise WorkflowError(source_issues[0]["name"])
             seeds = validate_seeds(seeds)
             if settings.get("workbench") == "single":
                 if settings.get("generation_mode") == "img2img":

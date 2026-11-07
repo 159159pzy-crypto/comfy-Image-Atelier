@@ -548,8 +548,11 @@ let favoritesAvailable = false;
 let customGroups = [];
 let artistFavoritesData = { groups: [], items: [] };
 let stylePresets = [];
-let stylePresetRequest = 0;
 let stylePresetProfile = "";
+const stylePresetReadGate = StudioRequestState.createReadGate();
+const stylePresetViewEpoch = StudioRequestState.createViewEpoch();
+const stylePresetCreates = new Map();
+const stylePresetWrites = new Set();
 let resources = { models: [], seedvr2_models: [], upscale_models: [], samplers: [], schedulers: [], model_profiles: {}, nodes: {}, plugins: {} };
 let resourceRequest = 0;
 let resourceInventoryProfile = "";
@@ -560,6 +563,8 @@ let loraInventoryProfile = "";
 let kreaPromptPoolRequest = 0;
 let customGroupsRequest = 0;
 let importPreview = null;
+const importReadGate = StudioRequestState.createReadGate();
+const importViewEpoch = StudioRequestState.createViewEpoch();
 let editingGroup = null;
 let childGroupParent = null;
 let selectedChildSource = "";
@@ -1065,6 +1070,8 @@ function switchProfileDraft(nextProfile, { applyDefaults = true } = {}) {
   if (previous !== next) saveCurrentProfileDraft();
   activeProfileId = next;
   if (ui.model_profile) ui.model_profile.value = next;
+  if (typeof invalidateCustomImport === "function") invalidateCustomImport();
+  if (typeof stylePresetContextChanged === "function") stylePresetContextChanged();
   if (typeof sharedFavoritesResetModel === "function") sharedFavoritesResetModel();
   const state = profileDrafts[next];
   if (state) {
@@ -1255,6 +1262,8 @@ function applySettings(raw, { useProfileDraft = false } = {}) {
   const previousProfile = currentProfile();
   activeProfileId = settings.model_profile;
   if (ui.model_profile) ui.model_profile.value = settings.model_profile;
+  if (typeof invalidateCustomImport === "function") invalidateCustomImport();
+  if (typeof stylePresetContextChanged === "function") stylePresetContextChanged();
   clearNormalizationUndo();
   if (ui.promptRuleDialog?.open) { clearPromptRuleEditor(); void loadPromptRules(); }
   if (typeof sharedFavoritesResetModel === "function") sharedFavoritesResetModel();
@@ -3609,6 +3618,7 @@ function updateVariantDrawer() {
   };
   ui.confirmVariant.textContent = labels[mode];
   const available = Boolean(regenerationOptions?.modes?.[mode]?.available);
+  const issues = regenerationOptions?.modes?.[mode]?.resourceIssues ?? regenerationOptions?.resourceIssues ?? [];
   const reasons = [...regenerationReasons(mode)];
   if (mode === "content_redraw") {
     for (const [section, value] of Object.entries(regenerationOptions?.sections || {})) {
@@ -3616,11 +3626,14 @@ function updateVariantDrawer() {
         reasons.push(value.preserveReason || `请同时重抽 ${section}：缺少可靠的历史快照`);
     }
   }
-  ui.confirmVariant.disabled = !available || reasons.length > 0 || (mode === "content_redraw" && !sections.length);
-  if (reasons.length && !(regenerationOptions?.resourceIssues || []).length) {
+  ui.confirmVariant.disabled = !available || issues.length > 0 || reasons.length > 0 || (mode === "content_redraw" && !sections.length);
+  if (issues.length) {
     ui.variantStatus.dataset.state = "error";
-    ui.variantStatus.innerHTML = `<strong>当前方式不可用</strong><span>${reasons.map(escapeHtml).join("<br>")}</span>`;
-  } else if (!(regenerationOptions?.resourceIssues || []).length) {
+    ui.variantStatus.innerHTML = `<strong>无法生成</strong><span>${issues.map(item => `${escapeHtml(item.label)}：${escapeHtml(item.name)}`).join("<br>")}</span>`;
+  } else if (reasons.length || !available) {
+    ui.variantStatus.dataset.state = "error";
+    ui.variantStatus.innerHTML = `<strong>当前方式不可用</strong><span>${reasons.map(escapeHtml).join("<br>") || "请重新检查所选方式。"}</span>`;
+  } else {
     ui.variantStatus.dataset.state = "ok";
     ui.variantStatus.textContent = "资源检查通过，所选方式可用。";
   }
@@ -3970,6 +3983,7 @@ function confirmPoolSelection() {
   if (!session.closed && !ui.confirmPool.disabled) session.finish(session.result());
 }
 async function openPool(section) {
+  if (typeof invalidateCustomImport === "function") invalidateCustomImport();
   if (characterPickerSession()) return;
   invalidatePoolContext();
   const revision = poolContextRevision;
@@ -4020,6 +4034,7 @@ function hideDrawerBackdrop() {
 }
 
 function closePool() {
+  if (typeof invalidateCustomImport === "function") invalidateCustomImport();
   const picker = characterPickerSession();
   if (picker) { picker.finish(null); return; }
   invalidatePoolContext();
@@ -5327,8 +5342,23 @@ function renderImportTargetGroups() {
     }),
   );
 }
-function openImportDialog() {
+function invalidateCustomImport() {
+  importReadGate.cancel();
+  importViewEpoch.invalidate();
   importPreview = null;
+  ui.commitImport.disabled = true;
+  ui.importSummary.hidden = true;
+  ui.importRows.replaceChildren();
+}
+function customImportContext() {
+  return { model_profile: currentProfile(), section: activeSection, file: ui.importFile.files?.[0], owner: importViewEpoch.capture() };
+}
+function customImportCurrent(context) {
+  return context.owner.current() && context.model_profile === currentProfile() && context.section === activeSection
+    && context.file === ui.importFile.files?.[0] && ui.importDialog.open;
+}
+function openImportDialog() {
+  invalidateCustomImport();
   const label = SECTION_META[activeSection].label;
   ui.importDialogTitle.textContent = `${label}池批量导入`;
   ui.importJsonTemplate.href = `/api/custom-prompts/templates/${activeSection}/json?model_profile=${encodeURIComponent(currentProfile())}`;
@@ -5345,33 +5375,43 @@ function openImportDialog() {
   motionDialog(ui.importDialog, true);
 }
 async function previewImportFile() {
+  invalidateCustomImport();
   const file = ui.importFile.files?.[0];
   if (!file) return;
+  const context = customImportContext(), token = importReadGate.next();
+  const current = () => token.current() && customImportCurrent(context);
   const format = file.name.toLowerCase().endsWith(".csv")
     ? "csv"
     : file.name.toLowerCase().endsWith(".json")
       ? "json"
       : "";
   if (!format) {
+    ui.importHint.textContent = "只支持 JSON 或 CSV 文件";
     toast("只支持 JSON 或 CSV 文件");
     return;
   }
   ui.importBundleName.value = file.name.replace(/\.[^.]+$/, "").trim();
   ui.importHint.textContent = `正在校验 ${file.name}`;
+  const bundleName = ui.importBundleName.value;
   try {
-    importPreview = await request("/api/custom-prompts/import/preview", {
+    const content = await file.text();
+    if (!current()) return;
+    const payload = await request("/api/custom-prompts/import/preview", {
       method: "POST",
+      signal: token.signal,
       body: JSON.stringify({
         format,
-        content: await file.text(),
-        section: activeSection,
-        model_profile: currentProfile(),
-        bundleName: ui.importBundleName.value,
+        content,
+        section: context.section,
+        model_profile: context.model_profile,
+        bundleName,
       }),
     });
-    importPreview.filename = file.name;
+    if (!current()) return;
+    importPreview = { ...payload, filename: file.name, context, saving: false };
     renderImportPreview();
   } catch (error) {
+    if (!current()) return;
     importPreview = null;
     ui.commitImport.disabled = true;
     ui.importHint.textContent = error.message;
@@ -5379,6 +5419,8 @@ async function previewImportFile() {
   }
 }
 function renderImportPreview() {
+  if (!importPreview || !customImportCurrent(importPreview.context)) return;
+  const preview = importPreview;
   const summary = importPreview.summary || {};
   ui.importHint.textContent = `${importPreview.filename} · 已完成校验`;
   ui.importSummary.hidden = false;
@@ -5398,41 +5440,48 @@ function renderImportPreview() {
       element.innerHTML = `<span>#${row.row}</span><span class="import-status">${labels[row.status]}</span><strong title="${escapeHtml(title)}">${escapeHtml(title)}</strong><small title="${escapeHtml(detail)}">${escapeHtml(detail)}</small><select aria-label="导入操作" ${row.status === "error" ? "disabled" : ""}>${row.status === "new" ? '<option value="create">导入</option><option value="skip">跳过</option>' : row.status === "conflict" ? '<option value="skip">跳过</option><option value="overwrite">覆盖</option>' : '<option value="skip">跳过</option>'}</select>`;
       const select = element.querySelector("select");
       select.value = row.action;
+      select.disabled ||= preview.saving;
       select.addEventListener("change", () => {
-        importPreview.rows[index].action = select.value;
+        if (preview !== importPreview || preview.saving) return;
+        preview.rows[index].action = select.value;
         renderImportPreview();
       });
       return element;
     }),
   );
   ui.commitImport.disabled =
-    !ui.importBundleName.value.trim() ||
+    preview.saving || !ui.importBundleName.value.trim() ||
     !importPreview.rows.some((row) => row.status !== "error" && row.action !== "skip");
 }
 async function commitCustomImport() {
-  if (!importPreview) return;
-  const preview = importPreview, context = { model_profile: currentProfile(), section: activeSection };
-  ui.commitImport.disabled = true;
+  const preview = importPreview;
+  if (!preview || preview.saving || !customImportCurrent(preview.context) || !ui.importBundleName.value.trim()
+    || !preview.rows.some(row => row.status !== "error" && row.action !== "skip")) return;
+  const context = preview.context;
+  const current = () => preview === importPreview && customImportCurrent(context);
+  const payload = clone({ rows: preview.rows, section: context.section, model_profile: context.model_profile,
+    targetGroupIds: selectedImportGroupIds(), bundleName: ui.importBundleName.value });
+  preview.saving = true;
+  renderImportPreview();
   try {
     const result = await request("/api/custom-prompts/import", {
       method: "POST",
-      body: JSON.stringify({
-        rows: preview.rows,
-        section: context.section,
-        model_profile: context.model_profile,
-        targetGroupIds: selectedImportGroupIds(),
-        bundleName: ui.importBundleName.value,
-      }),
+      body: JSON.stringify(payload),
     });
-    if (typeof poolSourceChanged === "function") poolSourceChanged({ ...context, ...result });
-    if (preview !== importPreview || context.model_profile !== currentProfile() || context.section !== activeSection) return;
-    motionDialog(ui.importDialog, false);
+    if (typeof poolSourceChanged === "function") poolSourceChanged({ model_profile: context.model_profile, section: context.section, ...result });
+    if (current()) { invalidateCustomImport(); motionDialog(ui.importDialog, false); }
     toast(`${result.bundleName}：新增 ${result.imported}，更新 ${result.updated}，跳过 ${result.skipped}`);
   } catch (error) {
-    ui.commitImport.disabled = false;
     const message = typeof poolMutationError === "function" ? poolMutationError(error, context) : error.message;
-    if (preview === importPreview) ui.importHint.textContent = message;
+    if (current()) ui.importHint.textContent = message;
     toast(message);
+  } finally {
+    preview.saving = false;
+    if (current()) {
+      const message = ui.importHint.textContent;
+      renderImportPreview();
+      ui.importHint.textContent = message;
+    }
   }
 }
 
@@ -5866,21 +5915,51 @@ function presetSnapshot() {
   const settings = readSettings();
   return Object.fromEntries(PRESET_SETTING_KEYS.filter(key => settings[key] !== undefined).map((key) => [key, clone(settings[key])]));
 }
+function stylePresetItemProfile(item) {
+  return normalizeProfileId(item.settings?.model_profile || item.model_profile || "anima");
+}
+function syncStylePresetControls() {
+  const busy = stylePresetCreates.has(currentProfile());
+  const protectedStore = typeof config !== "undefined" && config.storage_status?.style_presets?.read_only;
+  ui.savePreset.disabled = busy || Boolean(protectedStore);
+  ui.savePreset.textContent = busy ? "保存中…" : "保存当前";
+}
+function stylePresetContextChanged() {
+  stylePresetViewEpoch.invalidate();
+  const profile = currentProfile();
+  if (stylePresetProfile !== profile) {
+    stylePresetReadGate.cancel();
+    stylePresets = [];
+    stylePresetProfile = profile;
+    renderStylePresets();
+  }
+  setPresetFeedback();
+  syncStylePresetControls();
+}
+async function stylePresetWriteCompleted(profile, message) {
+  // A committed write belongs to its original profile even after navigation.
+  // Only its list needs refreshing; the new form must retain its own contents.
+  toast(`${profileLabel(profile)}：${message}`);
+  if (profile === currentProfile()) {
+    stylePresetReadGate.cancel();
+    await loadStylePresets();
+  }
+}
 async function loadStylePresets() {
   const requestedProfile = currentProfile();
-  const requestId = ++stylePresetRequest;
+  const token = stylePresetReadGate.next();
   if (stylePresetProfile && stylePresetProfile !== requestedProfile) {
     stylePresets = [];
     renderStylePresets();
   }
   stylePresetProfile = requestedProfile;
   try {
-    const data = await request(`/api/style-presets?model_profile=${encodeURIComponent(requestedProfile)}`);
-    if (requestId !== stylePresetRequest || requestedProfile !== currentProfile()) return;
-    stylePresets = data.items || [];
+    const data = await request(`/api/style-presets?model_profile=${encodeURIComponent(requestedProfile)}`, { signal: token.signal });
+    if (!token.current() || requestedProfile !== currentProfile()) return;
+    stylePresets = (data.items || []).filter(item => stylePresetItemProfile(item) === requestedProfile);
     renderStylePresets();
   } catch (error) {
-    if (requestId !== stylePresetRequest || requestedProfile !== currentProfile()) return;
+    if (!token.current() || requestedProfile !== currentProfile()) return;
     toast(error.message);
   }
 }
@@ -5891,6 +5970,7 @@ function setPresetFeedback(message = "", type = "error") {
   ui.presetName.setAttribute("aria-invalid", String(Boolean(message) && type === "error"));
 }
 function renderStylePresets() {
+  stylePresets = stylePresets.filter(item => stylePresetItemProfile(item) === currentProfile());
   ui.presetSummary.textContent = `${stylePresets.length} 个预设`;
   ui.presetEmpty.hidden = stylePresets.length > 0;
   ui.presetList.replaceChildren(
@@ -5931,7 +6011,8 @@ function renderStylePresets() {
   );
 }
 async function createStylePreset() {
-  if (ui.savePreset.disabled) return;
+  const profile = currentProfile();
+  if (ui.savePreset.disabled || stylePresetCreates.has(profile)) return;
   const name = ui.presetName.value.trim();
   if (!name) {
     setPresetFeedback("请输入预设名称");
@@ -5943,48 +6024,64 @@ async function createStylePreset() {
     ui.presetName.focus();
     return;
   }
-  const originalLabel = ui.savePreset.textContent;
-  ui.savePreset.disabled = true;
-  ui.savePreset.textContent = "保存中…";
+  const operation = stylePresetViewEpoch.capture();
+  const current = () => operation.current() && profile === currentProfile();
+  const payload = clone({ name, favorite: false, model_profile: profile, settings: presetSnapshot() });
+  stylePresetCreates.set(profile, operation);
+  syncStylePresetControls();
   setPresetFeedback("正在写入本地预设…", "pending");
   try {
     const created = await request("/api/style-presets", {
       method: "POST",
-      body: JSON.stringify({ name, favorite: false, model_profile: currentProfile(), settings: presetSnapshot() }),
+      body: JSON.stringify(payload),
     });
-    const favoriteCount = stylePresets.findIndex((item) => !item.favorite);
-    stylePresets.splice(favoriteCount < 0 ? stylePresets.length : favoriteCount, 0, created);
-    ui.presetName.value = "";
-    renderStylePresets();
-    setPresetFeedback(`已保存“${created.name}”`, "success");
-    toast("风格预设已保存");
+    if (current()) {
+      if (ui.presetName.value.trim() === name) ui.presetName.value = "";
+      setPresetFeedback(`已保存“${created.name}”`, "success");
+    }
+    await stylePresetWriteCompleted(profile, `已保存风格预设“${created.name}”`);
   } catch (error) {
-    setPresetFeedback(error.message);
-    toast(error.message);
+    if (current()) setPresetFeedback(error.message);
+    toast(`${profileLabel(profile)}：${error.message}`);
   } finally {
-    ui.savePreset.disabled = false;
-    ui.savePreset.textContent = originalLabel;
+    if (stylePresetCreates.get(profile) === operation) stylePresetCreates.delete(profile);
+    // Derive from the current operation map, never an older button snapshot.
+    syncStylePresetControls();
   }
 }
 async function updateStylePreset(item, changes) {
+  if (stylePresetWrites.has(item.id)) return;
+  const profile = stylePresetItemProfile(item);
+  if (changes.settings && (currentProfile() !== profile
+    || changes.settings.model_profile && normalizeProfileId(changes.settings.model_profile) !== profile)) {
+    toast("不能跨模型档案覆盖风格预设，请在当前档案另存新预设");
+    return;
+  }
+  const payload = clone({ ...changes, model_profile: profile });
+  stylePresetWrites.add(item.id);
   try {
     await request(`/api/style-presets/${encodeURIComponent(item.id)}`, {
       method: "PUT",
-      body: JSON.stringify({ ...changes, model_profile: currentProfile() }),
+      body: JSON.stringify(payload),
     });
-    await loadStylePresets();
+    await stylePresetWriteCompleted(profile, `已更新风格预设“${item.name}”`);
   } catch (error) {
-    toast(error.message);
+    toast(`${profileLabel(profile)}：${error.message}`);
+  } finally {
+    stylePresetWrites.delete(item.id);
   }
 }
 async function deleteStylePreset(item) {
-  if (!confirm(`删除预设“${item.name}”？`)) return;
+  if (stylePresetWrites.has(item.id) || !confirm(`删除预设“${item.name}”？`)) return;
+  const profile = stylePresetItemProfile(item);
+  stylePresetWrites.add(item.id);
   try {
-    await request(`/api/style-presets/${encodeURIComponent(item.id)}?model_profile=${encodeURIComponent(currentProfile())}`, { method: "DELETE" });
-    await loadStylePresets();
-    toast("风格预设已删除");
+    await request(`/api/style-presets/${encodeURIComponent(item.id)}?model_profile=${encodeURIComponent(profile)}`, { method: "DELETE" });
+    await stylePresetWriteCompleted(profile, `已删除风格预设“${item.name}”`);
   } catch (error) {
-    toast(error.message);
+    toast(`${profileLabel(profile)}：${error.message}`);
+  } finally {
+    stylePresetWrites.delete(item.id);
   }
 }
 function setPromptRuleError(message = "") {
@@ -6624,8 +6721,10 @@ ui.importBundleName.addEventListener("input", () => {
   if (importPreview) renderImportPreview();
 });
 ui.commitImport.addEventListener("click", commitCustomImport);
-ui.closeImport.addEventListener("click", () => motionDialog(ui.importDialog, false));
-ui.cancelImport.addEventListener("click", () => motionDialog(ui.importDialog, false));
+ui.closeImport.addEventListener("click", () => { invalidateCustomImport(); motionDialog(ui.importDialog, false); });
+ui.cancelImport.addEventListener("click", () => { invalidateCustomImport(); motionDialog(ui.importDialog, false); });
+ui.importDialog.addEventListener("cancel", invalidateCustomImport);
+ui.importDialog.addEventListener("close", invalidateCustomImport);
 ui.manageArtists.addEventListener("click", openArtistDialog);
 ui.saveCurrentArtists.addEventListener("click", saveCurrentArtistFavorites);
 ui.closeArtists.addEventListener("click", () => motionDialog(ui.artistDialog, false));

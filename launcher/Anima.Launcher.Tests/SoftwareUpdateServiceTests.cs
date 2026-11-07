@@ -14,7 +14,7 @@ internal static class SoftwareUpdateServiceTests
         Directory.CreateDirectory(comfy);
         var startedMarker = Path.Combine(comfy, "comfy-was-started.txt");
         File.WriteAllText(Path.Combine(comfy, "main.py"), "from pathlib import Path\nPath(__file__).with_name('comfy-was-started.txt').write_text('unexpected start')\n");
-        var passed = 0;
+        var passed = WebUiOwnershipTests.Run(work);
         void Check(bool ok, string message)
         {
             if (!ok) throw new Exception("FAIL: " + message);
@@ -97,6 +97,112 @@ internal static class SoftwareUpdateServiceTests
                         await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
                     }
         }
+        passed += await RunVenv(work, manifest, python);
+        return passed;
+    }
+
+    private static async Task<int> RunVenv(string work, RuntimeManifest manifest, string python)
+    {
+        var root = Path.Combine(work, "software-update-venv-services");
+        var versions = Path.Combine(root, "versions");
+        var venv = Path.Combine(root, "venv");
+        Directory.CreateDirectory(root);
+        await Commands.Run(python, ["-m", "venv", "--without-pip", venv], root, null, default, timeout: TimeSpan.FromSeconds(30));
+        var previous = new LauncherConfig
+        {
+            AppRoot = Path.Combine(versions, "old"), DataDir = Path.Combine(root, "data"), ComfyRoot = Path.Combine(root, "stopped-comfy"),
+            Python = Path.Combine(venv, "Scripts", "python.exe"), WebPort = FreePort(), ComfyPort = FreePort(), SetupComplete = true,
+        };
+        while (previous.WebPort == previous.ComfyPort) previous.ComfyPort = FreePort();
+        Directory.CreateDirectory(previous.ComfyRoot);
+        var startedMarker = Path.Combine(previous.ComfyRoot, "comfy-was-started.txt");
+        File.WriteAllText(Path.Combine(previous.ComfyRoot, "main.py"), "from pathlib import Path\nPath(__file__).with_name('comfy-was-started.txt').write_text('unexpected start')\n");
+        WriteWorkbench(previous.AppRoot, failStatus: false);
+        var target = previous.Clone(); target.AppRoot = Path.Combine(versions, "new");
+        WriteWorkbench(target.AppRoot, failStatus: false);
+        var runtime = manifest with { Nodes = [] };
+        var started = new List<OwnedProcess>();
+        var passed = 0;
+        void Check(bool ok, string message)
+        {
+            if (!ok) throw new Exception("FAIL: " + message);
+            passed++; Console.WriteLine("PASS: " + message);
+        }
+        OwnedProcess Current() => JsonFile.Read<OwnedProcess[]>(Path.Combine(root, "processes.json")).Single();
+        try
+        {
+            var services = new ServiceManager(root, _ => { });
+            await services.StartWebUIForSoftwareUpdateAsync(previous, runtime, default);
+            var original = Current(); started.Add(original);
+            var listener = await WindowsProcessInspection.FindLoopbackListenerAsync(previous.WebPort);
+            Check(listener != original.Pid && await WindowsProcessInspection.FindParentProcessIdAsync(listener) == original.Pid,
+                "real Windows venv workbench listens in a direct child of the persisted launcher PID");
+            var recovered = new ServiceManager(root, _ => { }); recovered.RecoverOwned();
+            Check(await recovered.TryStopWebUiWhenIdleAsync(previous, versions) == IdleShutdownResult.Stopped,
+                "recovered venv ownership authorizes authenticated idle shutdown");
+            Check(File.Exists(Path.Combine(previous.AppRoot, "shutdown-request.txt"))
+                && JsonFile.Read<OwnedProcess[]>(Path.Combine(root, "processes.json")).Length == 0,
+                "venv idle shutdown uses its token and removes the exited parent ownership record");
+
+            await recovered.StartWebUIForSoftwareUpdateAsync(previous, runtime, default);
+            original = Current(); started.Add(original);
+            await recovered.SwitchWorkbenchWhenIdleAsync(previous, target, runtime, versions, true);
+            started.Add(Current());
+            Check(!LauncherUpdateStore.IsRunning(original)
+                && ServiceManager.IsOurWebUi(await ServiceManager.Json(target.WebUrl + "/api/launcher-health"), target)
+                && !File.Exists(startedMarker) && !await ServiceManager.PortOpen(target.ComfyPort),
+                "venv software update replaces only the workbench and keeps ComfyUI stopped");
+            var restarted = new ServiceManager(root, _ => { }); restarted.RecoverOwned();
+            Check(await restarted.TryStopWebUiAsync(target, versions)
+                && File.Exists(Path.Combine(target.AppRoot, "shutdown-request.txt")),
+                "ordinary venv shutdown uses recovered credentials instead of force-killing the listener");
+            Check(JsonFile.Read<OwnedProcess[]>(Path.Combine(root, "processes.json")).Length == 0,
+                "ordinary venv shutdown removes the persisted parent PID");
+
+            var otherRoot = Path.Combine(root, "other-owner");
+            var otherVenv = Path.Combine(root, "other-venv");
+            await Commands.Run(python, ["-m", "venv", "--without-pip", otherVenv], root, null, default, timeout: TimeSpan.FromSeconds(30));
+            var other = previous.Clone(); other.AppRoot = Path.Combine(versions, "other");
+            other.Python = Path.Combine(otherVenv, "Scripts", "python.exe"); other.WebPort = FreePort();
+            while (other.WebPort == previous.WebPort || other.WebPort == other.ComfyPort) other.WebPort = FreePort();
+            WriteWorkbench(other.AppRoot, failStatus: false);
+            File.Delete(Path.Combine(previous.AppRoot, "shutdown-request.txt"));
+            await restarted.StartWebUIForSoftwareUpdateAsync(previous, runtime, default);
+            var active = Current(); started.Add(active);
+            var unrelated = new ServiceManager(otherRoot, _ => { });
+            await unrelated.StartWebUIForSoftwareUpdateAsync(other, runtime, default);
+            var unrelatedOwner = JsonFile.Read<OwnedProcess[]>(Path.Combine(otherRoot, "processes.json")).Single();
+            started.Add(unrelatedOwner);
+            Check(await unrelated.TryStopWebUiWhenIdleAsync(previous, versions) == IdleShutdownResult.MissingToken,
+                "a different real venv using the same base Python cannot supply the target's token");
+            Check(!await unrelated.TryStopWebUiAsync(previous, Path.Combine(root, "not-a-snapshot"))
+                && !File.Exists(Path.Combine(previous.AppRoot, "shutdown-request.txt"))
+                && LauncherUpdateStore.IsRunning(active) && LauncherUpdateStore.IsRunning(unrelatedOwner),
+                "unrelated venv ownership neither authenticates nor bypasses ordinary snapshot checks");
+            File.WriteAllText(Path.Combine(previous.AppRoot, "shutdown-mode.txt"), "busy");
+            Check(await restarted.TryStopWebUiWhenIdleAsync(previous, versions) == IdleShutdownResult.Busy
+                && LauncherUpdateStore.IsRunning(active), "a busy venv workbench is never force-stopped by idle shutdown");
+            File.Delete(Path.Combine(previous.AppRoot, "shutdown-mode.txt"));
+            Check(await restarted.TryStopWebUiWhenIdleAsync(previous, versions) == IdleShutdownResult.Stopped
+                && await unrelated.TryStopWebUiWhenIdleAsync(other, versions) == IdleShutdownResult.Stopped,
+                "each real venv can still shut down using only its own recovered ownership");
+        }
+        finally
+        {
+            // Include a service whose readiness failed after its ownership was saved.
+            // These are the two fixture-only state roots created by this test.
+            foreach (var directory in new[] { root, Path.Combine(root, "other-owner") })
+            {
+                var path = Path.Combine(directory, "processes.json");
+                if (File.Exists(path)) started.AddRange(JsonFile.Read<OwnedProcess[]>(path));
+            }
+            foreach (var identity in started.Distinct())
+                if (LauncherUpdateStore.IsRunning(identity))
+                {
+                    using var process = Process.GetProcessById(identity.Pid);
+                    process.Kill(true); await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                }
+        }
         return passed;
     }
 
@@ -140,6 +246,9 @@ class Handler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', '0'))))
         if self.path != '/api/launcher-shutdown' or body.get('token') != args.shutdown_token:
             self.reply(403, {}); return
+        if (root / 'shutdown-mode.txt').exists() and (root / 'shutdown-mode.txt').read_text() == 'busy':
+            self.reply(409, {}); return
+        (root / 'shutdown-request.txt').write_text('authenticated')
         self.reply(200, dict(stopping=True))
         threading.Timer(0.1, shutdown).start()
 server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)

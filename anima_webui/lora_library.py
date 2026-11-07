@@ -205,6 +205,12 @@ class LoraLibraryService:
         self._pending_local: dict[str, dict[str, Any]] = {}
         self._closing = False
         self._inventory_snapshot: dict[str, Any] | None = None
+        self._source_inventory: dict[str, Any] | None = None
+        self._source_identity: tuple[Any, int] | None = None
+        self._inventory_version = 0
+        self._normalized_key: tuple[Any, ...] | None = None
+        self._normalized_store: dict[str, Any] | None = None
+        self._normalized_items: dict[str, dict[str, Any]] = {}
         self._last_synced_at: str | None = None
         self._offline_error: str | None = None
 
@@ -229,6 +235,7 @@ class LoraLibraryService:
             for item in self._inventory_snapshot.get(collection, []):
                 if item.get("file_path") and _path_key(_absolute_path(item["file_path"])) == identity:
                     item.update(copy.deepcopy(updates))
+        self._inventory_version += 1
         self._last_synced_at = datetime.now(timezone.utc).isoformat()
 
     def default_strength(self, filename: str) -> float:
@@ -240,19 +247,36 @@ class LoraLibraryService:
     async def available_bindings(self) -> dict[str, Any]:
         return await self.client.resource_classifications("loras", refresh=True)
 
-    async def inventory(self, *, refresh: bool = False, model_profile: str = "all", allow_cached: bool = False) -> list[dict[str, Any]]:
+    async def _inventory_index(self, *, refresh: bool = False, allow_cached: bool = False) -> dict[str, dict[str, Any]]:
+        # Still consult the client on every access: it owns the five-second TTL,
+        # explicit refresh and connection checks. Only normalize a new snapshot.
         try:
             inventory = await self.client.resource_classifications("loras", refresh=refresh)
         except ComfyError as error:
             self._offline_error = str(error)
             if not allow_cached or self._inventory_snapshot is None:
                 raise
-            inventory = copy.deepcopy(self._inventory_snapshot)
         else:
             self._offline_error = None
-            self._inventory_snapshot = copy.deepcopy(inventory)
+            generation = getattr(self.client, "classification_generation", None)
+            identity = (generation("loras") if callable(generation) else None, id(inventory))
+            if refresh or identity != self._source_identity:
+                self._inventory_snapshot = copy.deepcopy(inventory)
+                # Retain the source object so an embedded client's new object
+                # cannot accidentally reuse its identity after garbage collection.
+                self._source_inventory = inventory
+                self._source_identity = identity
+                self._inventory_version += 1
             self._last_synced_at = datetime.now(timezone.utc).isoformat()
-        connection = self._connection_state()
+        key = (self._inventory_version, self.store.data["revision"], getattr(self.trigger_store, "revision", None))
+        if key != self._normalized_key or self._normalized_store is not self.store.data:
+            items = self._normalize_inventory(self._inventory_snapshot)
+            self._normalized_items = {item["id"]: item for item in items}
+            self._normalized_key = key
+            self._normalized_store = self.store.data
+        return self._normalized_items
+
+    def _normalize_inventory(self, inventory: dict[str, Any]) -> list[dict[str, Any]]:
         classifications = inventory.get("items", [])
         raw_items = inventory.get("manager_items")
         roots = inventory.get("roots", [])
@@ -307,7 +331,6 @@ class LoraLibraryService:
                            "display_name": str(raw.get("model_name") or relative.rsplit("/", 1)[-1]),
                            "base_model": str(raw.get("base_model") or "Unknown"), "model_profile": profile,
                            "classification_status": status, "classification_reason": reason,
-                           "available": not connection["offline"] and status == "recognized" and (model_profile == "all" or profile == model_profile),
                            "sha256": sha, "favorite": raw.get("favorite") is True,
                            "tags": [x for x in raw.get("tags", []) if isinstance(x, str)], "notes": str(raw.get("notes") or ""),
                            "size": raw.get("file_size") or 0, "modified": raw.get("modified") or 0,
@@ -318,20 +341,33 @@ class LoraLibraryService:
                            "trigger_override": overridden, "trigger_metadata_available": True,
                            "default_strength": local.get("default_strength", 1.0), "groupIds": list(local.get("groupIds", [])),
                            "configured": resource_id in saved,
-                           "pending_local": resource_id in self._pending_local,
-                           "offline": connection["offline"], "cached": connection["cached"], "writable": connection["writable"],
                            "bindings": copy.deepcopy(bindings_by_resource.get(resource_id, []))})
         return result
+
+    def _current_item(self, item: dict[str, Any], model_profile: str) -> dict[str, Any]:
+        # Do not let a caller, an offline fallback, or an in-flight write mutate
+        # the normalized cache. Runtime flags must never become cached facts.
+        result = copy.deepcopy(item)
+        connection = self._connection_state()
+        result.update({key: connection[key] for key in ("offline", "cached", "writable")})
+        result["pending_local"] = item["id"] in self._pending_local
+        result["available"] = (not connection["offline"] and item["classification_status"] == "recognized"
+                               and (model_profile == "all" or item["model_profile"] == model_profile))
+        return result
+
+    async def inventory(self, *, refresh: bool = False, model_profile: str = "all", allow_cached: bool = False) -> list[dict[str, Any]]:
+        items = await self._inventory_index(refresh=refresh, allow_cached=allow_cached)
+        return [self._current_item(item, model_profile) for item in items.values()]
 
     @staticmethod
     def public(item: dict[str, Any]) -> dict[str, Any]:
         return {key: value for key, value in item.items() if not key.startswith("_")}
 
     async def item(self, resource_id: str, *, refresh: bool = False, model_profile: str = "all", allow_cached: bool = False) -> dict[str, Any]:
-        result = next((item for item in await self.inventory(refresh=refresh, model_profile=model_profile, allow_cached=allow_cached) if item["id"] == resource_id), None)
+        result = (await self._inventory_index(refresh=refresh, allow_cached=allow_cached)).get(resource_id)
         if result is None:
             raise KeyError(resource_id)
-        return result
+        return self._current_item(result, model_profile)
 
     @staticmethod
     def _remember(data: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:

@@ -311,6 +311,20 @@ class ManagerClassificationApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["items"][0]["model_profile"], "anima")
         self.assertEqual(self.calls["/api/lm/loras/list"], 2)
 
+    async def test_classification_generation_only_changes_after_successful_refresh(self):
+        self.assertEqual(self.client.classification_generation("loras"), 0)
+        await self.client.lora_inventory()
+        self.assertEqual(self.client.classification_generation("loras"), 1)
+        await self.client.lora_inventory()
+        self.assertEqual(self.client.classification_generation("loras"), 1)
+        await self.client.lora_inventory(refresh=True)
+        self.assertEqual(self.client.classification_generation("loras"), 2)
+        self.overrides['/api/lm/loras/list?page=1'] = web.Response(status=503)
+        with self.assertRaises(ComfyError):
+            await self.client.lora_inventory(refresh=True)
+        self.assertEqual(self.client.classification_generation("loras"), 2)
+        self.assertEqual(self.client.classification_generation("models"), 0)
+
     async def test_missing_plugin_routes_are_explicit_errors_without_fallback(self):
         for path in ("/api/lm/loras/roots", "/api/lm/loras/list?page=1", "/api/lm/checkpoints/unet_roots"):
             with self.subTest(path=path):
