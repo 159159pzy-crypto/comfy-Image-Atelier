@@ -224,14 +224,52 @@ internal static class ReleaseRecoveryTests
             try
             {
                 JsonFile.Write(Path.Combine(idleState, "processes.json"), new[] { Record(endpoint) with { ShutdownToken = scenario.Token } });
-                var manager = new ServiceManager(idleState, _ => { });
+                var diagnostics = new List<string>();
+                var manager = new ServiceManager(idleState, diagnostics.Add);
                 manager.RecoverOwned();
                 var result = await manager.TryStopWebUiWhenIdleAsync(config, idleVersions, requestTimeout: TimeSpan.FromMilliseconds(100), exitTimeout: TimeSpan.FromMilliseconds(700));
-                Check(result == scenario.Result, $"idle-only shutdown classifies {scenario.Mode}/{scenario.Token ?? "no-token"} as {scenario.Result}");
+                Check(result == scenario.Result, $"idle-only shutdown classifies {scenario.Mode}/{scenario.Token ?? "no-token"} as {scenario.Result}"
+                    + (result == scenario.Result ? "" : $"; actual={result}; exited={endpoint.HasExited}; diagnostics={string.Join(" | ", diagnostics)}"));
                 Check(scenario.Result == IdleShutdownResult.Stopped ? endpoint.HasExited : !endpoint.HasExited,
                     $"idle-only shutdown never force-kills a refused or unconfirmed {scenario.Mode} process");
             }
             finally { await EndFixture(endpoint); }
+        }
+
+        // Exercise both sides of exit-event registration deterministically. The
+        // original process is pinned while alive; no sleep chooses the ordering.
+        // A replacement listener also verifies that exit alone cannot authorize
+        // success, even though the original process can no longer match its PID.
+        foreach (var timing in new[] { "before-wait", "during-wait", "port-reused" })
+        {
+            var config = new LauncherConfig { AppRoot = Path.Combine(idleVersions, timing), DataDir = Path.Combine(idleState, "data"), ComfyPort = 18183 };
+            using var endpoint = await StartFixture(config, "idle");
+            using var observed = Process.GetProcessById(endpoint.Id);
+            _ = observed.SafeHandle;
+            TcpListener? replacement = null;
+            try
+            {
+                Check(!observed.HasExited, $"exit observation starts with a live pinned process: {timing}");
+                var observation = timing == "during-wait" ? ObserveIdleExit(observed, config.WebPort) : null;
+                if (observation is not null)
+                    Check(!observation.IsCompleted, "exit observation remains pending until the original process exits");
+                using var client = new HttpClient(new HttpClientHandler { UseProxy = false });
+                using var body = new StringContent("{\"token\":\"fixture-idle-token\"}", Encoding.UTF8, "application/json");
+                using var response = await client.PostAsync(config.WebUrl + "/api/launcher-shutdown", body);
+                response.EnsureSuccessStatusCode();
+                await endpoint.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                if (timing == "port-reused")
+                {
+                    replacement = new TcpListener(IPAddress.Loopback, config.WebPort);
+                    replacement.Start();
+                }
+                var expected = timing == "port-reused" ? IdleShutdownResult.IdentityMismatch : IdleShutdownResult.Stopped;
+                var result = await (observation ?? ObserveIdleExit(observed, config.WebPort));
+                Check(result == expected, $"exit boundary {timing} returns {expected}; actual={result}");
+                Check(await ServiceManager.PortOpen(config.WebPort) == (replacement is not null),
+                    $"exit boundary {timing} preserves the replacement listener and confirms the original endpoint closed");
+            }
+            finally { replacement?.Stop(); await EndFixture(endpoint); }
         }
 
         // The target contains a workbench entry, but deliberately unusable runtime
@@ -295,6 +333,9 @@ internal static class ReleaseRecoveryTests
     private static Task<string> Tool(Installer installer, string id, LauncherConfig config) =>
         (Task<string>)typeof(Installer).GetMethod("Tool", PrivateInstance)!.Invoke(installer, [id, config, CancellationToken.None])!;
     private static OwnedProcess Record(Process process) => new(process.Id, process.StartTime.ToUniversalTime().Ticks, process.MainModule!.FileName!, "WebUI");
+    private static Task<IdleShutdownResult> ObserveIdleExit(Process process, int webPort) =>
+        (Task<IdleShutdownResult>)typeof(ServiceManager).GetMethod("ObserveIdleShutdownExitAsync", BindingFlags.NonPublic | BindingFlags.Static)!
+            .Invoke(null, [process, webPort, TimeSpan.FromSeconds(5), CancellationToken.None])!;
 
     private static async Task<Process> StartFixture(LauncherConfig config, string shutdownMode = "")
     {

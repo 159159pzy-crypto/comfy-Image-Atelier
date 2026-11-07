@@ -622,6 +622,9 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
         try
         {
             using var process = Process.GetProcessById(pid);
+            // Keep the original native process handle through the shutdown wait.
+            // A reused PID must never change which process we observe for exit.
+            _ = process.SafeHandle;
             var identity = new OwnedProcess(pid, process.StartTime.ToUniversalTime().Ticks, process.MainModule!.FileName!, "WebUI");
             var record = records.SingleOrDefault(r => r.Role == "WebUI" && SameProcessIdentity(r, identity));
             if (string.IsNullOrEmpty(record?.ShutdownToken)) return IdleShutdownResult.MissingToken;
@@ -650,22 +653,17 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or IOException) { }
             }
-            var until = Stopwatch.StartNew();
-            var limit = exitTimeout ?? TimeSpan.FromSeconds(10);
-            do
+            var result = await ObserveIdleShutdownExitAsync(process, config.WebPort,
+                exitTimeout ?? TimeSpan.FromSeconds(10), ct);
+            if (result != IdleShutdownResult.Failed) ForgetOwned(pid);
+            if (result == IdleShutdownResult.Stopped)
             {
-                ct.ThrowIfCancellationRequested();
-                if (process.HasExited)
-                {
-                    ForgetOwned(pid);
-                    if (await PortOpen(config.WebPort, ct)) return IdleShutdownResult.IdentityMismatch;
-                    log($"工作台进程 {pid} 已空闲停机。");
-                    return IdleShutdownResult.Stopped;
-                }
-                if (!ProcessStillMatches(identity)) return IdleShutdownResult.IdentityMismatch;
-                await Task.Delay(TimeSpan.FromMilliseconds(100), ct);
-            } while (until.Elapsed < limit);
-            return IdleShutdownResult.Failed;
+                log($"工作台进程 {pid} 已空闲停机。");
+            }
+            else if (result == IdleShutdownResult.IdentityMismatch)
+                log($"工作台原进程 {pid} 已退出，但端口 {config.WebPort} 仍有服务监听，未停止其他进程。");
+            else log($"工作台进程 {pid} 未在退出期限内停止，未强制结束进程。");
+            return result;
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception or IOException)
@@ -673,6 +671,20 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
             log("工作台安全停机未完成：" + ex.Message);
             return IdleShutdownResult.Failed;
         }
+    }
+
+    private static async Task<IdleShutdownResult> ObserveIdleShutdownExitAsync(Process process, int webPort,
+        TimeSpan exitTimeout, CancellationToken ct)
+    {
+        // Wait on the proven process, including exit before event registration.
+        // Re-querying its PID between HasExited checks races with normal exit and
+        // incorrectly treats an already-exited process as an identity mismatch.
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(exitTimeout);
+        try { await process.WaitForExitAsync(deadline.Token); }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return IdleShutdownResult.Failed; }
+        ct.ThrowIfCancellationRequested();
+        return await PortOpen(webPort, ct) ? IdleShutdownResult.IdentityMismatch : IdleShutdownResult.Stopped;
     }
 
     /// <summary>
