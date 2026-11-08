@@ -16,6 +16,7 @@ function context() {
     SECTIONS: ['character', 'clothing', 'pose', 'background', 'expression'],
     defaults: { profile_settings: { anima: {}, krea2: {} } },
     draft: {}, profileDrafts: {}, ui: {}, activeProfileId: 'anima',
+    pipelineContractState: { version: 5, source: {} }, currentPipelineVersion: () => 5,
     clone: x => JSON.parse(JSON.stringify(x)),
     normalizeProfileId: x => x === 'krea2' ? 'krea2' : 'anima',
     defaultPools: () => ({ pose: { ids: [] } }), defaultUpscalers: () => ({}),
@@ -62,7 +63,7 @@ test('generation omits inactive fixed drafts while retaining pools and count', (
   ctx.ui.count.value = '7';
   ctx.draft = { modes: { character: 'pool', clothing: 'off', pose: 'fixed' }, fixed: { character: 'hidden identity', clothing: 'hidden coat', pose: 'standing' }, counts: {}, pools: { pose: { ids: ['pose:one'] } }, loras: [] };
   const settings = ctx.readSettings();
-  assert.equal(settings.pipeline_version, 4);
+  assert.equal(settings.pipeline_version, 5);
   assert.equal(settings.fixed_character, '');
   assert.equal(settings.fixed_clothing, '');
   assert.equal(settings.fixed_pose, 'standing');
@@ -71,12 +72,12 @@ test('generation omits inactive fixed drafts while retaining pools and count', (
   assert.equal(ctx.draft.fixed_character, undefined);
   assert.equal(ctx.draft.fixed.character, 'hidden identity');
 });
-test('profile drafts isolate v4 latent sampling and upgrade older drafts without borrowing post settings', () => {
+test('profile drafts preserve each source version without borrowing post settings', () => {
   const ctx = context();
   ctx.profileDrafts.anima = { pipeline_version: 4, upscalers: { latent: { enabled: true, sampler: { steps: 32, cfg: 3.3, denoise: .42 } }, post_sampler: { enabled: false, steps: 21 } } };
   ctx.profileDrafts.krea2 = { pipeline_version: 3, upscalers: { latent: { enabled: true, second_sampler: { enabled: true, steps: 99, denoise: 1 } }, post_sampler: { enabled: true, steps: 25, denoise: .15 } } };
   ctx.restoreProfileDraft('anima'); ctx.restoreProfileDraft('krea2'); ctx.restoreProfileDraft('anima');
-  assert.equal(ctx.profileDrafts.anima.pipeline_version, 4); assert.equal(ctx.profileDrafts.krea2.pipeline_version, 4);
+  assert.equal(ctx.profileDrafts.anima.pipeline_version, 4); assert.equal(ctx.profileDrafts.krea2.pipeline_version, 3);
   assert.equal(ctx.profileDrafts.anima.upscalers.latent.sampler.steps, 32);
   assert.equal(ctx.profileDrafts.anima.upscalers.latent.sampler.denoise, .42);
   assert.equal(ctx.profileDrafts.krea2.upscalers.latent.sampler.steps, 10);

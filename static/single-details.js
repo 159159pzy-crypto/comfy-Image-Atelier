@@ -20,6 +20,7 @@ function singleDetailData(record) {
   const variance = settings.krea_variance || single.krea_variance;
   const v3 = Number(settings.pipeline_version || 2) >= 3;
   const v4 = Number(settings.pipeline_version || 2) >= 4;
+  const v5 = Number(settings.pipeline_version || 2) >= 5;
   const dlss = v3 ? post.dlss : post.nvidia?.dlss || single.dlss;
   const primaryNegative = runtime.negative ?? record.negative_prompt ?? settings.negative_prompt;
   const pipelinePrompt = name => runtime.effective_positive?.[name];
@@ -89,16 +90,17 @@ function singleDetailData(record) {
     const nvidia = repairs.find(stage => stage.title === "N 卡放大");
     nvidia.title = "N 卡 VSR"; nvidia.rows = [["倍率", post.nvidia?.scale]]; nvidia.otherGroups = [{ title: "放大参数", rows: [["质量", post.nvidia?.quality], ["缩放方式", post.nvidia?.resize_type]] }];
     repairs.push(
-      { title: "像素高清", enabled: post.pixel_hires?.enabled, rows: [["模型", bound.pixel_hires_model ?? post.pixel_hires?.model_name], ["缩图比例", post.post_sampler?.enabled ? "后采样开启，跳过缩图" : `${post.pixel_hires?.percent ?? "未记录"}%`], ["缩图算法", post.pixel_hires?.upscale_method]], otherGroups: [] },
+      { title: "像素高清", enabled: post.pixel_hires?.enabled, rows: [["模型", bound.pixel_hires_model ?? post.pixel_hires?.model_name], ["缩图比例", !v5 && post.post_sampler?.enabled ? "后采样开启，跳过缩图" : `${post.pixel_hires?.percent ?? "未记录"}%`], ["缩图算法", post.pixel_hires?.upscale_method]], otherGroups: [] },
       { title: "整图后采样", enabled: post.post_sampler?.enabled, rows: [...sampler(post.post_sampler), ["模型与 LoRA", "继承底图最后一段"]], otherGroups: [] },
       { title: "DLSS", enabled: post.dlss?.enabled, rows: fields(dlss, [["style", "风格"], ["intensity", "强度"], ["local_tone", "局部光影"], ["local_struct", "局部细节"], ["output_mix", "输出混合"]]), otherGroups: [{ title: "输出参数", rows: fields(dlss, [["output_view", "输出视图"], ["gpu_gen", "显卡代际"]]) }] },
     );
   }
   const repairOrder = v4 ? ["像素高清", "潜空间放大", "整图后采样", "脸部细化", "SeedVR2", "N 卡 VSR", "DLSS"]
-    : v3 ? ["像素高清", "N 卡 VSR", "SeedVR2", "潜空间放大", "整图后采样", "脸部细化", "DLSS"] : ["潜空间放大", "脸部细化", "SeedVR2", "N 卡放大"];
+    : v3 ? ["像素高清", "N 卡 VSR", "SeedVR2", "潜空间放大", "整图后采样", "脸部细化", "DLSS"] : ["潜空间放大", "SeedVR2", "N 卡放大", "脸部细化"];
   repairs.sort((a, b) => repairOrder.indexOf(a.title) - repairOrder.indexOf(b.title));
   const profile = bound.model_profile ?? settings.model_profile;
   const basic = [["模型档案", profile === "anima" ? "Anima" : profile === "krea2" ? "Krea 2" : profile], ["主模型", bound.unet ?? settings.model_name],
+    ["工作流版本", `v${settings.pipeline_version ?? 2}`],
     ["生成方式", mode === "img2img" ? "图生图" : mode === "txt2img" ? "文生图" : undefined],
     ["底图模式", settings.base_mode === "dual_sampler" ? "双采样" : settings.base_mode === "normal" ? "普通采样" : undefined],
     ["图像种子", record.sample_seed], ["底图尺寸", settings.width != null && settings.height != null ? `${settings.width} × ${settings.height}` : undefined],

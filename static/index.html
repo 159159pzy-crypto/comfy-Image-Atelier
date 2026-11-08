@@ -155,15 +155,15 @@
               <label class="field"><span>降噪幅度</span><input id="base_denoise" type="number" min="0" max="1" step="0.01" value="1"></label>
               <label class="switch-row base-krea-toggle"><span><strong>是否 K2 多样性增强</strong></span><input id="krea_variance_enabled" type="checkbox"></label>
               <section id="randomDualSection" hidden><div class="parameter-grid compact-parameter-grid">
-                <label class="field"><span>采样器切换步数</span><input id="random_dual_switch_step" type="number" min="0" max="149" step="1" value="15"></label>
-                <label class="field"><span>潜空间放大倍数</span><input id="random_dual_scale" type="number" min="1" max="2" step="0.05" value="1"></label>
-                <label class="field"><span>潜空间缩放方法</span><select id="random_dual_model_format"><option value="Wan 2.1">Wan 2.1</option></select></label>
+                <label class="field"><span>第二轮起始步</span><input id="random_dual_switch_step" type="number" min="0" max="149" step="1" value="15"></label>
+                <label class="field"><span>第二轮前放大倍率</span><input id="random_dual_scale" type="number" min="1" max="2" step="0.05" value="1"></label>
+                <label class="field"><span>潜空间格式</span><select id="random_dual_model_format"><option value="Wan 2.1">Wan 2.1</option></select></label>
                 <label class="field"><span>CFG 2</span><input id="random_dual_second_cfg" type="number" min="0" max="30" step="0.1" value="8"></label>
                 <label class="field"><span>采样器 2</span><select id="random_dual_second_sampler_name"><option value="euler">euler</option></select></label>
                 <label class="field"><span>调度器 2</span><select id="random_dual_second_scheduler"><option value="simple">simple</option></select></label>
                 <label hidden><select id="random_dual_upscale_method"><option value="sesqui">sesqui</option><option value="bilinear">bilinear</option><option value="bislerp">bislerp</option><option value="nearest-exact">nearest-exact</option><option value="area">area</option><option value="bicubic">bicubic</option></select></label>
               </div></section>
-            </div></section>
+            </div><p id="dualSamplingHint" class="field-hint" hidden aria-live="polite"></p></section>
             <div class="sampling-stage sampling-stage-pixel_hires">
               <label class="switch-row"><span><strong>像素高清</strong><small>像素模型放大</small></span><input id="pixel_hires_enabled" type="checkbox"></label>
               <div id="pixelHiresFields" class="repair-parameters parameter-grid">
@@ -178,7 +178,7 @@
               <div id="latentUpscaleFields" class="repair-parameters" hidden>
                 <label class="field"><span>放大倍数</span><input id="latent_upscale_scale" type="number" min="1" max="2" step="0.01"></label>
                 <label class="field"><span>缩放方法</span><select id="latent_upscale_method"><option value="sesqui">Sesqui</option><option value="bilinear">bilinear</option><option value="bislerp">bislerp</option><option value="nearest-exact">nearest-exact</option><option value="area">area</option><option value="bicubic">bicubic</option></select></label>
-                <label id="latentModelFormatField" class="field"><span>模型格式</span><select id="latent_model_format"><option value="Wan 2.1">Wan 2.1</option></select></label>
+                <label id="latentModelFormatField" class="field"><span>潜空间格式</span><select id="latent_model_format" title="匹配潜变量格式，不会切换底图模型"><option value="Wan 2.1">Wan 2.1</option></select></label>
                 <label class="field"><span>步数</span><input id="latent_sampler_steps" type="number" min="1" max="150" step="1"></label>
                 <label class="field"><span>CFG</span><input id="latent_sampler_cfg" type="number" min="0.1" max="30" step="0.1"></label>
                 <label class="field"><span>采样器</span><select id="latent_sampler_name"><option value="">读取中...</option></select></label>
@@ -217,7 +217,7 @@
                 <label class="field"><span>采样遮罩模糊强度</span><input id="face_sampling_mask_blur_strength" type="number" min="0" step="0.01"></label>
                 <label class="field"><span>正向提示词</span><textarea id="face_positive_prompt" rows="2"></textarea></label>
                 <label class="field"><span>负向提示词</span><textarea id="face_negative_prompt" rows="2"></textarea></label>
-                <label class="field"><span>排除区域</span><textarea id="face_exclusions" rows="2"></textarea></label>
+                <label class="field"><span>从脸部提示词中剔除</span><textarea id="face_exclusions" rows="2"></textarea></label>
                 <div class="switch-list sampling-switch-list">
                   <label class="switch-row"><span>启用预放大</span><input id="face_enable_pre_upscale" type="checkbox"></label>
                   <label class="switch-row"><span>替换正向提示词</span><input id="face_replace_positive_prompt" type="checkbox"></label>
@@ -282,7 +282,7 @@
               <details class="pipeline-help">
                 <summary>流程说明</summary>
                 <p class="field-hint">潜空间放大包含采样；与整图后采样同时开启会重绘两次。两者均继承底图最后一段的模型、LoRA 和提示词。</p>
-                <p id="pipelineUpgradeHint" class="field-hint" role="status" hidden>旧参数已适配新顺序，潜空间放大现在包含采样。历史原样复现仍使用原链路。</p>
+                <p id="pipelineUpgradeHint" class="field-hint" role="status" hidden>保留原工作流参数和执行规则；保存或生成不会自动升级。</p>
               </details>
             </div>
           </div>
@@ -836,22 +836,22 @@
   <div id="toast" role="status" aria-live="polite"></div>
   <script src="/static/request-state.js?v=20261107-mutation-context" defer></script>
   <script src="/static/motion.js?v=20261024-motion" defer></script>
-  <script src="/static/workbench-parameters.js?v=20261024-workflow-parameters" defer></script>
+  <script src="/static/workbench-parameters.js?v=20261108-experience-v5" defer></script>
   <script src="/static/single-layout.js?v=20261029-artwork-favorites" defer></script>
   <script src="/static/single-gallery.js?v=20261028-remove-artwork-management" defer></script>
   <script src="/static/shared-favorites.js?v=20261030-source-lifecycle" defer></script>
-  <script src="/static/prompt-reverse.js?v=20261028-remove-artwork-management" defer></script>
-  <script src="/static/prompt-assistant.js?v=20261024-pools" defer></script>
-  <script src="/static/single-workbench.js?v=20261107-single-lora-prefix" defer></script>
+  <script src="/static/prompt-reverse.js?v=20261108-cancel-state" defer></script>
+  <script src="/static/prompt-assistant.js?v=20261108-cancel-state" defer></script>
+  <script src="/static/single-workbench.js?v=20261108-single-lora-experience-v5" defer></script>
   <script src="/static/single-input.js?v=20261028-remove-artwork-management" defer></script>
   <script src="/static/single-compatibility.js?v=20261024-single-ui" defer></script>
-  <script src="/static/single-details.js?v=20261027-history-polish" defer></script>
+  <script src="/static/single-details.js?v=20261108-experience-v5" defer></script>
   <script src="/static/krea-pool.js?v=20261030-source-lifecycle" defer></script>
   <script src="/static/history-detail.js?v=20261029-artwork-favorites" defer></script>
   <script src="/static/artwork-favorites.js?v=20261029-favorites-motion" defer></script>
   <script src="/static/detail-actions.js?v=20261027-history-polish" defer></script>
   <script src="/static/lora-manager.js?v=20261107-mutation-context" defer></script>
   <script src="/static/pool-browser.js?v=20261107-binding" defer></script>
-  <script src="/static/app.js?v=20261107-mutation-context" defer></script>
+  <script src="/static/app.js?v=20261108-lora-notice-experience-v5" defer></script>
 </body>
 </html>

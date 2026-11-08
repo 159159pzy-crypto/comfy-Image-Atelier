@@ -194,6 +194,21 @@ test('cancel during job creation cancels returned id and discards completed outp
   assert.ok(calls.some(item => item.url === '/api/prompt-jobs/late-job/cancel')); assert.equal(draft.result, ''); assert.equal(draft.busy, false);
 });
 
+test('cancelled recognition shows unconfirmed remote execution without adopting a result', async () => {
+  const { ctx, configure } = setup(); await tick();
+  const draft = configure(asset('image-a', { source: 'none' }));
+  draft.result = 'previous preview';
+  ctx.request = async (_url, init) => init ? { id: 'cancelled-job', status: 'queued' } : {
+    status: 'cancelled', error: '提示词处理已取消', cancel_state: 'unconfirmed',
+    cancel_warning: '远端任务可能继续执行，请在 ComfyUI 中检查', result: metadata({ text: 'must not adopt' }),
+  };
+  await ctx.promptReverseStart();
+  assert.equal(draft.busy, false);
+  assert.equal(draft.result, 'previous preview');
+  assert.match(draft.status, /本地已停止，ComfyUI 尚未确认/);
+  assert.match(draft.status, /远端任务可能继续/);
+});
+
 test('replacement during pending job create prevents that old task from taking ownership', async () => {
   const { ctx, configure } = setup(); await tick(); const draft = configure(), gate = deferred();
   ctx.request = () => gate.promise;

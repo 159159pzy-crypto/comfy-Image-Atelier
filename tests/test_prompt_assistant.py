@@ -199,6 +199,13 @@ class PromptAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.manager.prompt_jobs.get(second["id"]))["status"], "completed")
         self.assertTrue(self.comfy.cancelled)
         self.assertEqual(set(self.comfy.cancelled), {"1"})
+        # Advancing the queue must not erase the old job's remote-cancel warning.
+        first_snapshot = await (await self.client.get(f"/api/prompt-jobs/{first['id']}")).json()
+        self.assertEqual(first_snapshot["cancel_state"], "unconfirmed")
+        self.assertIn("远端任务可能继续", first_snapshot["cancel_warning"])
+        second_snapshot = await (await self.client.get(f"/api/prompt-jobs/{second['id']}")).json()
+        self.assertEqual(second_snapshot["cancel_state"], "not_requested")
+        self.assertNotIn("cancel_warning", second_snapshot)
 
     async def test_timeout_targets_only_owned_job_and_sets_terminal_error(self):
         self.comfy.block = asyncio.Event()

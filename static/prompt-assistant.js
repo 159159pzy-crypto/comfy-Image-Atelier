@@ -177,8 +177,10 @@ async function promptAssistantPoll(profile, id, revision, fingerprint, epoch = p
     if (draft !== promptAssistantState.drafts[profile] || draft.jobId !== id || epoch !== promptAssistantState.epoch) return;
     const pending = ["queued", "running", "stopping"].includes(job.status);
     draft.busy = pending;
-    draft.status = job.error || ({ queued: "重写任务排队中…", running: "正在重写…", stopping: "正在取消重写…", cancelled: "重写已取消，正文保持原样。", interrupted: "重写已中断，可重新尝试。", error: "重写失败，可重新尝试。" }[job.status] || "");
+    draft.status = job.error || ({ queued: "重写任务排队中…", running: "正在重写…", stopping: "正在取消重写…", cancelled: "本地重写任务已取消，正文保持原样。", interrupted: "重写已中断，可重新尝试。", error: "重写失败，可重新尝试。" }[job.status] || "");
+    if (job.status === "cancelled") draft.status = "本地重写任务已取消，正文保持原样。";
     if (pending && draft.cancelRequested) draft.status = "已请求取消，等待任务停止…";
+    if (job.cancel_state === "unconfirmed" || job.cancel_warning) draft.status = `${pending ? "取消请求未确认" : "本地已停止，ComfyUI 尚未确认"}。${job.cancel_warning || "远端任务可能继续执行，请在 ComfyUI 中检查。"}`;
     if (pending) promptAssistantState.timers[profile] = setTimeout(() => promptAssistantPoll(profile, id, revision, fingerprint, epoch), 1200);
     else {
       draft.jobId = "";

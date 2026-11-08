@@ -11,17 +11,17 @@ function load(ctx, name) {
   vm.runInContext(app.slice(start, app.indexOf('\n}', start) + 2), ctx);
 }
 function context() {
-  const ctx = vm.createContext({ clone: plain, ui: {}, applyNodeResourceControls() {}, ensureSelectValue: (node, value) => { node.value = value; } });
+  const ctx = vm.createContext({ clone: plain, ui: {}, pipelineContractState: { version: 5, source: {} }, currentPipelineVersion: () => 5, currentProfile: () => 'krea2', applyNodeResourceControls() {}, ensureSelectValue: (node, value) => { node.value = value; } });
   for (const name of ['defaultUpscalers', 'normalizeUpscalers']) load(ctx, name);
   return ctx;
 }
-test('legacy effective post sampling and DLSS flags migrate without activating dormant stages', () => {
+test('legacy controls retain nested enabled even when latent is disabled and bind DLSS to VSR', () => {
   const ctx = context();
   for (const latent of [false, true]) for (const second of [false, true]) for (const nvidia of [false, true]) {
     const old = { latent: { enabled: latent, second_sampler: { enabled: second, steps: 23, cfg: 2.4, denoise: .42 } }, nvidia: { enabled: nvidia, dlss: { style: '自然', output_mix: .4 } } };
     const before = plain(old), result = ctx.normalizeUpscalers(old, null, 'anima', 2);
-    assert.equal(result.post_sampler.enabled, latent && second);
-    assert.equal(result.post_sampler.steps, latent ? 23 : 16); assert.equal(result.post_sampler.denoise, latent ? .42 : .2);
+    assert.equal(result.post_sampler.enabled, second);
+    assert.equal(result.post_sampler.steps, 23); assert.equal(result.post_sampler.denoise, .42);
     assert.equal(result.dlss.enabled, nvidia); assert.equal(result.dlss.output_mix, .4);
     assert.equal(result.pixel_hires.enabled, false);
     assert.deepEqual(old, before);
@@ -62,21 +62,22 @@ test('controls round trip canonical settings including disabled shrink and indep
   Object.assign(ctx.ui.latent_upscale_method, { type: 'select-one', tagName: 'SELECT' });
   const settings = ctx.normalizeUpscalers({ pixel_hires: { enabled: true, percent: 37 }, latent: { enabled: false, upscale_method: 'bilinear', sampler: { steps: 29, denoise: .41 } }, post_sampler: { enabled: true, denoise: .33 }, dlss: { enabled: true, output_mix: .6 } }, null, 'krea2');
   ctx.setUpscalerControls(settings);
+  ctx.pipelineContractState.source = { upscalers: settings };
   const result = ctx.readUpscalerControls();
   assert.equal(result.pixel_hires.percent, 37); assert.equal(result.post_sampler.enabled, true);
   assert.equal(result.post_sampler.denoise, .33); assert.equal(result.dlss.enabled, true); assert.equal(result.dlss.output_mix, .6);
   assert.equal(result.latent.enabled, false); assert.equal(result.latent.upscale_method, 'bilinear');
   assert.deepEqual(plain(result.latent.sampler), { steps: 29, cfg: 1, denoise: .41, sampler_name: 'er_sde', scheduler: 'simple' });
-  assert.equal(result.latent.second_sampler, undefined); assert.equal(result.nvidia.dlss, undefined);
+  assert.deepEqual(plain(result.latent.second_sampler), plain(settings.latent.second_sampler)); assert.deepEqual(plain(result.nvidia.dlss), plain(settings.nvidia.dlss));
 });
-test('v3 upgrades preserve stage switches and post sampling while initializing only the new profile sampler', () => {
+test('v3 display normalization preserves dormant sampling values without upgrading its contract', () => {
   const ctx = context();
   for (const profile of ['anima', 'krea2']) for (const enabled of [false, true]) {
     const old = { latent: { enabled, upscale_method: 'bilinear', scale_by: 3.5, second_sampler: { enabled: true, steps: 99, cfg: 22, denoise: 1 } },
       post_sampler: { enabled: false, steps: 27, cfg: 2.8, denoise: .37 }, nvidia: { enabled: true }, dlss: { enabled: false } };
     const before = plain(old), result = ctx.normalizeUpscalers(old, { latent: { sampler: { steps: 88 } } }, profile, 3);
     assert.equal(result.latent.enabled, enabled); assert.equal(result.latent.upscale_method, 'bilinear'); assert.equal(result.latent.scale_by, 3.5);
-    assert.deepEqual(plain(result.latent.sampler), plain(ctx.defaultUpscalers(profile).latent.sampler));
+    assert.deepEqual(plain(result.latent.sampler), { ...plain(ctx.defaultUpscalers(profile).latent.sampler), steps: 88 });
     assert.equal(result.post_sampler.enabled, false); assert.equal(result.post_sampler.steps, 27); assert.equal(result.post_sampler.denoise, .37);
     assert.equal(result.nvidia.enabled, true); assert.equal(result.dlss.enabled, false); assert.deepEqual(old, before);
   }
@@ -88,29 +89,30 @@ test('cross-workbench v4 preset imports preserve independently edited latent and
     const source = { pipeline_version: version, model_profile: 'krea2', workbench: 'single', single: { latent: { upscale_method: 'bilinear', model_format: 'Wan 2.1' } },
       upscalers: { latent: { enabled: true, scale_by: 1.7, sampler: { steps: 34, cfg: 2.2, denoise: .44, sampler_name: 'heun', scheduler: 'karras' } }, post_sampler: { enabled: true, steps: 21, cfg: 3.1, denoise: .25 } } };
     const destination = plain(source); ctx.adaptPostprocessSettings(destination, source, 'random');
-    assert.equal(destination.pipeline_version, 4); assert.equal(destination.upscalers.latent.upscale_method, 'bilinear');
-    assert.equal(destination.upscalers.latent.sampler.steps, version === 4 ? 34 : 10);
+    assert.equal(destination.pipeline_version, version); assert.equal(destination.upscalers.latent.upscale_method, 'bilinear');
+    assert.equal(destination.upscalers.latent.sampler.steps, 34);
     assert.equal(destination.upscalers.post_sampler.steps, 21); assert.equal(destination.upscalers.post_sampler.enabled, true);
   }
 });
-test('legacy history merged onto new defaults retains effective old toggles on upgrade', () => {
+test('legacy history retains its nested contract when merged into another workbench', () => {
   const ctx = context();
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../static/workbench-parameters.js'), 'utf8'), ctx);
   const old = { model_profile: 'anima', workbench: 'random', upscalers: { latent: { enabled: true, second_sampler: { enabled: true, steps: 27 } }, nvidia: { enabled: true, dlss: { output_mix: .45 } } } };
   const destination = { upscalers: { ...ctx.defaultUpscalers(), ...old.upscalers }, single: { dual: {}, latent: {} } };
   ctx.adaptPostprocessSettings(destination, old, 'single');
-  assert.equal(destination.pipeline_version, 4); assert.equal(destination.upscalers.post_sampler.enabled, true);
-  assert.equal(destination.upscalers.post_sampler.steps, 27); assert.equal(destination.upscalers.dlss.enabled, true);
-  assert.equal(destination.upscalers.dlss.output_mix, .45);
+  assert.equal(destination.pipeline_version, 2); assert.equal(destination.upscalers.latent.second_sampler.enabled, true);
+  assert.equal(destination.upscalers.latent.second_sampler.steps, 27); assert.equal(destination.upscalers.nvidia.enabled, true);
+  assert.equal(destination.upscalers.nvidia.dlss.output_mix, .45);
+  assert.equal(destination.upscalers.latent.sampler, undefined);
 });
 test('capability checks distinguish VSR and DLSS and require pixel models only when enabled', () => {
   const ctx = context();
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../static/workbench-parameters.js'), 'utf8'), ctx);
   ctx.resourcesLoaded = true;
   ctx.resources = { node_types: ['DLSS5NeuralRender', 'KSampler'], samplers: ['er_sde'], schedulers: ['simple'], upscale_models: [] };
-  assert.deepEqual(plain(ctx.sharedParameterResourceIssues({ upscalers: { dlss: { enabled: true } } })), []);
-  assert.match(ctx.sharedParameterResourceIssues({ upscalers: { nvidia: { enabled: true } } }).join(), /RTXVideoSuperResolution/);
-  assert.match(ctx.sharedParameterResourceIssues({ upscalers: { pixel_hires: { enabled: true, model_name: 'missing.pth' } } }).join(), /missing.pth/);
+  assert.deepEqual(plain(ctx.sharedParameterResourceIssues({ pipeline_version: 5, upscalers: { dlss: { enabled: true } } })), []);
+  assert.match(ctx.sharedParameterResourceIssues({ pipeline_version: 5, upscalers: { nvidia: { enabled: true } } }).join(), /RTXVideoSuperResolution/);
+  assert.match(ctx.sharedParameterResourceIssues({ pipeline_version: 5, upscalers: { pixel_hires: { enabled: true, model_name: 'missing.pth' } } }).join(), /missing.pth/);
 });
 test('inactive v4 profile drafts retain their source version before workbench migration', () => {
   const ctx = context();

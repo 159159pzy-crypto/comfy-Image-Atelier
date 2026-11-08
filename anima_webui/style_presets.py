@@ -21,7 +21,7 @@ from .model_profiles import (
     get_model_profile,
     normalize_model_profile,
 )
-from .workflow import DEFAULT_SETTINGS, WorkflowError, upgrade_pipeline_settings, validate_settings
+from .workflow import DEFAULT_SETTINGS, WorkflowError, validate_settings
 
 
 logger = logging.getLogger(__name__)
@@ -108,9 +108,9 @@ def preset_settings(
         for key in V2_PRESET_SETTING_KEYS
         if key in DEFAULT_SETTINGS
     }
-    # Presets are snapshots.  Legacy snapshots are migrated before validation
-    # so removed v1 controls cannot leak into a new profile's preset.
-    migrated = upgrade_pipeline_settings(value)
+    # Canonicalize legacy aliases without changing the recorded execution
+    # version. Defaults must not turn a versionless snapshot into a new task.
+    migrated = validate_settings(value)
     if force_model_profile is not None:
         forced_profile = normalize_model_profile(force_model_profile)
         profile = get_model_profile(forced_profile)

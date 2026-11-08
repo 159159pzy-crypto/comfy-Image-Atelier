@@ -49,7 +49,7 @@ from .runner import BatchConflict, BatchManager
 from .regeneration import prompt_source_issues
 from .style_presets import StylePresetStore
 from .thumbnails import ThumbnailStore
-from .workflow import WorkflowError, WorkflowTemplates, normalize_lora_path, upgrade_pipeline_settings, validate_settings
+from .workflow import WorkflowError, WorkflowTemplates, normalize_lora_path, validate_settings
 from .model_profiles import (
     MODEL_PROFILE_IDS,
     model_profile_defaults,
@@ -1212,6 +1212,14 @@ def create_app(
                             words.append(word.strip())
             target[key] = words
 
+    async def normalize_settings(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        if set(body) != {"settings"} or not isinstance(body["settings"], dict):
+            raise WorkflowError("请求必须包含 settings 对象")
+        # This endpoint is deliberately offline and read-only. In particular,
+        # it must not hydrate triggers, check resources or modify a snapshot.
+        return web.json_response({"settings": validate_settings(body["settings"])})
+
     async def start_batch(request: web.Request) -> web.Response:
         history.ensure_writable()
         body = await _json_body(request)
@@ -1230,7 +1238,7 @@ def create_app(
                     launch_defaults = {**startup_defaults, **profile_defaults}
             body = {**launch_defaults, **supplied}
             # Only a submitted version chooses interpretation. Fresh launcher
-            # defaults must not hide legacy nested stage settings before upgrade.
+            # defaults must not hide legacy nested stage settings before validation.
             body["pipeline_version"] = supplied.get("pipeline_version", 2)
             # These fields depend on the submitted mode and legacy values.
             # Launcher defaults must not hide their absence before migration.
@@ -1239,13 +1247,9 @@ def create_app(
                     body.pop(key, None)
         body = generation_settings(body)
         requested_model_name = body.get("model_name")
-        # Starting from the workbench creates a current-pipeline task. History
-        # replay uses manager.start directly and retains its recorded version.
-        body = upgrade_pipeline_settings(body)
-        # Validate the public shape before resource helpers traverse nested
-        # fields. Keep the original payload so legacy migration semantics at
-        # the runner boundary remain unchanged.
-        validate_settings(body)
+        # The editor submits its source version. New defaults choose the
+        # current version explicitly; legacy drafts keep their original graph.
+        body = validate_settings(body)
         await client.status()
         # Migration can replace a known model filename with the selected
         # profile default. Ownership must still reject an explicitly selected
@@ -1351,7 +1355,7 @@ def create_app(
         return web.json_response(result, status=201)
 
     async def get_prompt_job(request: web.Request) -> web.Response:
-        return web.json_response(await manager.prompt_jobs.get(request.match_info["job_id"]))
+        return web.json_response(manager.prompt_job_snapshot(await manager.prompt_jobs.get(request.match_info["job_id"])))
 
     async def cancel_prompt_job(request: web.Request) -> web.Response:
         return web.json_response(await manager.cancel_prompt_preview(request.match_info["job_id"]))
@@ -1907,6 +1911,7 @@ def create_app(
     app.router.add_post("/api/custom-groups/{section}", create_custom_group)
     app.router.add_put("/api/custom-groups/{section}/{group_id}", update_custom_group)
     app.router.add_delete("/api/custom-groups/{section}/{group_id}", delete_custom_group)
+    app.router.add_post("/api/settings/normalize", normalize_settings)
     app.router.add_post("/api/batches", start_batch)
     app.router.add_get("/api/artwork-folders", list_artwork_folders)
     app.router.add_post("/api/artwork-folders", create_artwork_folder)

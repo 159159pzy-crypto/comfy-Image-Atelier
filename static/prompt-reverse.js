@@ -413,9 +413,12 @@ function promptReverseReceive(profile, job, revision, fingerprint, epoch) {
   if (!draft || epoch !== promptReverseState.epoch || revision !== draft.jobRevision) return;
   const pending = ["queued", "running", "stopping"].includes(job.status);
   draft.busy = pending;
-  draft.jobStatus = job.error || ({ queued: `${PROMPT_REVERSE_LABELS[draft.jobMethod]}任务排队中…`, running: `${PROMPT_REVERSE_LABELS[draft.jobMethod]}正在识别图片…`, stopping: "正在取消识别…", cancelled: "识别已取消。", interrupted: "识别已中断，可重新尝试。", error: "识别失败，可重新尝试。" }[job.status] || "");
+  draft.jobStatus = job.error || ({ queued: `${PROMPT_REVERSE_LABELS[draft.jobMethod]}任务排队中…`, running: `${PROMPT_REVERSE_LABELS[draft.jobMethod]}正在识别图片…`, stopping: "正在取消识别…", cancelled: "本地识别任务已取消。", interrupted: "识别已中断，可重新尝试。", error: "识别失败，可重新尝试。" }[job.status] || "");
+  if (job.status === "cancelled") draft.jobStatus = "本地识别任务已取消。";
+  const cancelUnconfirmed = job.cancel_state === "unconfirmed" || Boolean(job.cancel_warning);
+  if (cancelUnconfirmed) draft.jobStatus = `${pending ? "取消请求未确认" : "本地已停止，ComfyUI 尚未确认"}。${job.cancel_warning || "远端任务可能继续执行，请在 ComfyUI 中检查。"}`;
   if (pending) {
-    if (draft.cancelRequested) draft.jobStatus = "已请求取消，等待任务停止…";
+    if (draft.cancelRequested && !cancelUnconfirmed) draft.jobStatus = "已请求取消，等待任务停止…";
     promptReverseRuntime(profile).timer = setTimeout(() => promptReversePoll(profile, draft.jobId, revision, fingerprint, epoch), 1200);
   } else {
     draft.jobId = "";

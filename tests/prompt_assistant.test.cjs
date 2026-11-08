@@ -142,6 +142,17 @@ test('cancel keeps the job pending until stopping finishes and never adopts outp
   await timers[0]();
   assert.equal(draft.busy, false); assert.equal(draft.jobId, ''); assert.equal(draft.result, '');
 });
+
+test('cancelled rewrite preserves an unconfirmed remote warning in its result panel', async () => {
+  const { ctx, configured } = setup();
+  const draft = configured(); draft.jobId = 'job'; draft.busy = true; draft.cancelRequested = true;
+  ctx.request = async () => ({ status: 'cancelled', error: '提示词处理已取消', cancel_state: 'unconfirmed',
+    cancel_warning: '远端任务可能继续执行，请在 ComfyUI 中检查' });
+  await ctx.promptAssistantPoll('anima', 'job', draft.revision, ctx.promptAssistantFingerprint(draft));
+  assert.equal(draft.busy, false);
+  assert.match(draft.status, /本地已停止，ComfyUI 尚未确认/);
+  assert.match(draft.status, /远端任务可能继续/);
+});
 test('cancelling while create POST is pending cancels the returned job and discards even a completed response', async () => {
   const { ctx, configured, elements } = setup(), create = deferred(), calls = [];
   const draft = configured();

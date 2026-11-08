@@ -120,7 +120,7 @@ class RegenerationPreservationApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(submitted["prompt"]["1026:1011"]["inputs"]["text"], expected)
         image = (await self.history.list_images())["items"][0]
         self.assertEqual(image["positive_prompt"], expected)
-        self.assertEqual(image["settings"]["pipeline_version"], 4)
+        self.assertEqual(image["settings"]["pipeline_version"], DEFAULT_SETTINGS["pipeline_version"])
         self.assertEqual(image["settings"]["character_detail"], "trigger_tags_no_clothing")
         role = image["resolved_selection"]["character"][0]
         self.assertEqual(role["prompt"], expected.removeprefix("1girl, "))

@@ -9,7 +9,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from .sampling import latent_upscale_node
+from .sampling import latent_upscale_node, pixel_hires_resizes
 
 
 STAGE_LABELS = {
@@ -45,7 +45,7 @@ def required_node_classes(settings: dict[str, Any]) -> set[str]:
     required: set[str] = {"PrimitiveInt", "ComfyMathExpression"}
     if stages["pixel_hires"]["enabled"]:
         required.update({"UpscaleModelLoader", "ImageUpscaleWithModel"})
-        if not stages["post_sampler"]["enabled"]:
+        if pixel_hires_resizes(settings):
             required.add("ImageScaleBy")
     if stages["nvidia"]["enabled"]:
         required.add("RTXVideoSuperResolution")
@@ -162,7 +162,7 @@ def build_pipeline(api: dict[str, Any], ui_template: dict[str, Any], settings: d
         image = add("v3:pixel:upscale", "ImageUpscaleWithModel", "pixel_hires",
                     upscale_model=model, image=ensure_image())
         latent = None
-        if not stages["post_sampler"]["enabled"]:
+        if pixel_hires_resizes(settings):
             image = add("v3:pixel:resize", "ImageScaleBy", "pixel_hires", image=image,
                         upscale_method=config["upscale_method"], scale_by=config["percent"] / 100)
     def nvidia_stage() -> None:

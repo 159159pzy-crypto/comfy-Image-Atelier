@@ -224,6 +224,13 @@ class ReverseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.manager.prompt_jobs.get(first["id"]))["status"], "cancelled")
         self.assertEqual((await self.manager.prompt_jobs.get(second["id"]))["status"], "completed")
         self.assertEqual(set(self.comfy.cancelled), {"1"})
+        refreshed = await (await self.client.get(f"/api/prompt-jobs/{first['id']}")).json()
+        self.assertEqual(refreshed["cancel_state"], "unconfirmed")
+        self.assertIn("远端任务可能继续", refreshed["cancel_warning"])
+        current = await (await self.client.get(f"/api/prompt-jobs/{second['id']}")).json()
+        self.assertNotIn("cancel_warning", current)
+        repeated = await (await self.client.post(f"/api/prompt-jobs/{first['id']}/cancel")).json()
+        self.assertEqual(repeated["cancel_state"], "unconfirmed")
         self.comfy.block = asyncio.Event()
         with patch("anima_webui.runner.PROMPT_JOB_TIMEOUT", .2):
             third = await self.create(asset)
@@ -267,6 +274,10 @@ class ReverseTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(sensitive, json.dumps(self.manager.snapshot()))
         self.assertNotIn(sensitive, "\n".join(logs.output))
         self.assertTrue(self.manager.snapshot()["cancel_warning"])
+        refreshed = await (await self.client.get(f"/api/prompt-jobs/{job['id']}")).json()
+        self.assertEqual(refreshed["cancel_state"], "unconfirmed")
+        self.assertIn("远端任务可能继续", refreshed["cancel_warning"])
+        self.assertNotIn(sensitive, json.dumps(refreshed))
 
     async def test_timeout_cancel_failure_hides_provider_details(self):
         asset = await self.upload()

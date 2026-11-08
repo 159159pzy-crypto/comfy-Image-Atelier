@@ -24,7 +24,7 @@ def test_latent_sampler_defaults_are_profile_owned_and_independent(profile, step
 
 
 def test_versionless_and_explicit_historical_validation_stay_frozen():
-    assert DEFAULT_SETTINGS["pipeline_version"] == 4
+    assert DEFAULT_SETTINGS["pipeline_version"] == 5
     for version in (None, 2, 3):
         source = {"upscalers": {"latent": {"enabled": True}}}
         if version is not None:
@@ -62,19 +62,21 @@ def test_v3_upgrade_retains_existing_switches_and_parameters(post_enabled):
     assert source == original
 
 
-def test_v4_is_idempotent_and_rejects_future_version_instead_of_downgrading():
-    current = validate_settings({"pipeline_version": 4, "upscalers": {"latent": {
+@pytest.mark.parametrize("version", [4, 5])
+def test_current_versions_are_idempotent_and_reject_future_version_instead_of_downgrading(version):
+    current = validate_settings({"pipeline_version": version, "upscalers": {"latent": {
         "sampler": {"steps": 9, "cfg": 3, "denoise": .4, "sampler_name": "euler", "scheduler": "karras"}}}})
     assert upgrade_pipeline_settings(current) == current
     for operation in (validate_settings, upgrade_pipeline_settings):
         with pytest.raises(WorkflowError, match="pipeline_version"):
-            operation({"pipeline_version": 5})
+            operation({"pipeline_version": 6})
 
 
 @pytest.mark.parametrize("sampler", [None, False, {"enabled": False}, {"seed": 1}, {"cfg": float("nan")}, {"steps": True}, {"sampler_name": ""}])
-def test_latent_sampler_has_exactly_five_parameters_and_no_additional_toggle(sampler):
+@pytest.mark.parametrize("version", [2, 3, 4, 5])
+def test_latent_sampler_has_exactly_five_parameters_and_no_additional_toggle(sampler, version):
     with pytest.raises(WorkflowError, match="latent.sampler"):
-        validate_settings({"pipeline_version": 4, "upscalers": {"latent": {"sampler": sampler}}})
+        validate_settings({"pipeline_version": version, "upscalers": {"latent": {"sampler": sampler}}})
 
 
 @pytest.mark.parametrize("method,accepted,rejected", [("bicubic", 8, 8.01), ("sesqui", 2, 2.01)])

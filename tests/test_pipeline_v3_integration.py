@@ -91,9 +91,9 @@ def test_pixel_shrink_parameters_are_unused_with_post_sampling():
 
 
 @pytest.mark.parametrize("profile,cfg", [("anima", 4), ("krea2", 1)])
-def test_preset_roundtrip_uses_current_profile_pipeline(profile, cfg):
+def test_versionless_preset_roundtrip_retains_legacy_pipeline(profile, cfg):
     saved = preset_settings({"model_profile": profile})
-    assert saved["pipeline_version"] == 4
+    assert saved["pipeline_version"] == 2
     assert saved["upscalers"]["post_sampler"]["cfg"] == cfg
     assert preset_settings(saved) == saved
 

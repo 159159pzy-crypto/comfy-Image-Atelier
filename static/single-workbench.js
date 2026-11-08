@@ -5,7 +5,7 @@ const singleWorkbenchState = {
   ready: false, mode: "random", drafts: { random: {}, single: {} }, single: {},
   generationMode: "txt2img", promptTarget: null,
   inputImage: null, previewRecord: null, promptJob: null, promptPoll: null, promptRevision: 0, inputRequest: 0,
-  reading: false, restoring: false, resourceValues: {}, promptSeed: 0,
+  reading: false, restoring: false, initializing: false, resourceValues: {}, promptSeed: 0,
 };
 function singleWorkbenchActive() { return singleWorkbenchState.ready && singleWorkbenchState.mode === "single"; }
 // Keep source offsets so removing an automatic tag does not rewrite user prose.
@@ -121,7 +121,7 @@ function singleWorkbenchDefaultSettings(profile = "anima") {
     latent: { upscale_method: "sesqui", model_format: "Wan 2.1", half_precision: true, pipeline: "secondary" }, face_pipeline: "secondary",
     dlss: { enabled: false, style: "电影", intensity: 1, local_tone: 1, local_struct: 1, output_view: "处理", output_mix: 1, gpu_gen: "Auto" },
   };
-  return { ...settings, ...(typeof sharedSamplingDefaults === "function" ? (() => { const value = sharedSamplingDefaults(); delete value.seedMode; delete value.seed; return value; })() : {}), pipeline_version: 4, upscalers: typeof normalizeUpscalers === "function" ? normalizeUpscalers(settings.upscalers, null, profile, settings.pipeline_version ?? 4) : settings.upscalers, workbench: "single", generation_mode: "txt2img", model_profile: profile, count: 1, base_mode: "normal",
+  return { ...settings, ...(typeof sharedSamplingDefaults === "function" ? (() => { const value = sharedSamplingDefaults(); delete value.seedMode; delete value.seed; return value; })() : {}), pipeline_version: 5, upscalers: typeof normalizeUpscalers === "function" ? normalizeUpscalers(settings.upscalers, null, profile, 5) : settings.upscalers, workbench: "single", generation_mode: "txt2img", model_profile: profile, count: 1, base_mode: "normal",
     clip_name: settings.clip_name || profileConfig(profile).clip_name || "", vae_name: settings.vae_name || profileConfig(profile).vae_name || "", clip_type: settings.clip_type || profileConfig(profile).clip_type || "",
     single: singleWorkbenchUnifiedDefaults(singleWorkbenchMerge(single, typeof config !== "undefined" ? config.single_defaults || config.defaults?.single : {})) };
 }
@@ -180,7 +180,7 @@ function singleWorkbenchBuild() {
     sharedFavoritesPanelMarkup("single") + '</section>' +
     '<div id="singleParameterTabs" role="tablist" aria-label="参数分类"><span id="singleTabIndicator" aria-hidden="true"></span>' +
     [["common","常用参数"],["prompt","提示词处理"],["repair","放大修复"],["more","风格预设"]].map(([id,label]) => '<button id="singleCategory_' + id + '" type="button" role="tab" data-single-category="' + id + '" aria-selected="' + (id === "common") + '" tabindex="' + (id === "common" ? 0 : -1) + '">' + label + '</button>').join("") + '</div>' +
-    '<section id="singleSeedSection" hidden><div id="singleSeedControls"><label class="field"><span>随机种</span><div class="shared-seed-controls"><input id="singleSampleSeed" aria-label="随机种" type="number" min="0" max="1125899906842624" step="1" value="0"><select id="singleSeedMode" aria-label="种子方式"><option value="fixed">固定种子</option><option value="random">每次随机</option></select><button id="singleRollSeed" type="button" class="button ghost compact">换一个</button></div></label></div></section>';
+    '<section id="singleSeedSection" hidden><div id="singleSeedControls"><label class="field"><span>图像种子</span><div class="shared-seed-controls"><input id="singleSampleSeed" aria-label="图像种子" type="number" min="0" max="1125899906842624" step="1" value="0"><select id="singleSeedMode" aria-label="种子方式"><option value="fixed">固定种子</option><option value="random">每次随机</option></select><button id="singleRollSeed" type="button" class="button ghost compact">换一个</button></div><small id="sampleSeedHint" class="field-hint">固定图像种子不会固定词池抽取。</small></label></div></section>';
   html += promptAssistantMarkup();
   html += singleWorkbenchSection("双采样细项", number("dual.switch_step", "第二段起始步", 0, 149, 1) + number("dual.scale", "中间放大倍率", 1, 8, .05) + number("dual.second_cfg", "第二段 CFG", 0, 30, .1) + field("dual.second_sampler_name", "第二段采样器") + field("dual.second_scheduler", "第二段调度器") + field("dual.upscale_method", "中间放大算法", "text", upscalers) + '<p class="field-hint wide">第一段完整采样，第二段从指定步继续至总步数。</p>', "common", "singleDualSection");
   html += '<div id="singleLatentMethodField">' + field("latent.upscale_method", "放大算法", "text", upscalers) + '</div>';
@@ -249,7 +249,7 @@ function singleWorkbenchLegacyDrafts(settings, legacyProfiles) {
     if (!["anima", "krea2"].includes(profile) || !stored || typeof stored !== "object") continue;
     // Inactive v4 profile drafts may still contain nested v2 stages even when
     // the active profile was upgraded while loading the page.
-    const restored = { ...singleWorkbenchClone(settings), pipeline_version: stored.pipeline_version ?? 2, model_profile: profile, workbench: "random", generation_mode: "txt2img" };
+    const restored = { ...singleWorkbenchClone(settings), ...singleWorkbenchClone(stored.sourceSettings || {}), pipeline_version: stored.pipeline_version ?? 2, model_profile: profile, workbench: "random", generation_mode: "txt2img" };
     for (const key of ["model_name", "base_mode", "base_denoise", "krea_variance", "dual", "steps", "cfg", "sampler_name", "scheduler", "upscalers", "extra_prompt", "loras", "pools"]) if (stored[key] !== undefined) restored[key] = singleWorkbenchClone(stored[key]);
     restored.base_denoise = stored.base_denoise ?? 1;
     restored.krea_variance = typeof sharedKreaFromSettings === "function" ? sharedKreaFromSettings({ ...stored, workbench: "random", model_profile: profile }) : { enabled: profile === "krea2", ...(stored.krea_variance || {}) };
@@ -262,7 +262,8 @@ function singleWorkbenchLegacyDrafts(settings, legacyProfiles) {
 }
 function singleWorkbenchPersist() {
   if (!singleWorkbenchState.ready) return false;
-  if (singleWorkbenchState.restoring) return true;
+  if (typeof pipelineContractState !== "undefined" && pipelineContractState.persistenceBlocked) return true;
+  if (singleWorkbenchState.restoring || singleWorkbenchState.initializing) return true;
   const state = singleWorkbenchState;
   state.drafts[state.mode][currentProfile()] = singleWorkbenchCapture();
   try {
@@ -275,6 +276,7 @@ function singleWorkbenchPersist() {
 }
 function singleWorkbenchSwitch(mode, profile = currentProfile(), { save = true, settings = null, poolDraft = null } = {}) {
   if (!singleWorkbenchState.ready) return;
+  if (singleWorkbenchState.initializing && save) return false;
   if (save) singleWorkbenchPersist();
   if (typeof invalidatePoolContext === "function") invalidatePoolContext();
   const state = singleWorkbenchState;
@@ -491,7 +493,25 @@ function singleWorkbenchShowSettings() {
     target?.scrollIntoView({ block: "center", behavior: "auto" });
   });
 }
-function singleWorkbenchRestoreHistory(record) {
+function singleWorkbenchBeginSettingsImport(record = null) {
+  const state = singleWorkbenchState;
+  return { token: state.settingsImportRequest = (state.settingsImportRequest || 0) + 1,
+    mode: state.mode, profile: currentProfile(), settings: JSON.stringify(readSettings()),
+    seed: document.getElementById("singleSampleSeed")?.value, seedMode: document.getElementById("singleSeedMode")?.value,
+    detail: typeof detailContext !== "undefined" ? detailContext : null,
+    record: typeof selectedRecord !== "undefined" && selectedRecord === record ? record : null };
+}
+function singleWorkbenchSettingsImportCurrent(owner) {
+  return owner.token === singleWorkbenchState.settingsImportRequest
+    && owner.mode === singleWorkbenchState.mode && owner.profile === currentProfile()
+    && owner.settings === JSON.stringify(readSettings())
+    && owner.seed === document.getElementById("singleSampleSeed")?.value && owner.seedMode === document.getElementById("singleSeedMode")?.value
+    && (!owner.record || (selectedRecord === owner.record && (typeof detailContext === "undefined" || detailContext === owner.detail)));
+}
+async function singleWorkbenchRestoreHistory(record) {
+  const owner = singleWorkbenchBeginSettingsImport(record);
+  if (typeof canonicalizeWorkflowSettings === "function") record = { ...record, settings: await canonicalizeWorkflowSettings(record.settings || {}) };
+  if (!singleWorkbenchSettingsImportCurrent(owner)) return false;
   const mode = record.settings?.workbench === "single" ? "single" : "random";
   const profile = record.settings?.model_profile || "anima";
   const target = singleWorkbenchState.mode === mode && currentProfile() === profile
@@ -525,30 +545,25 @@ function singleWorkbenchRestoreHistory(record) {
   singleWorkbenchLayout();
   singleWorkbenchPersist();
   singleWorkbenchShowSettings();
+  return true;
 }
 async function singleWorkbenchFromHistory(record, asImage = false) {
-  if (!record || singleWorkbenchState.historyTransferBusy) return;
+  if (!record) return;
+  const owner = singleWorkbenchBeginSettingsImport(record);
+  const token = singleWorkbenchState.historyTransferRequest = (singleWorkbenchState.historyTransferRequest || 0) + 1;
+  singleWorkbenchState.historyTransferOwner = token;
+  const trigger = asImage ? document.getElementById("useAsInputImage") : null;
+  singleWorkbenchState.historyTransferBusy = true;
+  if (trigger) { trigger.disabled = true; trigger.setAttribute("aria-busy", "true"); }
+  try {
+  if (typeof canonicalizeWorkflowSettings === "function") record = { ...record, settings: await canonicalizeWorkflowSettings(record.settings || {}) };
+  if (token !== singleWorkbenchState.historyTransferRequest || !singleWorkbenchSettingsImportCurrent(owner)) return;
   // Resolve the managed reference before changing the user's current draft.
   // A failed or abandoned import must leave the detail and its list in place.
   let importedInput = null;
   if (asImage) {
-    const token = singleWorkbenchState.historyTransferRequest = (singleWorkbenchState.historyTransferRequest || 0) + 1;
-    const owner = typeof detailContext !== "undefined" ? detailContext : null;
-    const sourceProfile = currentProfile();
-    const trigger = document.getElementById("useAsInputImage");
-    singleWorkbenchState.historyTransferBusy = true;
-    if (trigger) { trigger.disabled = true; trigger.setAttribute("aria-busy", "true"); }
-    try {
-      importedInput = await request("/api/input-images/from-history", { method: "POST", body: JSON.stringify({ image_id: record.id }) });
-      if (token !== singleWorkbenchState.historyTransferRequest || sourceProfile !== currentProfile()
-        || (owner && (owner !== detailContext || selectedRecord !== record))) return;
-    } catch (error) {
-      if (token === singleWorkbenchState.historyTransferRequest && (!owner || owner === detailContext)) toast(`参考图导入失败：${error.message}`);
-      return;
-    } finally {
-      singleWorkbenchState.historyTransferBusy = false;
-      if (trigger) { trigger.disabled = false; trigger.removeAttribute("aria-busy"); }
-    }
+    importedInput = await request("/api/input-images/from-history", { method: "POST", body: JSON.stringify({ image_id: record.id }) });
+    if (token !== singleWorkbenchState.historyTransferRequest || !singleWorkbenchSettingsImportCurrent(owner)) return;
   }
   const profile = record.settings?.model_profile || "anima";
   const settings = singleWorkbenchMerge(singleWorkbenchDefaultSettings(profile), record.settings || {});
@@ -575,8 +590,19 @@ async function singleWorkbenchFromHistory(record, asImage = false) {
   singleWorkbenchPersist();
   if (typeof revealHistoryWorkbench === "function") revealHistoryWorkbench();
   toast(asImage ? "已送入单图工作台作为参考图" : "已载入最终提示词和生成参数");
+  } catch (error) {
+    if (token === singleWorkbenchState.historyTransferRequest && singleWorkbenchSettingsImportCurrent(owner)) toast(`${asImage ? "参考图导入" : "载入"}失败，当前草稿未更改：${error.message}`);
+  } finally {
+    if (token === singleWorkbenchState.historyTransferOwner) {
+      singleWorkbenchState.historyTransferBusy = false;
+      if (trigger) { trigger.disabled = false; trigger.removeAttribute("aria-busy"); }
+    }
+  }
 }
-function singleWorkbenchApplyPreset(item) {
+async function singleWorkbenchApplyPreset(item) {
+  const owner = singleWorkbenchBeginSettingsImport();
+  if (typeof canonicalizeWorkflowSettings === "function") item = { ...item, settings: await canonicalizeWorkflowSettings(item.settings || {}) };
+  if (!singleWorkbenchSettingsImportCurrent(owner)) return false;
   const current = readSettings(); const snapshot = singleWorkbenchClone(item.settings || {});
   const sourceWorkbench = snapshot.workbench;
   delete snapshot.workbench; delete snapshot.generation_mode;
@@ -591,27 +617,45 @@ function singleWorkbenchApplyPreset(item) {
     snapshot.single.prompt_job_id = ""; snapshot.single.processed_prompt_override = null;
   } else {
     if (typeof adaptPostprocessSettings === "function") adaptPostprocessSettings(snapshot, item.settings || {}, "random");
-    // Legacy random snapshots must initialize dual controls from their own
-    // effective values, rather than inheriting an unrelated current draft.
-    if (sourceWorkbench !== "single" && typeof randomDualFromSettings === "function") snapshot.dual = randomDualFromSettings(item.settings || {});
+    // A legacy null keeps inheriting the source's effective dual parameters.
+    if (sourceWorkbench !== "single") snapshot.dual = item.settings?.dual == null ? null : singleWorkbenchClone(item.settings.dual);
     delete snapshot.single; delete snapshot.clip_name; delete snapshot.vae_name; delete snapshot.clip_type;
   }
   const modes = typeof sharedSamplingDrafts === "function" ? sharedSamplingDrafts() : null;
   applySettings({ ...current, ...snapshot, workbench: singleWorkbenchState.mode });
   if (typeof showPipelineUpgradeNotice === "function") showPipelineUpgradeNotice(item.settings);
   if (typeof sharedSamplingRestoreDrafts === "function") sharedSamplingRestoreDrafts(modes);
+  return true;
 }
-function initializeSingleWorkbench({ legacyRestored = false } = {}) {
+async function initializeSingleWorkbench({ legacyRestored = false } = {}) {
+  singleWorkbenchState.initializing = true;
+  // Bootstrap from the settings that were applied, not transient DOM values
+  // while the shared controls are being built or moved into their workbench.
+  const bootstrap = typeof pipelineContractState !== "undefined" && Object.keys(pipelineContractState.source).length
+    ? { settings: singleWorkbenchClone(pipelineContractState.source), profileDrafts: singleWorkbenchClone(profileDrafts), seedMode: legacyRestored ? "random" : "fixed", seed: "0", promptSeed: 0, samplingModes: {} }
+    : null;
   singleWorkbenchBuild();
   const state = singleWorkbenchState;
   state.ready = true;
   if (typeof initializePromptAssistant === "function") initializePromptAssistant();
   if (legacyRestored) document.getElementById("singleSeedMode").value = "random";
-  const legacy = singleWorkbenchCapture();
+  const legacy = bootstrap || singleWorkbenchCapture();
   state.drafts.random = singleWorkbenchLegacyDrafts(legacy.settings, legacy.profileDrafts);
   state.drafts.random[currentProfile()] = legacy;
   let saved = null;
-  try { const value = JSON.parse(localStorage.getItem(WORKBENCH_DRAFT_KEY) || "null"); if (value?.version === 1 && value.drafts?.random && value.drafts?.single) saved = value; } catch { /* The old draft remains available for recovery. */ }
+  try {
+    const value = JSON.parse(localStorage.getItem(WORKBENCH_DRAFT_KEY) || "null");
+    if (value && (value.version !== 1 || !value.drafts?.random || !value.drafts?.single)) throw new Error("工作台草稿格式无效");
+    saved = value;
+    const drafts = saved?.drafts || state.drafts;
+    if (typeof canonicalizeWorkflowSettings === "function") await Promise.all(Object.values(drafts).flatMap(profiles => Object.values(profiles || {})).map(async entry => {
+      if (!entry?.settings || typeof entry.settings !== "object") throw new Error("工作台参数缺失");
+      entry.settings = await canonicalizeWorkflowSettings(entry.settings);
+    }));
+  } catch (error) {
+    if (typeof pipelineContractState !== "undefined") pipelineContractState.persistenceBlocked = true;
+    throw new Error(`工作台草稿加载失败，原内容已保留：${error.message}`);
+  }
   if (saved) { state.drafts = saved.drafts; singleWorkbenchSwitch(saved.mode === "single" ? "single" : "random", normalizeProfileId(saved.profile), { save: false }); }
   else singleWorkbenchRenderMode();
   document.querySelectorAll("[data-workbench]").forEach(button => { if (button.tagName === "BUTTON") button.addEventListener("click", () => singleWorkbenchSwitch(button.dataset.workbench)); });
@@ -639,4 +683,5 @@ function initializeSingleWorkbench({ legacyRestored = false } = {}) {
   window.addEventListener("pagehide", singleWorkbenchPersist);
   singleWorkbenchResources();
   if (typeof initializeSingleGallery === "function") initializeSingleGallery();
+  state.initializing = false;
 }

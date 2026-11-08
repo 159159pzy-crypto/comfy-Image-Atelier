@@ -16,7 +16,7 @@ function load(ctx, name) {
   if (app.slice(start - 6, start) === 'async ') start -= 6;
   vm.runInContext(app.slice(start, app.indexOf('\n}', start) + 2), ctx);
 }
-function setup(profile, workbench) {
+function setup(profile, workbench, version = 5, source = null) {
   const ui = {}, requests = [], saved = [], gates = [];
   for (const match of html.matchAll(/<(\w+)\b([^>]*\bid="([^"]+)"[^>]*)>/g)) {
     const [, tag, attrs, id] = match, listeners = new Map();
@@ -30,6 +30,7 @@ function setup(profile, workbench) {
   const sourceImage = { input_image_id: 'chosen-original', positive_prompt: 'original prompt' };
   const ctx = vm.createContext({
     ui, document: { getElementById: id => ui[id] || null }, clone: plain, submitInFlight: false, resourcesLoaded: false, resourceError: '', resources: {},
+    pipelineContractState: { version, source: { upscalers: source || {} } }, currentPipelineVersion: () => version,
     currentProfile: () => profile, profileLabel: value => value, profileConfig: () => ({}),
     refreshCurrentModelSelection() {}, updateProfileResources() {}, updateGenerationAvailability() {},
     applyNodeResourceControls() {}, ensureSelectValue: (node, value) => { node.value = value; },
@@ -44,9 +45,10 @@ function setup(profile, workbench) {
     },
   });
   load(ctx, 'defaultUpscalers');
+  load(ctx, 'normalizeUpscalers');
   vm.runInContext(app.slice(app.indexOf('const UPSCALER_CONTROL_FIELDS'), app.indexOf('\nfunction refreshProfileData')), ctx);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../static/workbench-parameters.js'), 'utf8'), ctx);
-  ctx.readSettings = () => ({ pipeline_version: 4, model_profile: profile, workbench, single: sourceImage, upscalers: ctx.readUpscalerControls() });
+  ctx.readSettings = () => ({ pipeline_version: version, model_profile: profile, workbench, single: sourceImage, upscalers: ctx.readUpscalerControls() });
   ctx.schedulePersist = ctx.persistNow = () => saved.push(plain(ctx.readSettings()));
   for (const name of ['pipelineFlowText', 'updateRepairControls', 'submitBatch']) load(ctx, name);
   const formStart = app.indexOf('ui.settingsForm.addEventListener("submit"');
@@ -54,13 +56,58 @@ function setup(profile, workbench) {
   const controlsStart = app.indexOf('for (const control of [\n  ui.pixel_hires_enabled');
   assert.ok(controlsStart >= 0);
   vm.runInContext(app.slice(controlsStart, app.indexOf('ui.themeToggle.addEventListener', controlsStart)), ctx);
-  ctx.setUpscalerControls(ctx.defaultUpscalers(profile));
+  ctx.setUpscalerControls(ctx.normalizeUpscalers(source, null, profile, version));
   ctx.updateRepairControls();
   return { ctx, ui, requests, saved, gates, sourceImage, submit: () => ui.settingsForm.dispatch('submit'),
     change: async (id, checked) => { ui[id].checked = checked; await ui[id].dispatch('change'); },
     posts: () => requests.filter(item => item.url === '/api/batches'),
   };
 }
+
+test('v2 post controls retain the nested switch and DLSS remains bound to VSR', async () => {
+  const source = { latent: { enabled: false, second_sampler: { enabled: true, steps: 27 }, sampler: { steps: 39 } },
+    post_sampler: { enabled: true, steps: 12 }, dlss: { enabled: true, output_mix: .23 },
+    nvidia: { enabled: false, dlss: { output_mix: .61, output_view: '差异', gpu_gen: '50系列' } } };
+  const h = setup('anima', 'random', 2, source);
+  assert.equal(h.ui.latent_second_sampler_enabled.checked, true);
+  assert.equal(h.ui.latent_second_sampler_enabled.disabled, true);
+  assert.equal(h.ui.dlss_enabled.checked, false);
+  assert.equal(h.ui.dlss_enabled.disabled, true);
+  let settings = h.ctx.readSettings();
+  assert.equal(settings.pipeline_version, 2);
+  assert.equal(settings.upscalers.latent.second_sampler.enabled, true);
+  assert.equal(settings.upscalers.latent.sampler.steps, 39);
+  assert.equal(settings.upscalers.post_sampler.steps, 12);
+  assert.equal(settings.upscalers.dlss.output_mix, .23);
+  await h.change('latent_upscale_enabled', true);
+  h.ui.latent_second_sampler_steps.value = '32';
+  await h.change('nvidia_upscale_enabled', true);
+  settings = h.ctx.readSettings();
+  assert.equal(settings.upscalers.latent.second_sampler.steps, 32);
+  assert.equal(settings.upscalers.post_sampler.steps, 12);
+  assert.equal(settings.upscalers.nvidia.dlss.output_view, '差异');
+  assert.equal(settings.upscalers.nvidia.dlss.gpu_gen, '50系列');
+  assert.equal(h.ui.dlss_enabled.checked, true);
+  assert.equal(h.requests.length, 0);
+});
+
+test('v3 omits absent latent sampling while preserving a dormant source sampler', () => {
+  for (const sampler of [undefined, { steps: 37, cfg: 2.2, sampler_name: 'heun', scheduler: 'karras', denoise: .4 }]) {
+    const h = setup('anima', 'random', 3, { latent: { enabled: true, ...(sampler ? { sampler } : {}) } });
+    assert.equal(h.ui.latent_sampler_steps.disabled, true);
+    h.ui.latent_sampler_steps.value = '49';
+    assert.deepEqual(plain(h.ctx.readSettings().upscalers.latent).sampler, sampler);
+  }
+});
+
+test('v4 preserves skipped shrink and v5 always retains the pixel resize controls', () => {
+  for (const version of [4, 5]) {
+    const h = setup('anima', 'random', version, { pixel_hires: { enabled: true, percent: 37 }, post_sampler: { enabled: true } });
+    assert.equal(h.ui.pixel_hires_percent.disabled, version === 4);
+    assert.equal(h.ctx.readSettings().upscalers.pixel_hires.percent, 37);
+    assert.equal(h.ctx.readSettings().pipeline_version, version);
+  }
+});
 
 for (const profile of ['anima', 'krea2']) for (const workbench of ['random', 'single']) {
   test(`${profile}/${workbench}: stage changes save configuration; Start captures one complete pipeline from the selected base`, async () => {
@@ -89,8 +136,8 @@ for (const profile of ['anima', 'krea2']) for (const workbench of ['random', 'si
     assert.equal(h.requests.length, 0, 'switch changes must never start or extend a generation');
     assert.ok(h.saved.length >= stageControls.length);
     assert.equal(h.saved.at(-1).single.input_image_id, 'chosen-original');
-    assert.equal(h.ui.pixel_hires_percent.disabled, true);
-    assert.equal(h.ui.pixelHiresResizeHint.textContent, '后采样已开启，跳过缩图');
+    assert.equal(h.ui.pixel_hires_percent.disabled, false);
+    assert.equal(h.ui.pixelHiresResizeHint.textContent, '按原生放大结果缩图');
     assert.equal(h.ui.latentUpscaleFields.hidden, false);
     assert.equal(h.ui.latent_sampler_steps.disabled, false);
     assert.equal(h.ui.latentDoubleSamplingHint.hidden, false);

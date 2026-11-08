@@ -113,9 +113,14 @@ test('X, backdrop and final Escape invalidate a pending import before the close 
     const pending = deferred(), switches = [], image = { id: 32, settings: { model_profile: 'anima' } };
     const trigger = { setAttribute() {}, removeAttribute() {} };
     const h = dismissalContext({ document: { getElementById: () => trigger }, currentProfile: () => 'anima',
+      readSettings: () => ({}),
       detailContext: { origin: 'random' }, selectedRecord: image, request: () => pending.promise,
       singleWorkbenchSwitch: () => switches.push('switch'), toast() {},
     });
+    for (const name of ['singleWorkbenchBeginSettingsImport', 'singleWorkbenchSettingsImportCurrent']) {
+      const helperStart = workbench.indexOf(`function ${name}(`);
+      vm.runInContext(workbench.slice(helperStart, workbench.indexOf('\n}', helperStart) + 2), h.ctx);
+    }
     vm.runInContext(workbench.slice(start, end), h.ctx);
     const importing = h.ctx.singleWorkbenchFromHistory(image, true);
     assert.equal(h.ctx.singleWorkbenchState.historyTransferRequest, 1);

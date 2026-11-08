@@ -178,6 +178,12 @@ def node_input_issues(resources: dict[str, Any], node_type: str, values: dict[st
     return issues
 
 
+def pixel_hires_resizes(settings: dict[str, Any]) -> bool:
+    """v5 applies the requested shrink independently of downstream sampling."""
+    return (settings.get("pipeline_version", 2) >= 5
+            or not settings["upscalers"].get("post_sampler", {}).get("enabled"))
+
+
 def enabled_postprocess_parameter_issues(settings: dict[str, Any], resources: dict[str, Any]) -> list[dict[str, str]]:
     """Both workbenches submit the same public repair-stage node inputs."""
     # Older clients advertise only node/plugin availability and may pass
@@ -199,7 +205,7 @@ def enabled_postprocess_parameter_issues(settings: dict[str, Any], resources: di
     if v3 and stages.get("pixel_hires", {}).get("enabled"):
         pixel = stages["pixel_hires"]
         check("UpscaleModelLoader", {"model_name": pixel["model_name"]}, "像素高清模型")
-        if not stages.get("post_sampler", {}).get("enabled"):
+        if pixel_hires_resizes(settings):
             check("ImageScaleBy", {"upscale_method": pixel["upscale_method"], "scale_by": pixel["percent"] / 100}, "像素高清缩图")
     if v3 and stages.get("post_sampler", {}).get("enabled"):
         check("KSampler", stages["post_sampler"], "整图后采样")

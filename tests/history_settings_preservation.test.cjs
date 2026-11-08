@@ -11,7 +11,7 @@ const plain = value => JSON.parse(JSON.stringify(value));
 const sections = ['character', 'clothing', 'pose', 'background', 'expression'];
 const emptyPools = () => Object.fromEntries(sections.map(section => [section, { mode: 'include', ids: [], excluded_ids: [] }]));
 function defaults(profile = 'anima', workbench = 'random') {
-  return { model_profile: profile, workbench, count: workbench === 'single' ? 1 : 4,
+  return { pipeline_version: 5, model_profile: profile, workbench, count: workbench === 'single' ? 1 : 4,
     model_name: `${profile}-default`, steps: 20, cfg: 8, base_mode: 'normal', character_detail: 'trigger_tags',
     loras: [], lora_managed_triggers: [], pools: emptyPools(), upscalers: {},
     extra_prompt: '', negative_prompt: '', krea_prompt_pool: { enabled: false, ids: [] } };
@@ -33,6 +33,7 @@ function setup(storage = new Map()) {
   let invalidations = 0;
   const ctx = createFrontendContext({
     SECTIONS: sections, defaults: defaults(), draft: {}, profileDrafts: {}, activeProfileId: 'anima',
+    pipelineContractState: { version: 5, source: {}, persistenceBlocked: false },
     kreaPromptPoolSelection: [], initialized: false, loraInventoryLoaded: false,
     ui, document: { getElementById: id => elements[id] },
     clone: plain, normalizeProfileId: profile => profile === 'krea2' ? 'krea2' : 'anima',
@@ -48,6 +49,8 @@ function setup(storage = new Map()) {
     clearTimeout() {}, invalidatePoolContext: () => { invalidations++; },
   });
   ctx.currentProfile = () => ctx.activeProfileId;
+  ctx.currentPipelineVersion = () => ctx.pipelineContractState.version;
+  ctx.showPipelineUpgradeNotice = () => {};
   ctx.setUpscalerControls = value => { ctx.upscalers = plain(value); };
   ctx.readUpscalerControls = () => plain(ctx.upscalers || {});
   ctx.readKreaPoolSelection = () => ({ ids: [...ctx.kreaPromptPoolSelection] });

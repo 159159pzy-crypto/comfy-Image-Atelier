@@ -1269,14 +1269,82 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         history = await (await self.client.get("/api/history")).json()
         return history["items"][0]
 
-    async def test_new_workbench_submission_upgrades_legacy_settings_to_v4(self):
+    async def test_workbench_submission_preserves_versionless_legacy_settings(self):
         response = await self.client.post("/api/batches", json={"count": 1, "base_mode": "normal"})
         self.assertEqual(response.status, 201)
         result = await self.client.server.app[MANAGER_KEY].wait()
         self.assertEqual(result["status"], "completed")
         image = (await (await self.client.get("/api/history")).json())["items"][0]
-        self.assertEqual(image["settings"]["pipeline_version"], 4)
+        self.assertEqual(image["settings"]["pipeline_version"], 2)
         self.assertFalse(image["settings"]["upscalers"]["post_sampler"]["enabled"])
+
+    async def test_settings_normalize_is_offline_read_only_and_preserves_versions(self):
+        history = self.client.server.app[HISTORY_KEY]
+        manager = self.client.server.app[MANAGER_KEY]
+        with mock.patch.object(self.comfy, "status", side_effect=AssertionError("network")) as status, \
+             mock.patch.object(manager, "start", side_effect=AssertionError("generation")) as start, \
+             mock.patch.object(history, "ensure_writable", side_effect=AssertionError("persistence")) as writable:
+            for version in (None, 2, 3, 4, 5):
+                with self.subTest(version=version):
+                    source = {"base_mode": "normal", "dual": None,
+                              "upscalers": {"latent": {"enabled": False, "second_sampler": {"enabled": True, "steps": 23}}}}
+                    if version is not None:
+                        source["pipeline_version"] = version
+                    response = await self.client.post("/api/settings/normalize", json={"settings": source})
+                    self.assertEqual(response.status, 200, await response.text())
+                    saved = (await response.json())["settings"]
+                    self.assertEqual(saved["pipeline_version"], version or 2)
+                    self.assertIsNone(saved["dual"])
+                    self.assertTrue(saved["upscalers"]["latent"]["second_sampler"]["enabled"])
+                    self.assertEqual(saved["upscalers"]["latent"]["second_sampler"]["steps"], 23)
+                    self.assertEqual("sampler" in saved["upscalers"]["latent"], (version or 2) >= 4)
+            status.assert_not_called()
+            start.assert_not_called()
+            writable.assert_not_called()
+        self.assertEqual(self.comfy.submissions, [])
+
+    async def test_settings_normalize_uses_legacy_alias_rules_and_rejects_invalid_payloads(self):
+        response = await self.client.post("/api/settings/normalize", json={"settings": {
+            "hires": {"enabled": True, "percent": 50}, "second_sampler": {"enabled": True, "steps": 23}}})
+        self.assertEqual(response.status, 200, await response.text())
+        saved = (await response.json())["settings"]
+        self.assertEqual(saved["pipeline_version"], 2)
+        self.assertEqual(saved["upscalers"]["latent"]["scale_by"], 2)
+        self.assertEqual(saved["upscalers"]["latent"]["second_sampler"]["steps"], 23)
+        self.assertFalse(saved["upscalers"]["pixel_hires"]["enabled"])
+        for body in ({}, {"settings": None}, {"settings": []}, {"settings": {}, "extra": True},
+                     {"settings": {"pipeline_version": 6}}, {"settings": {"width": "invalid"}}):
+            with self.subTest(body=body):
+                invalid = await self.client.post("/api/settings/normalize", json=body)
+                self.assertEqual(invalid.status, 400, await invalid.text())
+
+    async def test_settings_normalize_preserves_explicit_hidden_sampler_for_old_versions(self):
+        sampler = {"steps": 11, "cfg": 3, "sampler_name": "heun", "scheduler": "karras", "denoise": .4}
+        for version in (None, 2, 3):
+            with self.subTest(version=version):
+                source = {"upscalers": {"latent": {"enabled": False, "sampler": sampler}}}
+                if version is not None:
+                    source["pipeline_version"] = version
+                for _ in range(2):
+                    response = await self.client.post("/api/settings/normalize", json={"settings": source})
+                    self.assertEqual(response.status, 200, await response.text())
+                    source = (await response.json())["settings"]
+                    self.assertEqual(source["pipeline_version"], version or 2)
+                    self.assertEqual(source["upscalers"]["latent"]["sampler"], sampler)
+        self.assertEqual(self.comfy.submissions, [])
+
+    async def test_new_defaults_submit_v5_with_pixel_resize_and_post_sampling(self):
+        settings = {**DEFAULT_SETTINGS, "count": 1, "base_mode": "normal",
+                    "upscalers": {"pixel_hires": {"enabled": True, "percent": 25},
+                                  "post_sampler": {"enabled": True}}}
+        response = await self.client.post("/api/batches", json=settings)
+        self.assertEqual(response.status, 201, await response.text())
+        result = await self.client.server.app[MANAGER_KEY].wait()
+        self.assertEqual(result["status"], "completed", result)
+        submitted = self.comfy.submissions[-1]
+        self.assertEqual(submitted["extra_data"]["extra_pnginfo"]["anima_random_webui"]["settings"]["pipeline_version"], 5)
+        self.assertEqual(submitted["prompt"]["v3:pixel:resize"]["inputs"]["scale_by"], .25)
+        self.assertIn("v3:post", submitted["prompt"])
 
     async def test_v3_replay_refreshes_execution_identity_without_changing_seeds_or_settings(self):
         image = await self._create_history_image()
@@ -1345,7 +1413,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(saved["pipeline_version"], 2)
         self.assertNotIn("pipeline_version", (await store.get_image(image["id"]))["settings"])
 
-    async def test_v3_history_replay_is_frozen_but_new_workbench_task_uses_v4_latent_sampling(self):
+    async def test_v3_history_replay_and_edited_workbench_task_keep_original_pipeline(self):
         from anima_webui.workflow import validate_settings
 
         settings = validate_settings({"pipeline_version": 3, "base_mode": "normal", "count": 1,
@@ -1367,8 +1435,9 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 201, await response.text())
         self.assertEqual((await self.client.server.app[MANAGER_KEY].wait())["status"], "completed")
         fresh = self.comfy.submissions[-1]
-        self.assertEqual(fresh["extra_data"]["extra_pnginfo"]["anima_random_webui"]["settings"]["pipeline_version"], 4)
-        self.assertEqual(fresh["prompt"]["v4:latent:sample"]["inputs"]["steps"], 16)
+        self.assertEqual(fresh["extra_data"]["extra_pnginfo"]["anima_random_webui"]["settings"]["pipeline_version"], 3)
+        self.assertNotIn("v4:latent:sample", fresh["prompt"])
+        self.assertEqual(sum(node["class_type"] == "KSampler" for node in fresh["prompt"].values()), 1)
         self.assertEqual((await store.get_image(image["id"]))["settings"], settings)
 
     async def test_regeneration_options_and_frozen_modes(self):

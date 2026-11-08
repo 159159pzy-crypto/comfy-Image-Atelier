@@ -62,8 +62,9 @@ MAX_LORA_MANAGED_TRIGGERS = 256
 MIN_LORA_STRENGTH = -100.0
 MAX_LORA_STRENGTH = 100.0
 PROMPT_SECTIONS = ("character", "clothing", "pose", "background", "expression")
+CURRENT_PIPELINE_VERSION = 5
 DEFAULT_SETTINGS = {
-    "pipeline_version": 4,
+    "pipeline_version": CURRENT_PIPELINE_VERSION,
     "workbench": "random",
     "generation_mode": "txt2img",
     "single": copy.deepcopy(SINGLE_DEFAULTS),
@@ -656,7 +657,9 @@ def _validate_upscalers(value: Any, profile_id: str = DEFAULT_MODEL_PROFILE, pip
             "second_sampler": second_sampler,
         }
     }
-    if pipeline_version >= 4:
+    # Older graphs do not execute this stage, but an explicitly saved hidden
+    # value must survive editing, draft persistence and preset round trips.
+    if pipeline_version >= 4 or "sampler" in value.get("latent", {}):
         sampler = value.get("latent", {}).get("sampler", {})
         if not isinstance(sampler, dict) or set(sampler) - set(profile["latent_sampler_defaults"]):
             raise WorkflowError("upscalers.latent.sampler 必须是仅含采样参数的对象")
@@ -866,8 +869,9 @@ def migrate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     profile = get_model_profile(profile_id)
     result = copy.deepcopy(source)
     # Missing versions belong to persisted v1/v2 snapshots. New entry points
-    # explicitly use DEFAULT_SETTINGS or upgrade_pipeline_settings instead.
-    result["pipeline_version"] = _integer("pipeline_version", source.get("pipeline_version", 2), 2, 4)
+    # explicitly use DEFAULT_SETTINGS instead. Loading or editing a snapshot
+    # must retain the execution semantics recorded by its source version.
+    result["pipeline_version"] = _integer("pipeline_version", source.get("pipeline_version", 2), 2, CURRENT_PIPELINE_VERSION)
     result["model_profile"] = profile_id
     workbench = source.get("workbench", "random")
     if not isinstance(workbench, str) or workbench not in {"random", "single"}:
@@ -1034,7 +1038,7 @@ def migrate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def upgrade_pipeline_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Explicitly upgrade an editable draft; historical validation never does.
+    """Opt-in legacy conversion to v4; normal loading and saving never do this.
 
     Existing effective switches are preserved. In particular the dormant v2
     latent sampler defaults to enabled, so copying that flag alone would turn
@@ -1047,7 +1051,7 @@ def upgrade_pipeline_settings(overrides: dict[str, Any] | None = None) -> dict[s
         return validate_settings(source)
     source = copy.deepcopy(overrides)
     settings = validate_settings(source)
-    if settings["pipeline_version"] == 4:
+    if settings["pipeline_version"] >= 4:
         return settings
     stages = settings["upscalers"]
     profile = get_model_profile(settings["model_profile"])

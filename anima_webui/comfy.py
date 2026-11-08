@@ -562,7 +562,7 @@ class ComfyClient:
             raise ComfyError("ComfyUI 返回了无效的队列数据")
         found = False
         for key in ("queue_running", "queue_pending"):
-            entries = data.get(key, [])
+            entries = data.get(key)
             if not isinstance(entries, (list, tuple)):
                 raise ComfyError(f"ComfyUI 返回了无效的队列字段: {key}")
             for entry in entries:

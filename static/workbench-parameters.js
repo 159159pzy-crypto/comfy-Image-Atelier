@@ -1,7 +1,7 @@
 /* Shared parameter behavior; stored workbench and sampling-mode drafts remain independent. */
 const RANDOM_DUAL_KEYS = ["switch_step", "scale", "second_cfg", "second_sampler_name", "second_scheduler", "upscale_method", "model_format", "half_precision"];
 const NVIDIA_DLSS_KEYS = ["style", "intensity", "local_tone", "local_struct", "output_mix"];
-const sharedParameterState = { latent: { model_format: "Wan 2.1", half_precision: true }, dual: {}, krea_variance: {}, dlss: {}, modes: {}, activeMode: null, applying: false };
+const sharedParameterState = { latent: { model_format: "Wan 2.1", half_precision: true }, dual: {}, dualLegacy: false, dualInitial: null, krea_variance: {}, dlss: {}, modes: {}, activeMode: null, applying: false };
 function sharedKreaDefaults() {
   return { enabled: false, randomize_percent: 50, auto_strength_factor: 1, strength: 20, noise_insert: "noise on beginning steps", steps_switchover_percent: 25, mask_starts_at: "beginning", mask_percent: 0, noise_distribution: "uniform", granularity: "values" };
 }
@@ -20,17 +20,18 @@ function randomDualFromSettings(settings = {}) {
   if (explicit && typeof explicit === "object") return Object.fromEntries(RANDOM_DUAL_KEYS.map(key => [key, explicit[key] ?? randomDualDefaults()[key]]));
   return { ...randomDualDefaults(), switch_step: 15, scale: settings.upscalers?.latent?.scale_by ?? 1.5,
     second_cfg: settings.cfg ?? 4, second_sampler_name: settings.sampler_name || "er_sde",
-    second_scheduler: settings.scheduler || "simple", upscale_method: settings.upscalers?.latent?.upscale_method || "bilinear" };
+    second_scheduler: settings.scheduler || "simple", upscale_method: settings.upscalers?.latent?.upscale_method || "bilinear",
+    model_format: settings.upscalers?.latent?.model_format || "Wan 2.1", half_precision: settings.upscalers?.latent?.half_precision ?? true };
 }
 function randomWorkbenchDefaultSettings(profile = "anima") {
   const settings = JSON.parse(JSON.stringify(profileSettingsDefaults(profile)));
-  const upscalers = normalizeUpscalers(settings.upscalers, null, profile, settings.pipeline_version ?? 4);
+  const upscalers = normalizeUpscalers(settings.upscalers, null, profile, 5);
   Object.assign(upscalers.latent, { upscale_method: "sesqui", model_format: "Wan 2.1", half_precision: true, scale_by: 1.5 });
   Object.assign(upscalers.face_refine, { steps: 8, cfg_scale: 1, sampler: "res_2m_ode", scheduler: "beta57", denoise_strength: .3 });
   const mode = settings.base_mode === "dual_sampler" ? "dual_sampler" : "normal";
   const sampling = sharedSamplingDefaults(mode);
   delete sampling.seedMode; delete sampling.seed;
-  return { ...settings, ...sampling, pipeline_version: 4, base_mode: mode, model_profile: profile, workbench: "random", upscalers };
+  return { ...settings, ...sampling, pipeline_version: 5, base_mode: mode, model_profile: profile, workbench: "random", upscalers };
 }
 function sharedLatentFormat(value, fallback = "Wan 2.1") {
   return String(value || "").startsWith("legacy:") ? fallback : value || fallback;
@@ -47,6 +48,7 @@ function sharedLatentMethodChoice(element, method, format) {
 }
 function setRandomDualControls(settings) {
   const values = randomDualFromSettings(settings);
+  sharedParameterState.dualLegacy = settings.workbench !== "single" && settings.dual == null;
   sharedParameterState.dual = { ...values };
   for (const key of RANDOM_DUAL_KEYS) {
     const element = document.getElementById(`random_dual_${key}`);
@@ -56,6 +58,7 @@ function setRandomDualControls(settings) {
     else element.value = values[key];
   }
   sharedLatentMethodChoice(document.getElementById("random_dual_model_format"), values.upscale_method, values.model_format);
+  sharedParameterState.dualInitial = JSON.stringify(readRandomDualControls());
 }
 function readRandomDualControls() {
   return Object.fromEntries(RANDOM_DUAL_KEYS.map(key => {
@@ -63,6 +66,17 @@ function readRandomDualControls() {
     if (key === "model_format") return [key, sharedLatentFormat(element?.value, sharedParameterState.dual.model_format || "Wan 2.1")];
     return [key, element ? (element.type === "checkbox" ? element.checked : element.type === "number" ? Number(element.value) : element.value) : sharedParameterState.dual[key] ?? randomDualDefaults()[key]];
   }));
+}
+function readRandomDualSettings() {
+  const values = readRandomDualControls();
+  if (sharedParameterState.dualLegacy && JSON.stringify(values) === sharedParameterState.dualInitial) return null;
+  return values;
+}
+function refreshInheritedDualControls() {
+  if (!sharedParameterState.dualLegacy || readRandomDualSettings() !== null) return;
+  setRandomDualControls({ dual: null, cfg: Number(ui.cfg.value), sampler_name: ui.sampler_name.value, scheduler: ui.scheduler.value,
+    upscalers: { latent: { scale_by: Number(ui.latent_upscale_scale.value), upscale_method: ui.latent_upscale_method.value,
+      ...sharedParameterState.latent } } });
 }
 function sharedParametersApply(settings, raw = settings) {
   sharedParameterState.applying = true;
@@ -85,7 +99,7 @@ function sharedParametersApply(settings, raw = settings) {
 function sharedSamplingCapture() {
   return { steps: Number(ui.steps.value), cfg: Number(ui.cfg.value), sampler_name: ui.sampler_name.value, scheduler: ui.scheduler.value,
     base_denoise: Number(ui.base_denoise?.value ?? 1), krea_variance: { ...sharedParameterState.krea_variance, enabled: Boolean(ui.krea_variance_enabled?.checked) },
-    dual: readRandomDualControls(), seedMode: document.getElementById("singleSeedMode")?.value || "fixed", seed: document.getElementById("singleSampleSeed")?.value || "0" };
+    dual: readRandomDualSettings(), dualDisplay: readRandomDualControls(), seedMode: document.getElementById("singleSeedMode")?.value || "fixed", seed: document.getElementById("singleSampleSeed")?.value || "0" };
 }
 function sharedSamplingDrafts() {
   if (sharedParameterState.activeMode) sharedParameterState.modes[sharedParameterState.activeMode] = sharedSamplingCapture();
@@ -104,7 +118,8 @@ function sharedSamplingModeChanged() {
   for (const key of ["steps", "cfg", "sampler_name", "scheduler", "base_denoise"]) setControl(key, next[key]);
   sharedParameterState.krea_variance = { ...sharedKreaDefaults(), ...next.krea_variance };
   setControl("krea_variance_enabled", sharedParameterState.krea_variance.enabled);
-  setRandomDualControls({ dual: next.dual });
+  setRandomDualControls({ dual: next.dual ?? next.dualDisplay });
+  if (next.dual == null && next.dualDisplay) sharedParameterState.dualLegacy = true;
   const seedMode = document.getElementById("singleSeedMode"), seed = document.getElementById("singleSampleSeed");
   if (seedMode) seedMode.value = next.seedMode || "fixed";
   if (seed) seed.value = next.seed ?? "0";
@@ -113,6 +128,8 @@ function sharedSamplingModeChanged() {
 }
 function sharedParameterVisibility() {
   const dual = ui.base_mode.value === "dual_sampler";
+  const single = typeof singleWorkbenchActive === "function" && singleWorkbenchActive();
+  const img2img = single && typeof singleWorkbenchState !== "undefined" && singleWorkbenchState.generationMode === "img2img";
   const panel = document.getElementById("randomDualSection");
   if (panel) {
     panel.hidden = !dual;
@@ -131,8 +148,23 @@ function sharedParameterVisibility() {
     const field = id === "singleSeedControls" ? node : node?.closest?.("label");
     if (field?.style) field.style.order = String(index);
   }
-  for (const [id, title] of [["steps", dual ? "总步数" : "步数"], ["cfg", dual ? "CFG 1" : "CFG"], ["sampler_name", dual ? "采样器 1" : "采样器"], ["scheduler", dual ? "调度器 1" : "调度器"]]) {
+  for (const [id, title] of [["steps", dual ? "第一轮步数" : "步数"], ["cfg", dual ? "CFG 1" : "CFG"], ["sampler_name", dual ? "采样器 1" : "采样器"], ["scheduler", dual ? "调度器 1" : "调度器"]]) {
     const label = ui[id]?.closest?.("label")?.querySelector("span"); if (label) label.textContent = title;
+  }
+  const dualFormat = document.getElementById("random_dual_model_format");
+  const dualFormatLabel = dualFormat?.closest?.("label")?.querySelector("span");
+  if (dualFormatLabel) dualFormatLabel.textContent = String(dualFormat.value).startsWith("legacy:") ? "旧放大算法" : "潜空间格式";
+  const dualHint = document.getElementById("dualSamplingHint");
+  if (dualHint) {
+    dualHint.hidden = !dual;
+    const stepsText = String(ui.steps.value).trim();
+    const startText = String(document.getElementById("random_dual_switch_step")?.value ?? "").trim();
+    const steps = Number(stepsText), start = Number(startText);
+    const valid = stepsText !== "" && startText !== "" && Number.isInteger(steps) && steps >= 1 && steps <= 150
+      && Number.isInteger(start) && start >= 0 && start < steps;
+    dualHint.textContent = valid
+      ? `第一轮 0→${steps}；第二轮 ${start}→${steps}；计划 ${steps}＋${steps - start}＝${steps * 2 - start} 步。`
+      : "请填写有效步数；第二轮起始步须小于第一轮步数。";
   }
   const kreaToggle = ui.krea_variance_enabled;
   if (kreaToggle && typeof currentProfile === "function") {
@@ -141,8 +173,10 @@ function sharedParameterVisibility() {
     kreaToggle.title = supported ? "" : "仅适用于 Krea 2";
     const label = kreaToggle.closest?.("label"); if (label) label.title = kreaToggle.title;
   }
-  const denoise = ui.base_denoise?.closest?.("label"); if (denoise) denoise.hidden = dual;
-  if (ui.base_denoise) ui.base_denoise.disabled = dual;
+  const denoise = ui.base_denoise?.closest?.("label"); if (denoise) denoise.hidden = dual || img2img;
+  if (ui.base_denoise) ui.base_denoise.disabled = dual || img2img;
+  const inputDenoise = document.getElementById("single_denoise");
+  if (inputDenoise) inputDenoise.disabled = !img2img || dual;
   const method = ui.latent_upscale_method.value;
   const sesqui = method === "sesqui";
   const schema = typeof resources !== "undefined" ? resources.node_inputs?.[sesqui ? "SesquiLatentUpscale" : "LatentUpscaleBy"] : null;
@@ -156,6 +190,7 @@ function sharedParameterVisibility() {
   if (seedMode) seedMode.disabled = false;
   if (seed) seed.disabled = seedMode?.value !== "fixed";
   const roll = document.getElementById("singleRollSeed"); if (roll) roll.disabled = false;
+  const seedHint = document.getElementById("sampleSeedHint"); if (seedHint) seedHint.hidden = single;
 }
 function sharedParameterResources() {
   for (const [key, choices] of [["second_sampler_name", resources.samplers], ["second_scheduler", resources.schedulers]]) {
@@ -181,14 +216,16 @@ function sharedParameterResourceIssues(settings) {
   const issues = [];
   if (settings.krea_variance?.enabled && settings.model_profile && settings.model_profile !== "krea2") issues.push("K2 多样性增强仅适用于 Krea 2，请关闭该选项");
   if (typeof resourcesLoaded === "undefined" || !resourcesLoaded) return issues;
-  const post = settings.upscalers || {};
+  const version = Number(settings.pipeline_version ?? 2);
+  const post = normalizeUpscalers(settings.upscalers, null, settings.model_profile || "anima", version);
+  if (version === 2) { post.pixel_hires.enabled = false; post.post_sampler.enabled = post.latent.enabled && post.latent.second_sampler.enabled; }
   const available = Array.isArray(resources.node_types) && resources.node_types.length ? new Set(resources.node_types) : null;
   const requireNodes = (enabled, label, names) => { if (enabled && available) for (const name of names) if (!available.has(name)) issues.push(`${label}节点不可用：${name}`); };
-  requireNodes(post.pixel_hires?.enabled, "像素高清", ["UpscaleModelLoader", "ImageUpscaleWithModel", ...(!post.post_sampler?.enabled ? ["ImageScaleBy"] : [])]);
+  requireNodes(post.pixel_hires?.enabled, "像素高清", ["UpscaleModelLoader", "ImageUpscaleWithModel", ...(version >= 5 || !post.post_sampler?.enabled ? ["ImageScaleBy"] : [])]);
   requireNodes(post.nvidia?.enabled, "N 卡 VSR", ["RTXVideoSuperResolution"]);
   requireNodes(post.dlss?.enabled, "DLSS", ["DLSS5NeuralRender"]);
   requireNodes(post.post_sampler?.enabled, "整图后采样", ["KSampler"]);
-  if (Number(settings.pipeline_version ?? 4) >= 4 && post.latent?.enabled) {
+  if (version >= 4 && post.latent?.enabled) {
     requireNodes(true, "潜空间放大", [post.latent.upscale_method === "sesqui" ? "SesquiLatentUpscale" : "LatentUpscaleBy", "KSampler"]);
     if (!(resources.samplers || []).includes(post.latent.sampler?.sampler_name)) issues.push(`潜空间采样器不可用：${post.latent.sampler?.sampler_name || "未选择"}`);
     if (!(resources.schedulers || []).includes(post.latent.sampler?.scheduler)) issues.push(`潜空间调度器不可用：${post.latent.sampler?.scheduler || "未选择"}`);
@@ -227,19 +264,11 @@ function adaptPostprocessSettings(settings, source, targetWorkbench) {
     settings.upscalers.nvidia.dlss = { ...source.single.dlss }; delete settings.upscalers.nvidia.dlss.enabled;
   }
   const profile = source?.model_profile || settings.model_profile || "anima";
-  settings.upscalers = normalizeUpscalers(settings.upscalers || source?.upscalers, null, profile);
-  if (Number(source?.pipeline_version ?? 2) < 3) {
-    const migrated = normalizeUpscalers(source?.upscalers, null, profile, 2);
-    settings.upscalers.post_sampler = migrated.post_sampler;
-    settings.upscalers.dlss = { ...migrated.dlss, ...(!source?.upscalers?.nvidia?.dlss ? source?.single?.dlss || {} : {}), enabled: migrated.dlss.enabled };
-    if (source?.hires && !source.upscalers) {
-      settings.upscalers.pixel_hires = { ...defaultUpscalers(profile).pixel_hires, ...source.hires };
-      settings.upscalers.latent.enabled = false;
-      settings.upscalers.post_sampler = { ...defaultUpscalers(profile).post_sampler, ...(source.second_sampler || {}) };
-    }
-  }
-  if (Number(source?.pipeline_version ?? 2) < 4) settings.upscalers.latent.sampler = clone(defaultUpscalers(profile).latent.sampler);
-  settings.pipeline_version = 4;
+  // Cross-workbench editing changes the editor, not the pipeline contract.
+  settings.upscalers = normalizeUpscalers(settings.upscalers || source?.upscalers, null, profile, 5);
+  settings.pipeline_version = Number(source?.pipeline_version ?? 2);
+  if (settings.pipeline_version < 4 && !source?.upscalers?.latent?.sampler) delete settings.upscalers.latent.sampler;
+  if (targetWorkbench === "random" && !sourceSingle) settings.dual = source?.dual == null ? null : clone(source.dual);
   return settings;
 }
 function initializeSharedParameters() {
@@ -247,7 +276,8 @@ function initializeSharedParameters() {
   if (seed && base) base.append(seed);
   ui.base_mode.addEventListener("change", sharedSamplingModeChanged);
   ui.krea_variance_enabled?.addEventListener("change", () => { sharedParameterVisibility(); updateRepairControls(); schedulePersist(); });
-  for (const key of RANDOM_DUAL_KEYS) document.getElementById(`random_dual_${key}`)?.addEventListener("change", () => { sharedParameterVisibility(); schedulePersist(); });
+  for (const key of RANDOM_DUAL_KEYS) document.getElementById(`random_dual_${key}`)?.addEventListener("change", () => { sharedParameterState.dualLegacy = false; sharedParameterVisibility(); schedulePersist(); });
+  document.getElementById("random_dual_switch_step")?.addEventListener("input", sharedParameterVisibility);
   for (const [id, target] of [["random_dual_model_format", "random_dual_upscale_method"]]) document.getElementById(id)?.addEventListener("change", () => {
     const selected = document.getElementById(id).value;
     ensureSelectValue(document.getElementById(target), selected.startsWith("legacy:") ? selected.slice(7) : "sesqui");

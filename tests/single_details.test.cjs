@@ -102,6 +102,15 @@ test('v4 details show the new stage order and distinct latent sampling with its 
   const random = new Map(context().singleDetailData(saved).repairs[1].rows);
   assert.equal(random.get('缩放方法'), 'sesqui'); assert.equal(random.get('模型格式'), 'Wan 2.1');
 });
+test('v5 history reports the saved shrink percentage even with post sampling enabled', () => {
+  const saved = record(); saved.settings.pipeline_version = 5;
+  saved.settings.upscalers.pixel_hires = { enabled: true, percent: 37 };
+  saved.settings.upscalers.post_sampler = { enabled: true };
+  const before = JSON.stringify(saved), data = context().singleDetailData(saved);
+  assert.equal(new Map(data.repairs.find(stage => stage.title === '像素高清').rows).get('缩图比例'), '37%');
+  assert.equal(new Map(data.basic).get('工作流版本'), 'v5');
+  assert.equal(JSON.stringify(saved), before);
+});
 
 test('dual noise and actual Sesqui and VAE settings are retained in collapsed historical groups', () => {
   const saved = record(); saved.settings.base_mode = 'dual_sampler';
@@ -134,16 +143,17 @@ test('enabled repair snapshots expose saved low-frequency parameters in executio
     enable_pre_upscale: true, upscaler_model: 'saved-model', blend_softness: 6, mask_expansion: 3, sampling_mask_blur_size: 13,
     sampling_mask_blur_strength: 0, enable_segmentation: false, offload_models_to_cpu: true };
   const data = context().singleDetailData(saved);
-  assert.deepEqual(Array.from(data.repairs, stage => stage.title), ['潜空间放大', '脸部细化', 'SeedVR2', 'N 卡放大']);
+  assert.deepEqual(Array.from(data.repairs, stage => stage.title), ['潜空间放大', 'SeedVR2', 'N 卡放大', '脸部细化']);
   const latent = data.repairs[0].otherGroups.find(group => group.title === '潜空间 VAE 编码');
   assert.equal(latent.rows.length, 1, 'disabled tiling must not present unused saved tile sizes as effective');
   assert.equal(latent.rows[0][1], false);
-  const seed = data.repairs[2];
+  const seed = data.repairs.find(stage => stage.title === 'SeedVR2');
   assert.equal(new Map(seed.otherGroups.find(group => group.title === 'SeedVR2 VAE 编码').rows).get('空间分块大小'), 640);
   assert.equal(new Map(seed.otherGroups.find(group => group.title === 'SeedVR2 VAE 解码').rows).get('空间分块大小'), 896);
-  const dlss = new Map([...data.repairs[3].rows, ...data.repairs[3].otherGroups[0].rows]);
+  const nvidia = data.repairs.find(stage => stage.title === 'N 卡放大');
+  const dlss = new Map([...nvidia.rows, ...nvidia.otherGroups[0].rows]);
   assert.equal(dlss.get('局部光影'), 0); assert.equal(dlss.get('输出视图'), '左右对比');
-  const faceGroups = data.repairs[1].otherGroups;
+  const faceGroups = data.repairs.find(stage => stage.title === '脸部细化').otherGroups;
   assert.equal(new Map(faceGroups.find(group => group.title === '检测与裁切').rows).get('脸部选择'), 0);
   assert.equal(new Map(faceGroups.find(group => group.title === '预放大').rows).get('预放大模型'), 'saved-model');
   assert.equal(new Map(faceGroups.find(group => group.title === '蒙版与融合').rows).get('采样蒙版模糊强度'), 0);

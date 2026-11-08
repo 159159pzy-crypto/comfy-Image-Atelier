@@ -22,6 +22,7 @@ function setup() {
     SECTIONS: ['character', 'clothing', 'pose', 'background', 'expression'],
     profileStateFrom: settings => ({ modes: {}, counts: {}, fixed: {}, pools: plain(settings.pools || {}) }),
     profileConfig: () => ({}), currentProfile: () => 'anima',
+    readSettings: () => ({ workbench: 'single', model_profile: 'anima' }),
     // The server must retain secondary defaults for historical compatibility.
     config: { single_defaults: { latent: { pipeline: 'secondary' }, face_pipeline: 'secondary' } },
     ui: { detailDialog: { close() {} } }, closeImagePreview() {}, toast() {},
@@ -70,6 +71,51 @@ function historyRecord(workbench) {
     },
   };
 }
+
+test('failed normalization preserves the editor and never begins reference import', async () => {
+  const h = setup(); const messages = []; let requests = 0;
+  h.ctx.canonicalizeWorkflowSettings = async () => { throw new Error('invalid saved scale'); };
+  h.ctx.request = async () => { requests++; return {}; };
+  h.ctx.toast = message => messages.push(message);
+  await h.ctx.singleWorkbenchFromHistory(historyRecord('random'), true);
+  assert.equal(requests, 0); assert.equal(h.imported.length, 0); assert.equal(h.saved.length, 0);
+  assert.match(messages[0], /invalid saved scale/); assert.equal(h.state.historyTransferBusy, false);
+});
+
+test('a changed editor or detail rejects late normalization before history transfer', async () => {
+  for (const change of ['profile', 'detail', 'settings']) {
+    const h = setup(); let resolve; let profile = 'anima', draft = { cfg: 4 };
+    h.ctx.currentProfile = () => profile; h.ctx.readSettings = () => draft;
+    h.ctx.canonicalizeWorkflowSettings = () => new Promise(yes => { resolve = yes; });
+    const record = historyRecord('random'); h.ctx.selectedRecord = record; h.ctx.detailContext = {};
+    const task = h.ctx.singleWorkbenchFromHistory(record);
+    if (change === 'profile') profile = 'krea2';
+    if (change === 'detail') h.ctx.detailContext = {};
+    if (change === 'settings') draft = { cfg: 7 };
+    resolve(record.settings); await task;
+    assert.equal(h.imported.length, 0, change);
+  }
+});
+
+test('the latest history normalization wins and both requests retain source versions', async () => {
+  const h = setup(); const pending = [];
+  h.ctx.canonicalizeWorkflowSettings = settings => new Promise(resolve => pending.push(() => resolve(settings)));
+  const a = historyRecord('random'), b = historyRecord('random'); a.settings.pipeline_version = 2; b.settings.pipeline_version = 3;
+  const first = h.ctx.singleWorkbenchFromHistory(a), second = h.ctx.singleWorkbenchFromHistory(b);
+  pending[1](); await second; pending[0](); await first;
+  assert.equal(h.imported.length, 1); assert.equal(h.imported[0].settings.pipeline_version, 3);
+});
+
+test('preset and restore normalization cannot overwrite a newly selected workbench', async () => {
+  for (const action of ['singleWorkbenchApplyPreset', 'singleWorkbenchRestoreHistory']) {
+    const h = setup(); let resolve;
+    h.ctx.canonicalizeWorkflowSettings = settings => new Promise(yes => { resolve = () => yes(settings); });
+    const record = historyRecord('random');
+    const task = h.ctx[action](record);
+    h.state.mode = 'random'; resolve();
+    assert.equal(await task, false); assert.equal(h.imported.length, 0);
+  }
+});
 
 test('sending random history into single uses the unified defaults and keeps its image parameters', async () => {
   const { ctx, imported, layouts, elements, saved } = setup();

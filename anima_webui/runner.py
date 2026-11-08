@@ -125,6 +125,11 @@ class BatchManager:
         self._preview_seq = 0
         self._preview_epoch = 0
         self._submitted_node_stages: dict[str, tuple[str, str]] = {}
+        self._cancel_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
+        # Keep text-job cancellation evidence after the next queued job starts.
+        # This is process-local state; no cancellation outcome is inferred from
+        # a persisted local "cancelled" status after a server restart.
+        self._prompt_cancel_states: dict[str, dict[str, str]] = {}
         # start 里的资源校验要 await 多次 ComfyUI 请求,期间若不上锁,
         # 第二个并发 start 也能通过 active() 检查并启动重复批次。
         self._start_lock = asyncio.Lock()
@@ -170,6 +175,8 @@ class BatchManager:
                         if isinstance(result, Exception):
                             logger.warning("关闭时任务收尾失败: %s", result)
             finally:
+                if self._cancel_tasks:
+                    await asyncio.gather(*self._cancel_tasks.values(), return_exceptions=True)
                 self._stop_monitor()
                 if self._monitor_tasks:
                     await asyncio.gather(*self._monitor_tasks, return_exceptions=True)
@@ -638,9 +645,10 @@ class BatchManager:
     async def _begin_prompt_preview(self, job: dict[str, Any]) -> None:
         self.stop_requested = False
         self._clear_preview()
+        self._cancel_tasks = {key: task for key, task in self._cancel_tasks.items() if not task.done()}
         self.state = {"id": job["id"], "kind": "prompt_preview", "stage": "prompt_processing",
                       "status": "running", "total": 1, "current": 1, "completed": 0,
-                      "prompt_id": "", "error": "", "settings": job["settings"]}
+                      "prompt_id": "", "error": "", "cancel_state": "not_requested", "settings": job["settings"]}
         self.task = asyncio.create_task(self._run_prompt_preview(job))
         self.task.add_done_callback(lambda _: self._wake_prompt_cache())
         self._ensure_monitor()
@@ -762,7 +770,16 @@ class BatchManager:
         async with self._start_lock:
             result = await self._cancel_prompt_preview(job_id)
             self._wake_prompt_cache()
-            return result
+            return self.prompt_job_snapshot(result)
+
+    def prompt_job_snapshot(self, job: dict[str, Any]) -> dict[str, Any]:
+        fields = ("cancel_state", "cancel_warning")
+        cached = self._prompt_cancel_states.get(job["id"], {})
+        result = {**job, **{key: cached[key] for key in fields if key in cached}}
+        state = self.state
+        if state and state.get("id") == job["id"] and state.get("kind") == "prompt_preview":
+            result.update({key: state[key] for key in fields if key in state})
+        return result
 
     def _wake_prompt_cache(self) -> None:
         cache = getattr(self.imported_images, "prompt_cache", None)
@@ -951,6 +968,7 @@ class BatchManager:
         self.stop_requested = False
         self._clear_preview()
         self._submitted_node_stages = {}
+        self._cancel_tasks = {key: task for key, task in self._cancel_tasks.items() if not task.done()}
         self.state = {
             "id": batch_id,
             "kind": "generation",
@@ -961,6 +979,7 @@ class BatchManager:
             "current": 0,
             "prompt_id": "",
             "error": "",
+            "cancel_state": "not_requested",
             "settings": settings,
         }
         await self.history.create_batch(batch_id, settings["count"], settings)
@@ -1473,41 +1492,69 @@ class BatchManager:
             await asyncio.sleep(2.0)
 
     async def _interrupt_current(self) -> None:
-        """停止时尽力中断 ComfyUI 正在渲染的任务;失败不影响批次收尾。"""
+        """Share cancellation and queue confirmation for one owned prompt."""
+        state = self.state
+        if state is None:
+            return
+        prompt_id = state.get("prompt_id")
+        if not prompt_id:
+            state["cancel_state"] = "not_requested"
+            return
+        key = (str(state.get("id", "")), prompt_id)
+        task = self._cancel_tasks.get(key)
+        if task is None:
+            state["cancel_state"] = "pending"
+            job_id = key[0] if state.get("kind") == "prompt_preview" else None
+            if job_id is not None:
+                self._prompt_cancel_states[job_id] = {"prompt_id": prompt_id, "cancel_state": "pending"}
+            task = asyncio.create_task(self._cancel_prompt_for_state(state, prompt_id, job_id))
+            self._cancel_tasks[key] = task
+        await asyncio.shield(task)
+
+    async def _cancel_prompt_for_state(self, state: dict[str, Any], prompt_id: str,
+                                     job_id: str | None = None) -> None:
+        warning = ""
         try:
             async with asyncio.timeout(CANCEL_PROMPT_TIMEOUT):
-                await self._cancel_current_prompt()
-        except (ComfyError, asyncio.TimeoutError) as error:
-            warning = ("取消请求未确认，远端任务可能继续执行；请在 ComfyUI 中检查"
-                       if (self.state or {}).get("kind") == "prompt_preview"
-                       else str(error) or "取消请求超时，远端任务可能继续执行")
-            if self.state is not None:
-                self.state["cancel_warning"] = warning
+                await self._cancel_current_prompt(prompt_id, state.get("kind", "generation"))
+        except (ComfyError, asyncio.TimeoutError):
+            warning = "取消请求未确认，远端任务可能继续执行；请在 ComfyUI 中检查"
             logger.warning("ComfyUI 任务取消未确认；本地任务将继续收尾: %s", warning)
+        outcome = {"cancel_state": "unconfirmed" if warning else "confirmed"}
+        if warning:
+            outcome["cancel_warning"] = warning
+        if (job_id is not None
+                and self._prompt_cancel_states.get(job_id, {}).get("prompt_id") == prompt_id):
+            self._prompt_cancel_states[job_id] = {"prompt_id": prompt_id, **outcome}
+        if self.state is state and state.get("prompt_id") == prompt_id:
+            state.update(outcome)
+            if not warning:
+                state.pop("cancel_warning", None)
 
-    async def _cancel_current_prompt(self) -> None:
+    async def _cancel_current_prompt(self, prompt_id: str, kind: str) -> None:
         cancel = getattr(self.comfy, "cancel_prompt", None)
-        prompt_id = (self.state or {}).get("prompt_id")
         if cancel is not None:
-            if prompt_id:
-                await cancel(prompt_id)
-                queued = getattr(self.comfy, "prompt_queued", None)
-                if queued:
-                    for _ in range(40):
-                        if not await queued(prompt_id):
-                            break
-                        await asyncio.sleep(0.1)
-                    else:
-                        raise ComfyError("取消请求后任务仍在 ComfyUI 队列中，远端任务可能继续执行")
-            return
-        if (self.state or {}).get("kind") == "prompt_preview":
+            await cancel(prompt_id)
+        elif kind == "prompt_preview":
             # Text jobs must never fall back to a global interrupt, even with
             # an older/custom client that cannot cancel a specific prompt.
-            return
-        interrupt = getattr(self.comfy, "interrupt", None)
-        if interrupt is None:
-            return
-        await interrupt()
+            raise ComfyError("当前客户端不支持按任务取消")
+        else:
+            interrupt = getattr(self.comfy, "interrupt", None)
+            if interrupt is None:
+                raise ComfyError("当前客户端不支持取消任务")
+            await interrupt()
+        queued = getattr(self.comfy, "prompt_queued", None)
+        if queued is None:
+            raise ComfyError("当前客户端不能确认 ComfyUI 队列状态")
+        for _ in range(40):
+            present = await queued(prompt_id)
+            if present is False:
+                return
+            if present is not True:
+                raise ComfyError("当前客户端返回了无效的队列确认结果")
+            await asyncio.sleep(0.1)
+        raise ComfyError("取消请求后任务仍在 ComfyUI 队列中")
 
     def _resolve_regeneration(
         self,

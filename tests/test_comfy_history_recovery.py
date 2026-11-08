@@ -57,7 +57,7 @@ class HistoryRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_retry_budget_resets_only_after_a_complete_healthy_poll(self):
         # Five failures, then a healthy empty-history + running-queue cycle,
         # followed by another outage. Each outage gets its own five retries.
-        self.replies = ([503] * 5 + [{}, {'queue_running': [[0, 'owned']]}]
+        self.replies = ([503] * 5 + [{}, {'queue_running': [[0, 'owned']], 'queue_pending': []}]
                         + [503] * 5 + [{'owned': self.entry}])
         with patch.object(self.client, '_history_delay', new_callable=AsyncMock) as delay:
             result = await self.client.wait_for_history('owned')
@@ -94,11 +94,15 @@ class HistoryRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_malformed_queue_and_history_shapes_fail_without_retry(self):
         cases = [
+            [{}, {}],
+            [{}, {'queue_running': []}],
+            [{}, {'queue_pending': []}],
             [{}, {'queue_running': {}, 'queue_pending': []}],
-            [{}, {'queue_running': None}],
-            [{}, {'queue_pending': 'owned'}],
-            [{}, {'queue_pending': [['incomplete']]}],
-            [{}, {'queue_running': [[0, {'id': 'owned'}]]}],
+            [{}, {'queue_running': None, 'queue_pending': []}],
+            [{}, {'queue_running': [], 'queue_pending': 'owned'}],
+            [{}, {'queue_running': [], 'queue_pending': [['incomplete']]}],
+            [{}, {'queue_running': [[0, {'id': 'owned'}]], 'queue_pending': []}],
+            [{}, {'queue_running': [[0, 'owned']], 'queue_pending': None}],
             [{'owned': []}],
             [{'owned': None}],
             [{'owned': {'status': []}}],
@@ -117,11 +121,33 @@ class HistoryRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 delay.assert_not_awaited()
                 self.assertEqual(len(self.calls), len(replies))
 
-    async def test_legacy_missing_status_and_queue_fields_remain_valid(self):
-        self.replies = [{}, {}, {'owned': {'outputs': {}}}]
+    async def test_legacy_missing_history_status_remains_valid(self):
+        self.replies = [{}, {'queue_running': [], 'queue_pending': []}, {'owned': {'outputs': {}}}]
         result = await self.client.wait_for_history('owned')
         self.assertEqual(result, {'outputs': {}})
         self.assertEqual(len(self.calls), 3)
+
+    async def test_cancel_acknowledgement_requires_complete_valid_queue_response(self):
+        for queue in ({}, {'queue_running': []}, {'queue_pending': []},
+                      {'queue_running': [], 'queue_pending': None},
+                      {'queue_running': [], 'queue_pending': []}):
+            with self.subTest(queue=queue), tempfile.TemporaryDirectory() as directory:
+                history = HistoryStore(Path(directory) / 'history.sqlite3')
+                manager = BatchManager(runner_fixtures.FakeTemplates(), history, self.client)
+                manager.state = {'id': 'batch', 'kind': 'generation', 'prompt_id': 'owned'}
+                self.calls.clear()
+                self.replies = [queue]
+                try:
+                    with patch.object(self.client, 'cancel_prompt', new_callable=AsyncMock) as cancel:
+                        await manager._interrupt_current()
+                        cancel.assert_awaited_once_with('owned')
+                    confirmed = queue == {'queue_running': [], 'queue_pending': []}
+                    self.assertEqual(manager.state['cancel_state'], 'confirmed' if confirmed else 'unconfirmed')
+                    self.assertEqual('cancel_warning' in manager.state, not confirmed)
+                    self.assertEqual(self.calls, [('GET', '/queue')])
+                finally:
+                    await manager.shutdown()
+                    await history.close()
 
     async def test_stop_interrupts_pending_read(self):
         started = asyncio.Event()

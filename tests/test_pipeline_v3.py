@@ -210,7 +210,7 @@ def test_versionless_history_and_explicit_upgrade_keep_effective_switches(templa
     original = {"upscalers": {"latent": {"enabled": False, "second_sampler": {"enabled": True}},
                               "nvidia": {"enabled": False}}, "single": {"dlss": {"enabled": True}}}
     before = copy.deepcopy(original)
-    assert DEFAULT_SETTINGS["pipeline_version"] == 4
+    assert DEFAULT_SETTINGS["pipeline_version"] == 5
     assert validate_settings(original)["pipeline_version"] == 2
     upgraded = upgrade_pipeline_settings(original)
     assert upgraded["pipeline_version"] == 4

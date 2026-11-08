@@ -59,6 +59,19 @@ test('fresh library metadata replaces stale classification before trigger reconc
   assert.equal(cached, fresh);
 });
 
+test('successful automatic LoRAs stay in image details without a generation notice', () => {
+  const ctx = load({escapeHtml: text => String(text)}, ['loraRuntimeSummary', 'loraRuntimeMarkup']);
+  for (const count of [1, 3]) {
+    const runtime = {version: 1, applied: Array.from({length: count}, (_, i) =>
+      ({character_name: `Character ${i}`, filename: `bound-${i}.safetensors`, strength: .8})), skipped: []};
+    assert.equal(ctx.loraRuntimeSummary(runtime), '');
+    const markup = ctx.loraRuntimeMarkup(runtime);
+    assert.match(markup, /人物自动启用/);
+    for (const applied of runtime.applied) assert.ok(markup.includes(applied.filename));
+    assert.match(ctx.loraRuntimeSummary(runtime, 2), /累计跳过 2/);
+  }
+});
+
 test('runtime feedback keeps skipped reasons visible and escapes model metadata', () => {
   const ctx = load({escapeHtml: text => String(text).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')},
     ['loraRuntimeSummary', 'loraRuntimeMarkup']);
@@ -66,6 +79,7 @@ test('runtime feedback keeps skipped reasons visible and escapes model metadata'
     skipped: [{character_name: '<script>', filename: 'missing.safetensors', message: '文件不存在'}]};
   assert.match(ctx.loraRuntimeSummary(runtime, 3), /累计跳过 3/);
   assert.match(ctx.loraRuntimeSummary(runtime), /文件不存在/);
+  assert.doesNotMatch(ctx.loraRuntimeSummary(runtime, 3), /自动启用/);
   const markup = ctx.loraRuntimeMarkup(runtime);
   assert.ok(markup.includes('&lt;script&gt;'));
   assert.ok(!markup.includes('<script>'));

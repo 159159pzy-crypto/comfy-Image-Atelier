@@ -2,10 +2,11 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from anima_webui.history import HistoryStore
 from anima_webui.runner import BatchConflict, BatchManager
+from anima_webui.comfy import ComfyError
 from anima_webui.workflow import DEFAULT_SETTINGS
 from test_runner import FakeComfy, FakeTemplates
 
@@ -205,3 +206,163 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(self.manager._interrupt_current(), 1)
         self.assertTrue(cancel_started.is_set())
         self.assertIn("远端任务可能继续", self.manager.state["cancel_warning"])
+        self.assertEqual(self.manager.state["cancel_state"], "unconfirmed")
+
+    async def test_concurrent_and_repeated_cancel_share_one_confirmed_operation(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def cancel(prompt_id):
+            self.assertEqual(prompt_id, "owned")
+            entered.set()
+            await release.wait()
+
+        self.manager.state = {"id": "batch", "kind": "generation", "prompt_id": "owned",
+                              "cancel_warning": "previous unconfirmed warning"}
+        with patch.object(self.comfy, "cancel_prompt", AsyncMock(side_effect=cancel), create=True) as cancel_mock, \
+                patch.object(self.comfy, "prompt_queued", AsyncMock(return_value=False), create=True) as queued:
+            first = asyncio.create_task(self.manager._interrupt_current())
+            await entered.wait()
+            second = asyncio.create_task(self.manager._interrupt_current())
+            await asyncio.sleep(0)
+            self.assertEqual(self.manager.state["cancel_state"], "pending")
+            release.set()
+            await asyncio.gather(first, second)
+            await self.manager._interrupt_current()
+            cancel_mock.assert_awaited_once_with("owned")
+            queued.assert_awaited_once_with("owned")
+        self.assertEqual(self.manager.state["cancel_state"], "confirmed")
+        self.assertNotIn("cancel_warning", self.manager.state)
+
+    async def test_cancel_acknowledgement_without_queue_check_is_unconfirmed(self):
+        self.manager.state = {"id": "batch", "kind": "generation", "prompt_id": "owned"}
+        with patch.object(self.comfy, "cancel_prompt", AsyncMock(), create=True):
+            await self.manager._interrupt_current()
+        self.assertEqual(self.manager.state["cancel_state"], "unconfirmed")
+        self.assertIn("远端任务可能继续", self.manager.state["cancel_warning"])
+        self.assertFalse(self.comfy.interrupted)
+
+    async def test_failed_queue_read_does_not_confirm_remote_stop(self):
+        for result in (ComfyError("queue unavailable"), None):
+            self.manager.state = {"id": str(result), "kind": "generation", "prompt_id": "owned"}
+            query = AsyncMock(side_effect=result) if isinstance(result, Exception) else AsyncMock(return_value=result)
+            with patch.object(self.comfy, "cancel_prompt", AsyncMock(), create=True), \
+                    patch.object(self.comfy, "prompt_queued", query, create=True):
+                await self.manager._interrupt_current()
+            self.assertEqual(self.manager.state["cancel_state"], "unconfirmed")
+
+    async def test_cancelled_job_remaining_in_remote_queue_is_unconfirmed(self):
+        self.manager.state = {"id": "batch", "kind": "generation", "prompt_id": "owned"}
+        with patch.object(self.comfy, "cancel_prompt", AsyncMock(), create=True), \
+                patch.object(self.comfy, "prompt_queued", AsyncMock(return_value=True), create=True), \
+                patch("anima_webui.runner.CANCEL_PROMPT_TIMEOUT", 0.01):
+            await self.manager._interrupt_current()
+        self.assertEqual(self.manager.state["cancel_state"], "unconfirmed")
+
+    async def test_old_text_job_keeps_cancel_result_after_current_job_changes(self):
+        for confirmed in (False, True):
+            entered, release = asyncio.Event(), asyncio.Event()
+            job_id = f"old-{confirmed}"
+
+            async def cancel(_):
+                entered.set()
+                await release.wait()
+                if not confirmed:
+                    raise ComfyError("unavailable")
+
+            self.manager.state = {"id": job_id, "kind": "prompt_preview", "prompt_id": "old",
+                                  "cancel_warning": "previous warning"}
+            with patch.object(self.comfy, "cancel_prompt", cancel, create=True), \
+                    patch.object(self.comfy, "prompt_queued", AsyncMock(return_value=False), create=True):
+                stopping = asyncio.create_task(self.manager._interrupt_current())
+                await entered.wait()
+                self.assertEqual(self.manager.prompt_job_snapshot({"id": job_id})["cancel_state"], "pending")
+                self.manager.state = {"id": "new", "kind": "prompt_preview", "prompt_id": "new",
+                                      "cancel_state": "not_requested"}
+                release.set()
+                await stopping
+            snapshot = self.manager.prompt_job_snapshot({"id": job_id, "status": "cancelled"})
+            self.assertEqual(snapshot["cancel_state"], "confirmed" if confirmed else "unconfirmed")
+            self.assertEqual("cancel_warning" in snapshot, not confirmed)
+            self.assertNotIn("prompt_id", snapshot)  # Cache metadata is not an API field.
+            self.assertEqual(self.manager.prompt_job_snapshot({"id": "new"})["cancel_state"], "not_requested")
+            self.assertNotIn("cancel_warning", self.manager.state)
+
+    async def test_late_cancel_result_cannot_replace_newer_text_prompt_outcome(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def cancel(prompt_id):
+            if prompt_id == "old":
+                entered.set()
+                await release.wait()
+            else:
+                raise ComfyError("unavailable")
+
+        self.manager.state = {"id": "job", "kind": "prompt_preview", "prompt_id": "old"}
+        with patch.object(self.comfy, "cancel_prompt", cancel, create=True), \
+                patch.object(self.comfy, "prompt_queued", AsyncMock(return_value=False), create=True):
+            stopping = asyncio.create_task(self.manager._interrupt_current())
+            await entered.wait()
+            self.manager.state.update(prompt_id="new", cancel_state="not_requested")
+            await self.manager._interrupt_current()
+            release.set()
+            await stopping
+        self.manager.state = None
+        snapshot = self.manager.prompt_job_snapshot({"id": "job"})
+        self.assertEqual(snapshot["cancel_state"], "unconfirmed")
+        self.assertIn("远端任务可能继续", snapshot["cancel_warning"])
+
+    async def test_late_cancel_result_does_not_modify_another_batch_or_prompt(self):
+        for replace_state in (False, True):
+            entered, release = asyncio.Event(), asyncio.Event()
+
+            async def cancel(_):
+                entered.set()
+                await release.wait()
+
+            self.manager.state = {"id": str(replace_state), "kind": "generation", "prompt_id": "old"}
+            with patch.object(self.comfy, "cancel_prompt", cancel, create=True), \
+                    patch.object(self.comfy, "prompt_queued", AsyncMock(return_value=False), create=True):
+                stopping = asyncio.create_task(self.manager._interrupt_current())
+                await entered.wait()
+                if replace_state:
+                    self.manager.state = {"id": "new", "prompt_id": "new", "cancel_state": "not_requested"}
+                else:
+                    self.manager.state.update(prompt_id="new", cancel_state="not_requested")
+                release.set()
+                await stopping
+            self.assertEqual(self.manager.state["cancel_state"], "not_requested")
+            self.assertNotIn("cancel_warning", self.manager.state)
+
+    async def test_stop_request_and_aborted_wait_cancel_owned_prompt_only_once(self):
+        self.comfy.block = asyncio.Event()
+        self.comfy.honor_abort = True
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def cancel(_):
+            entered.set()
+            await release.wait()
+
+        with patch.object(self.comfy, "cancel_prompt", AsyncMock(side_effect=cancel), create=True) as cancel_mock, \
+                patch.object(self.comfy, "prompt_queued", AsyncMock(return_value=False), create=True):
+            state = await self.manager.start({**DEFAULT_SETTINGS, "count": 2})
+            await self.submitted()
+            await self.manager.start({**DEFAULT_SETTINGS, "count": 1})
+            stopping = asyncio.create_task(self.manager.request_stop(state["id"]))
+            await entered.wait()
+            await asyncio.sleep(0)
+            self.assertEqual(self.manager.queue, [])
+            release.set()
+            await stopping
+            result = await self.manager.wait()
+            cancel_mock.assert_awaited_once_with("prompt-1")
+        self.assertEqual(result["status"], "stopped")
+        self.assertEqual(result["cancel_state"], "confirmed")
+        self.assertEqual(len(self.comfy.submissions), 1)
+
+    async def test_no_accepted_prompt_needs_no_remote_cancellation(self):
+        self.manager.state = {"id": "batch", "kind": "generation", "prompt_id": ""}
+        with patch.object(self.comfy, "cancel_prompt", AsyncMock(), create=True) as cancel:
+            await self.manager._interrupt_current()
+            cancel.assert_not_awaited()
+        self.assertEqual(self.manager.state["cancel_state"], "not_requested")
+        self.assertFalse(self.comfy.interrupted)

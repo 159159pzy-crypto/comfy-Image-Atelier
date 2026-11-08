@@ -474,6 +474,7 @@ if (missingUi.length) {
 let defaults = null;
 let config = { catalog: { counts: {} } };
 let currentBatch = null;
+let stopRequestId = "";
 let selectedRecord = null;
 let detailContext = null;
 const imagePreview = {
@@ -916,6 +917,14 @@ function normalizeProfileId(value) {
   const normalized = String(value || "").trim().toLowerCase();
   return normalized === "krea2" || normalized.includes("krea2") ? "krea2" : "anima";
 }
+// Rendering may expose legacy aliases; serialization retains the source contract.
+const pipelineContractState = { source: {}, version: 5, persistenceBlocked: false };
+function currentPipelineVersion() { return pipelineContractState.version; }
+async function canonicalizeWorkflowSettings(settings) {
+  const payload = await request("/api/settings/normalize", { method: "POST", body: JSON.stringify({ settings }) });
+  if (!payload?.settings || typeof payload.settings !== "object") throw new Error("设置校验未返回有效参数");
+  return payload.settings;
+}
 function defaultUpscalers(profile = "anima") {
   return {
     pixel_hires: { enabled: false, model_name: profile === "krea2" ? "4x-AnimeSharp.pth" : "4x_foolhardy_Remacri.pth", percent: 50, upscale_method: "lanczos" },
@@ -929,7 +938,7 @@ function defaultUpscalers(profile = "anima") {
     face_refine: { enabled: false, steps: 8, cfg_scale: 1, sampler: "res_2m_ode", scheduler: "beta57", denoise_strength: 0.3, face_selection: 0, detection_confidence: 0.75, manual_rotation: "None", processing_resolution: 1024, enable_pre_upscale: true, upscaler_model: "Fast 4x (Lanczos)", crop_padding: 1.6, face_positive_prompt: "", replace_positive_prompt: false, face_negative_prompt: "", replace_negative_prompt: false, exclusions: "", blend_softness: 8, mask_expansion: 2, sampling_mask_blur_size: 21, sampling_mask_blur_strength: 1, enable_color_correction: true, enable_segmentation: true, enable_differential_diffusion: true, enable_lightness_rescue: true, enable_final_refinement: true, offload_models_to_cpu: true },
   };
 }
-function normalizeUpscalers(value, fallback = null, profile = "anima", pipelineVersion = 4) {
+function normalizeUpscalers(value, fallback = null, profile = "anima", pipelineVersion = 5) {
   const base = clone(defaultUpscalers(profile));
   const raw = value && typeof value === "object" ? value : {};
   for (const source of [fallback || {}, raw]) for (const key of Object.keys(base)) {
@@ -943,23 +952,18 @@ function normalizeUpscalers(value, fallback = null, profile = "anima", pipelineV
     }
   }
   base.latent.enabled = Boolean(base.latent.enabled);
-  base.latent.scale_by = Number.isFinite(Number(base.latent.scale_by))
-    ? Math.max(0.01, Math.min(64, Number(base.latent.scale_by)))
-    : 1.5;
   base.seedvr2.enabled = Boolean(base.seedvr2.enabled);
   base.seedvr2.model_name = String(base.seedvr2.model_name || "");
   base.seedvr2.vae_name = String(base.seedvr2.vae_name || "");
-  base.seedvr2.scale_by = Number.isFinite(Number(base.seedvr2.scale_by)) ? Math.max(0.01, Math.min(64, Number(base.seedvr2.scale_by))) : 2;
   base.nvidia.enabled = Boolean(base.nvidia.enabled);
   // Ignore the deprecated v1 upscale-model choice. RTXVideoSuperResolution
   // uses the installed GPU/plugin directly and has no model-file input.
   delete base.nvidia.model_name;
   base.face_refine.enabled = Boolean(base.face_refine.enabled);
   if (Number(pipelineVersion) < 3) {
-    if (!raw.post_sampler) base.post_sampler = { ...base.post_sampler, ...(base.latent.enabled ? base.latent.second_sampler : {}), enabled: Boolean(base.latent.enabled && base.latent.second_sampler?.enabled) };
-    if (!raw.dlss) base.dlss = { ...base.dlss, ...base.nvidia.dlss, enabled: Boolean(base.nvidia.enabled) };
+    base.post_sampler = { ...base.post_sampler, ...base.latent.second_sampler };
+    base.dlss = { ...base.dlss, ...base.nvidia.dlss, enabled: Boolean(base.nvidia.enabled) };
   }
-  if (Number(pipelineVersion) < 4) base.latent.sampler = clone(defaultUpscalers(profile).latent.sampler);
   for (const key of ["pixel_hires", "post_sampler", "dlss"]) base[key].enabled = Boolean(base[key].enabled);
   return base;
 }
@@ -971,12 +975,12 @@ function profileDefaults(profile) {
 function profileSettingsDefaults(profile) {
   const id = normalizeProfileId(profile);
   const saved = defaults?.profile_settings?.[id] || defaults?.profiles?.[id]?.settings;
-  if (saved) return saved;
-  if (normalizeProfileId(defaults?.model_profile || "anima") === id) return defaults || {};
+  if (saved) return { ...saved, pipeline_version: 5 };
+  if (normalizeProfileId(defaults?.model_profile || "anima") === id) return { ...defaults, pipeline_version: 5 };
   const bound = profileConfig(id);
   return { ...defaults, ...bound.defaults, model_profile: id,
     ...Object.fromEntries(["model_name", "clip_name", "vae_name", "clip_type"].map(key => [key, bound[key] || ""])),
-    pipeline_version: 4, upscalers: normalizeUpscalers(null, null, id), loras: [], lora_managed_triggers: [], pools: defaultPools() };
+    pipeline_version: 5, upscalers: normalizeUpscalers(null, null, id), loras: [], lora_managed_triggers: [], pools: defaultPools() };
 }
 function defaultLorasForProfile(profile) {
   return clone(profileSettingsDefaults(profile)?.loras || []);
@@ -1014,10 +1018,11 @@ function saveCurrentProfileDraft() {
 }
 function profileSamplingState() {
   return {
-    pipeline_version: 4,
+    pipeline_version: currentPipelineVersion(),
+    sourceSettings: clone(pipelineContractState.source),
     model_name: ui.model_name?.value || "",
     base_mode: ui.base_mode?.value || "normal",
-    dual: typeof readRandomDualControls === "function" ? readRandomDualControls() : null,
+    dual: typeof readRandomDualSettings === "function" ? readRandomDualSettings() : null,
     steps: Number(ui.steps?.value || 0),
     cfg: Number(ui.cfg?.value || 0),
     sampler_name: ui.sampler_name?.value || "",
@@ -1048,14 +1053,15 @@ function restoreProfileDraft(profile, settings = {}, { preferStored = true } = {
     draft.modes = Object.fromEntries(SECTIONS.map((section) => [section, "off"]));
   }
   profileDrafts[normalizeProfileId(profile)] = {
-    pipeline_version: 4,
+    pipeline_version: (preferStored ? stored?.pipeline_version : undefined) ?? settings.pipeline_version ?? 2,
+    sourceSettings: clone((preferStored ? stored?.sourceSettings : null) || settings.sourceSettings || settings),
     ...clone(profileDraftFromDraft()),
     kreaPromptPoolEnabled: Boolean((preferStored ? stored?.kreaPromptPoolEnabled : undefined) ?? settings.krea_prompt_pool?.enabled),
     kreaPromptPoolSelection: [...((preferStored ? stored?.kreaPromptPoolSelection : null) || settings.krea_prompt_pool?.ids || [])],
     extra_prompt: (preferStored ? stored?.extra_prompt : undefined) ?? settings.extra_prompt ?? "",
     model_name: (preferStored ? stored?.model_name : undefined) ?? (sourceProfile === targetProfile ? settings.model_name : null) ?? profileConfig(profile).model_name ?? "",
     base_mode: (preferStored ? stored?.base_mode : undefined) ?? settings.base_mode,
-    dual: clone((preferStored ? stored?.dual : undefined) ?? settings.dual ?? null),
+    dual: clone(preferStored && stored && Object.prototype.hasOwnProperty.call(stored, "dual") ? stored.dual : settings.dual ?? null),
     steps: (preferStored ? stored?.steps : undefined) ?? settings.steps,
     cfg: (preferStored ? stored?.cfg : undefined) ?? settings.cfg,
     sampler_name: (preferStored ? stored?.sampler_name : undefined) ?? settings.sampler_name,
@@ -1085,6 +1091,8 @@ function switchProfileDraft(nextProfile, { applyDefaults = true } = {}) {
     ui.extra_prompt.value = source.extra_prompt || "";
   }
   const selectedState = profileDrafts[next] || profileSettingsDefaults(next);
+  pipelineContractState.version = Number(selectedState.pipeline_version ?? 2);
+  pipelineContractState.source = clone(selectedState.sourceSettings || selectedState);
   ensureSelectValue(ui.model_name, selectedState.model_name || profileConfig(next).model_name || "");
   if (applyDefaults) {
     const values = profileDefaults(next);
@@ -1145,7 +1153,8 @@ function normalizeSettings(raw) {
     merged.upscalers.latent.enabled = false;
     merged.upscalers.post_sampler = { ...defaultUpscalers(merged.model_profile).post_sampler, ...(raw?.second_sampler || {}) };
   }
-  merged.pipeline_version = 4;
+  merged.pipeline_version = Number(raw?.pipeline_version ?? 2);
+  merged.dual = clone(raw?.dual ?? null);
   if (raw?.detailers?.face && !raw?.upscalers?.face_refine) merged.upscalers.face_refine.enabled = true;
   const profile = profileConfig(merged.model_profile);
   if (!merged.upscalers.seedvr2.model_name) merged.upscalers.seedvr2.model_name = profile.seedvr2_model || "";
@@ -1215,15 +1224,26 @@ function setUpscalerControls(upscalers) {
   applyNodeResourceControls();
 }
 function readUpscalerControls() {
-  const result = {};
-  for (const [stage, fields] of Object.entries(UPSCALER_CONTROL_FIELDS)) result[stage] = Object.fromEntries(fields.map((field) => [field, controlValue(UPSCALER_CONTROL_IDS[stage][field])]));
-  result.post_sampler = { enabled: controlValue("latent_second_sampler_enabled"), ...readSamplerValues(POST_SAMPLER_IDS) };
-  result.latent.sampler = readSamplerValues(LATENT_SAMPLER_IDS);
+  const version = currentPipelineVersion();
+  const result = normalizeUpscalers(pipelineContractState.source.upscalers, null, currentProfile(), 5);
+  for (const [stage, fields] of Object.entries(UPSCALER_CONTROL_FIELDS)) {
+    if (stage === "dlss" && version === 2) continue;
+    Object.assign(result[stage], Object.fromEntries(fields.map((field) => [field, controlValue(UPSCALER_CONTROL_IDS[stage][field])])));
+  }
+  const post = { enabled: controlValue("latent_second_sampler_enabled"), ...readSamplerValues(POST_SAMPLER_IDS) };
+  if (version === 2) result.latent.second_sampler = { ...result.latent.second_sampler, ...post };
+  else result.post_sampler = { ...result.post_sampler, ...post };
+  if (version >= 4) result.latent.sampler = { ...result.latent.sampler, ...readSamplerValues(LATENT_SAMPLER_IDS) };
+  else if (!pipelineContractState.source.upscalers?.latent?.sampler) delete result.latent.sampler;
   if (typeof sharedParameterState !== "undefined") Object.assign(result.latent, sharedParameterState.latent);
   result.seedvr2.sampler = readSamplerValues(SEED_SAMPLER_IDS);
-  Object.assign(result.seedvr2, readTileValues());
+  for (const [group, values] of Object.entries(readTileValues())) result.seedvr2[group] = { ...result.seedvr2[group], ...values };
   if (ui.latent_model_format) result.latent.model_format = typeof sharedLatentFormat === "function" ? sharedLatentFormat(ui.latent_model_format.value, sharedParameterState.latent.model_format) : ui.latent_model_format.value;
-  if (typeof NVIDIA_DLSS_KEYS !== "undefined") result.dlss = { ...defaultUpscalers().dlss, ...sharedParameterState.dlss, ...result.dlss, ...Object.fromEntries(NVIDIA_DLSS_KEYS.map(key => [key, controlValue(`nvidia_dlss_${key}`)])) };
+  if (typeof NVIDIA_DLSS_KEYS !== "undefined") {
+    const values = { ...sharedParameterState.dlss, ...Object.fromEntries(NVIDIA_DLSS_KEYS.map(key => [key, controlValue(`nvidia_dlss_${key}`)])) };
+    if (version === 2) { result.nvidia.dlss = { ...result.nvidia.dlss, ...values }; delete result.nvidia.dlss.enabled; }
+    else result.dlss = { ...result.dlss, ...values };
+  }
   return result;
 }
 
@@ -1258,7 +1278,9 @@ function applySettings(raw, { useProfileDraft = false } = {}) {
   if (typeof invalidatePoolContext === "function") invalidatePoolContext();
   invalidatePromptNormalization();
   const settings = normalizeSettings(raw || defaults || {});
-  if (ui.pipelineUpgradeHint) ui.pipelineUpgradeHint.hidden = !raw || Number(raw.pipeline_version ?? 2) >= 4;
+  pipelineContractState.version = settings.pipeline_version;
+  pipelineContractState.source = { ...clone(settings), upscalers: clone(raw?.upscalers || settings.upscalers) };
+  showPipelineUpgradeNotice(settings);
   const previousProfile = currentProfile();
   activeProfileId = settings.model_profile;
   if (ui.model_profile) ui.model_profile.value = settings.model_profile;
@@ -1277,7 +1299,7 @@ function applySettings(raw, { useProfileDraft = false } = {}) {
   }
   ensureSelectValue(ui.sampler_name, settings.sampler_name);
   ensureSelectValue(ui.scheduler, settings.scheduler);
-  const upscalers = normalizeUpscalers(settings.upscalers);
+  const upscalers = normalizeUpscalers(settings.upscalers, null, settings.model_profile, settings.pipeline_version);
   setUpscalerControls(upscalers);
   if (typeof setRandomDualControls === "function") setRandomDualControls(settings);
   if (typeof sharedParametersApply === "function") sharedParametersApply(settings, raw);
@@ -1303,7 +1325,10 @@ function applySettings(raw, { useProfileDraft = false } = {}) {
 }
 
 function showPipelineUpgradeNotice(source) {
-  if (ui.pipelineUpgradeHint) ui.pipelineUpgradeHint.hidden = Number(source?.pipeline_version ?? 2) >= 4;
+  if (!ui.pipelineUpgradeHint) return;
+  const version = Number(source?.pipeline_version ?? 2);
+  ui.pipelineUpgradeHint.hidden = version >= 5;
+  ui.pipelineUpgradeHint.textContent = `保留原工作流 v${version} 参数和执行规则；保存或生成不会自动升级。`;
 }
 
 function readSettings() {
@@ -1311,7 +1336,8 @@ function readSettings() {
   const normalizedArtist = canonicalArtists(ui.manual_artist.value);
   if (ui.manual_artist.value !== normalizedArtist) ui.manual_artist.value = normalizedArtist;
   const settings = {
-    pipeline_version: 4,
+    ...clone(pipelineContractState.source),
+    pipeline_version: currentPipelineVersion(),
     count: Number(ui.count.value), female_count: Number(ui.female_count.value), male_count: Number(ui.male_count.value),
     character_detail: ui.character_detail.value, manual_artist: normalizedArtist, quality_prompt: ui.quality_prompt.value,
     extra_prompt: ui.extra_prompt.value, negative_prompt: ui.negative_prompt.value, width: Number(ui.width.value), height: Number(ui.height.value),
@@ -1324,7 +1350,7 @@ function readSettings() {
       ids: currentProfile() === "krea2" ? [...(readKreaPoolSelection().ids || [])] : [],
     },
     base_mode: ui.base_mode.value === "dual_sampler" ? "dual_sampler" : "normal",
-    dual: typeof readRandomDualControls === "function" ? readRandomDualControls() : null,
+    dual: typeof readRandomDualSettings === "function" ? readRandomDualSettings() : null,
     pools: clone(draft.pools), loras: clone(draft.loras), lora_managed_triggers: clone(draft.managedTriggers || []),
     upscalers: readUpscalerControls(),
   };
@@ -1347,7 +1373,7 @@ function formatSavedTime(timestamp) {
 }
 
 function persistNow() {
-  if (!initialized) return;
+  if (!initialized || pipelineContractState.persistenceBlocked) return;
   if (typeof singleWorkbenchPersist === "function" && singleWorkbenchPersist()) return;
   const savedAt = new Date().toISOString();
   try {
@@ -1381,15 +1407,16 @@ function loadStoredView() {
   }
 }
 
-function loadStoredDraft() {
+async function loadStoredDraft() {
   try {
     const current = JSON.parse(localStorage.getItem(DRAFT_KEY) || "null");
     const legacy = current
       ? null
       : LEGACY_DRAFT_KEYS.map((key) => JSON.parse(localStorage.getItem(key) || "null")).find(Boolean);
     const payload = current || legacy;
-    if (![1, 2, 3, 4].includes(payload?.version) || !payload.settings || typeof payload.settings !== "object") return false;
-    const settings = clone(payload.settings);
+    if (!payload) return false;
+    if (![1, 2, 3, 4].includes(payload.version) || !payload.settings || typeof payload.settings !== "object") throw new Error("草稿格式无效");
+    let settings = clone(payload.settings);
     if (payload.version < 4) {
       try {
         localStorage.setItem(`${DRAFT_BACKUP_KEY_PREFIX}${payload.version}`, JSON.stringify(payload));
@@ -1398,18 +1425,14 @@ function loadStoredDraft() {
       }
     }
     if (payload.version === 1 && isLegacyDefaultLoras(settings.loras)) settings.loras = [];
+    settings = await canonicalizeWorkflowSettings(settings);
     profileDrafts = payload.profileDrafts && typeof payload.profileDrafts === "object" ? clone(payload.profileDrafts) : {};
     applySettings(settings, { useProfileDraft: true });
-    if (payload.version !== 4) {
-      localStorage.setItem(DRAFT_KEY, JSON.stringify({ version: 4, savedAt: payload.savedAt, settings, profileDrafts: clone(profileDrafts) }));
-      for (const key of LEGACY_DRAFT_KEYS) localStorage.removeItem(key);
-    }
     ui.draftStatus.textContent = `已恢复草稿 ${formatSavedTime(payload.savedAt)}`;
     return true;
-  } catch {
-    localStorage.removeItem(DRAFT_KEY);
-    for (const key of LEGACY_DRAFT_KEYS) localStorage.removeItem(key);
-    return false;
+  } catch (error) {
+    pipelineContractState.persistenceBlocked = true;
+    throw new Error(`草稿加载失败，原内容已保留：${error.message}`);
   }
 }
 
@@ -1688,7 +1711,7 @@ function renderLoras() {
       const display = loraPresentation(inventoryItem, item.filename);
       const triggers = normalizeTriggerWords(inventoryItem?.trigger_words || []);
       const triggerLabel = inventoryItem?.trigger_override ? "触发词（已覆盖）" : "触发词";
-      row.innerHTML = `<input class="lora-toggle" type="checkbox" ${item.enabled ? "checked" : ""} title="启用 LoRA" aria-label="启用 ${escapeHtml(item.filename)}"><div class="lora-name"><strong title="${escapeHtml(display.path)}">${escapeHtml(display.label)}</strong><small class="${available && !high ? "" : "lora-warning"}">${available ? (high ? "高强度 · 模型 + CLIP" : "模型 + CLIP") : escapeHtml(selectionIssue)}</small>${triggers.length || inventoryItem?.trigger_override ? `<small class="lora-trigger-line" title="自动触发词">${triggerLabel}：${triggers.length ? escapeHtml(triggers.join(", ")) : "已禁用"}</small>` : ""}</div><input class="lora-strength" type="number" min="-100" max="100" step="0.05" value="${Number(item.strength)}" title="LoRA strength" aria-label="${escapeHtml(item.filename)} 强度"><div class="lora-actions"><button class="button ghost compact lora-trigger-edit" type="button" data-lora-triggers ${inventoryItem ? "" : "disabled"}>触发词</button><button class="icon-button dark" type="button" data-lora-up title="上移" aria-label="上移">↑</button><button class="icon-button dark" type="button" data-lora-down title="下移" aria-label="下移">↓</button><button class="icon-button dark" type="button" data-lora-remove title="移除" aria-label="移除">×</button></div>`;
+      row.innerHTML = `<input class="lora-toggle" type="checkbox" ${item.enabled ? "checked" : ""} title="启用 LoRA" aria-label="启用 ${escapeHtml(item.filename)}"><div class="lora-name"><strong title="${escapeHtml(display.path)}">${escapeHtml(inventoryItem?.display_name || display.basename)}</strong><small class="${available && !high ? "" : "lora-warning"}">${available ? (high ? "高强度 · 模型 + CLIP" : "模型 + CLIP") : escapeHtml(selectionIssue)}</small>${triggers.length || inventoryItem?.trigger_override ? `<small class="lora-trigger-line" title="自动触发词">${triggerLabel}：${triggers.length ? escapeHtml(triggers.join(", ")) : "已禁用"}</small>` : ""}</div><input class="lora-strength" type="number" min="-100" max="100" step="0.05" value="${Number(item.strength)}" title="LoRA strength" aria-label="${escapeHtml(item.filename)} 强度"><div class="lora-actions"><button class="button ghost compact lora-trigger-edit" type="button" data-lora-triggers ${inventoryItem ? "" : "disabled"}>触发词</button><button class="icon-button dark" type="button" data-lora-up title="上移" aria-label="上移">↑</button><button class="icon-button dark" type="button" data-lora-down title="下移" aria-label="下移">↓</button><button class="icon-button dark" type="button" data-lora-remove title="移除" aria-label="移除">×</button></div>`;
       row.querySelector(".lora-toggle").addEventListener("change", (event) => {
         item.enabled = event.target.checked;
         reconcileLoraTriggers(item.enabled ? [item] : []);
@@ -2075,10 +2098,8 @@ function batchProgressLabel(batch) {
 }
 function loraRuntimeSummary(runtime, warningCount = 0) {
   if (!runtime || typeof runtime !== "object") return "";
-  const applied = Array.isArray(runtime.applied) ? runtime.applied : [];
   const skipped = Array.isArray(runtime.skipped) ? runtime.skipped : [];
   const parts = [];
-  if (applied.length) parts.push(`本张人物自动启用 ${applied.length} 个 LoRA`);
   if (skipped.length) parts.push(`本张跳过 ${skipped.length} 项：${skipped.map(item => `${item.character_name || "人物"} · ${item.filename}（${item.message || item.reason || "不可用"}）`).join("；")}`);
   if (warningCount) parts.push(`本批累计跳过 ${warningCount} 项，原因已保存在图片详情`);
   return parts.join("\n");
@@ -2106,6 +2127,9 @@ function renderBatch(batch, queue = currentQueue) {
   if (typeof singleWorkbenchBatch === "function") singleWorkbenchBatch(batch);
   renderQueue(queue);
   const active = Boolean(batch && ["running", "stopping"].includes(batch.status));
+  const stopPending = active && typeof stopRequestId !== "undefined" && stopRequestId === batch.id;
+  const stopping = active && (batch.status === "stopping" || stopPending);
+  const cancelUnconfirmed = batch?.cancel_state === "unconfirmed" || Boolean(batch?.cancel_warning);
   const completed = batch?.completed || 0;
   const total = batch?.total || 0;
   const promptOnly = batch?.kind === "prompt_preview";
@@ -2114,24 +2138,26 @@ function renderBatch(batch, queue = currentQueue) {
     running: batch?.settings?.kind === "reverse" ? "正在反推图像提示词" : "正在重写提示词",
     stopping: `正在取消${promptAction}`,
     completed: `${promptAction}完成`,
-    stopped: `${promptAction}已取消`,
+    stopped: `本地${promptAction}已取消`,
     error: `${promptAction}失败`,
   } : {
     running: "正在生成",
-    stopping: "完成当前张后停止",
+    stopping: "正在取消当前任务",
     completed: "批次完成",
-    stopped: "已停止",
+    stopped: "本地批次已停止",
     error: "执行失败",
   };
   ui.batchState.textContent = batch ? labels[batch.status] || batch.status : "等待任务";
+  if (stopPending && batch.status === "running") ui.batchState.textContent = "正在请求停止…";
+  if (batch?.status === "stopped" && cancelUnconfirmed) ui.batchState.textContent = "本地已停止，ComfyUI 尚未确认";
   ui.progressCount.textContent = `${completed} / ${total}`;
   setProgressValue(ui.progressFill, total ? completed / total : 0, active, batch?.id || "");
   // 单张采样进度(来自 ComfyUI websocket,尽力而为;旧版页面缺控件时跳过)
   if (ui.sampleFill && ui.sampleProgress) {
-    const progress = active ? batch.progress : null;
+    const progress = active && !stopping ? batch.progress : null;
     const sampleTrack = ui.sampleFill.parentElement;
     ui.sampleProgress.hidden = !active;
-    ui.sampleProgress.textContent = active ? batchProgressLabel(batch) : "";
+    ui.sampleProgress.textContent = stopping ? "正在取消当前任务，确认 ComfyUI 状态…" : active ? batchProgressLabel(batch) : "";
     if (progress && progress.max > 0) {
       sampleTrack.hidden = false;
       setProgressValue(ui.sampleFill, progress.value / progress.max, active, `${batch.id}:${batch.progress_node}`);
@@ -2140,12 +2166,14 @@ function renderBatch(batch, queue = currentQueue) {
       setProgressValue(ui.sampleFill, 0, false, `${batch?.id}:${batch?.progress_node}`);
     }
   }
-  ui.stopButton.disabled = !active || batch.status === "stopping";
+  ui.stopButton.disabled = !active || stopping;
+  ui.stopButton.textContent = stopping ? "正在停止…" : "停止";
   // 运行中仍可加入队列，但分类有效性与连接状态共用同一守卫。
   updateGenerationAvailability();
   ui.startButton.textContent = active ? "加入队列" : "开始生成";
   const failurePrefix = batch?.failed_stage_label ? `${batch.failed_stage_label}失败：` : "";
-  const batchMessage = [batch?.error && (failurePrefix && !String(batch.error).startsWith(failurePrefix) ? `${failurePrefix}${batch.error}` : batch.error), batch?.cancel_warning].filter(Boolean).join("\n");
+  const cancelMessage = cancelUnconfirmed ? batch?.cancel_warning || "取消请求未确认，远端任务可能继续执行；请在 ComfyUI 中检查" : "";
+  const batchMessage = [batch?.error && (failurePrefix && !String(batch.error).startsWith(failurePrefix) ? `${failurePrefix}${batch.error}` : batch.error), cancelMessage].filter(Boolean).join("\n");
   ui.batchError.hidden = !batchMessage;
   ui.batchError.textContent = batchMessage;
   const loraNotice = typeof document !== "undefined" ? document.getElementById("loraBatchNotice") : null;
@@ -2175,6 +2203,29 @@ function renderBatch(batch, queue = currentQueue) {
         || (typeof historyDetailState !== "undefined" && historyDetailState.homeQuery.folderId);
       loadHistory(keepPosition ? historyPage : 1);
     }
+  }
+}
+async function stopCurrentBatch() {
+  const batch = currentBatch;
+  if (!batch || batch.status !== "running" || stopRequestId === batch.id) return;
+  stopRequestId = batch.id;
+  renderBatch(currentBatch);
+  try {
+    const payload = await request(`/api/batches/${batch.id}/stop`, { method: "POST" });
+    if (currentBatch?.id === batch.id && (["running", "stopping"].includes(currentBatch.status)
+        || currentBatch.status === payload.batch?.status)) renderBatchPayload(payload);
+  } catch (error) {
+    toast(`停止请求失败：${error.message}`);
+    const beforeRefresh = currentBatch;
+    try {
+      const payload = await request("/api/batches/current", { cache: "no-store" });
+      if (currentBatch === beforeRefresh && currentBatch?.id === batch.id) renderBatchPayload(payload);
+    } catch (refreshError) {
+      toast(`暂时无法确认停止状态：${refreshError.message}`);
+    }
+  } finally {
+    if (stopRequestId === batch.id) stopRequestId = "";
+    renderBatch(currentBatch);
   }
 }
 async function refreshConnection() {
@@ -5719,8 +5770,12 @@ async function loadResources({ refresh = false } = {}) {
   updateRepairControls();
   if (typeof singleWorkbenchResources === "function") singleWorkbenchResources();
 }
-function pipelineFlowText(enabled) {
-  const stages = [
+function pipelineFlowText(enabled, version = 5) {
+  const stages = version === 2 ? [
+    ["latent", "潜空间放大"], ["post_sampler", "潜空间后采样"], ["seedvr2", "SeedVR2"], ["nvidia", "N 卡 VSR + DLSS"], ["face", "脸部细化"],
+  ] : version === 3 ? [
+    ["pixel_hires", "像素高清"], ["nvidia", "N 卡 VSR"], ["seedvr2", "SeedVR2"], ["latent", "潜空间缩放"], ["post_sampler", "整图后采样"], ["face", "脸部细化"], ["dlss", "DLSS"],
+  ] : [
     ["pixel_hires", "像素高清"], ["latent", "潜空间放大"], ["post_sampler", "整图后采样"],
     ["face", "脸部细化"], ["seedvr2", "SeedVR2"], ["nvidia", "N 卡 VSR"], ["dlss", "DLSS"],
   ];
@@ -5728,6 +5783,8 @@ function pipelineFlowText(enabled) {
 }
 function updateRepairControls() {
   refreshCurrentModelSelection();
+  if (typeof refreshInheritedDualControls === "function") refreshInheritedDualControls();
+  const version = currentPipelineVersion();
   const upscalers = {
     pixel_hires: Boolean(ui.pixel_hires_enabled?.checked),
     post_sampler: ui.latent_second_sampler_enabled.checked,
@@ -5737,27 +5794,48 @@ function updateRepairControls() {
     nvidia: ui.nvidia_upscale_enabled.checked,
     face: ui.face_refine_enabled.checked,
   };
+  if (version === 2) {
+    upscalers.pixel_hires = false;
+    upscalers.post_sampler = upscalers.latent && upscalers.post_sampler;
+    upscalers.dlss = upscalers.nvidia;
+    if (ui.dlss_enabled) ui.dlss_enabled.checked = upscalers.nvidia;
+  }
+  const stageLabel = (id, title, description) => {
+    const label = ui[id]?.closest?.("label");
+    const strong = label?.querySelector?.("strong"), small = label?.querySelector?.("small");
+    if (strong) strong.textContent = title;
+    if (small) small.textContent = description;
+  };
+  stageLabel("latent_upscale_enabled", "潜空间放大", version === 3 ? "仅缩放；需要重绘时开启整图后采样" : version === 2 ? "保留旧版缩放和可选后采样" : "放大后采样重绘");
+  stageLabel("latent_second_sampler_enabled", version === 2 ? "潜空间后采样" : "整图后采样", version === 2 ? "仅潜空间放大开启时执行" : "重绘整图细节");
+  stageLabel("dlss_enabled", "DLSS", version === 2 ? "随 N 卡 VSR 同时启用" : "导出前增强画面");
+  const pixelStage = ui.pixel_hires_enabled?.closest?.(".sampling-stage"); if (pixelStage) pixelStage.hidden = version === 2;
+  if (ui.dlss_enabled) ui.dlss_enabled.disabled = version === 2;
   const activeCount = Object.values(upscalers).filter(Boolean).length;
-  if (ui.pipelineFlow) ui.pipelineFlow.textContent = pipelineFlowText(upscalers);
+  if (ui.pipelineFlow) ui.pipelineFlow.textContent = pipelineFlowText(upscalers, version);
   const baseLabel = ui.base_mode.value === "dual_sampler" ? "底图－双采样器" : "普通底图";
-  ui.repairSummary.textContent = `${profileLabel(currentProfile())} · ${baseLabel} · ${activeCount} 项后处理`;
+  ui.repairSummary.textContent = `${profileLabel(currentProfile())} · v${version} · ${baseLabel} · ${activeCount} 项后处理`;
   ui.latentUpscaleFields.classList.toggle("disabled", !upscalers.latent);
   ui.latentUpscaleFields.hidden = !upscalers.latent;
-  if (ui.latentDoubleSamplingHint) ui.latentDoubleSamplingHint.hidden = !upscalers.latent || !upscalers.post_sampler;
+  if (ui.latentDoubleSamplingHint) ui.latentDoubleSamplingHint.hidden = version < 4 || !upscalers.latent || !upscalers.post_sampler;
   ui.seedvr2Fields.classList.toggle("disabled", !upscalers.seedvr2);
   ui.nvidiaUpscaleFields.classList.toggle("disabled", !upscalers.nvidia);
   ui.faceRefineFields.classList.toggle("disabled", !upscalers.face);
   ui.latentSecondSamplerFields.classList.toggle("disabled", !upscalers.post_sampler);
   ui.latent_upscale_scale.disabled = !upscalers.latent;
   ui.latent_upscale_method.disabled = !upscalers.latent;
-  for (const id of Object.values(LATENT_SAMPLER_IDS)) if (ui[id]) ui[id].disabled = !upscalers.latent;
-  ui.latent_second_sampler_enabled.disabled = false;
+  for (const id of Object.values(LATENT_SAMPLER_IDS)) if (ui[id]) {
+    ui[id].disabled = version < 4 || !upscalers.latent;
+    const label = ui[id].closest?.("label"); if (label) label.hidden = version < 4;
+  }
+  ui.latent_second_sampler_enabled.disabled = version === 2 && !upscalers.latent;
   for (const id of Object.values(POST_SAMPLER_IDS)) ui[id].disabled = !upscalers.post_sampler;
   ui.pixelHiresFields?.classList.toggle("disabled", !upscalers.pixel_hires);
   ui.dlssFields?.classList.toggle("disabled", !upscalers.dlss);
   if (ui.pixel_hires_model_name) ui.pixel_hires_model_name.disabled = !upscalers.pixel_hires || !resourcesLoaded;
-  for (const id of ["pixel_hires_percent", "pixel_hires_upscale_method"]) if (ui[id]) ui[id].disabled = !upscalers.pixel_hires || upscalers.post_sampler;
-  if (ui.pixelHiresResizeHint) ui.pixelHiresResizeHint.textContent = upscalers.post_sampler ? "后采样已开启，跳过缩图" : "按原生放大结果缩图";
+  const skipPixelResize = version < 5 && upscalers.post_sampler;
+  for (const id of ["pixel_hires_percent", "pixel_hires_upscale_method"]) if (ui[id]) ui[id].disabled = !upscalers.pixel_hires || skipPixelResize;
+  if (ui.pixelHiresResizeHint) ui.pixelHiresResizeHint.textContent = skipPixelResize ? `v${version}：后采样已开启，按旧规则跳过缩图` : "按原生放大结果缩图";
   ui.seedvr2_model_name.disabled = !upscalers.seedvr2 || !resourcesLoaded;
   ui.seedvr2_vae_name.disabled = !upscalers.seedvr2 || !resourcesLoaded;
   for (const id of ["seedvr2_weight_dtype", "seedvr2_scale_by", "seedvr2_color_correction_method", ...Object.values(SEED_SAMPLER_IDS), ...Object.values(SEED_TILE_IDS.encode), ...Object.values(SEED_TILE_IDS.decode)]) ui[id].disabled = !upscalers.seedvr2;
@@ -5989,11 +6067,13 @@ function renderStylePresets() {
       ];
       if (activeLoras) metaParts.push(`${activeLoras} LoRA`);
       row.innerHTML = `<button class="preset-apply" type="button" title="${escapeHtml(settings.model_profile || "anima")}"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(metaParts.join(" · "))}</small></button><div class="preset-actions"><button type="button" data-preset-favorite title="${item.favorite ? "取消收藏" : "收藏"}" aria-label="${item.favorite ? "取消收藏" : "收藏"}">${item.favorite ? "★" : "☆"}</button><button type="button" data-preset-update title="用当前设置覆盖" aria-label="用当前设置覆盖">↻</button><button type="button" data-preset-rename title="重命名" aria-label="重命名">✎</button><button type="button" data-preset-delete title="删除" aria-label="删除">×</button></div>`;
-      row.querySelector(".preset-apply").addEventListener("click", () => {
-        if (typeof singleWorkbenchApplyPreset === "function") singleWorkbenchApplyPreset(item);
-        else applySettings({ ...readSettings(), ...item.settings });
-        schedulePersist();
-        toast(`已应用预设：${item.name}`);
+      row.querySelector(".preset-apply").addEventListener("click", async () => {
+        try {
+          if (typeof singleWorkbenchApplyPreset === "function") { if (await singleWorkbenchApplyPreset(item) === false) return; }
+          else applySettings({ ...readSettings(), ...await canonicalizeWorkflowSettings(item.settings || {}) });
+          schedulePersist();
+          toast(`已应用预设：${item.name}`);
+        } catch (error) { toast(`预设加载失败，当前草稿未更改：${error.message}`); }
       });
       row
         .querySelector("[data-preset-favorite]")
@@ -6442,15 +6522,7 @@ ui.settingsForm.addEventListener("change", schedulePersist);
 document.addEventListener("input", (event) => {
   if (promptFieldForElement(event.target) || event.target.matches?.("[data-single-prompt]")) invalidatePromptNormalization();
 });
-ui.stopButton.addEventListener("click", async () => {
-  if (!currentBatch) return;
-  try {
-    // 停止 = 中断当前批次并清空队列(队列条目可单独用 × 移除)
-    renderBatchPayload(await request(`/api/batches/${currentBatch.id}/stop`, { method: "POST" }));
-  } catch (error) {
-    toast(error.message);
-  }
-});
+ui.stopButton.addEventListener("click", stopCurrentBatch);
 ui.queueBadge?.addEventListener("click", () => {
   const open = !ui.queuePanel.classList.contains("open") && currentQueue.length > 0;
   setQueuePanelOpen(open);
@@ -6600,11 +6672,11 @@ ui.detailDialog.addEventListener("cancel", (event) => {
 for (const button of document.querySelectorAll("[data-detail-action]")) {
   button.addEventListener("click", () => toggleDetailActionPanel(button.dataset.detailAction));
 }
-ui.restoreSettings.addEventListener("click", () => {
+ui.restoreSettings.addEventListener("click", async () => {
   if (!selectedRecord) return;
   try {
-    if (typeof singleWorkbenchRestoreHistory === "function") singleWorkbenchRestoreHistory(selectedRecord);
-    else applySettings(selectedRecord.settings);
+    if (typeof singleWorkbenchRestoreHistory === "function") { if (await singleWorkbenchRestoreHistory(selectedRecord) === false) return; }
+    else applySettings(await canonicalizeWorkflowSettings(selectedRecord.settings));
     suppressDetailReturnFocus();
     closeImagePreview({ immediate: true, restoreFocus: false });
     motionDialog(ui.detailDialog, false);
@@ -6870,8 +6942,10 @@ ui.extra_prompt.addEventListener("input", forgetRemovedManagedTriggers);
 ui.female_count.addEventListener("input", updatePeopleTotal);
 ui.male_count.addEventListener("input", updatePeopleTotal);
 ui.resetSettings.addEventListener("click", () => {
+  if (pipelineContractState.persistenceBlocked) { toast("原草稿加载失败且仍已保留；请使用“清除本地草稿”后重新加载。"); return; }
   if (!confirm("恢复全部模板默认设置？")) return;
   const profile = currentProfile();
+  pipelineContractState.persistenceBlocked = false;
   if (typeof singleWorkbenchActive === "function" && singleWorkbenchActive()) applySettings(singleWorkbenchDefaultSettings(profile));
   else applySettings(typeof randomWorkbenchDefaultSettings === "function" ? randomWorkbenchDefaultSettings(profile) : { ...profileSettingsDefaults(profile), model_profile: profile });
   schedulePersist();
@@ -6879,11 +6953,21 @@ ui.resetSettings.addEventListener("click", () => {
 });
 ui.clearDraft.addEventListener("click", () => {
   if (!confirm("清除本地草稿并恢复默认设置？收藏不会被删除。")) return;
+  const restart = pipelineContractState.persistenceBlocked;
+  pipelineContractState.persistenceBlocked = false;
   localStorage.removeItem(DRAFT_KEY);
   if (typeof promptAssistantClear === "function") promptAssistantClear();
-  if (typeof singleWorkbenchState !== "undefined" && singleWorkbenchState.ready) { localStorage.removeItem(WORKBENCH_DRAFT_KEY); singleWorkbenchState.drafts = { random: {}, single: {} }; singleWorkbenchState.mode = "random"; }
+  if (typeof WORKBENCH_DRAFT_KEY !== "undefined") localStorage.removeItem(WORKBENCH_DRAFT_KEY);
+  if (typeof singleWorkbenchState !== "undefined" && singleWorkbenchState.ready) { singleWorkbenchState.drafts = { random: {}, single: {} }; singleWorkbenchState.mode = "random"; }
   for (const key of LEGACY_DRAFT_KEYS) localStorage.removeItem(key);
   localStorage.removeItem(VIEW_KEY);
+  if (restart) {
+    // pagehide runs before reload; keep its autosave from recreating the
+    // explicitly cleared draft from the partially initialized form.
+    pipelineContractState.persistenceBlocked = true;
+    if (typeof singleWorkbenchState !== "undefined") singleWorkbenchState.ready = false;
+    window.location.reload(); return;
+  }
   poolViews = Object.fromEntries(SECTIONS.map((section) => [section, defaultView()]));
   applySettings(typeof randomWorkbenchDefaultSettings === "function" ? randomWorkbenchDefaultSettings(defaults.model_profile) : defaults);
   ui.draftStatus.textContent = "本地草稿已清除";
@@ -6914,12 +6998,12 @@ async function initialize() {
     // 启动期数据文件恢复等服务端警告(如坏文件已备份重建)逐条提示。
     for (const warning of payload.warnings || []) toast(warning);
     loadStoredView();
-    const restored = loadStoredDraft();
+    const restored = await loadStoredDraft();
     if (!restored) {
       applySettings(typeof randomWorkbenchDefaultSettings === "function" ? randomWorkbenchDefaultSettings(defaults.model_profile) : defaults);
       ui.draftStatus.textContent = "使用模板默认设置";
     }
-    if (typeof initializeSingleWorkbench === "function") initializeSingleWorkbench({ legacyRestored: Boolean(restored) });
+    if (typeof initializeSingleWorkbench === "function") await initializeSingleWorkbench({ legacyRestored: Boolean(restored) });
     if (typeof initializeHistoryDetail === "function") initializeHistoryDetail();
     if (typeof initializeArtworkFavorites === "function") initializeArtworkFavorites();
     initializeLoraManager();

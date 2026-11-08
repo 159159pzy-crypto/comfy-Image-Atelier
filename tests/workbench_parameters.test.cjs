@@ -40,6 +40,18 @@ test('editing an old random record retains its actual dual sampler and latent sc
   assert.deepEqual(plain(ctx.readRandomDualControls()), { switch_step: 15, scale: 1.75, second_cfg: 2.5, second_sampler_name: 'euler', second_scheduler: 'karras', upscale_method: 'bicubic', model_format: 'Wan 2.1', half_precision: true });
   assert.deepEqual(old, before);
 });
+test('legacy null remains inherited until a dual control changes and survives independent mode drafts', () => {
+  const { ctx, elements } = setup();
+  const old = { workbench: 'random', dual: null, cfg: 2.5, upscalers: { latent: { scale_by: 1.75, upscale_method: 'bicubic' } } };
+  ctx.setRandomDualControls(old);
+  assert.equal(ctx.readRandomDualSettings(), null);
+  ctx.ui.cfg = { value: '4' };
+  assert.equal(ctx.readRandomDualSettings(), null, 'unrelated main settings do not make dual explicit');
+  elements.random_dual_second_cfg.value = '3.1';
+  assert.equal(ctx.readRandomDualSettings().second_cfg, 3.1);
+  ctx.setRandomDualControls(old);
+  assert.equal(ctx.readRandomDualSettings(), null);
+});
 test('dual fields hide and disable on normal mode without losing values, then restore', () => {
   const { ctx, elements } = setup();
   elements.random_dual_switch_step.value = '7';
