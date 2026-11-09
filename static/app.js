@@ -755,7 +755,10 @@ function applyPromptField(field, value) {
     const section = field.slice(6);
     draft.fixed[section] = value;
     const input = ui.dimensionList.querySelector(`[data-fixed="${section}"]`);
-    if (input) input.value = value;
+    if (input) {
+      if (input.value !== value) input.value = value;
+      syncDimensionPromptHeight(input, { keepCaret: document.activeElement === input });
+    }
     return;
   }
   if (field === "custom_prompt") {
@@ -1111,7 +1114,7 @@ function switchProfileDraft(nextProfile, { applyDefaults = true } = {}) {
     if (typeof setRandomDualControls === "function") setRandomDualControls(profileSettings);
   }
   updateProfileResources();
-  renderDimensions();
+  renderDimensions({ immediate: true });
   renderLoras();
   updatePoolOverview();
   renderKreaPromptPool();
@@ -1316,7 +1319,7 @@ function applySettings(raw, { useProfileDraft = false } = {}) {
   const storedExtraPrompt = useProfileDraft ? storedProfileState?.extra_prompt : null;
   if (typeof storedExtraPrompt === "string") ui.extra_prompt.value = storedExtraPrompt;
   else if (typeof settings.extra_prompt === "string") ui.extra_prompt.value = settings.extra_prompt;
-  renderDimensions();
+  renderDimensions({ immediate: true });
   renderLoras();
   renderKreaPromptPool();
   updatePeopleTotal();
@@ -1489,42 +1492,235 @@ async function refreshPoolSelectionTotals({ throwOnError = false } = {}) {
   if (throwOnError && results.some(result => result.status === "rejected")) throw results.find(result => result.status === "rejected").reason;
 }
 
-function renderDimensions() {
-  ui.dimensionList.replaceChildren(
-    ...SECTIONS.map((section) => {
-      const meta = SECTION_META[section];
-      const mode = draft.modes[section] || "off";
-      const count = draft.counts[section] || 1;
-      const selected = selectedCount(section);
-      const article = document.createElement("article");
-      article.className = `dimension-row mode-${mode}`;
-      article.dataset.section = section;
-      article.innerHTML = `<div class="dimension-heading"><div><span class="dimension-icon">${meta.label.slice(0, 1)}</span><strong>${meta.label}</strong><small>${selected} 项已选</small></div><button class="manage-pool" type="button" data-manage="${section}">管理池 <span aria-hidden="true">→</span></button></div>
-      <div class="dimension-mode" role="group" aria-label="${meta.label}模式"><button type="button" data-mode="off" class="${mode === "off" ? "active" : ""}">关闭</button><button type="button" data-mode="pool" class="${mode === "pool" ? "active" : ""}">随机池</button><button type="button" data-mode="fixed" class="${mode === "fixed" ? "active" : ""}">固定</button></div>
-      <div class="dimension-body"><label class="draw-count"><span>抽取数量</span><input type="number" min="1" max="${section === "expression" ? 1 : 5}" step="1" value="${section === "expression" ? 1 : count}" data-count="${section}" ${mode !== "pool" || section === "expression" ? "disabled" : ""}></label><span class="mode-note">${mode === "pool" ? `${selected} 项候选` : mode === "fixed" ? "使用固定提示词" : "不加入提示词"}</span></div>
-      <label class="field dimension-fixed"><span>固定提示词</span><input type="text" value="${escapeHtml(draft.fixed[section] || "")}" data-fixed="${section}" placeholder="留空则不加入" ${mode !== "fixed" ? "disabled" : ""}></label>`;
-      article.querySelectorAll("[data-mode]").forEach((button) =>
-        button.addEventListener("click", () => {
-          draft.modes[section] = button.dataset.mode;
-          renderDimensions();
-          schedulePersist();
-        }),
-      );
-      article.querySelector("[data-count]").addEventListener("input", (event) => {
-        draft.counts[section] = Math.max(1, Math.min(5, Number(event.target.value || 1)));
-        schedulePersist();
-        updatePoseConflict();
+function styleDimensionPromptMeasure(measure, styles, width) {
+  for (const name of ["fontFamily", "fontSize", "fontWeight", "fontStyle", "lineHeight", "letterSpacing", "wordSpacing", "textIndent", "textTransform", "tabSize", "whiteSpace", "wordBreak", "overflowWrap", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "borderStyle"]) {
+    measure.style[name] = styles[name];
+  }
+  measure.style.width = `${width}px`;
+}
+function dimensionPromptMetrics(input) {
+  const bounds = input.getBoundingClientRect();
+  if (!(bounds.width > 0)) return null;
+  const styles = getComputedStyle(input);
+  const number = name => Number.parseFloat(styles[name]) || 0;
+  const lineHeight = number("lineHeight") || number("fontSize") * 1.6;
+  const paddingTop = number("paddingTop"), paddingBottom = number("paddingBottom");
+  const border = number("borderTopWidth") + number("borderBottomWidth");
+  const minHeight = Math.max(number("minHeight"), lineHeight + paddingTop + paddingBottom + border);
+  const maxHeight = Math.max(minHeight, lineHeight * 6 + paddingTop + paddingBottom + border);
+  const state = input.dimensionPromptMotion ||= {};
+  let measure = state.measure;
+  if (!measure) {
+    measure = document.createElement("textarea");
+    measure.className = "dimension-fixed-measure";
+    measure.rows = 1; measure.tabIndex = -1; measure.disabled = true;
+    measure.setAttribute("aria-hidden", "true");
+    Object.assign(measure.style, {
+      position: "fixed", left: "0", top: "0", visibility: "hidden", pointerEvents: "none",
+      height: "0px", minHeight: "0", maxHeight: "none", margin: "0", resize: "none",
+      boxSizing: "border-box", overflowX: "hidden", overflowY: "hidden",
+    });
+    document.body.append(measure); state.measure = measure;
+  }
+  styleDimensionPromptMeasure(measure, styles, bounds.width);
+  measure.style.overflowY = "hidden";
+  measure.value = input.value;
+  let contentHeight = Math.max(minHeight, measure.scrollHeight + border);
+  // A capped editor reserves a scrollbar. Measure with that same text width so
+  // its last line and caret remain accurate on platforms with classic scrollbars.
+  if (contentHeight > maxHeight + .5) {
+    measure.style.overflowY = "scroll";
+    contentHeight = Math.max(minHeight, measure.scrollHeight + border);
+  }
+  let caretTop = paddingTop;
+  if (!input.disabled && document.activeElement === input) {
+    let caretMeasure = state.caretMeasure;
+    if (!caretMeasure) {
+      caretMeasure = document.createElement("div");
+      caretMeasure.className = "dimension-fixed-measure dimension-fixed-caret-measure";
+      caretMeasure.setAttribute("aria-hidden", "true");
+      Object.assign(caretMeasure.style, {
+        position: "fixed", left: "0", top: "0", visibility: "hidden", pointerEvents: "none",
+        height: "0px", minHeight: "0", maxHeight: "none", margin: "0", boxSizing: "border-box", overflowX: "hidden",
       });
-      const fixedInput = article.querySelector("[data-fixed]");
-      fixedInput.addEventListener("input", (event) => {
-        draft.fixed[section] = event.target.value;
-        schedulePersist();
+      state.caretOrigin = document.createElement("span"); state.caretOrigin.textContent = "\u200b";
+      state.caretBefore = document.createElement("span"); state.caretAfter = document.createElement("span");
+      caretMeasure.append(state.caretOrigin, state.caretBefore, state.caretAfter);
+      document.body.append(caretMeasure); state.caretMeasure = caretMeasure;
+    }
+    styleDimensionPromptMeasure(caretMeasure, styles, bounds.width);
+    caretMeasure.style.overflowY = measure.style.overflowY;
+    const caret = (input.selectionDirection === "backward" ? input.selectionStart : input.selectionEnd) ?? input.value.length;
+    state.caretBefore.textContent = input.value.slice(0, caret);
+    // Keep the entire suffix: its word can wrap before the caret even when a
+    // prefix-only measurement would still fit on the preceding line.
+    state.caretAfter.textContent = input.value.slice(caret) || "\u200b";
+    const line = Math.max(0, Math.round((state.caretAfter.offsetTop - state.caretOrigin.offsetTop) / lineHeight));
+    caretTop += line * lineHeight;
+  }
+  const caretBottom = caretTop + lineHeight;
+  return { width: bounds.width, height: bounds.height, lineHeight, paddingTop, paddingBottom, border,
+    minHeight, maxHeight, contentHeight, caretTop, caretBottom };
+}
+function applyDimensionPromptHeight(input, height) {
+  const state = input.dimensionPromptMotion;
+  if (!state) return;
+  state.height = height;
+  input.style.height = `${height}px`;
+  if (input.disabled) { input.scrollTop = 0; state.scrollTop = 0; return; }
+  if (!state.keepCaret || document.activeElement !== input) return;
+  // All geometry is captured when text or width changes, not in animation frames.
+  const viewport = height - state.border;
+  let scroll = state.scrollTop;
+  if (state.caretTop < scroll + state.paddingTop) scroll = state.caretTop - state.paddingTop;
+  else if (state.caretBottom > scroll + viewport - state.paddingBottom) scroll = state.caretBottom - viewport + state.paddingBottom;
+  state.scrollTop = Math.max(0, Math.min(scroll, state.contentHeight - height));
+  input.scrollTop = state.scrollTop;
+}
+function syncDimensionPromptHeight(input, { immediate = false, keepCaret = false } = {}) {
+  if (!input) return;
+  const state = input.dimensionPromptMotion ||= {};
+  const metrics = dimensionPromptMetrics(input);
+  if (!metrics) {
+    state.pending = true;
+    const layout = ui.dimensionList.dimensionLayout;
+    // A workbench can hide and reappear between ResizeObserver deliveries with
+    // the same width. One shared frame resolves that restoration without polling.
+    if (layout && layout.revealFrame == null && !document.hidden) {
+      layout.revealFrame = requestAnimationFrame(() => {
+        layout.revealFrame = null;
+        for (const article of ui.dimensionList.querySelectorAll(".dimension-row")) {
+          const field = article.querySelector("[data-fixed]");
+          if (!field.dimensionPromptMotion?.pending || !(field.getBoundingClientRect().width > 0)) continue;
+          positionDimensionIndicator(article, { immediate: true });
+          syncDimensionPromptHeight(field, { immediate: true, keepCaret: document.activeElement === field });
+        }
       });
-      fixedInput.addEventListener("blur", () => normalizePromptElement(fixedInput));
-      article.querySelector("[data-manage]").addEventListener("click", () => openPool(section));
-      return article;
-    }),
-  );
+    }
+    return;
+  }
+  const first = !Number.isFinite(state.target), previous = state.target;
+  Object.assign(state, metrics, { pending: false, value: input.value, keepCaret, scrollTop: input.scrollTop });
+  const fixed = draft.modes[input.dataset.fixed] === "fixed";
+  const target = fixed ? Math.min(metrics.maxHeight, metrics.contentHeight) : metrics.minHeight;
+  input.style.overflowY = fixed && metrics.contentHeight > metrics.maxHeight + .5 ? "auto" : "hidden";
+  if (!immediate && !first && Math.abs(target - previous) < .5) {
+    applyDimensionPromptHeight(input, metrics.height);
+    return;
+  }
+  state.target = target;
+  const finish = () => { applyDimensionPromptHeight(input, target); state.keepCaret = false; };
+  if (typeof StudioMotion === "undefined") { finish(); return; }
+  StudioMotion.spring(input, "dimension-height", { height: target }, {
+    initial: first ? { height: metrics.height || metrics.minHeight } : undefined,
+    immediate: immediate || first, response: .3, damping: 1, precision: .1,
+    onUpdate: value => applyDimensionPromptHeight(input, value.height), onComplete: finish,
+  });
+}
+function positionDimensionIndicator(article, { immediate = false } = {}) {
+  const selected = article.querySelector(`[data-mode="${draft.modes[article.dataset.section] || "off"}"]`);
+  const indicator = article.querySelector(".dimension-mode-thumb");
+  if (!selected || !indicator || !(selected.offsetWidth > 0)) return;
+  const target = { x: selected.offsetLeft - indicator.offsetLeft, width: selected.offsetWidth };
+  if (typeof animateStudioIndicator === "function") animateStudioIndicator(indicator, target, { immediate });
+  else { indicator.style.width = `${target.width}px`; indicator.style.transform = `translateX(${target.x}px)`; }
+}
+function initializeDimensionLayout() {
+  const list = ui.dimensionList;
+  if (list.dimensionLayout) return list.dimensionLayout;
+  const state = list.dimensionLayout = { widths: new WeakMap(), observed: new WeakSet(), observer: null };
+  const refresh = article => {
+    positionDimensionIndicator(article, { immediate: true });
+    const input = article.querySelector("[data-fixed]");
+    syncDimensionPromptHeight(input, { immediate: true, keepCaret: document.activeElement === input });
+  };
+  if (typeof ResizeObserver !== "undefined") {
+    state.observer = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        const width = entry.contentRect.width, previous = state.widths.get(entry.target);
+        if (previous !== undefined && Math.abs(width - previous) < .5) continue;
+        state.widths.set(entry.target, width);
+        if (width > 0) refresh(entry.target);
+        else if (typeof StudioMotion !== "undefined") {
+          StudioMotion.finish(entry.target.querySelector("[data-fixed]"), "dimension-height");
+          StudioMotion.finish(entry.target.querySelector(".dimension-mode-thumb"), "indicator");
+        }
+      }
+    });
+  } else {
+    window.addEventListener("resize", () => list.querySelectorAll(".dimension-row").forEach(refresh));
+  }
+  document.fonts?.ready?.then(() => list.querySelectorAll(".dimension-row").forEach(refresh));
+  return state;
+}
+function setDimensionMode(section, mode, { focus = false } = {}) {
+  if (!SECTIONS.includes(section) || !["off", "pool", "fixed"].includes(mode) || (draft.modes[section] || "off") === mode) return false;
+  draft.modes[section] = mode;
+  renderDimensions();
+  if (focus) ui.dimensionList.querySelector(`[data-section="${section}"] [data-mode="${mode}"]`)?.focus({ preventScroll: true });
+  schedulePersist();
+  return true;
+}
+function createDimensionCard(section) {
+  const meta = SECTION_META[section], article = document.createElement("article");
+  article.className = "dimension-row"; article.dataset.section = section;
+  article.innerHTML = `<div class="dimension-heading"><div><span class="dimension-icon">${meta.label.slice(0, 1)}</span><strong>${meta.label}</strong><small></small></div><button class="manage-pool" type="button" data-manage="${section}">管理池 <span aria-hidden="true">→</span></button></div>
+    <div class="dimension-mode" role="group" aria-label="${meta.label}模式"><span class="dimension-mode-thumb" aria-hidden="true"></span><button type="button" data-mode="off">关闭</button><button type="button" data-mode="pool">随机池</button><button type="button" data-mode="fixed">固定</button></div>
+    <div class="dimension-body"><label class="draw-count"><span>抽取数量</span><input type="number" min="1" max="${section === "expression" ? 1 : 5}" step="1" data-count="${section}"></label><span class="mode-note"></span></div>
+    <label class="field dimension-fixed"><span>固定提示词</span><textarea rows="1" data-fixed="${section}" placeholder="留空则不加入"></textarea></label>`;
+  article.querySelectorAll("[data-mode]").forEach(button => button.addEventListener("click", () => setDimensionMode(section, button.dataset.mode)));
+  article.querySelector("[data-count]").addEventListener("input", event => {
+    draft.counts[section] = Math.max(1, Math.min(5, Number(event.target.value || 1)));
+    schedulePersist(); updatePoseConflict();
+  });
+  const input = article.querySelector("[data-fixed]");
+  input.addEventListener("input", () => {
+    draft.fixed[section] = input.value;
+    syncDimensionPromptHeight(input, { keepCaret: true }); schedulePersist();
+  });
+  input.addEventListener("blur", () => normalizePromptElement(input));
+  input.addEventListener("compositionstart", () => { input.dimensionComposing = true; });
+  input.addEventListener("compositionend", () => {
+    input.dimensionComposing = false; draft.fixed[section] = input.value;
+    syncDimensionPromptHeight(input, { keepCaret: true }); schedulePersist();
+  });
+  input.addEventListener("select", () => syncDimensionPromptHeight(input, { keepCaret: true }));
+  article.querySelector("[data-manage]").addEventListener("click", () => openPool(section));
+  return article;
+}
+function renderDimensions({ immediate = false } = {}) {
+  immediate ||= typeof singleWorkbenchState !== "undefined" && singleWorkbenchState.restoring;
+  const layout = initializeDimensionLayout();
+  for (const section of SECTIONS) {
+    let article = ui.dimensionList.querySelector(`[data-section="${section}"]`);
+    const created = !article;
+    if (!article) { article = createDimensionCard(section); ui.dimensionList.append(article); }
+    const mode = draft.modes[section] || "off", changed = article.dimensionMode !== mode;
+    const count = section === "expression" ? 1 : draft.counts[section] || 1;
+    const selected = selectedCount(section), fixed = draft.fixed[section] || "";
+    article.dimensionMode = mode;
+    for (const name of ["off", "pool", "fixed"]) article.classList.toggle(`mode-${name}`, mode === name);
+    for (const button of article.querySelectorAll("[data-mode]")) {
+      const active = button.dataset.mode === mode;
+      button.classList.toggle("active", active); button.setAttribute("aria-pressed", String(active));
+    }
+    const summary = article.querySelector(".dimension-heading small"), summaryText = `${selected} 项已选`;
+    if (summary.textContent !== summaryText) summary.textContent = summaryText;
+    const note = article.querySelector(".mode-note"), noteText = mode === "pool" ? `${selected} 项候选` : mode === "fixed" ? "使用固定提示词" : "不加入提示词";
+    if (note.textContent !== noteText) note.textContent = noteText;
+    const countInput = article.querySelector("[data-count]");
+    if (countInput.value !== String(count) && (immediate || document.activeElement !== countInput)) countInput.value = count;
+    countInput.disabled = mode !== "pool" || section === "expression";
+    const input = article.querySelector("[data-fixed]");
+    const valueChanged = input.value !== fixed;
+    if (valueChanged && (!input.dimensionComposing || immediate)) input.value = fixed;
+    input.disabled = mode !== "fixed";
+    if (created || changed || immediate) positionDimensionIndicator(article, { immediate: immediate || created });
+    if (created || changed || valueChanged || immediate || input.dimensionPromptMotion?.pending) {
+      syncDimensionPromptHeight(input, { immediate: immediate || created, keepCaret: document.activeElement === input });
+    }
+    if (layout.observer && !layout.observed.has(article)) { layout.observed.add(article); layout.observer.observe(article); }
+  }
 }
 
 function updatePeopleTotal() {
