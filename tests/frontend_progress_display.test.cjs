@@ -203,6 +203,62 @@ test('stop confirmation has accurate local labels and never claims remote termin
   assert.equal(ui.batchState.textContent, '本地已停止，ComfyUI 尚未确认');
 });
 
+test('memory release keeps generation blocked after local stop and shows its final result', () => {
+  const { ctx, ui } = setup();
+  ctx.updateGenerationAvailability = () => { ui.startButton.disabled = ctx.currentBatch?.memory_release === 'pending'; };
+  ctx.renderBatch(batch({ status: 'stopped', memory_release: 'pending', cancel_state: 'confirmed' }));
+  assert.match(ui.batchState.textContent, /正在释放显存/);
+  assert.equal(ui.startButton.disabled, true);
+  assert.equal(ui.stopButton.disabled, true);
+  assert.equal(ui.sampleProgress.hidden, false);
+  assert.equal(ui.sampleFill.parentElement.hidden, true);
+  for (const [memory_release, message] of [
+    ['requested', '已请求释放显存'], ['failed', '释放显存请求失败：连接超时'], ['skipped', 'ComfyUI 队列仍有任务，已跳过释放'],
+  ]) {
+    ctx.renderBatch(batch({ status: 'stopped', memory_release, memory_release_message: message }));
+    assert.equal(ui.startButton.disabled, false);
+    assert.equal(ui.startButton.textContent, '开始生成');
+    assert.equal(ui.sampleProgress.textContent, message);
+    assert.doesNotMatch(ui.batchState.textContent, /执行失败|显存已清空/);
+  }
+  ctx.renderBatch(batch({ id: 'next-batch' }));
+  assert.doesNotMatch(ui.sampleProgress.textContent, /释放/);
+});
+
+test('release feedback preserves cancellation warnings and does not replace cancellation progress', () => {
+  const { ctx, ui } = setup();
+  ctx.renderBatch(batch({ status: 'stopping', memory_release: 'pending' }));
+  assert.match(ui.sampleProgress.textContent, /正在取消当前任务/);
+  assert.equal(ui.startButton.disabled, true);
+  ctx.renderBatch(batch({ status: 'stopped', cancel_state: 'unconfirmed', cancel_warning: '远端取消尚未确认',
+    memory_release: 'skipped', memory_release_message: '无法确认空闲，已跳过释放显存' }));
+  assert.equal(ui.batchState.textContent, '本地已停止，ComfyUI 尚未确认');
+  assert.equal(ui.batchError.textContent, '远端取消尚未确认');
+  assert.match(ui.sampleProgress.textContent, /跳过释放/);
+});
+
+test('availability refresh and direct submissions cannot bypass memory release', async () => {
+  const { ctx, ui } = setup();
+  ctx.currentBatch = batch({ status: 'stopped', memory_release: 'pending' });
+  Object.assign(ctx, { submitInFlight: false, config: {}, generationClassificationIssues: () => [] });
+  ui.connection = { classList: { contains: () => true } };
+  for (const name of ['updateGenerationAvailability', 'submitBatch']) {
+    let start = source.indexOf(`function ${name}(`);
+    if (name === 'submitBatch') start -= 6;
+    vm.runInContext(source.slice(start, source.indexOf('\n}', start) + 2), ctx);
+  }
+  ctx.updateGenerationAvailability();
+  assert.equal(ui.startButton.disabled, true);
+  assert.match(ui.startButton.title, /释放显存/);
+  const messages = [];
+  ctx.toast = message => messages.push(message);
+  assert.equal(await ctx.submitBatch({}), false);
+  assert.match(messages[0], /释放显存/);
+  ctx.currentBatch.memory_release = 'requested';
+  ctx.updateGenerationAvailability();
+  assert.equal(ui.startButton.disabled, false);
+});
+
 function stopSetup() {
   const result = setup(), { ctx } = result;
   const start = source.indexOf('async function stopCurrentBatch(');
@@ -260,6 +316,18 @@ test('late stop responses do not replace a new batch or downgrade completion', a
     assert.equal(ctx.currentBatch, next);
     assert.equal(ui.batchState.textContent, next.status === 'completed' ? '批次完成' : '正在生成');
   }
+});
+
+test('late stop response cannot restore pending release after cleanup finished', async () => {
+  const { ctx, ui } = stopSetup(); let release;
+  ctx.request = () => new Promise(resolve => { release = resolve; });
+  const pending = ctx.stopCurrentBatch();
+  const final = batch({ status: 'stopped', memory_release: 'requested', memory_release_message: '已请求释放显存' });
+  ctx.renderBatch(final);
+  release({ batch: batch({ status: 'stopped', memory_release: 'pending' }), queue: [] });
+  await pending;
+  assert.equal(ctx.currentBatch, final);
+  assert.equal(ui.sampleProgress.textContent, '已请求释放显存');
 });
 
 test('a delayed old stop does not block or clear a newer batch stop request', async () => {

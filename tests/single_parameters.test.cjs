@@ -15,6 +15,10 @@ function setup() {
     singleNegative: { value: '' }, singleSeedMode: { value: 'fixed' }, singleSampleSeed: { value: '1234' },
     single_positive_prompt: { dataset: { singlePath: 'positive_prompt' }, value: '', type: 'textarea' },
     single_denoise: { dataset: { singlePath: 'denoise' }, value: '', type: 'number' },
+    single_zero_negative: { dataset: { singlePath: 'zero_negative' }, type: 'checkbox', checked: false },
+    single_secondary_zero_negative: { dataset: { singlePath: 'secondary_zero_negative' }, type: 'checkbox', checked: false },
+    singleSecondaryZeroNegativeRow: {}, singleZeroNegativeLabel: {}, singleZeroNegativeHint: {},
+    randomZeroNegativeRow: {}, singleZeroNegativeControls: {},
   };
   const config = { single_defaults: {
     latent: { pipeline: 'secondary' }, face_pipeline: 'secondary',
@@ -36,7 +40,7 @@ function setup() {
         if (removedControls.has(id)) throw new Error(`Removed control accessed: ${id}`);
         return elements[id] || null;
       },
-      querySelectorAll: selector => selector === '[data-single-path]' ? [elements.single_positive_prompt, elements.single_denoise] : [],
+      querySelectorAll: selector => selector === '[data-single-path]' ? Object.values(elements).filter(element => element.dataset?.singlePath) : [],
     },
     SECTIONS: ['character', 'clothing', 'pose', 'background', 'expression'],
     currentProfile: () => 'anima',
@@ -226,4 +230,54 @@ test('random fixed image seeds omit prompt_seed so composition keeps changing', 
   assert.deepEqual(plain(ctx.singleWorkbenchSeeds()), { sample_seed: 0 });
   elements.singleSeedMode.value = 'random';
   assert.equal(ctx.singleWorkbenchSeeds(), null);
+});
+
+test('zero-negative controls follow active routes and keep dormant values through draft capture', () => {
+  const { ctx, elements, defaults } = setup();
+  ctx.singleWorkbenchRenderZeroNegative();
+  assert.equal(elements.single_zero_negative.checked, false);
+  assert.equal(elements.single_zero_negative.disabled, false);
+  assert.equal(elements.singleSecondaryZeroNegativeRow.hidden, true);
+  const legacy = ctx.singleWorkbenchMerge(defaults, { single: {
+    normal_pipeline: 'secondary', zero_negative: true, secondary_zero_negative: false,
+  } });
+  ctx.applySettings(legacy); ctx.singleWorkbenchRenderZeroNegative();
+  assert.equal(elements.single_zero_negative.disabled, true);
+  assert.equal(elements.single_zero_negative.checked, true);
+  assert.equal(elements.single_secondary_zero_negative.disabled, false);
+  assert.equal(elements.singleSecondaryZeroNegativeRow.hidden, false);
+  assert.match(elements.singleZeroNegativeHint.textContent, /未使用主管线/);
+  elements.single_secondary_zero_negative.checked = true;
+  const captured = ctx.singleWorkbenchCapture().settings;
+  assert.equal(captured.single.zero_negative, true);
+  assert.equal(captured.single.secondary_zero_negative, true);
+  assert.equal(legacy.single.secondary_zero_negative, false);
+  ctx.applySettings({ ...captured, upscalers: { ...captured.upscalers, face_refine: { enabled: true } } });
+  ctx.singleWorkbenchRenderZeroNegative();
+  assert.equal(elements.single_zero_negative.disabled, false, 'primary face repair activates its own conditioning');
+});
+
+test('zero-negative controls preserve negative text and are excluded from compatibility reset', () => {
+  const { ctx, defaults, elements, persisted } = setup();
+  ctx.applySettings(ctx.singleWorkbenchMerge(defaults, { negative_prompt: 'keep negative text', single: {
+    zero_negative: true, secondary_zero_negative: true, weight_dtype: 'fp8_e4m3fn',
+  } }));
+  ctx.singleWorkbenchResetCompatibility();
+  assert.equal(elements.singleNegative.value, 'keep negative text');
+  assert.equal(persisted().settings.single.zero_negative, true);
+  assert.equal(persisted().settings.single.secondary_zero_negative, true);
+  assert.equal(persisted().settings.single.weight_dtype, 'default');
+});
+
+test('legacy latent routes require a secondary zero-negative control only when their sampler runs', () => {
+  const { ctx, defaults } = setup();
+  const settings = ctx.singleWorkbenchMerge(defaults, { pipeline_version: 2,
+    single: { latent: { pipeline: 'secondary' } },
+    upscalers: { latent: { enabled: true, second_sampler: { enabled: true } } },
+  });
+  assert.deepEqual([...ctx.singleWorkbenchActivePipelines(settings)].sort(), ['primary', 'secondary']);
+  settings.upscalers.latent.second_sampler.enabled = false;
+  assert.deepEqual([...ctx.singleWorkbenchActivePipelines(settings)], ['primary']);
+  settings.upscalers.latent.second_sampler.enabled = true; settings.pipeline_version = 5;
+  assert.deepEqual([...ctx.singleWorkbenchActivePipelines(settings)], ['primary']);
 });

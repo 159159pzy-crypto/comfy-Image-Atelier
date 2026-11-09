@@ -433,6 +433,9 @@ def render_single_workflows(api_template: dict[str, Any], ui_template: dict[str,
     else:
         api[V2_OUTPUT_ID]["_meta"] = {"title": "进阶单图工作台 输出"}
         api = _prune_graph(api, V2_OUTPUT_ID)
+        if any(pipe["negative"][0].endswith(":zero") for pipe in pipelines.values()):
+            from .pipeline_v3 import export_ui_workflow
+            ui = export_ui_workflow(api, ui_template, pipeline_version=2)
     # The API graph is authoritative; keep it with the attached UI workflow so
     # advanced settings and newly inserted input nodes remain auditable.
     editor_settings = copy.deepcopy(s)

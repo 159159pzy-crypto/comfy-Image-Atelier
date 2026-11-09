@@ -141,11 +141,11 @@ function sharedParameterVisibility() {
   }
   const modeTitle = document.getElementById("baseSamplingTitle");
   if (modeTitle) modeTitle.textContent = dual ? "双采样" : "底图";
-  const order = dual ? ["steps", "random_dual_switch_step", "random_dual_scale", "random_dual_model_format", "singleSeedControls", "cfg", "sampler_name", "scheduler", "krea_variance_enabled", "random_dual_second_cfg", "random_dual_second_sampler_name", "random_dual_second_scheduler"]
-    : ["steps", "cfg", "sampler_name", "scheduler", "base_denoise", "singleSeedControls", "krea_variance_enabled"];
+  const order = dual ? ["steps", "random_dual_switch_step", "random_dual_scale", "random_dual_model_format", "singleSeedControls", "cfg", "sampler_name", "scheduler", "krea_variance_enabled", "baseZeroNegativeControls", "random_dual_second_cfg", "random_dual_second_sampler_name", "random_dual_second_scheduler"]
+    : ["steps", "cfg", "sampler_name", "scheduler", "base_denoise", "singleSeedControls", "krea_variance_enabled", "baseZeroNegativeControls"];
   for (const [index, id] of order.entries()) {
     const node = document.getElementById(id);
-    const field = id === "singleSeedControls" ? node : node?.closest?.("label");
+    const field = ["singleSeedControls", "baseZeroNegativeControls"].includes(id) ? node : node?.closest?.("label");
     if (field?.style) field.style.order = String(index);
   }
   for (const [id, title] of [["steps", dual ? "第一轮步数" : "步数"], ["cfg", dual ? "CFG 1" : "CFG"], ["sampler_name", dual ? "采样器 1" : "采样器"], ["scheduler", dual ? "调度器 1" : "调度器"]]) {

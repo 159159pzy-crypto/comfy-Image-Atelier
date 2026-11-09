@@ -1,6 +1,7 @@
 /* Preserve saved values even when their controls are absent from the compact UI. */
 const SINGLE_VISIBLE_PATHS = new Set([
   "positive_prompt", "prefix", "suffix", "input_image_id", "denoise", "resize_mode",
+  "zero_negative", "secondary_zero_negative",
   "prompt_job_id", "processed_prompt_override", "dual.switch_step", "dual.scale",
   "dual.second_cfg", "dual.second_sampler_name", "dual.second_scheduler", "dual.upscale_method", "dual.model_format",
   "latent.upscale_method", "latent.model_format", "krea_variance.enabled", "dlss.enabled", "dlss.style", "dlss.intensity", "dlss.local_tone", "dlss.local_struct", "dlss.output_mix",

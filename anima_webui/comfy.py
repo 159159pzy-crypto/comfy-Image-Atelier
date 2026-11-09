@@ -556,6 +556,28 @@ class ComfyClient:
         data = await self._json("GET", "/queue")
         return self._queue_contains(data, prompt_id)
 
+    async def queue_idle(self) -> bool:
+        """Confirm that both queues are valid and empty before global cleanup."""
+        data = await self._json("GET", "/queue")
+        self._queue_contains(data, "")  # Validate every queue and entry.
+        return not data["queue_running"] and not data["queue_pending"]
+
+    async def free_memory(self) -> None:
+        """Ask ComfyUI's worker to unload models and clear its execution cache.
+
+        An empty 200 acknowledges the request, not completed GPU reclamation.
+        """
+        session = await self._get_session()
+        try:
+            async with session.post(
+                f"{self.base_url}/free", json={"unload_models": True, "free_memory": True}
+            ) as response:
+                await response.read()
+                if response.status >= 400:
+                    raise ComfyHTTPError(f"释放显存请求失败: HTTP {response.status}", response.status)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+            raise ComfyTransportError(f"释放显存请求失败: {error}") from error
+
     @staticmethod
     def _queue_contains(data: dict[str, Any], prompt_id: str) -> bool:
         if not isinstance(data, dict):

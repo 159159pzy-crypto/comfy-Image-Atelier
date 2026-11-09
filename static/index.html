@@ -154,6 +154,13 @@
               <label class="field"><span>调度器</span><select id="scheduler"><option value="">正在读取调度器...</option></select></label>
               <label class="field"><span>降噪幅度</span><input id="base_denoise" type="number" min="0" max="1" step="0.01" value="1"></label>
               <label class="switch-row base-krea-toggle"><span><strong>是否 K2 多样性增强</strong></span><input id="krea_variance_enabled" type="checkbox"></label>
+              <div id="baseZeroNegativeControls" class="negative-conditioning-controls">
+                <label id="randomZeroNegativeRow" class="switch-row" data-random-only><span><strong>负向条件零化</strong><small>将编码后的负向条件置零，保留负面词文本。</small></span><input id="zero_negative" type="checkbox"></label>
+                <div id="singleZeroNegativeControls" class="negative-conditioning-controls" hidden>
+                  <label class="switch-row"><span><strong id="singleZeroNegativeLabel">负向条件零化</strong><small id="singleZeroNegativeHint">将编码后的负向条件置零，保留负面词文本。</small></span><input id="single_zero_negative" data-single-path="zero_negative" type="checkbox"></label>
+                  <label id="singleSecondaryZeroNegativeRow" class="switch-row" hidden><span><strong>旧副管线负向条件零化</strong><small>仅作用于使用旧副管线的采样与修复阶段。</small></span><input id="single_secondary_zero_negative" data-single-path="secondary_zero_negative" type="checkbox"></label>
+                </div>
+              </div>
               <section id="randomDualSection" hidden><div class="parameter-grid compact-parameter-grid">
                 <label class="field"><span>第二轮起始步</span><input id="random_dual_switch_step" type="number" min="0" max="149" step="1" value="15"></label>
                 <label class="field"><span>第二轮前放大倍率</span><input id="random_dual_scale" type="number" min="1" max="2" step="0.05" value="1"></label>

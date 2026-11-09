@@ -139,6 +139,46 @@ function singleWorkbenchPath(value, path, next) {
   if (arguments.length === 3) current[parts.at(-1)] = next;
   return current[parts.at(-1)];
 }
+function singleWorkbenchActivePipelines(settings) {
+  const single = settings.single || {};
+  const active = new Set(settings.base_mode === "dual_sampler"
+    ? [single.dual?.first_pipeline || "primary", single.dual?.second_pipeline || "primary"]
+    : [single.normal_pipeline || "primary"]);
+  const stages = settings.upscalers || {};
+  if (Number(settings.pipeline_version ?? 2) < 3 && stages.latent?.enabled && stages.latent.second_sampler?.enabled) active.add(single.latent?.pipeline || "secondary");
+  if (stages.face_refine?.enabled) active.add(single.face_pipeline || "secondary");
+  return active;
+}
+function singleWorkbenchRenderZeroNegative() {
+  const primary = document.getElementById("single_zero_negative"), secondary = document.getElementById("single_secondary_zero_negative");
+  if (!primary || !secondary) return;
+  const active = singleWorkbenchActive();
+  document.getElementById("randomZeroNegativeRow").hidden = active;
+  document.getElementById("singleZeroNegativeControls").hidden = !active;
+  const pipelines = active ? singleWorkbenchActivePipelines(readSettings()) : new Set();
+  primary.disabled = !active || !pipelines.has("primary");
+  secondary.disabled = !active || !pipelines.has("secondary");
+  document.getElementById("singleSecondaryZeroNegativeRow").hidden = !pipelines.has("secondary");
+  document.getElementById("singleZeroNegativeLabel").textContent = pipelines.has("secondary") ? "主管线负向条件零化" : "负向条件零化";
+  document.getElementById("singleZeroNegativeHint").textContent = active && !pipelines.has("primary")
+    ? "当前流程未使用主管线；请使用下方旧副管线开关。"
+    : "将编码后的负向条件置零，保留负面词文本。";
+}
+function singleWorkbenchAdaptZeroNegative(target, source, targetWorkbench) {
+  const sourceWorkbench = source.workbench === "single" ? "single" : "random";
+  if (sourceWorkbench === targetWorkbench) return "";
+  if (targetWorkbench === "single") {
+    for (const pipeline of singleWorkbenchActivePipelines(target)) {
+      target.single[pipeline === "secondary" ? "secondary_zero_negative" : "zero_negative"] = source.zero_negative === true;
+    }
+    return "";
+  }
+  const single = source.single || {};
+  const pipeline = source.base_mode === "dual_sampler" ? single.dual?.second_pipeline : single.normal_pipeline;
+  target.zero_negative = single[pipeline === "secondary" ? "secondary_zero_negative" : "zero_negative"] === true;
+  return Boolean(single.zero_negative) !== Boolean(single.secondary_zero_negative)
+    ? "随机工作台已采用底图最后一段的负向条件设置。" : "";
+}
 function singleWorkbenchField(path, label, type = "text", options = null, attrs = "") {
   const id = `single_${path.replaceAll(".", "_")}`;
   const control = options
@@ -570,6 +610,7 @@ async function singleWorkbenchFromHistory(record, asImage = false) {
   settings.workbench = "single"; settings.count = 1; settings.generation_mode = "txt2img";
   settings.single = singleWorkbenchMerge(singleWorkbenchDefaultSettings(profile).single, record.settings?.workbench === "single" ? record.settings.single || {} : {});
   if (typeof adaptPostprocessSettings === "function") adaptPostprocessSettings(settings, record.settings || {}, "single");
+  singleWorkbenchAdaptZeroNegative(settings, record.settings || {}, "single");
   settings.single.prefix = ""; settings.single.suffix = "";
   settings.single.lora_prefix_managed_triggers = [];
   settings.single.positive_prompt = (record.settings?.workbench === "single" ? record.single_runtime?.positive : "") || record.positive_prompt || record.resolved_prompt || "";
@@ -622,9 +663,12 @@ async function singleWorkbenchApplyPreset(item) {
     delete snapshot.single; delete snapshot.clip_name; delete snapshot.vae_name; delete snapshot.clip_type;
   }
   const modes = typeof sharedSamplingDrafts === "function" ? sharedSamplingDrafts() : null;
-  applySettings({ ...current, ...snapshot, workbench: singleWorkbenchState.mode });
+  const target = { ...current, ...snapshot, workbench: singleWorkbenchState.mode };
+  const zeroNegativeNotice = singleWorkbenchAdaptZeroNegative(target, item.settings || {}, target.workbench);
+  applySettings(target);
   if (typeof showPipelineUpgradeNotice === "function") showPipelineUpgradeNotice(item.settings);
   if (typeof sharedSamplingRestoreDrafts === "function") sharedSamplingRestoreDrafts(modes);
+  if (zeroNegativeNotice) toast(zeroNegativeNotice);
   return true;
 }
 async function initializeSingleWorkbench({ legacyRestored = false } = {}) {

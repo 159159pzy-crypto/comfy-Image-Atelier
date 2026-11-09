@@ -118,6 +118,7 @@ const ui = Object.fromEntries(
     "quality_prompt",
     "extra_prompt",
     "negative_prompt",
+    "zero_negative",
     "width",
     "height",
     "steps",
@@ -1119,6 +1120,7 @@ function switchProfileDraft(nextProfile, { applyDefaults = true } = {}) {
 }
 function normalizeSettings(raw) {
   const merged = { ...defaults, ...raw };
+  merged.zero_negative = raw?.zero_negative === true;
   const legacyModelProfile = /krea2/i.test(String(raw?.model_name || "")) ? "krea2" : null;
   merged.model_profile = normalizeProfileId(raw?.model_profile ?? legacyModelProfile ?? defaults?.model_profile ?? "anima");
   const settingsProfile = normalizeProfileId(raw?.model_profile ?? defaults?.model_profile ?? "anima");
@@ -1297,6 +1299,7 @@ function applySettings(raw, { useProfileDraft = false } = {}) {
     const element = ui[name];
     if (element && !["object", "undefined"].includes(typeof value)) element.value = value;
   }
+  if (ui.zero_negative) ui.zero_negative.checked = settings.zero_negative === true;
   ensureSelectValue(ui.sampler_name, settings.sampler_name);
   ensureSelectValue(ui.scheduler, settings.scheduler);
   const upscalers = normalizeUpscalers(settings.upscalers, null, settings.model_profile, settings.pipeline_version);
@@ -1341,6 +1344,7 @@ function readSettings() {
     count: Number(ui.count.value), female_count: Number(ui.female_count.value), male_count: Number(ui.male_count.value),
     character_detail: ui.character_detail.value, manual_artist: normalizedArtist, quality_prompt: ui.quality_prompt.value,
     extra_prompt: ui.extra_prompt.value, negative_prompt: ui.negative_prompt.value, width: Number(ui.width.value), height: Number(ui.height.value),
+    zero_negative: Boolean(ui.zero_negative?.checked),
     steps: Number(ui.steps.value), cfg: Number(ui.cfg.value), sampler_name: ui.sampler_name.value, scheduler: ui.scheduler.value,
     base_denoise: Number(ui.base_denoise?.value ?? 1),
     krea_variance: typeof sharedParameterState !== "undefined" ? { ...sharedParameterState.krea_variance, enabled: Boolean(ui.krea_variance_enabled?.checked) } : { enabled: false },
@@ -1683,6 +1687,7 @@ function generationClassificationIssues(settings = null) {
 function updateGenerationAvailability() {
   if (!ui.startButton) return;
   const issues = generationClassificationIssues();
+  if (typeof currentBatch !== "undefined" && currentBatch?.memory_release === "pending") issues.push("正在停止任务并释放显存，请稍后再试");
   if (typeof singleWorkbenchInputBlocked === "function" && singleWorkbenchInputBlocked()) issues.push("参考图正在读取或不可用，请等待、重新添加或移除");
   const storage = config.storage_status?.history;
   ui.startButton.disabled = submitInFlight || !ui.connection.classList.contains("online") || issues.length > 0 || Boolean(storage?.read_only);
@@ -2133,6 +2138,8 @@ function renderBatch(batch, queue = currentQueue) {
   const completed = batch?.completed || 0;
   const total = batch?.total || 0;
   const promptOnly = batch?.kind === "prompt_preview";
+  const releasePending = !promptOnly && batch?.memory_release === "pending";
+  const releaseMessage = !promptOnly && batch?.memory_release !== "not_requested" ? batch?.memory_release_message || "" : "";
   const promptAction = batch?.settings?.kind === "reverse" ? "图像反推" : "提示词重写";
   const labels = promptOnly ? {
     running: batch?.settings?.kind === "reverse" ? "正在反推图像提示词" : "正在重写提示词",
@@ -2150,14 +2157,15 @@ function renderBatch(batch, queue = currentQueue) {
   ui.batchState.textContent = batch ? labels[batch.status] || batch.status : "等待任务";
   if (stopPending && batch.status === "running") ui.batchState.textContent = "正在请求停止…";
   if (batch?.status === "stopped" && cancelUnconfirmed) ui.batchState.textContent = "本地已停止，ComfyUI 尚未确认";
+  else if (batch?.status === "stopped" && releasePending) ui.batchState.textContent = "任务已停止，正在释放显存…";
   ui.progressCount.textContent = `${completed} / ${total}`;
   setProgressValue(ui.progressFill, total ? completed / total : 0, active, batch?.id || "");
   // 单张采样进度(来自 ComfyUI websocket,尽力而为;旧版页面缺控件时跳过)
   if (ui.sampleFill && ui.sampleProgress) {
     const progress = active && !stopping ? batch.progress : null;
     const sampleTrack = ui.sampleFill.parentElement;
-    ui.sampleProgress.hidden = !active;
-    ui.sampleProgress.textContent = stopping ? "正在取消当前任务，确认 ComfyUI 状态…" : active ? batchProgressLabel(batch) : "";
+    ui.sampleProgress.hidden = !active && !releasePending && !releaseMessage;
+    ui.sampleProgress.textContent = stopping ? "正在取消当前任务，确认 ComfyUI 状态…" : active ? batchProgressLabel(batch) : releasePending ? "正在确认队列空闲并请求释放显存…" : releaseMessage;
     if (progress && progress.max > 0) {
       sampleTrack.hidden = false;
       setProgressValue(ui.sampleFill, progress.value / progress.max, active, `${batch.id}:${batch.progress_node}`);
@@ -2166,11 +2174,12 @@ function renderBatch(batch, queue = currentQueue) {
       setProgressValue(ui.sampleFill, 0, false, `${batch?.id}:${batch?.progress_node}`);
     }
   }
-  ui.stopButton.disabled = !active || stopping;
+  ui.stopButton.disabled = !active || stopping || releasePending;
   ui.stopButton.textContent = stopping ? "正在停止…" : "停止";
   // 运行中仍可加入队列，但分类有效性与连接状态共用同一守卫。
   updateGenerationAvailability();
-  ui.startButton.textContent = active ? "加入队列" : "开始生成";
+  if (releasePending) ui.startButton.disabled = true;
+  ui.startButton.textContent = releasePending ? (active ? "正在停止…" : "正在释放显存…") : active ? "加入队列" : "开始生成";
   const failurePrefix = batch?.failed_stage_label ? `${batch.failed_stage_label}失败：` : "";
   const cancelMessage = cancelUnconfirmed ? batch?.cancel_warning || "取消请求未确认，远端任务可能继续执行；请在 ComfyUI 中检查" : "";
   const batchMessage = [batch?.error && (failurePrefix && !String(batch.error).startsWith(failurePrefix) ? `${failurePrefix}${batch.error}` : batch.error), cancelMessage].filter(Boolean).join("\n");
@@ -2207,12 +2216,14 @@ function renderBatch(batch, queue = currentQueue) {
 }
 async function stopCurrentBatch() {
   const batch = currentBatch;
-  if (!batch || batch.status !== "running" || stopRequestId === batch.id) return;
+  if (!batch || batch.status !== "running" || batch.memory_release === "pending" || stopRequestId === batch.id) return;
   stopRequestId = batch.id;
   renderBatch(currentBatch);
   try {
     const payload = await request(`/api/batches/${batch.id}/stop`, { method: "POST" });
-    if (currentBatch?.id === batch.id && (["running", "stopping"].includes(currentBatch.status)
+    const releaseFinished = currentBatch?.memory_release && !["not_requested", "pending"].includes(currentBatch.memory_release);
+    if (currentBatch?.id === batch.id && !(releaseFinished && payload.batch?.memory_release === "pending")
+        && (["running", "stopping"].includes(currentBatch.status)
         || currentBatch.status === payload.batch?.status)) renderBatchPayload(payload);
   } catch (error) {
     toast(`停止请求失败：${error.message}`);
@@ -2260,7 +2271,7 @@ let pollBatchPending = false;
 let pollBatchLast = 0;
 async function pollBatch() {
   if (document.hidden || pollBatchPending) return;
-  const batchActive = Boolean(currentBatch && ["running", "stopping"].includes(currentBatch.status));
+  const batchActive = Boolean(currentBatch && (["running", "stopping"].includes(currentBatch.status) || currentBatch.memory_release === "pending"));
   const singleActive = batchActive && currentBatch.settings?.workbench === "single" && typeof singleWorkbenchActive === "function" && singleWorkbenchActive();
   const interval = singleActive ? 400 : batchActive ? 1200 : 4800;
   if (pollIdleTicks && Date.now() - pollBatchLast < interval) return;
@@ -2473,7 +2484,9 @@ function renderDetail(record) {
     ["图像种子", record.sample_seed],
     ["提示词种子", record.prompt_seed],
     ["人物", `${settings.female_count || 0} 女 / ${settings.male_count || 0} 男`],
+    ["负向条件", settings.zero_negative ? "置零" : "使用负面提示词"],
   ];
+  ui.detailNegative.closest("label").firstChild.textContent = settings.zero_negative ? "负面提示词 · 编码后条件置零" : "负面提示词";
   ui.detailStats.innerHTML = stats
     .map(([key, value]) => `<div><dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd></div>`)
     .join("");
@@ -5982,6 +5995,7 @@ const PRESET_SETTING_KEYS = [
   "quality_prompt",
   "extra_prompt",
   "negative_prompt",
+  "zero_negative",
   "width",
   "height",
   "steps",
@@ -6468,6 +6482,10 @@ async function removeArtistFavorite(name) {
 async function submitBatch(settings, seeds = null) {
   // 统一的批次提交入口:主表单、复现、变体共用;in-flight 守卫防双击重复入队。
   if (submitInFlight) return false;
+  if (typeof currentBatch !== "undefined" && currentBatch?.memory_release === "pending") {
+    toast("正在停止任务并释放显存，请稍后再试");
+    return false;
+  }
   settings = clone(settings);
   seeds = seeds ? clone(seeds) : null;
   const classificationIssues = generationClassificationIssues(settings);

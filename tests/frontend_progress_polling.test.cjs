@@ -104,6 +104,22 @@ test('a delayed status read cannot overwrite a newer submit or stop response', a
   assert.equal(ctx.currentBatch.progress.value, 2);
 });
 
+test('stopped batches keep polling quickly until the release request finishes', async () => {
+  const { ctx, requests, advance } = context();
+  const stopping = { ...batch(), status: 'stopped', memory_release: 'pending' };
+  ctx.currentBatch = stopping;
+  ctx.reply = () => response({ batch: stopping });
+  await ctx.pollBatch();
+  advance(1200);
+  ctx.reply = () => response({ batch: { ...stopping, memory_release: 'requested' } });
+  await ctx.pollBatch();
+  assert.equal(requests.length, 2);
+  assert.equal(ctx.currentBatch.memory_release, 'requested');
+  advance(1200);
+  await ctx.pollBatch();
+  assert.equal(requests.length, 2, 'finished release returns to idle polling');
+});
+
 test('slow startup resources do not delay polling or visibility recovery', async () => {
   const { ctx, intervals, listeners, requests, advance } = context();
   const resources = deferred();

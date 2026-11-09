@@ -114,6 +114,7 @@ DEFAULT_SETTINGS = {
     "quality_prompt": DEFAULT_QUALITY,
     "extra_prompt": "",
     "negative_prompt": DEFAULT_NEGATIVE,
+    "zero_negative": False,
     "width": 832,
     "height": 1216,
     "steps": MODEL_PROFILES[DEFAULT_MODEL_PROFILE]["defaults"]["steps"],
@@ -1148,6 +1149,7 @@ def validate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         settings.setdefault("vae_name", profile["vae_name"])
         settings.setdefault("clip_type", profile["clip_type"])
     settings["count"] = _integer("生成数量", settings["count"], 1, 1000)
+    settings["zero_negative"] = _boolean("zero_negative", settings["zero_negative"])
     for name in tuple(f"random_{section}" for section in PROMPT_SECTIONS):
         settings[name] = _boolean(name, settings[name])
     for name in tuple(f"random_{section}_count" for section in PROMPT_SECTIONS):
@@ -1917,6 +1919,12 @@ def _render_v2_workflows(
         inputs = _v2_inputs(api, node_id)
         if inputs is not None and "text" in inputs:
             inputs["text"] = negative_text
+    # Random generation shares one negative-conditioning policy across both
+    # LoRA routes. Single generation replaces these routes below and retains
+    # its historical per-pipeline switches independently.
+    if settings["workbench"] == "random":
+        for node_id in ("1010:1002", "1026:1018"):
+            _v2_set_input(api, node_id, "switch", settings["zero_negative"])
     for node_id in ("1010:1083", "1026:1088"):
         inputs = _v2_inputs(api, node_id)
         if inputs is not None:
@@ -2272,7 +2280,14 @@ def render_workflows(
             return build_pipeline(api, ui_template, settings, sample_seed, prompt_seed, filename_prefix,
                                   resource_paths=resource_paths, execution_nonce=execution_nonce)
         from .single_workbench import _prune_graph
-        return _prune_graph(api, V2_OUTPUT_ID), ui
+        api = _prune_graph(api, V2_OUTPUT_ID)
+        if settings["zero_negative"]:
+            # The historical attachment exposes nested switches through
+            # subgraph widgets. Export the actual graph for the new option
+            # rather than leaving those visual defaults set to false.
+            from .pipeline_v3 import export_ui_workflow
+            ui = export_ui_workflow(api, ui_template, pipeline_version=2)
+        return api, ui
 
     # Embedded v1 workflows still need their compatibility-only controls while
     # they are being replayed.  Keep those aliases local to this legacy render
@@ -2449,6 +2464,18 @@ def render_workflows(
     _set_ui_widget(ui, SECOND_SAMPLER_ID, second_sampler["sampler_name"], 4)
     _set_ui_widget(ui, SECOND_SAMPLER_ID, second_sampler["scheduler"], 5)
     _set_ui_widget(ui, SECOND_SAMPLER_ID, second_sampler["denoise"], 6)
+    if settings["zero_negative"]:
+        # Embedded v1 callers can opt in without silently ignoring the new
+        # setting. Add the transform after wiring all legacy sampling stages.
+        zero_id = "legacy:negative:zero"
+        _v2_replace_refs(api, str(NEGATIVE_ID), [zero_id, 0])
+        api[zero_id] = {
+            "class_type": "ConditioningZeroOut",
+            "inputs": {"conditioning": [str(NEGATIVE_ID), 0]},
+            "_meta": {"title": "负向条件零化"},
+        }
+        from .pipeline_v3 import export_ui_workflow
+        ui = export_ui_workflow(api, ui, pipeline_version=2)
     return api, ui
 
 

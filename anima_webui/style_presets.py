@@ -62,6 +62,7 @@ PRESET_SETTING_KEYS = (
     "quality_prompt",
     "extra_prompt",
     "negative_prompt",
+    "zero_negative",
     "width",
     "height",
     "steps",

@@ -78,6 +78,54 @@ class PlainTextResponseTests(unittest.IsolatedAsyncioTestCase):
             await self.client.lora_inventory()
 
 
+class MemoryReleaseTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.queue = {"queue_running": [], "queue_pending": []}
+        self.free_status = 200
+        self.free_requests = []
+        app = web.Application()
+
+        async def queue(request):
+            return web.json_response(self.queue)
+
+        async def free(request):
+            self.free_requests.append(await request.json())
+            return web.Response(status=self.free_status)
+
+        app.router.add_get("/queue", queue)
+        app.router.add_post("/free", free)
+        self.server = TestServer(app)
+        await self.server.start_server()
+        self.client = ComfyClient(f"http://127.0.0.1:{self.server.port}")
+
+    async def asyncTearDown(self):
+        await self.client.close()
+        await self.server.close()
+
+    async def test_release_accepts_empty_200_and_requests_both_cleanup_actions(self):
+        await self.client.free_memory()
+        self.assertEqual(self.free_requests, [{"unload_models": True, "free_memory": True}])
+
+    async def test_release_http_failure_is_not_retried(self):
+        self.free_status = 503
+        with self.assertRaisesRegex(ComfyError, "503"):
+            await self.client.free_memory()
+        self.assertEqual(len(self.free_requests), 1)
+
+    async def test_idle_check_requires_both_valid_empty_queues(self):
+        self.assertTrue(await self.client.queue_idle())
+        for key in ("queue_running", "queue_pending"):
+            self.queue = {"queue_running": [], "queue_pending": []}
+            self.queue[key] = [[0, "other-client-job"]]
+            self.assertFalse(await self.client.queue_idle())
+        for invalid in ({}, {"queue_running": [], "queue_pending": None},
+                        {"queue_running": [[0]], "queue_pending": []},
+                        {"queue_running": [], "queue_pending": ""}):
+            self.queue = invalid
+            with self.subTest(queue=invalid), self.assertRaises(ComfyError):
+                await self.client.queue_idle()
+
+
 class LoraPreviewTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         app = web.Application()

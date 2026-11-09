@@ -115,13 +115,21 @@ test('unchanged refresh preserves image nodes and focus targets; metadata and cl
 
 test('details load the original for both workbenches and release it only after the dialog closes', () => {
   const image = element('img');
+  const negativeLabel = { firstChild: { textContent: '' } };
   const ctx = vm.createContext({
-    ui: { detailImage: image, detailDialog: { open: true }, detailMeta: {}, detailPositive: {}, detailNegative: {}, detailStats: {}, detailSelection: {} },
+    ui: { detailImage: image, detailDialog: { open: true }, detailMeta: {}, detailPositive: {}, detailNegative: { closest: () => negativeLabel }, detailStats: {}, detailSelection: {} },
     resetRevealImageFile() {}, renderSingleDetail() {}, resetSingleDetail() {}, closeRegenerationDrawers() {},
     normalizeSettings: settings => ({ ...settings, loras: [] }), SECTIONS: [], escapeHtml: String,
     detailContext: { origin: 'random' }, closeImagePreview() {}, regenerationRequest: 0, regenerationOptions: {}, document: { querySelector: () => null },
   });
   load(ctx, 'loraRuntimeMarkup', 'renderDetail', 'finishDetailClose');
+  for (const zero of [true, false]) {
+    const item = record(7); item.settings.zero_negative = zero; item.negative_prompt = 'original negative';
+    ctx.renderDetail(item);
+    assert.equal(ctx.ui.detailNegative.value, 'original negative');
+    assert.equal(negativeLabel.firstChild.textContent, zero ? '负面提示词 · 编码后条件置零' : '负面提示词');
+    assert.match(ctx.ui.detailStats.innerHTML, zero ? /<dd>置零<\/dd>/ : /<dd>使用负面提示词<\/dd>/);
+  }
   for (const workbench of ['random', 'single']) {
     ctx.renderDetail(record(7, workbench));
     assert.equal(image.src, '/api/images/7');

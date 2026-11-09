@@ -72,6 +72,34 @@ test('generation omits inactive fixed drafts while retaining pools and count', (
   assert.equal(ctx.draft.fixed_character, undefined);
   assert.equal(ctx.draft.fixed.character, 'hidden identity');
 });
+
+test('random zero-negative defaults off and survives request and preset serialization without clearing text', () => {
+  const ctx = context();
+  ctx.canonicalArtists = value => value;
+  ctx.defaultLorasForProfile = () => [];
+  vm.runInContext(functionSource('normalizeSettings'), ctx);
+  ctx.defaults.zero_negative = true;
+  assert.equal(ctx.normalizeSettings({}).zero_negative, false, 'old snapshots must not borrow a new enabled default');
+  assert.equal(ctx.normalizeSettings({ zero_negative: true }).zero_negative, true);
+  vm.runInContext(functionSource('readSettings'), ctx);
+  ctx.saveCurrentProfileDraft = () => {};
+  ctx.currentProfile = () => 'anima';
+  ctx.readUpscalerControls = () => ({});
+  ctx.readKreaPoolSelection = () => ({ ids: [] });
+  const fields = ['count','female_count','male_count','character_detail','manual_artist','quality_prompt','extra_prompt','negative_prompt','zero_negative','width','height','steps','cfg','sampler_name','scheduler','model_name','base_mode','krea_prompt_pool_enabled'];
+  ctx.ui = Object.fromEntries(fields.map(key => [key, { value: '1', checked: false }]));
+  ctx.ui.negative_prompt.value = 'saved negative text';
+  ctx.draft = { modes: {}, fixed: {}, counts: {}, pools: {}, loras: [] };
+  const start = source.indexOf('const PRESET_SETTING_KEYS = [');
+  vm.runInContext(source.slice(start, source.indexOf('\n];', start) + 3), ctx);
+  vm.runInContext(functionSource('presetSnapshot'), ctx);
+  for (const zero of [true, false]) {
+    ctx.ui.zero_negative.checked = zero;
+    assert.equal(ctx.readSettings().zero_negative, zero);
+    assert.equal(ctx.presetSnapshot().zero_negative, zero);
+    assert.equal(ctx.presetSnapshot().negative_prompt, 'saved negative text');
+  }
+});
 test('profile drafts preserve each source version without borrowing post settings', () => {
   const ctx = context();
   ctx.profileDrafts.anima = { pipeline_version: 4, upscalers: { latent: { enabled: true, sampler: { steps: 32, cfg: 3.3, denoise: .42 } }, post_sampler: { enabled: false, steps: 21 } } };

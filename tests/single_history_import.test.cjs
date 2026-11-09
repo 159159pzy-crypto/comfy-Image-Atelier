@@ -342,3 +342,55 @@ test('restoring random history loads its image seed without freezing future rand
   assert.equal(state.mode, 'random');
   assert.deepEqual(plain(ctx.singleWorkbenchSeeds()), { sample_seed: 0 });
 });
+
+test('history transfer maps random zero-negative into the new primary route and preserves single asymmetry', async () => {
+  for (const workbench of ['random', 'single']) for (const zero of [false, true]) {
+    const { ctx, imported } = setup();
+    const record = historyRecord(workbench);
+    record.settings.zero_negative = zero;
+    record.settings.single.zero_negative = !zero;
+    record.settings.single.secondary_zero_negative = zero;
+    const before = plain(record);
+    await ctx.singleWorkbenchFromHistory(record);
+    assert.equal(imported[0].settings.single.zero_negative, workbench === 'random' ? zero : !zero);
+    assert.equal(imported[0].settings.single.secondary_zero_negative, workbench === 'random' ? false : zero);
+    assert.deepEqual(record, before);
+  }
+});
+
+test('random presets apply zero-negative only to active single routes without changing stored snapshots', async () => {
+  for (const zero of [false, true]) {
+    const { ctx } = setup();
+    const current = plain(ctx.singleWorkbenchDefaultSettings('anima'));
+    Object.assign(current.single, { normal_pipeline: 'secondary', zero_negative: true, secondary_zero_negative: !zero });
+    current.upscalers = { face_refine: { enabled: false } };
+    const preset = { settings: { workbench: 'random', base_mode: 'normal', zero_negative: zero } };
+    const before = plain(current), presetBefore = plain(preset); let applied;
+    ctx.readSettings = () => current; ctx.applySettings = value => { applied = plain(value); };
+    await ctx.singleWorkbenchApplyPreset(preset);
+    assert.equal(applied.single.zero_negative, true, 'inactive primary keeps its previous value');
+    assert.equal(applied.single.secondary_zero_negative, zero);
+    assert.deepEqual(current, before); assert.deepEqual(preset, presetBefore);
+  }
+});
+
+test('single presets retain separate zero-negative values or convert the final base route for random', async () => {
+  for (const destination of ['single', 'random']) for (const baseMode of ['normal', 'dual_sampler']) {
+    const { ctx, state } = setup(); state.mode = destination;
+    const current = plain(ctx.singleWorkbenchDefaultSettings('anima')); current.workbench = destination;
+    const preset = { settings: { workbench: 'single', base_mode: baseMode, zero_negative: false,
+      single: { normal_pipeline: 'primary', dual: { first_pipeline: 'primary', second_pipeline: 'secondary' },
+        zero_negative: true, secondary_zero_negative: false } } };
+    const before = plain(preset), notices = []; let applied;
+    ctx.readSettings = () => current; ctx.applySettings = value => { applied = plain(value); }; ctx.toast = value => notices.push(value);
+    await ctx.singleWorkbenchApplyPreset(preset);
+    if (destination === 'single') {
+      assert.equal(applied.single.zero_negative, true); assert.equal(applied.single.secondary_zero_negative, false);
+      assert.deepEqual(notices, []);
+    } else {
+      assert.equal(applied.zero_negative, baseMode === 'normal');
+      assert.match(notices[0], /底图最后一段/);
+    }
+    assert.deepEqual(preset, before);
+  }
+});

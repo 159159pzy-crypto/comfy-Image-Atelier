@@ -247,6 +247,8 @@ def random_sampling_resource_issues(settings: dict[str, Any], resources: dict[st
 
     if settings.get("krea_variance", {}).get("enabled"):
         node_inputs("KreaSeedVarianceEnhancer", settings["krea_variance"], "Krea 多样性增强")
+    if settings.get("zero_negative"):
+        node_inputs("ConditioningZeroOut", {}, "负向条件零化")
     if settings["base_mode"] == "normal":
         issues.extend(node_input_issues(resources, "KSampler", {"denoise": settings.get("base_denoise", 1.0)}, "底图采样"))
     latent = settings["upscalers"]["latent"]

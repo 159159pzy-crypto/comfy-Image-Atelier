@@ -41,6 +41,7 @@ MAX_QUEUE = 20
 PROMPT_JOB_TIMEOUT = 300
 SHUTDOWN_GRACE = 2.0
 CANCEL_PROMPT_TIMEOUT = 5.0
+MEMORY_RELEASE_TIMEOUT = 5.0
 REGENERATION_MODES = {"replay", "prompt_variant", "content_redraw", "settings_reroll"}
 PROMPT_SECTIONS = ("character", "clothing", "pose", "background", "expression")
 MAX_EXECUTION_NONCE = 2**53 - 1
@@ -141,6 +142,8 @@ class BatchManager:
     def _ensure_accepting(self) -> None:
         if self.shutting_down:
             raise BatchConflict("服务正在关闭，无法接受新任务")
+        if self.state and self.state.get("memory_release") == "pending":
+            raise BatchConflict("正在释放显存，请稍后再试")
 
     async def begin_idle_shutdown(self) -> None:
         """Reserve an idle manager for a launcher update without a start race."""
@@ -566,6 +569,7 @@ class BatchManager:
         return issues
 
     async def start_reverse(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._ensure_accepting()
         async with self._start_lock:
             self._ensure_accepting()
             self.history.ensure_writable()
@@ -605,6 +609,7 @@ class BatchManager:
             return await self.prompt_jobs.get(job["id"])
 
     async def start_rewrite(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._ensure_accepting()
         async with self._start_lock:
             self._ensure_accepting()
             self.history.ensure_writable()
@@ -620,6 +625,7 @@ class BatchManager:
             return await self.prompt_jobs.get(job["id"])
 
     async def start_prompt_preview(self, overrides: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
+        self._ensure_accepting()
         async with self._start_lock:
             self._ensure_accepting()
             self.history.ensure_writable()
@@ -648,7 +654,8 @@ class BatchManager:
         self._cancel_tasks = {key: task for key, task in self._cancel_tasks.items() if not task.done()}
         self.state = {"id": job["id"], "kind": "prompt_preview", "stage": "prompt_processing",
                       "status": "running", "total": 1, "current": 1, "completed": 0,
-                      "prompt_id": "", "error": "", "cancel_state": "not_requested", "settings": job["settings"]}
+                      "prompt_id": "", "error": "", "cancel_state": "not_requested",
+                      "memory_release": "not_requested", "memory_release_message": "", "settings": job["settings"]}
         self.task = asyncio.create_task(self._run_prompt_preview(job))
         self.task.add_done_callback(lambda _: self._wake_prompt_cache())
         self._ensure_monitor()
@@ -835,6 +842,7 @@ class BatchManager:
         seeds: dict[str, int] | None = None,
         regeneration: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        self._ensure_accepting()
         async with self._start_lock:
             self._ensure_accepting()
             ensure_writable = getattr(self.history, "ensure_writable", None)
@@ -980,6 +988,8 @@ class BatchManager:
             "prompt_id": "",
             "error": "",
             "cancel_state": "not_requested",
+            "memory_release": "not_requested",
+            "memory_release_message": "",
             "settings": settings,
         }
         await self.history.create_batch(batch_id, settings["count"], settings)
@@ -1052,9 +1062,10 @@ class BatchManager:
 
     async def request_stop(self, batch_id: str, clear_queue: bool = True) -> dict[str, Any]:
         async with self._start_lock:
-            return await self._request_stop(batch_id, clear_queue)
+            return await self._request_stop(batch_id, clear_queue, release_memory=True)
 
-    async def _request_stop(self, batch_id: str, clear_queue: bool = True) -> dict[str, Any]:
+    async def _request_stop(self, batch_id: str, clear_queue: bool = True,
+                            *, release_memory: bool = False) -> dict[str, Any]:
         if not self.state or self.state["id"] != batch_id:
             raise KeyError(batch_id)
         if clear_queue:
@@ -1066,6 +1077,9 @@ class BatchManager:
         if self.active() and self.state.get("status") in {"running", "stopping"}:
             self.stop_requested = True
             self.state["status"] = "stopping"
+            if (release_memory and self.state.get("kind", "generation") == "generation"
+                    and self.state.get("memory_release", "not_requested") == "not_requested"):
+                self.state.update(memory_release="pending", memory_release_message="任务停止后将请求释放显存")
             if self.state.get("kind") == "prompt_preview":
                 await self.prompt_jobs.update(batch_id, status="stopping")
             else:
@@ -1312,6 +1326,7 @@ class BatchManager:
         self._clear_preview()
         self._wake_prompt_cache()
         async with self._start_lock:
+            await self._release_stopped_memory()
             while not self.shutting_down and self.queue:
                 entry = self.queue.pop(0)
                 try:
@@ -1328,6 +1343,57 @@ class BatchManager:
                     if entry.get("kind") == "prompt_preview":
                         await self.prompt_jobs.update(entry["job_id"], status="error", error=str(error))
             self._stop_monitor()
+
+    async def _release_stopped_memory(self) -> None:
+        """Finish manual-stop cleanup under _start_lock before any new dispatch.
+
+        This stays in the runner's finally path, never in a detached task. The
+        lock orders our requests; ComfyUI acknowledges /free before its worker
+        necessarily finishes unloading, so success is deliberately 'requested'.
+        """
+        state = self.state
+        if not state or state.get("memory_release") != "pending":
+            return
+
+        def outcome(value: str, message: str) -> None:
+            state.update(memory_release=value, memory_release_message=message)
+
+        if self.shutting_down or state.get("status") != "stopped":
+            outcome("skipped", "任务未完成停止收尾或服务正在关闭，已跳过释放显存")
+            return
+        if self.queue:
+            outcome("skipped", "还有本地任务等待执行，已跳过释放显存")
+            return
+        if state.get("prompt_id") and state.get("cancel_state") != "confirmed":
+            outcome("skipped", "ComfyUI 尚未确认任务停止，已跳过释放显存")
+            return
+        queue_idle = getattr(self.comfy, "queue_idle", None)
+        free_memory = getattr(self.comfy, "free_memory", None)
+        if queue_idle is None or free_memory is None:
+            outcome("skipped", "当前客户端不支持确认空闲并释放显存")
+            return
+        release_started = False
+        try:
+            async with asyncio.timeout(MEMORY_RELEASE_TIMEOUT):
+                idle = await queue_idle()
+                if idle is not True:
+                    outcome("skipped", "ComfyUI 队列仍有任务，已跳过释放显存" if idle is False
+                            else "无法确认 ComfyUI 队列空闲，已跳过释放显存")
+                    return
+                release_started = True
+                state["memory_release_message"] = "正在请求释放显存…"
+                await free_memory()
+            outcome("requested", "已请求释放显存")
+        except asyncio.CancelledError:
+            outcome("failed" if release_started else "skipped", "显存释放收尾已中断")
+            raise
+        except Exception:
+            # A failed/uncertain cleanup never changes the stopped batch result,
+            # retries later, or exposes a transport exception in the UI.
+            outcome("failed" if release_started else "skipped",
+                    "任务已停止，释放显存请求失败或超时" if release_started
+                    else "无法确认 ComfyUI 队列空闲，已跳过释放显存")
+            logger.warning("批次 %s 显存释放未确认: %s", state.get("id"), state["memory_release_message"])
 
     def _ensure_monitor(self) -> None:
         if self._monitor_task and not self._monitor_task.done():

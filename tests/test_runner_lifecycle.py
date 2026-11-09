@@ -30,6 +30,196 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
             while not self.comfy.submissions:
                 await asyncio.sleep(0)
 
+    def memory_client(self):
+        self.comfy.cancel_prompt = AsyncMock()
+        self.comfy.prompt_queued = AsyncMock(return_value=False)
+        self.comfy.queue_idle = AsyncMock(return_value=True)
+        self.comfy.free_memory = AsyncMock()
+        return self.comfy
+
+    async def stoppable_batch(self):
+        self.comfy.block = asyncio.Event()
+        self.comfy.honor_abort = True
+        state = await self.manager.start({**DEFAULT_SETTINGS, "count": 2})
+        await self.submitted()
+        return state
+
+    async def test_manual_stop_releases_once_after_confirmed_cancel_and_keeps_history_clean(self):
+        client = self.memory_client()
+        order = []
+        client.cancel_prompt.side_effect = lambda _: order.append("cancel")
+        client.prompt_queued.side_effect = lambda _: order.append("confirm") or False
+        client.queue_idle.side_effect = lambda: order.append("idle") or True
+        client.free_memory.side_effect = lambda: order.append("free")
+        state = await self.stoppable_batch()
+        await asyncio.gather(self.manager.request_stop(state["id"]),
+                             self.manager.request_stop(state["id"]))
+        result = await self.manager.wait()
+        await self.manager.request_stop(state["id"])
+        self.assertEqual(order, ["cancel", "confirm", "idle", "free"])
+        self.assertEqual(result["status"], "stopped")
+        self.assertEqual(result["memory_release"], "requested")
+        self.assertEqual(result["memory_release_message"], "已请求释放显存")
+        record = await self.history.get_batch(state["id"])
+        self.assertEqual(record["status"], "stopped")
+        self.assertNotIn("memory_release", record["settings"])
+
+    async def test_stop_before_submission_can_release_previous_models(self):
+        client = self.memory_client()
+        state = await self.manager.start({**DEFAULT_SETTINGS, "count": 2})
+        await self.manager.request_stop(state["id"])
+        result = await self.manager.wait()
+        self.assertEqual(client.submissions, [])
+        client.cancel_prompt.assert_not_awaited()
+        client.queue_idle.assert_awaited_once()
+        client.free_memory.assert_awaited_once()
+        self.assertEqual(result["cancel_state"], "not_requested")
+        self.assertEqual(result["memory_release"], "requested")
+
+    async def test_cleanup_holds_dispatch_and_pending_starts_fail_promptly(self):
+        client = self.memory_client()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def cleanup():
+            self.assertTrue(self.manager._start_lock.locked())
+            entered.set()
+            await release.wait()
+
+        client.free_memory.side_effect = cleanup
+        state = await self.stoppable_batch()
+        await self.manager.request_stop(state["id"])
+        await entered.wait()
+        self.assertTrue(self.manager.active())
+        self.assertEqual(self.manager.snapshot()["status"], "stopped")
+        self.assertEqual(self.manager.snapshot()["memory_release"], "pending")
+        try:
+            for start in (self.manager.start, self.manager.start_rewrite,
+                          self.manager.start_reverse, self.manager.start_prompt_preview):
+                with self.subTest(start=start.__name__):
+                    with self.assertRaisesRegex(BatchConflict, "正在释放显存"):
+                        await asyncio.wait_for(start({}), .2)
+            self.assertEqual(self.manager.queue, [])
+        finally:
+            release.set()
+        await self.manager.wait()
+        client.block.set()
+        new_state = await self.manager.start({**DEFAULT_SETTINGS, "count": 1})
+        self.assertEqual(new_state["memory_release"], "not_requested")
+        self.assertEqual(new_state["memory_release_message"], "")
+        await self.manager.wait()
+        client.free_memory.assert_awaited_once()
+
+    async def test_remote_busy_unconfirmed_or_invalid_queue_never_releases(self):
+        for queue_result, cancel_error in ((False, None), (None, None),
+                                          (ComfyError("queue unavailable"), None),
+                                          (True, ComfyError("cancel unavailable"))):
+            with self.subTest(queue=queue_result, cancel=cancel_error):
+                client = self.memory_client()
+                client.submissions.clear()
+                client.cancel_prompt.side_effect = cancel_error
+                if isinstance(queue_result, Exception):
+                    client.queue_idle.side_effect = queue_result
+                else:
+                    client.queue_idle.return_value = queue_result
+                state = await self.stoppable_batch()
+                await self.manager.request_stop(state["id"])
+                result = await self.manager.wait()
+                self.assertEqual(result["status"], "stopped")
+                self.assertEqual(result["memory_release"], "skipped")
+                client.free_memory.assert_not_awaited()
+                if cancel_error:
+                    client.queue_idle.assert_not_awaited()
+                    self.assertEqual(result["cancel_state"], "unconfirmed")
+
+    async def test_release_errors_and_timeout_do_not_change_stopped_or_retry(self):
+        for timeout in (False, True):
+            with self.subTest(timeout=timeout):
+                client = self.memory_client()
+                client.submissions.clear()
+
+                async def cleanup():
+                    if timeout:
+                        await asyncio.Event().wait()
+                    raise ComfyError("sensitive transport detail")
+
+                client.free_memory.side_effect = cleanup
+                state = await self.stoppable_batch()
+                with patch("anima_webui.runner.MEMORY_RELEASE_TIMEOUT", .02):
+                    await self.manager.request_stop(state["id"])
+                    result = await asyncio.wait_for(self.manager.wait(), 1)
+                self.assertEqual(result["status"], "stopped")
+                self.assertEqual(result["error"], "")
+                self.assertEqual(result["memory_release"], "failed")
+                self.assertNotIn("sensitive", result["memory_release_message"])
+                await self.manager.request_stop(state["id"])
+                client.free_memory.assert_awaited_once()
+
+    async def test_queue_check_and_release_share_one_total_timeout(self):
+        client = self.memory_client()
+
+        async def busy_check():
+            await asyncio.Event().wait()
+
+        client.queue_idle.side_effect = busy_check
+        state = await self.stoppable_batch()
+        with patch("anima_webui.runner.MEMORY_RELEASE_TIMEOUT", .02):
+            await self.manager.request_stop(state["id"])
+            result = await asyncio.wait_for(self.manager.wait(), 1)
+        self.assertEqual(result["memory_release"], "skipped")
+        client.free_memory.assert_not_awaited()
+
+    async def test_keep_queue_skips_release_and_next_batch_resets_runtime_fields(self):
+        client = self.memory_client()
+        state = await self.stoppable_batch()
+        await self.manager.start({**DEFAULT_SETTINGS, "count": 1})
+        stopped_state = self.manager.state
+        await self.manager.request_stop(state["id"], clear_queue=False)
+        client.block.set()
+        result = await self.manager.wait()
+        self.assertEqual(stopped_state["memory_release"], "skipped")
+        self.assertIn("本地任务", stopped_state["memory_release_message"])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["memory_release"], "not_requested")
+        client.queue_idle.assert_not_awaited()
+        client.free_memory.assert_not_awaited()
+
+    async def test_completion_pending_removal_and_shutdown_never_release(self):
+        client = self.memory_client()
+        state = await self.manager.start({**DEFAULT_SETTINGS, "count": 1})
+        await self.manager.wait()
+        await self.manager.request_stop(state["id"])
+        self.assertEqual(self.manager.state["memory_release"], "not_requested")
+        client.submissions.clear()
+        await self.stoppable_batch()
+        queued = await self.manager.start({**DEFAULT_SETTINGS, "count": 1})
+        self.assertTrue(self.manager.remove_queued(queued["queue_id"]))
+        self.assertEqual(self.manager.state["memory_release"], "not_requested")
+        await self.manager.shutdown()
+        self.assertEqual(self.manager.state["status"], "stopped")
+        self.assertEqual(self.manager.state["memory_release"], "not_requested")
+        client.free_memory.assert_not_awaited()
+
+    async def test_internal_prompt_cancellation_does_not_request_memory_release(self):
+        client = self.memory_client()
+        state = await self.stoppable_batch()
+        # Prompt-processing cancellation calls the private stop path, even
+        # when its owning batch is an image generation.
+        async with self.manager._start_lock:
+            await self.manager._request_stop(state["id"], clear_queue=False)
+        result = await self.manager.wait()
+        self.assertEqual(result["memory_release"], "not_requested")
+        client.free_memory.assert_not_awaited()
+
+    async def test_public_stop_of_prompt_preview_does_not_release_memory(self):
+        client = self.memory_client()
+        state = await self.stoppable_batch()
+        self.manager.state["kind"] = "prompt_preview"
+        with patch.object(self.manager.prompt_jobs, "update", AsyncMock()):
+            await self.manager.request_stop(state["id"])
+            result = await self.manager.wait()
+        self.assertEqual(result["memory_release"], "not_requested")
+        client.free_memory.assert_not_awaited()
+
     async def test_all_start_endpoints_reject_shutdown_without_side_effects(self):
         await self.manager.shutdown()
         for start, payload in (

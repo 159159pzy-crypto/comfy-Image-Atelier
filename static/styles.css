@@ -184,6 +184,7 @@ body[data-workbench="single"] [data-random-only], body[data-workbench="single"] 
 .single-mode-switch button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .single-prompt-main textarea { min-height: 170px; font-size: 14px; line-height: 1.65; }
 .single-prompt-tools, .single-favorite-tabs, .single-inline-actions { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+.negative-conditioning-controls { display: grid; gap: 6px; }
 .prompt-assistant { min-width: 0; display: grid; gap: 12px; }
 .prompt-assistant .section-heading, .prompt-assistant .field-hint { margin: 0; }
 .prompt-assistant .field-hint { overflow-wrap: anywhere; }
@@ -1384,6 +1385,7 @@ html.image-preview-open { overflow: hidden; }
 #randomDualSection:not([hidden]), #randomDualSection > .parameter-grid { display:contents; }
 #randomDualSection[hidden], #baseSamplingFields [hidden] { display:none !important; }
 #baseSamplingFields .base-krea-toggle { grid-column:1 / -1; }
+#baseSamplingFields #baseZeroNegativeControls { grid-column:1 / -1; min-width:0; }
 #baseSamplingFields #singleSeedControls { display:block; grid-column:1 / -1; margin:0; padding:0; border:0; background:none; }
 .shared-seed-controls { display:flex; gap:6px; align-items:center; min-width:0; }
 .shared-seed-controls input { min-width:0; flex:1; }
