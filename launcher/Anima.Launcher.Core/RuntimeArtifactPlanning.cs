@@ -95,6 +95,7 @@ print(json.dumps(dict(pythonTag='cp'+str(sys.version_info.major)+str(sys.version
         if (plan.RuntimeArtifactsIdentity.Length == 0) return plan;
         ValidateIdentity(plan);
         if (plan.RuntimeArtifactsPrepared) return plan;
+        if (plan.ResourcePolicyVersion > 0) runtime = SetupFeatures.SelectRuntime(runtime, plan.Features);
         var config = plan.CreateConfig();
         var artifacts = new List<Artifact>();
         long environmentReserve = 0, cacheReserve = 0;
@@ -111,9 +112,12 @@ print(json.dumps(dict(pythonTag='cp'+str(sys.version_info.major)+str(sys.version
             if (host.Generation.Length > 0)
             {
                 var catalog = NvidiaRuntimePreparation.Catalog();
-                var wheel = NvidiaRuntimePreparation.WheelFor(host.PythonTag)
-                    ?? throw new InvalidOperationException("当前 Python ABI 没有已验证的 NVIDIA VFX 运行库；保留现有 Python 与 Torch，请重新检查支持的独立环境。");
-                if (host.VfxVersion != wheel.Version)
+                var needsVsr = runtime.Nodes.Any(node => node.Id == "nvidia-rtx-vsr-pro");
+                var needsDlss = runtime.Nodes.Any(node => node.Id == "DLSS5-Comfyui");
+                var wheel = NvidiaRuntimePreparation.WheelFor(host.PythonTag);
+                // Unsupported optional features remain selectable with a runtime issue;
+                // they do not prevent preparing the independent base environment.
+                if (needsVsr && wheel is not null && host.VfxVersion != wheel.Version)
                 {
                     artifacts.Add(wheel);
                     // The official wheel contains compressed SDK models; reserve the
@@ -122,25 +126,28 @@ print(json.dumps(dict(pythonTag='cp'+str(sys.version_info.major)+str(sys.version
                     cacheReserve += 2 * GiB;
                 }
                 if (!host.VcRuntime) artifacts.Add(catalog.VcRuntime);
-                var node = NvidiaRuntimePreparation.ResolveDlssDirectory(config.ComfyRoot);
-                var variant = catalog.DlssRuntimes.Single(item => item.Generation == host.Generation);
-                var hostReady = node is not null && await Downloads.Verify(Path.Combine(node, "vendor", catalog.DlssHost.FileName), catalog.DlssHost.Size, catalog.DlssHost.Sha256, ct);
-                var dllReady = node is not null && await Downloads.Verify(Path.Combine(node, "vendor", variant.Generation, variant.Dll.FileName), variant.Dll.Size, variant.Dll.Sha256, ct);
-                if (!hostReady || host.Generation == "rtx40" && !dllReady) artifacts.Add(catalog.DlssArchive);
-                if (!hostReady) environmentReserve += catalog.DlssHost.Size;
-                if (!dllReady)
+                if (needsDlss)
                 {
-                    environmentReserve += variant.Dll.Size;
-                    cacheReserve += variant.Dll.Size;
-                    if (host.Generation != "rtx40")
+                    var node = NvidiaRuntimePreparation.ResolveDlssDirectory(config.ComfyRoot);
+                    var variant = catalog.DlssRuntimes.Single(item => item.Generation == host.Generation);
+                    var hostReady = node is not null && await Downloads.Verify(Path.Combine(node, "vendor", catalog.DlssHost.FileName), catalog.DlssHost.Size, catalog.DlssHost.Sha256, ct);
+                    var dllReady = node is not null && await Downloads.Verify(Path.Combine(node, "vendor", variant.Generation, variant.Dll.FileName), variant.Dll.Size, variant.Dll.Sha256, ct);
+                    if (!hostReady || host.Generation == "rtx40" && !dllReady) artifacts.Add(catalog.DlssArchive);
+                    if (!hostReady) environmentReserve += catalog.DlssHost.Size;
+                    if (!dllReady)
                     {
-                        artifacts.Add(variant.Archive);
-                        var sevenZip = Path.Combine(plan.RuntimeRoot, "tools", "7zip-26.05");
-                        if (!await HashMatches(Path.Combine(sevenZip, "7z.exe"), catalog.SevenZipExeSha256, ct)
-                            || !await HashMatches(Path.Combine(sevenZip, "7z.dll"), catalog.SevenZipDllSha256, ct))
+                        environmentReserve += variant.Dll.Size;
+                        cacheReserve += variant.Dll.Size;
+                        if (host.Generation != "rtx40")
                         {
-                            artifacts.Add(catalog.SevenZipBootstrap); artifacts.Add(catalog.SevenZipArchive);
-                            cacheReserve += 8 * 1024 * 1024;
+                            artifacts.Add(variant.Archive);
+                            var sevenZip = Path.Combine(plan.RuntimeRoot, "tools", "7zip-26.05");
+                            if (!await HashMatches(Path.Combine(sevenZip, "7z.exe"), catalog.SevenZipExeSha256, ct)
+                                || !await HashMatches(Path.Combine(sevenZip, "7z.dll"), catalog.SevenZipDllSha256, ct))
+                            {
+                                artifacts.Add(catalog.SevenZipBootstrap); artifacts.Add(catalog.SevenZipArchive);
+                                cacheReserve += 8 * 1024 * 1024;
+                            }
                         }
                     }
                 }

@@ -1,10 +1,12 @@
 using System.Text.Json;
+using System.Net.Http.Json;
 
 namespace Anima.Launcher.Core;
 
 public sealed record SetupRuntimeIssue(string Feature, string Message, string ModelId = "");
 public sealed record SetupRuntimeReadinessReport(SetupRuntimeIssue[] RequiredIssues, SetupRuntimeIssue[] OptionalIssues)
 {
+    public SetupRuntimeIssue[] ConfigurationIssues { get; init; } = [];
     public bool RequiredReady => RequiredIssues.Length == 0;
     public bool Ready => RequiredReady && OptionalIssues.Length == 0;
 }
@@ -22,147 +24,126 @@ public sealed class SetupRuntimeReadiness : IDisposable
 
     public async Task<SetupRuntimeReadinessReport> CheckAsync(LauncherConfig config, RuntimeManifest runtime,
         ModelManifest models, ModelProfilesManifest profiles, IEnumerable<string> selectedModelIds,
-        CancellationToken ct, Action<string>? log = null, string? runtimeRoot = null)
+        CancellationToken ct, Action<string>? log = null, string? runtimeRoot = null, IEnumerable<string>? features = null)
     {
         var required = new List<SetupRuntimeIssue>();
         var optional = new List<SetupRuntimeIssue>();
-        var requiredModels = profiles.RequiredModels(models, config.SelectedProfile).Select(model => model.Id)
-            .Concat(new[] { "seedvr2-model", "seedvr2-vae" }).ToHashSet(StringComparer.Ordinal);
-        var selected = selectedModelIds.Concat(requiredModels).Distinct(StringComparer.Ordinal).ToArray();
+        var configurationIssues = new List<SetupRuntimeIssue>();
+        var selected = selectedModelIds.Where(id => !SetupFeatures.IsCapability(id)).Distinct(StringComparer.Ordinal).ToArray();
+        var effectiveFeatures = (features ?? SetupFeatures.Resolve(false, selectedModelIds, config.SelectedProfile)).ToHashSet(StringComparer.Ordinal);
         async Task<JsonElement?> Read(string endpoint, string feature)
         {
             try { return await ReadAsync(endpoint, ct); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex) { required.Add(new(feature, "无法读取运行状态：" + ex.Message)); return null; }
         }
-        log?.Invoke("正在检查实际节点、模型分类与工作台资源…");
+        log?.Invoke("正在检查环境连接与本次选择的功能…");
         var stats = await Read(config.ComfyUrl + "/system_stats", "ComfyUI");
         if (stats is not null && !ServiceManager.SameRoot(stats.Value, config.ComfyRoot))
             required.Add(new("ComfyUI身份", "当前端口上的 ComfyUI 与本次安装目录不一致。"));
-        var nodes = await Read(config.ComfyUrl + "/object_info", "节点");
         var health = await Read(config.WebUrl + "/api/launcher-health", "工作台身份");
         if (health is not null && !ServiceManager.IsOurWebUi(health, config))
             required.Add(new("工作台身份", "当前端口上的工作台与本次安装目录不一致。"));
         var status = await Read(config.WebUrl + "/api/status", "工作台连接");
         if (status is not null && !LoraManagerClassificationClient.True(status.Value, "online"))
             required.Add(new("工作台连接", "工作台尚未连接本次 ComfyUI。"));
-        var resources = await Read(config.WebUrl + "/api/resources?model_profile=" + Uri.EscapeDataString(config.SelectedProfile) + "&refresh=true", "模型分类");
         var configuration = await Read(config.WebUrl + "/api/config", "随机数据");
-
-        // Production installation passes its resolved runtime root. Leaving it null
-        // permits pure HTTP contract tests without launching hardware probe processes.
-        if (!string.IsNullOrWhiteSpace(runtimeRoot))
-        {
-            try
-            {
-                required.AddRange((await SesquiRuntimePreparation.FilesIssuesAsync(config, runtime, ct))
-                    .Select(message => new SetupRuntimeIssue("潜空间放大模型", message)));
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (Exception ex) { required.Add(new("潜空间放大模型", "无法验证潜空间放大权重：" + ex.Message)); }
-            try
-            {
-                var probe = await NvidiaRuntimePreparation.ProbeAsync(config, runtimeRoot, ct);
-                if (probe.Supported)
-                {
-                    var native = await NvidiaRuntimePreparation.ValidateStatusAsync(config, runtimeRoot, ct);
-                    if (!NvidiaRuntimePreparation.IsReadyFor(probe, native))
-                        required.Add(new("NVIDIA运行库", native?.Detail ?? "当前显卡的 NVIDIA 修复放大运行库尚未完成验证。"));
-                    if (nodes is not null)
-                    {
-                        var nativeIds = new[] { RuntimeCapabilities.NvidiaCapabilityId };
-                        foreach (var name in RuntimeCapabilities.RequiredClasses(runtime, nativeIds).Except(RuntimeCapabilities.RequiredClasses(runtime)))
-                            if (!nodes.Value.TryGetProperty(name, out _)) required.Add(new("NVIDIA节点", "缺少节点或节点导入失败：" + name));
-                        required.AddRange(RuntimeCapabilities.ObjectInfoIssues(nodes.Value, nativeIds).Except(RuntimeCapabilities.ObjectInfoIssues(nodes.Value))
-                            .Select(message => new SetupRuntimeIssue("NVIDIA节点", message)));
-                    }
-                }
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (Exception ex) { required.Add(new("NVIDIA运行库", "无法验证当前显卡的运行库：" + ex.Message)); }
-        }
-
-        if (nodes is not null)
-        {
-            foreach (var name in RuntimeCapabilities.RequiredClasses(runtime))
-                if (!nodes.Value.TryGetProperty(name, out _)) required.Add(new("节点", "缺少节点或节点导入失败：" + name));
-            var baselineIssues = RuntimeCapabilities.ObjectInfoIssues(nodes.Value);
-            required.AddRange(baselineIssues.Select(message => new SetupRuntimeIssue("节点参数", message)));
-            foreach (var id in selected.Where(id => !requiredModels.Contains(id)))
-            {
-                foreach (var name in RuntimeCapabilities.RequiredClasses(runtime, [id]).Except(RuntimeCapabilities.RequiredClasses(runtime)))
-                    if (!nodes.Value.TryGetProperty(name, out _)) optional.Add(new("可选节点", "缺少节点或节点导入失败：" + name, id));
-                optional.AddRange(RuntimeCapabilities.ObjectInfoIssues(nodes.Value, [id]).Except(baselineIssues)
-                    .Select(message => new SetupRuntimeIssue("可选节点参数", message, id)));
-            }
-        }
-        if (resources is not null)
-        {
-            ValidateProfile(resources.Value, config.SelectedProfile, required);
-            var primaryProfile = profiles.Get(config.SelectedProfile);
-            if (nodes is not null)
-            {
-                var bindings = ServiceManager.ResourceBindings(nodes.Value);
-                primaryProfile = primaryProfile with { Seedvr2Model = bindings.GetValueOrDefault(primaryProfile.Seedvr2Model, primaryProfile.Seedvr2Model),
-                    Seedvr2Vae = bindings.GetValueOrDefault(primaryProfile.Seedvr2Vae, primaryProfile.Seedvr2Vae) };
-            }
-            ValidateSeed(resources.Value, primaryProfile, required);
-            foreach (var profile in profiles.Profiles.Where(profile => profile.Id != config.SelectedProfile))
-            {
-                var profileModels = profiles.RequiredModels(models, profile.Id).Select(model => model.Id).ToArray();
-                // A shared VAE is not a request to install another generation profile.
-                var requested = profileModels.Except(requiredModels).FirstOrDefault(selected.Contains);
-                if (requested is null) continue;
-                var failures = new List<SetupRuntimeIssue>();
-                ValidateProfile(resources.Value, profile.Id, failures);
-                optional.AddRange(failures.Select(issue => issue with { ModelId = requested }));
-            }
-        }
         if (configuration is not null) ValidateCatalog(configuration.Value, required);
-
-        // Model presence is verified in the running process's actual directories,
-        // not the pre-install probe or the launcher's own cached rows.
-        var folders = await Read(config.ComfyUrl + "/internal/folder_paths", "模型目录");
-        if (folders is not null)
+        if (effectiveFeatures.Overlaps(["prompt-assistant", "tagger", "krea2"]))
         {
-            var paths = new Dictionary<string, string[]>(StringComparer.Ordinal);
-            foreach (var property in folders.Value.EnumerateObject())
-                if (property.Value.ValueKind == JsonValueKind.Array)
-                    paths[property.Name] = property.Value.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String)
-                        .Select(item => item.GetString()!).Where(Path.IsPathFullyQualified).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-            if (stats is not null)
+            var nodes = await Read(config.ComfyUrl + "/object_info", "节点");
+            if (nodes is not null)
+                foreach (var node in SetupFeatures.SelectRuntime(runtime, effectiveFeatures).Nodes
+                    .Where(node => SetupFeatures.NodeFeature(node.Id) is "prompt-assistant" or "tagger" or "krea2"))
+                    foreach (var name in node.RequiredClasses.Concat(node.Id == "ComfyUI-WD-Timm-Tagger" ? new[] { "WDTimmTagger" } : []))
+                        if (!nodes.Value.TryGetProperty(name, out _))
+                            optional.Add(new("可选节点", "所选功能缺少节点：" + name, SetupFeatures.Prefix + SetupFeatures.NodeFeature(node.Id)));
+        }
+        // Runtime compatibility belongs to the same resolver used before generation.
+        // A missing model does not prevent entering the workbench to configure it.
+        try
+        {
+            var stages = new Dictionary<string, object>();
+            foreach (var (stage, feature) in new[] { ("pixel_hires", "pixel_hires"), ("latent", "latent"),
+                ("post_sampler", "post_sampler"), ("face_refine", "face-refine"), ("seedvr2", "seedvr2"),
+                ("nvidia", "nvidia"), ("dlss", "dlss") })
+                stages[stage] = new { enabled = effectiveFeatures.Contains(feature) };
+            using var response = await http.PostAsJsonAsync(config.WebUrl + "/api/resources/resolve", new
             {
-                var tagger = TaggerRuntime.ResolveDirectory(folders.Value, stats.Value);
-                paths["wd_taggers"] = tagger is null ? [] : [tagger];
-                // Forbidden Vision does not register a folder_paths category: its
-                // loader uses models_dir/forbidden_vision regardless of extra YAML.
-                var modelsDirectory = ResolveModelsDirectory(stats.Value);
-                paths["forbidden_vision"] = modelsDirectory is null ? [] : [Path.Combine(modelsDirectory, "forbidden_vision")];
-            }
-            foreach (var id in selected)
+                settings = new { pipeline_version = 5, model_profile = config.SelectedProfile,
+                    base_mode = effectiveFeatures.Contains("sesqui") ? "dual_sampler" : "normal", loras = Array.Empty<object>(), upscalers = stages }
+            }, ct);
+            response.EnsureSuccessStatusCode();
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            var result = document.RootElement;
+            if (!result.TryGetProperty("version", out var version) || version.GetInt32() != 1
+                || !result.TryGetProperty("issues", out var issues) || issues.ValueKind != JsonValueKind.Array)
+                throw new InvalidDataException("工作台资源检查接口不兼容，请更新工作台后重试。");
+            foreach (var issue in issues.EnumerateArray())
             {
-                if (id == RuntimeCapabilities.NvidiaCapabilityId) continue;
-                var destination = requiredModels.Contains(id) ? required : optional;
-                var model = models.Models.SingleOrDefault(model => model.Id == id);
-                if (model is null) { destination.Add(new("模型清单", "安装清单缺少模型：" + id, id)); continue; }
-                if (!paths.TryGetValue(model.Category, out var roots) || roots.Length == 0)
-                { destination.Add(new("模型目录", "运行中的 ComfyUI 未提供有效模型目录：" + model.Category, id)); continue; }
-                try
+                var module = issue.TryGetProperty("module", out var moduleValue) ? moduleValue.GetString() ?? "base" : "base";
+                var message = issue.TryGetProperty("message", out var messageValue) ? messageValue.GetString() ?? "资源待配置" : "资源待配置";
+                var feature = module == "face_refine" ? "face-refine" : module;
+                var modelId = feature switch
                 {
-                    var scanned = await Inventory.Scan(new(config.ComfyRoot, config.Python, paths), new(models.SchemaVersion, [model]), true, ct);
-                    if (scanned.Single().Missing) destination.Add(new("模型完整性", model.Name + "：" + scanned.Single().State, id));
+                    "seedvr2" => selected.FirstOrDefault(id => id.StartsWith("seedvr2-", StringComparison.Ordinal)) ?? "",
+                    "face-refine" => selected.FirstOrDefault(RuntimeCapabilities.IsFaceModel) ?? "",
+                    "nvidia" or "dlss" => SetupFeatures.Prefix + feature,
+                    _ => ""
+                };
+                var item = new SetupRuntimeIssue(module, message, modelId);
+                if (modelId.Length > 0 && effectiveFeatures.Contains(feature)) optional.Add(item);
+                else configurationIssues.Add(item);
+            }
+            if (result.TryGetProperty("replacements", out var replacements) && replacements.ValueKind == JsonValueKind.Array)
+                foreach (var item in replacements.EnumerateArray())
+                    log?.Invoke("已使用兼容资源：" + item.GetProperty("from").GetString() + " → " + item.GetProperty("to").GetString());
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex) { required.Add(new("资源检查", "无法检查实际兼容资源：" + ex.Message)); }
+
+        // Only explicitly selected official downloads are verified against their catalog.
+        // Compatible alternatives are never represented as a successful official download.
+        if (selected.Length > 0)
+        {
+            var folders = await Read(config.ComfyUrl + "/internal/folder_paths", "模型目录");
+            if (folders is not null)
+            {
+                var paths = new Dictionary<string, string[]>(StringComparer.Ordinal);
+                foreach (var property in folders.Value.EnumerateObject())
+                    if (property.Value.ValueKind == JsonValueKind.Array)
+                        paths[property.Name] = property.Value.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String)
+                            .Select(item => item.GetString()!).Where(Path.IsPathFullyQualified).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                if (stats is not null)
+                {
+                    var tagger = TaggerRuntime.ResolveDirectory(folders.Value, stats.Value);
+                    paths["wd_taggers"] = tagger is null ? [] : [tagger];
+                    var directory = ResolveModelsDirectory(stats.Value);
+                    paths["forbidden_vision"] = directory is null ? [] : [Path.Combine(directory, "forbidden_vision")];
                 }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-                catch (Exception ex) { destination.Add(new("模型完整性", model.Name + "：" + ex.Message, id)); }
+                foreach (var id in selected)
+                {
+                    var model = models.Models.SingleOrDefault(model => model.Id == id);
+                    if (model is null) { optional.Add(new("模型清单", "安装清单缺少所选下载：" + id, id)); continue; }
+                    if (!paths.TryGetValue(model.Category, out var roots) || roots.Length == 0)
+                    { optional.Add(new("模型目录", "所选下载的目录尚未就绪：" + model.Category, id)); continue; }
+                    try
+                    {
+                        var scanned = await Inventory.Scan(new(config.ComfyRoot, config.Python, paths), new(models.SchemaVersion, [model]), true, ct);
+                        if (scanned.Single().Missing) optional.Add(new("模型完整性", model.Name + "：" + scanned.Single().State, id));
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                    catch (Exception ex) { optional.Add(new("模型完整性", model.Name + "：" + ex.Message, id)); }
+                }
             }
         }
         if (required.Count == 0)
         {
             try { await ModelMetadata.ConfirmPendingCoreAsync(config, http, ct, log); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (Exception ex) { required.Add(new("模型分类", ex.Message)); }
+            catch (Exception ex) { configurationIssues.Add(new("模型分类", ex.Message)); }
         }
-        return new(required.Distinct().ToArray(), optional.Distinct().ToArray());
+        return new(required.Distinct().ToArray(), optional.Distinct().ToArray()) { ConfigurationIssues = configurationIssues.Distinct().ToArray() };
     }
 
     internal static void ValidateProfile(JsonElement resources, string id, List<SetupRuntimeIssue> issues)

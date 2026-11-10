@@ -121,7 +121,13 @@ internal static class InstallationReadinessTests
         using (var checker = new SetupRuntimeReadiness(http))
         {
             var ready = await checker.CheckAsync(config, minimalRuntime, models, profiles, [], default);
-            Check(ready.Ready, "baseline runtime requires working nodes, classified generation models, SeedVR2 and random data");
+            Check(ready.Ready, "baseline runtime checks connectivity and shared resource resolution without requiring SeedVR2");
+            Check(handler.LastSettings.GetProperty("pipeline_version").GetInt32() == 5
+                && handler.LastSettings.GetProperty("loras").GetArrayLength() == 0, "launcher resolver explicitly uses v5 and no default LoRAs");
+            await checker.CheckAsync(config, minimalRuntime, models, profiles, [], default, features: ["nvidia"]);
+            Check(handler.LastSettings.GetProperty("upscalers").GetProperty("nvidia").GetProperty("enabled").GetBoolean()
+                && !handler.LastSettings.GetProperty("upscalers").GetProperty("dlss").GetProperty("enabled").GetBoolean(),
+                "VSR readiness request never activates DLSS through legacy defaults");
             Check(!ready.OptionalIssues.Any(issue => issue.Feature == "生图模型"), "mandatory shared VAE does not implicitly select optional Krea");
             var optional = await checker.CheckAsync(config, minimalRuntime, models, profiles, ["forbidden-vision-detect"], default);
             Check(optional.RequiredReady && optional.OptionalIssues.Any(issue => issue.ModelId == "forbidden-vision-detect"), "selected optional face failure never becomes a mandatory generation failure");
@@ -146,7 +152,8 @@ internal static class InstallationReadinessTests
             handler.ExpressionCount = 1;
             handler.Warnings = [];
             handler.AnimaAvailable = false;
-            Check((await checker.CheckAsync(config, minimalRuntime, models, profiles, [], default)).RequiredIssues.Any(issue => issue.Feature == "生图模型"), "unknown/unavailable Anima classification blocks ready state");
+            var unconfigured = await checker.CheckAsync(config, minimalRuntime, models, profiles, [], default);
+            Check(unconfigured.RequiredReady && unconfigured.ConfigurationIssues.Any(issue => issue.Feature == "base"), "missing compatible base model allows configuration without pretending generation is ready");
         }
         using (var values = JsonDocument.Parse("{\"seedvr2_models\":[\"a/seedvr2.safetensors\",\"b/seedvr2.safetensors\"]}"))
             Check(!SetupRuntimeReadiness.ContainsResource(values.RootElement, "seedvr2_models", "seedvr2.safetensors"), "ambiguous model basename is never treated as a usable binding");
@@ -196,13 +203,20 @@ internal static class InstallationReadinessTests
         public string DiscoveryStatus = "available";
         public string[] Warnings = [];
         public int ExpressionCount = 1;
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        public JsonElement LastSettings;
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
+            if (request.RequestUri!.AbsolutePath == "/api/resources/resolve")
+            {
+                using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
+                LastSettings = body.RootElement.GetProperty("settings").Clone();
+            }
             object value = request.RequestUri!.AbsolutePath switch
             {
                 "/system_stats" => new { system = new { argv = new[] { Path.Combine(config.ComfyRoot, "main.py") } } },
                 "/api/launcher-health" => new { app_dir = config.AppRoot, data_dir = config.DataDir, comfy_url = config.ComfyUrl },
                 "/api/status" => new { online = Online },
+                "/api/resources/resolve" => new { version = 1, ready = AnimaAvailable, issues = AnimaAvailable ? Array.Empty<object>() : new object[] { new { module = "base", field = "model_name", code = "missing", message = "选择兼容主模型" } }, replacements = Array.Empty<object>(), effective_settings = new { } },
                 "/api/resources" => new { model_profiles = new { anima = new { available = new { model = AnimaAvailable, clip = true, vae = true } } }, seedvr2_models = new[] { "seedvr2.safetensors" }, seedvr2_vaes = new[] { "seedvr2_vae.safetensors" } },
                 "/api/config" => new { catalog = new { available = CatalogReady, discovery = new { status = DiscoveryStatus, message = "fixture" }, counts = new { character = 1, clothing = 2, pose = 3, background = 4, expression = ExpressionCount } }, warnings = Warnings },
                 "/internal/folder_paths" => new Dictionary<string, string[]> { ["diffusion_models"] = [Path.Combine(config.ComfyRoot, "models", "diffusion_models")], ["text_encoders"] = [Path.Combine(config.ComfyRoot, "models", "text_encoders")], ["vae"] = [Path.Combine(config.ComfyRoot, "models", "vae")] },
@@ -217,7 +231,7 @@ internal static class InstallationReadinessTests
                     ["ImageCaptionNode"] = Node(new() { ["image"] = new[] { "IMAGE" }, ["vlm_service"] = new[] { "STRING" }, ["custom_rule"] = new[] { "BOOLEAN" }, ["custom_rule_content"] = new[] { "STRING" } }) },
                 _ => throw new Exception("Unexpected readiness request: " + request.RequestUri),
             };
-            return Task.FromResult(Json(value));
+            return Json(value);
         }
         private static object Node(Dictionary<string, object> fields) => new { input = new { required = fields } };
     }

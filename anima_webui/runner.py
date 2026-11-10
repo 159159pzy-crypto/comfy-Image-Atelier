@@ -17,6 +17,7 @@ from .history import HistoryStore
 from .prompt_rules import PromptRuleStore
 from .prompt_pools import PromptPoolStore
 from .model_profiles import get_model_profile
+from .resource_resolution import merge_resource_replacements, resources_changed
 from .lora_binding import (append_trigger_words, binding_policy, manual_settings,
                            resolve_character_loras, runtime_snapshot, validate_frozen_resources)
 from .prompt_jobs import PromptJobStore
@@ -110,6 +111,7 @@ class BatchManager:
         # Optional service attached by the HTTP application after construction.
         self.imported_images = None
         self.lora_library = None
+        self.resource_resolver = None
         self.prompt_jobs = PromptJobStore(history)
         self.prompt_assistant = PromptAssistant(comfy)
         self.prompt_tagger = PromptTagger(comfy)
@@ -211,7 +213,7 @@ class BatchManager:
 
         def resolve(filename: Any) -> str:
             value = str(filename or "").replace("\\", "/")
-            return mapped.get(value.casefold(), value)
+            return value if self.resource_resolver is not None else mapped.get(value.casefold(), value)
 
         v2 = self._uses_v2_workflow()
         active = active_lora_pipelines(settings)
@@ -223,8 +225,8 @@ class BatchManager:
         return {
             "model_profile": profile["id"],
             "unet": resolve(settings.get("model_name") if v2 else settings.get("model_name")),
-            "clip": resolve(settings.get("clip_name") if settings.get("workbench") == "single" else profile["clip_name"] if v2 else settings.get("clip_name")),
-            "vae": resolve(settings.get("vae_name") if settings.get("workbench") == "single" else profile["vae_name"] if v2 else settings.get("vae_name")),
+            "clip": resolve(settings.get("clip_name")),
+            "vae": resolve(settings.get("vae_name")),
             "seedvr2_model": resolve(
                 (settings.get("upscalers") or {}).get("seedvr2", {}).get("model_name")
                 or profile["seedvr2_model"]
@@ -310,7 +312,7 @@ class BatchManager:
             result["original_selection"] = copy.deepcopy(original_selection)
         return result
 
-    async def resource_issues(self, overrides: dict[str, Any]) -> list[dict[str, str]]:
+    async def resource_issues(self, overrides: dict[str, Any], *, inventory: dict[str, Any] | None = None) -> list[dict[str, str]]:
         # Keep diagnostics for callers that still submit a v1 settings
         # object, while treating a clean v2 payload as authoritative.  The
         # compatibility aliases remain in ``DEFAULT_SETTINGS`` for embedded
@@ -333,10 +335,6 @@ class BatchManager:
             settings = migrate_settings(settings)
         issues: list[dict[str, str]] = []
         lora_filenames = getattr(self.comfy, "lora_filenames", None)
-        available_loras = {
-            str(value).replace("\\", "/").casefold(): str(value)
-            for value in await lora_filenames()
-        } if lora_filenames else {}
         active = active_lora_pipelines(settings)
         all_loras = list(settings["loras"]) if "primary" in active else []
         if settings.get("workbench") == "single":
@@ -349,12 +347,16 @@ class BatchManager:
                     self.input_images.get(settings["single"]["input_image_id"])
                 except KeyError:
                     issues.append({"type": "input_image", "name": settings["single"]["input_image_id"], "label": "输入图片"})
+        available_loras = {
+            str(value).replace("\\", "/").casefold(): str(value)
+            for value in await lora_filenames()
+        } if lora_filenames and any(item.get("enabled") for item in all_loras) else {}
         for item in all_loras:
             if item["enabled"] and item["filename"].replace("\\", "/").casefold() not in available_loras:
                 issues.append({"type": "lora", "name": item["filename"], "label": "LoRA"})
         resource_inventory = getattr(self.comfy, "resource_inventory", None)
-        if resource_inventory:
-            resources = await resource_inventory()
+        if resource_inventory or inventory is not None:
+            resources = inventory if inventory is not None else await resource_inventory()
             issues.extend(
                 self._resource_inventory_issues(
                     settings, resources, legacy_requested=legacy_requested
@@ -398,7 +400,7 @@ class BatchManager:
                 # Treat a unique basename as the same resource so launcher
                 # subfolder mappings do not produce false preflight errors.
                 return wanted in available or (
-                    wanted_base in {item.rsplit("/", 1)[-1] for item in available}
+                    "/" not in wanted and sum(item.rsplit("/", 1)[-1] == wanted_base for item in available) == 1
                 )
             except TypeError:
                 return False
@@ -414,8 +416,8 @@ class BatchManager:
         profile = get_model_profile(settings.get("model_profile", "anima"))
         check("model", "主模型", settings["model_name"], resources.get("models"))
         single = settings.get("workbench") == "single"
-        check("clip", "CLIP", settings["clip_name"] if single else profile["clip_name"], resources.get("clips"))
-        check("vae", "VAE", settings["vae_name"] if single else profile["vae_name"], resources.get("vaes"))
+        check("clip", "CLIP", settings["clip_name"], resources.get("clips"))
+        check("vae", "VAE", settings["vae_name"], resources.get("vaes"))
         check("sampler", "Sampler", settings["sampler_name"], resources.get("samplers"))
         check("scheduler", "Scheduler", settings["scheduler"], resources.get("schedulers"))
 
@@ -543,8 +545,17 @@ class BatchManager:
                         "label": "脸部细化节点",
                     }
                 )
-            check("face_refine_sampler", "脸部细化 Sampler", face.get("sampler"), resources.get("samplers"))
-            check("face_refine_scheduler", "脸部细化 Scheduler", face.get("scheduler"), resources.get("schedulers"))
+            def face_choices(field: str, fallback: str) -> Any:
+                spec = resources.get("node_inputs", {}).get("ForbiddenVisionFaceProcessorIntegrated", {}).get(field)
+                if isinstance(spec, list) and spec:
+                    if isinstance(spec[0], list):
+                        return spec[0]
+                    if len(spec) > 1 and isinstance(spec[1], dict) and isinstance(spec[1].get("options"), list):
+                        return spec[1]["options"]
+                return resources.get(fallback)
+
+            check("face_refine_sampler", "脸部细化 Sampler", face.get("sampler"), face_choices("sampler", "samplers"))
+            check("face_refine_scheduler", "脸部细化 Scheduler", face.get("scheduler"), face_choices("scheduler", "schedulers"))
 
         # Keep v1 resource diagnostics meaningful when a caller explicitly
         # submits a legacy settings object during migration tests.
@@ -841,6 +852,7 @@ class BatchManager:
         overrides: dict[str, Any],
         seeds: dict[str, int] | None = None,
         regeneration: dict[str, Any] | None = None,
+        resource_resolution: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._ensure_accepting()
         async with self._start_lock:
@@ -888,6 +900,14 @@ class BatchManager:
                 # schema even when an embedded caller submits DEFAULT_SETTINGS
                 # with the four deprecated aliases attached.
                 settings = migrate_settings(settings)
+            if self.resource_resolver is not None:
+                resolved = await self.resource_resolver(settings, refresh=True)
+                if resolved["issues"]:
+                    raise WorkflowError("；".join(item["message"] for item in resolved["issues"]))
+                settings = resolved["effective_settings"]
+                replacements = merge_resource_replacements((resource_resolution or {}).get("replacements", []), resolved["replacements"])
+                resource_resolution = {"version": 1, "replacements": replacements, "resourceChanged": resources_changed(replacements),
+                                       "resources": copy.deepcopy(resolved.get("resources", []))}
             source_issues = prompt_source_issues(settings, self.prompt_pools, regeneration)
             if source_issues:
                 raise WorkflowError(source_issues[0]["name"])
@@ -902,16 +922,18 @@ class BatchManager:
             ):
                 self.catalog.validate_settings(settings)
             lora_filenames = getattr(self.comfy, "lora_filenames", None)
-            if not lora_filenames:
-                raise ComfyError("ComfyUI 客户端无法读取 LoRA 列表")
-            available_loras = await lora_filenames()
             active = active_lora_pipelines(settings)
+            uses_loras = ("primary" in active and any(item["enabled"] for item in settings["loras"])) or (
+                "secondary" in active and any(item["enabled"] for item in settings["single"]["loras_secondary"]))
+            if uses_loras and not lora_filenames:
+                raise ComfyError("ComfyUI 客户端无法读取 LoRA 列表")
+            available_loras = await lora_filenames() if uses_loras else []
             if "primary" in active:
                 settings["loras"] = validate_loras(settings, available_loras)
             if "secondary" in active:
                 settings["single"]["loras_secondary"] = validate_loras({"loras": settings["single"]["loras_secondary"]}, available_loras)
             resource_inventory = getattr(self.comfy, "resource_inventory", None)
-            if resource_inventory:
+            if resource_inventory and self.resource_resolver is None:
                 resources = await resource_inventory()
                 issues = self._resource_inventory_issues(
                     settings,
@@ -954,6 +976,7 @@ class BatchManager:
                     "regeneration": regeneration,
                     "binding_snapshot": binding_snapshot,
                     "kind": "generation",
+                    "resource_resolution": resource_resolution,
                 }
                 self.queue.append(entry)
                 return {
@@ -961,8 +984,9 @@ class BatchManager:
                     "queue_id": entry["queue_id"],
                     "position": len(self.queue),
                     "count": settings["count"],
+                    "resource_resolution": resource_resolution,
                 }
-            await self._begin_batch(settings, seeds, regeneration, binding_snapshot)
+            await self._begin_batch(settings, seeds, regeneration, binding_snapshot, resource_resolution)
             return self.snapshot()
 
     async def _begin_batch(
@@ -971,6 +995,7 @@ class BatchManager:
         seeds: dict[str, int] | None,
         regeneration: dict[str, Any] | None = None,
         binding_snapshot: dict[str, Any] | None = None,
+        resource_resolution: dict[str, Any] | None = None,
     ) -> None:
         batch_id = uuid.uuid4().hex[:12]
         self.stop_requested = False
@@ -991,9 +1016,10 @@ class BatchManager:
             "memory_release": "not_requested",
             "memory_release_message": "",
             "settings": settings,
+            "resource_resolution": resource_resolution,
         }
         await self.history.create_batch(batch_id, settings["count"], settings)
-        self.task = asyncio.create_task(self._run(batch_id, settings, seeds, regeneration, binding_snapshot))
+        self.task = asyncio.create_task(self._run(batch_id, settings, seeds, regeneration, binding_snapshot, resource_resolution))
         self._ensure_monitor()
 
     def queue_snapshot(self) -> list[dict[str, Any]]:
@@ -1007,6 +1033,7 @@ class BatchManager:
                 **({"prompt_kind": entry["settings"].get("kind", "legacy_preview")}
                    if entry.get("kind") == "prompt_preview" else {}),
                 "workbench": entry["settings"].get("workbench", "random"),
+                "resource_resolution": entry.get("resource_resolution"),
             }
             for index, entry in enumerate(self.queue)
         ]
@@ -1134,12 +1161,22 @@ class BatchManager:
         seeds: dict[str, int] | None = None,
         regeneration: dict[str, Any] | None = None,
         binding_snapshot: dict[str, Any] | None = None,
+        resource_resolution: dict[str, Any] | None = None,
     ) -> None:
         try:
             single_runtime = await self._prepare_single_runtime(settings, regeneration) if settings.get("workbench") == "single" else None
             for sequence in range(1, settings["count"] + 1):
                 if self.stop_requested:
                     break
+                if self.resource_resolver is not None:
+                    frozen_check = await self.resource_resolver(settings, refresh=True)
+                    identities = {item["field"]: (item["name"], item["fingerprint"])
+                                  for item in (resource_resolution or {}).get("resources", []) if item.get("fingerprint")}
+                    current_identities = {item["field"]: (item["name"], item.get("fingerprint", ""))
+                                          for item in frozen_check.get("resources", [])}
+                    if frozen_check["issues"] or frozen_check["replacements"] or any(current_identities.get(key) != identity for key, identity in identities.items()):
+                        detail = "；".join(item["message"] for item in frozen_check["issues"])
+                        raise WorkflowError("入队后资源已变化，请重新提交任务：" + (detail or "已冻结的模型不可用或文件已变化"))
                 # 图像种子可单独固定；仅显式的提示词种子才冻结每张的抽取。
                 sample_seed = seeds["sample_seed"] if seeds else secrets.randbelow(MAX_SAMPLE_SEED + 1)
                 prompt_seed = (
@@ -1228,6 +1265,7 @@ class BatchManager:
                     ),
                     **({"single_runtime": single_runtime} if single_runtime is not None else {}),
                     **({"execution_nonce": execution_context["execution_nonce"]} if execution_context is not None else {}),
+                    **({"resolved_resources": True} if self.resource_resolver is not None else {}),
                 )
                 if execution_context is not None:
                     metadata = payload.setdefault("extra_data", {}).setdefault("extra_pnginfo", {}).setdefault("anima_random_webui", {})
@@ -1236,6 +1274,9 @@ class BatchManager:
                 if lora_runtime:
                     metadata = payload.setdefault("extra_data", {}).setdefault("extra_pnginfo", {}).setdefault("anima_random_webui", {})
                     metadata["lora_runtime"] = copy.deepcopy(lora_runtime)
+                if resource_resolution:
+                    metadata = payload.setdefault("extra_data", {}).setdefault("extra_pnginfo", {}).setdefault("anima_random_webui", {})
+                    metadata["resource_resolution"] = copy.deepcopy(resource_resolution)
                 self.state["current"] = sequence
                 self.state["prompt_id"] = ""
                 self._clear_preview()
@@ -1269,6 +1310,8 @@ class BatchManager:
                 if lora_runtime:
                     positive = frozen_positive or resolved["full_prompt"]
                 bound_resources = self._bound_resources(effective_settings)
+                if resource_resolution:
+                    bound_resources["resource_resolution"] = copy.deepcopy(resource_resolution)
                 for image in images:
                     await self.history.add_image(
                         batch_id=batch_id,
@@ -1336,7 +1379,7 @@ class BatchManager:
                             continue
                         await self._begin_prompt_preview(job)
                     else:
-                        await self._begin_batch(entry["settings"], entry["seeds"], entry.get("regeneration"), entry.get("binding_snapshot"))
+                        await self._begin_batch(entry["settings"], entry["seeds"], entry.get("regeneration"), entry.get("binding_snapshot"), entry.get("resource_resolution"))
                     return
                 except Exception as error:
                     logger.warning("队列任务启动失败: %s", error)

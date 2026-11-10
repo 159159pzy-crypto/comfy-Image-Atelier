@@ -105,9 +105,9 @@ internal static class DownloadOwnerRecoveryTests
         var seedModels = new[] { Model("seedvr2-model", "diffusion_models"), Model("seedvr2-vae", "vae") };
         var expandedCatalog = currentModels with { Models = currentModels.Models.Concat(seedModels).ToArray() };
         var supplement = SetupModelSelection.SupplementalModels(plan, expandedCatalog, currentProfiles);
-        Check(supplement.Select(model => model.Id).SequenceEqual(["seedvr2-model", "seedvr2-vae"])
+        Check(supplement.Length == 0
             && plan.ModelIds.SequenceEqual(["diffusion", "clip", "vae", "optional"]) && plan.MandatoryModelIds.IsEmpty,
-            "a legacy owner exposes a separate SeedVR2 supplement without changing its frozen model identities");
+            "a legacy owner retains its frozen scope without adding optional SeedVR2");
         var newPlan = plan with
         {
             ModelIds = [.. plan.ModelIds, .. seedModels.Select(model => model.Id)],

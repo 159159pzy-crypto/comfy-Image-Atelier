@@ -34,13 +34,24 @@ def probe() -> dict:
             "pythonVersion": platform.python_version(), "torchVersion": torch.__version__, "vfxVersion": vfx, "vcRuntime": vc}
 
 
-def verify(dlss_root: Path, state_dir: Path, generation: str) -> dict:
-    import numpy as np
+def verify(dlss_root: Path | None, state_dir: Path | None, generation: str,
+           features: tuple[str, ...] = ("nvidia", "dlss")) -> dict:
     import torch
-    import nvvfx
     result = probe()
     if not result["supported"] or result["generation"] != generation:
         raise RuntimeError("NVIDIA device identity changed; check the installation again")
+    outputs = {}
+    if "nvidia" in features:
+        outputs.update(verify_vsr(torch))
+    if "dlss" in features:
+        if dlss_root is None or state_dir is None:
+            raise RuntimeError("DLSS node and state directories are required")
+        outputs.update(verify_dlss(dlss_root, state_dir, generation))
+    return {**result, "ready": True, "features": list(features), **outputs}
+
+
+def verify_vsr(torch) -> dict:
+    import nvvfx
     if nvvfx.__version__ != "0.1.0.1":
         raise RuntimeError("The installed NVIDIA VFX runtime does not match the installation plan")
     # Exercise the native SDK and its model assets. Import success alone is insufficient.
@@ -54,6 +65,11 @@ def verify(dlss_root: Path, state_dir: Path, generation: str) -> dict:
             raise RuntimeError("NVIDIA VFX smoke test returned an invalid image")
     del frame, output
     torch.cuda.empty_cache()
+    return {"vfxOutput": [512, 512]}
+
+
+def verify_dlss(dlss_root: Path, state_dir: Path, generation: str) -> dict:
+    import numpy as np
     # Load only the backend; importing the node package would invoke its lazy downloader.
     spec = importlib.util.spec_from_file_location("anima_dlss_runtime_check", dlss_root / "dlss_engine.py")
     engine = importlib.util.module_from_spec(spec)
@@ -69,7 +85,7 @@ def verify(dlss_root: Path, state_dir: Path, generation: str) -> dict:
             raise RuntimeError("DLSS Feature 18 smoke test did not produce an image")
     finally:
         session.close()
-    return {**result, "ready": True, "vfxOutput": [512, 512], "dlssOutput": [256, 256]}
+    return {"dlssOutput": [256, 256]}
 
 
 def main() -> int:
@@ -78,9 +94,10 @@ def main() -> int:
     parser.add_argument("--dlss-root", type=Path)
     parser.add_argument("--state-dir", type=Path)
     parser.add_argument("--generation", choices=("rtx30", "rtx40", "rtx50"))
+    parser.add_argument("--features", nargs="+", choices=("nvidia", "dlss"), default=["nvidia", "dlss"])
     args = parser.parse_args()
     try:
-        result = probe() if args.probe else verify(args.dlss_root, args.state_dir, args.generation)
+        result = probe() if args.probe else verify(args.dlss_root, args.state_dir, args.generation, tuple(args.features))
     except Exception as error:
         print(json.dumps({"ready": False, "error": str(error)}, ensure_ascii=False))
         return 1

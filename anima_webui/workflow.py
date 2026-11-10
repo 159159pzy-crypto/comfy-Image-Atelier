@@ -887,40 +887,16 @@ def migrate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     raw_single = source.get("single", {})
     if not isinstance(raw_single, dict):
         raise WorkflowError("single 必须是对象")
-    unlocked = workbench == "single" and raw_single.get("unlock_resources", True) is True
-    # Unlocked single settings may select custom resources, but a canonical
-    # resource from another profile is a stale default, not a custom override.
-    # Repair old browser drafts/history as well as newly switched settings.
+    # Explicit resource choices are shared by both workbenches. Compatibility
+    # and substitutions belong to the live resolver, not offline migration.
+    # The historical single.unlock_resources flag remains readable but no
+    # longer hides or silently overrides choices in either workbench.
     for resource_key in ("clip_name", "vae_name", "clip_type"):
-        value = source.get(resource_key, profile[resource_key]) if unlocked else profile[resource_key]
-        if unlocked and isinstance(value, str):
-            normalized = value.replace("\\", "/").rsplit("/", 1)[-1].casefold()
-            foreign_defaults = {
-                other[resource_key].casefold()
-                for other_id, other in MODEL_PROFILES.items()
-                if other_id != profile_id and other[resource_key] != profile[resource_key]
-            }
-            if normalized in foreign_defaults:
-                value = profile[resource_key]
-        result[resource_key] = value
-    # Switching profiles should reset a previous profile's canonical UNet,
-    # while a custom explicitly assigned UNet remains selected. Ownership is
-    # enforced at the request/resource boundary where the live inventory is
-    # available; locked CLIP/VAE and encoder type stay profile-bound.
+        result[resource_key] = source.get(resource_key, profile[resource_key])
+    # Preserve explicit model identities for live compatibility resolution,
+    # so every automatic substitution can be reported and recorded.
     raw_model_name = str(source.get("model_name") or "")
-    other_profile_defaults = {
-        str(value["model_name"]).casefold()
-        for key, value in MODEL_PROFILES.items()
-        if key != profile_id
-    }
-    if raw_model_name and raw_model_name.casefold() not in other_profile_defaults:
-        # The profile owns its CLIP/VAE and prompt namespace, while users may
-        # choose any UNet explicitly assigned to that profile. Ownership is
-        # enforced at the request/resource boundary where the live inventory
-        # is available; this normalization layer only validates the shape.
-        result["model_name"] = raw_model_name
-    else:
-        result["model_name"] = profile["model_name"]
+    result["model_name"] = raw_model_name or profile["model_name"]
     for key in ("steps", "cfg", "sampler_name", "scheduler"):
         if key not in result:
             result[key] = profile["defaults"][key]
@@ -1861,10 +1837,8 @@ def _render_v2_workflows(
         settings["upscalers"]["latent"]["second_sampler"]["enabled"] = False
     api = copy.deepcopy(api_template)
     ui = copy.deepcopy(ui_template)
-    profile = get_model_profile(settings["model_profile"])
 
-    # Profile-bound resources are authoritative.  This prevents a stale Anima
-    # CLIP/VAE surviving a Krea switch in browser drafts or history replay.
+    # The resolver freezes compatible loader choices before rendering.
     _v2_set_input(
         api,
         V2_UNET_ID,
@@ -1875,14 +1849,14 @@ def _render_v2_workflows(
         api,
         V2_CLIP_ID,
         "clip_name",
-        _mapped_resource_name(profile["clip_name"], resource_paths),
+        _mapped_resource_name(settings["clip_name"], resource_paths),
     )
-    _v2_set_input(api, V2_CLIP_ID, "type", profile["clip_type"])
+    _v2_set_input(api, V2_CLIP_ID, "type", settings["clip_type"])
     _v2_set_input(
         api,
         V2_VAE_ID,
         "vae_name",
-        _mapped_resource_name(profile["vae_name"], resource_paths),
+        _mapped_resource_name(settings["vae_name"], resource_paths),
     )
     # SeedVR2 resources are selectable from their live node inventories;
     # migration/validation use the current profile's canonical files only as
@@ -2594,6 +2568,7 @@ class WorkflowTemplates:
         *,
         single_runtime: dict[str, Any] | None = None,
         execution_nonce: int | None = None,
+        resolved_resources: bool = False,
     ) -> dict[str, Any]:
         return build_submission(
             self.api,
@@ -2609,7 +2584,7 @@ class WorkflowTemplates:
             resolved_prompt_full,
             frozen_positive_prompt,
             frozen_negative_prompt,
-            self.resource_paths,
+            {} if resolved_resources else self.resource_paths,
             single_runtime=single_runtime,
             execution_nonce=execution_nonce,
         )

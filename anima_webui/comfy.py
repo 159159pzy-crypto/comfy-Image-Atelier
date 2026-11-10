@@ -67,6 +67,8 @@ class ComfyClient:
         self._classification_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._classification_generations = {kind: 0 for kind in ("models", "loras")}
         self._classification_locks = {kind: asyncio.Lock() for kind in ("models", "loras")}
+        self._inspection_cache: dict[tuple[str, ...], tuple[float, dict[str, Any]]] = {}
+        self._inspection_lock = asyncio.Lock()
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
@@ -338,8 +340,8 @@ class ComfyClient:
         upscale_models = choices("UpscaleModelLoader", "model_name") or choices("easy hiresFix", "model_name")
         samplers = choices("KSampler", "sampler_name")
         schedulers = choices("KSampler", "scheduler")
-        if not models or not samplers or not schedulers:
-            raise ComfyError("ComfyUI 未返回模型或采样器列表")
+        # Empty loader inventories are valid on a fresh installation. Keep
+        # configuration usable; task-aware resolution reports missing assets.
         node_names = set(object_info)
         seedvr_nodes = sorted(
             name for name in node_names if "seedvr" in name.casefold()
@@ -419,6 +421,31 @@ class ComfyClient:
                 "schedulers": schedulers,
             }
         return result
+
+    async def resource_inspection(self, *, refresh: bool = False,
+                                  modules: list[str] | None = None) -> dict[str, Any]:
+        """Read header-derived compatibility; request native probes explicitly.
+
+        Absence of the optional extension must not make the inventory endpoint
+        unavailable. Unknown remains unknown, never a fabricated success.
+        """
+        selected = tuple(sorted(set(modules or [])))
+        if set(selected) - {"nvidia", "dlss"}:
+            raise ComfyError("未知模块能力检查")
+        async with self._inspection_lock:
+            now = asyncio.get_running_loop().time()
+            cached = self._inspection_cache.get(selected)
+            if not refresh and cached and now - cached[0] < 5:
+                return cached[1]
+            query = "?" + urlencode({"probe": ",".join(selected)}) if selected else ""
+            try:
+                result = await self._json("GET", "/anima/resources/inspect" + query)
+                if result.get("version") != 1 or not isinstance(result.get("items"), list) or not isinstance(result.get("capabilities"), dict):
+                    raise ComfyError("模型检查扩展返回了无效数据")
+            except ComfyError as error:
+                result = {"version": 1, "supported": False, "items": [], "capabilities": {}, "error": str(error)}
+            self._inspection_cache[selected] = (now, result)
+            return result
 
     async def favorites(self) -> dict[str, Any]:
         return await self._json("GET", "/anima-tools/favorites")

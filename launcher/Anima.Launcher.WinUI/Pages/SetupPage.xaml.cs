@@ -275,7 +275,7 @@ public sealed partial class SetupPage : LauncherPage
         RootLabel.Text = fresh && !directRoot ? "安装文件夹" : "ComfyUI 文件夹";
         RootBox.PlaceholderText = fresh && !directRoot ? @"例如 D:\AnimaStudio" : @"例如 D:\ComfyUI";
         ImportPythonPanel.Visibility = Visible(!fresh);
-        ModelSummary.Text = fresh ? "将准备 Anima 三件套和 SeedVR2 两个修复模型，共五项必装模型。"
+        ModelSummary.Text = fresh ? "将准备 Anima 基础三件套与默认双采样使用的 Sesqui；其他功能按需选择。"
             : "复用现有模型和节点；导入完成后，会列出仍需补齐的模型。";
         UpdateDetectedPython();
         try
@@ -361,15 +361,15 @@ public sealed partial class SetupPage : LauncherPage
         renderedChoiceSelection = selection;
         SetupModelChoices.Children.Clear();
         var profile = State.Setup.Fresh ? "anima" : State.Setup.Draft.SelectedProfile;
-        var required = SetupModelSelection.MandatoryModels(Program.Models, Program.ModelProfiles, profile);
+        var required = State.Setup.Fresh ? SetupModelSelection.MandatoryModels(Program.Models, Program.ModelProfiles, profile) : [];
         SetupModelChoices.Children.Add(new TextBlock
         {
-            Text = "生成与 SeedVR2 修复模型 · 必装", FontWeight = FontWeights.SemiBold,
+            Text = State.Setup.Fresh ? "默认基础生成 · 三件套与双采样 Sesqui" : "使用已有兼容模型，可稍后在工作台配置", FontWeight = FontWeights.SemiBold,
             Foreground = PageBrush("StudioTextBrush")
         });
         foreach (var model in required) SetupModelChoices.Children.Add(ModelChoiceDetails(model));
         var taggers = new StackPanel { Spacing = 14 };
-        foreach (var choice in SetupModelSelection.Choices(Program.Models, Program.ModelProfiles, profile))
+        foreach (var choice in SetupModelSelection.Choices(Program.Models, Program.ModelProfiles, profile, includeBase: !State.Setup.Fresh))
         {
             var selected = choice.ModelIds.All(id => (State.Setup.OptionalModelIds ?? []).Contains(id));
             var box = new CheckBox
@@ -395,9 +395,9 @@ public sealed partial class SetupPage : LauncherPage
             var row = new StackPanel { Spacing = 6 };
             row.Children.Add(box);
             row.Children.Add(BodyText(choice.Description));
-            foreach (var id in choice.ModelIds)
+            foreach (var id in choice.ModelIds.Where(id => !SetupFeatures.IsCapability(id)))
                 row.Children.Add(ModelChoiceDetails(Program.Models.Models.Single(model => model.Id == id)));
-            if (choice.ModelIds.Any(id => Program.Models.Models.Single(model => model.Id == id).Category == "wd_taggers"))
+            if (choice.ModelIds.Any(id => Program.Models.Models.SingleOrDefault(model => model.Id == id)?.Category == "wd_taggers"))
                 taggers.Children.Add(row);
             else SetupModelChoices.Children.Add(row);
         }

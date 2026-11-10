@@ -19,6 +19,7 @@ public sealed class SetupRecord
     public bool RuntimeVerified { get; set; }
     public string[] OptionalModelIds { get; set; } = [];
     public string[] SkippedOptionalModelIds { get; set; } = [];
+    public string[] FailedFeatureIds { get; set; } = [];
     public InstallationPlan? ReviewedPlan { get; set; }
     public InstallationPlan? SupplementalPlan { get; set; }
     public AssistantSetupStatus AssistantStatus { get; set; }
@@ -76,9 +77,7 @@ public static class SetupRouting
     }
 
     public static bool NeedsSupplement(InstallationPlan plan, RuntimeManifest runtime,
-        ModelManifest models, ModelProfilesManifest profiles) => plan.RuntimeArtifactsIdentity.Length == 0
-        || SetupModelSelection.SupplementalModels(plan, models, profiles).Length > 0
-        || plan.ResolvedRuntime is { } frozen && runtime.Nodes.Any(node => !frozen.Nodes.Any(old => old.Id == node.Id));
+        ModelManifest models, ModelProfilesManifest profiles) => false;
 
     /// <summary>Compare a normalized installation target, including an unexpanded fresh-install draft.</summary>
     public static bool TargetsMatch(LauncherConfig current, LauncherConfig draft, bool fresh)

@@ -11,7 +11,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from anima_webui.persistence import StorageReadOnlyError
 from anima_webui.server import (
     CUSTOM_PROMPTS_KEY, HISTORY_KEY, LORA_LIBRARY_KEY, LORA_TRIGGER_OVERRIDES_KEY, MANAGER_KEY,
-    PROMPT_POOLS_KEY, PROMPT_RULES_KEY, STYLE_PRESETS_KEY,
+    PROMPT_POOLS_KEY, PROMPT_RULES_KEY, RESOURCE_USAGE_KEY, STYLE_PRESETS_KEY,
     create_app,
 )
 from anima_webui.workflow import DEFAULT_SETTINGS
@@ -68,6 +68,7 @@ STORE_FILES = {
     "prompt_pools": "prompt_pools.json",
     "favorite_extensions": "favorite_extensions.json",
     "lora_library": "lora_library.json",
+    "resource_usage": "resource_usages.json",
 }
 STORE_KEYS = {
     "history": HISTORY_KEY,
@@ -77,6 +78,7 @@ STORE_KEYS = {
     "prompt_rules": PROMPT_RULES_KEY,
     "prompt_pools": PROMPT_POOLS_KEY,
     "lora_library": LORA_LIBRARY_KEY,
+    "resource_usage": RESOURCE_USAGE_KEY,
 }
 
 
@@ -85,7 +87,7 @@ def state(store):
     return copy.deepcopy({
         key: getattr(store, key)
         for key in ("items", "groups", "profile_overrides", "overrides", "custom_rules",
-                    "disabled_builtins", "assignments", "initialized", "data")
+                    "disabled_builtins", "assignments", "initialized", "data", "entries")
         if hasattr(store, key)
     })
 
@@ -147,6 +149,7 @@ class StorageApiTests(unittest.IsolatedAsyncioTestCase):
             "/api/history", "/api/custom-prompts", "/api/style-presets", "/api/prompt-rules",
             "/api/prompt-pools?model_profile=krea2", "/api/resources", "/api/loras",
             "/api/resource-ownership?kind=models",
+            "/api/resource-usages",
             "/api/lora-library", "/api/lora-collections", "/api/character-lora-bindings",
         ):
             response = await self.client.get(endpoint)
@@ -211,6 +214,9 @@ class StorageApiTests(unittest.IsolatedAsyncioTestCase):
                 ("post", "/api/prompt-rules", {"from": "old", "to": "new"}),
                 ("put", "/api/prompt-rules/prompt_rule_missing", {"from": "old", "to": "new"}),
                 ("delete", "/api/prompt-rules/prompt_rule_missing", None),
+            ],
+            "resource_usage": [
+                ("delete", "/api/resource-usages", {"kind": "models", "name": "unknown.safetensors"}),
             ],
             "prompt_pools": [
                 ("post", "/api/prompt-pools/import", {"model_profile": "krea2", "items": ["test"]}),

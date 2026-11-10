@@ -345,8 +345,18 @@ if (args.Contains("--updates-only"))
     Console.WriteLine($"{count} software update checks passed; artifacts: {work}");
     return;
 }
+if (args.Contains("--resource-policy-only"))
+{
+    count += await ResourcePolicyTests.Run(work, manifest);
+    count += await InstallationReadinessTests.Run(work, manifest);
+    count += await SetupModelSelectionTests.Run(work, manifest, models,
+        JsonFile.Read<ModelProfilesManifest>(Path.Combine(manifestDir, "model-profiles.json")));
+    count += DownloadOwnerRecoveryTests.Run(work);
+    Console.WriteLine($"{count} resource policy checks passed; artifacts: {work}"); return;
+}
 if (args.Contains("--onboarding-only"))
 {
+    count += await ResourcePolicyTests.Run(work, manifest);
     count += RuntimeCapabilityTests.Run(work, manifest);
     count += await InstallationReadinessTests.Run(work, manifest);
     count += await OnboardingTests.Run(work, manifest);
@@ -404,6 +414,7 @@ if (args.Contains("--tagger-only"))
 }
 count += await OnboardingTests.Run(work, manifest);
 count += await SetupCompletionTests.Run(work);
+count += await ResourcePolicyTests.Run(work, manifest);
 count += await InstallationReadinessTests.Run(work, manifest);
 count += RuntimeCapabilityTests.Run(work, manifest);
 count += await SetupModelSelectionTests.Run(work, manifest, models,
@@ -877,7 +888,7 @@ var externalProbe = new ProbeResult(resumedEnvironment.ComfyRoot, resumedEnviron
 });
 var relocatedPlan = await InstallationPlanner.ResolveModelDestinationsAsync(
     InstallationPlanner.Create(resumedConfig, resumeManifest, resumeState, true, smallModels, profiles), externalProbe, smallModels, profiles, default);
-Check(relocatedPlan.Downloads.Single(a => a.Destination == existingExternalModel).InEnvironment && relocatedPlan.EstimatedDownloadBytes == 4 * data.Length, "resumed planning reuses an existing model and budgets the other four mandatory files");
+Check(relocatedPlan.Downloads.Single(a => a.Destination == existingExternalModel).InEnvironment && relocatedPlan.EstimatedDownloadBytes == 2 * data.Length, "resumed planning reuses an existing model and budgets the other two base files without optional SeedVR2");
 var relocatedVolumes = InstallationPlanner.EstimateVolumes(relocatedPlan);
 var relocatedBudgetDiagnostic = new
 {
@@ -900,20 +911,20 @@ Check(unverifiedRuntimeArtifacts.Length == 3
     && unverifiedRuntimeArtifacts.Single(artifact => Path.GetFileName(artifact.Destination) == "python.tar.gz").RemainingAllocationBytes == data.Length
     && relocatedPlan.RuntimeBytes == relocatedPlan.RuntimeReserveBytes + expectedUnverifiedRuntimeAllocation,
     "new relocated plan conservatively budgets its unverified tool/Python caches and credits only the wheel partial allocation");
-Check(relocatedVolumes.Single(v => v.Volume == separateVolume).RequiredBytes == 3 * data.Length + 256L * 1024 * 1024
+Check(relocatedVolumes.Single(v => v.Volume == separateVolume).RequiredBytes == 2 * data.Length + 256L * 1024 * 1024
     && relocatedVolumes.Single(v => v.Volume.Equals(Path.GetPathRoot(work), StringComparison.OrdinalIgnoreCase)).RequiredBytes
-        == relocatedPlan.EnvironmentReserveBytes + relocatedPlan.RuntimeReserveBytes + expectedUnverifiedRuntimeAllocation + 2 * data.Length + 256L * 1024 * 1024,
+        == relocatedPlan.EnvironmentReserveBytes + relocatedPlan.RuntimeReserveBytes + expectedUnverifiedRuntimeAllocation + data.Length + 256L * 1024 * 1024,
     "each volume includes only its own unverified models and cache allocations plus component reserves and one safety margin");
 await ThrowsType<InvalidDataException>(() => InstallationPlanner.RefreshSpaceEstimateAsync(relocatedPlan, default), "preflight verifies the existing effective model path instead of a hardcoded models directory");
 File.WriteAllBytes(existingExternalModel, data);
 var verifiedRelocatedPlan = await InstallationPlanner.RefreshSpaceEstimateAsync(relocatedPlan, default);
-Check(verifiedRelocatedPlan.EstimatedDownloadBytes == 4 * data.Length, "verified external models need no duplicate download allocation");
+Check(verifiedRelocatedPlan.EstimatedDownloadBytes == 2 * data.Length, "verified external models need no duplicate download allocation");
 Check(verifiedRelocatedPlan.Downloads.Where(artifact => !artifact.InEnvironment).All(artifact => artifact.RemainingAllocationBytes == 0)
     && verifiedRelocatedPlan.RuntimeBytes == verifiedRelocatedPlan.RuntimeReserveBytes,
     "strong cache verification releases all three runtime archive allocations without dropping runtime component reserves");
 var verifiedRelocatedVolumes = InstallationPlanner.EstimateVolumes(verifiedRelocatedPlan);
-Check(verifiedRelocatedVolumes.Single(v => v.Volume == separateVolume).RequiredBytes == 3 * data.Length + 256L * 1024 * 1024
-    && verifiedRelocatedVolumes.Single(v => v.Volume.Equals(Path.GetPathRoot(work), StringComparison.OrdinalIgnoreCase)).RequiredBytes == verifiedRelocatedPlan.EnvironmentReserveBytes + verifiedRelocatedPlan.RuntimeReserveBytes + data.Length + 256L * 1024 * 1024,
+Check(verifiedRelocatedVolumes.Single(v => v.Volume == separateVolume).RequiredBytes == 2 * data.Length + 256L * 1024 * 1024
+    && verifiedRelocatedVolumes.Single(v => v.Volume.Equals(Path.GetPathRoot(work), StringComparison.OrdinalIgnoreCase)).RequiredBytes == verifiedRelocatedPlan.EnvironmentReserveBytes + verifiedRelocatedPlan.RuntimeReserveBytes + 256L * 1024 * 1024,
     "verified external contents release only their own allocation while offline model volume and component reserves remain");
 
 var metadataRoot = Path.Combine(work, "model-metadata");

@@ -421,7 +421,7 @@ test('Krea single defaults bind its encoder before the live resource inventory l
   assert.deepEqual(value.loras, []);
   assert.deepEqual(plain(ctx.defaults), before);
 });
-test('single restores stale profile resources and serializes the repaired values', () => {
+test('single preserves imported resource choices until the server resolves compatibility', () => {
   const { ctx, run, profiles } = profileResourceContext();
   for (const name of ['singleWorkbenchCancelInput', 'singleWorkbenchRenderCompatibility', 'singleWorkbenchRenderProcessed', 'singleWorkbenchRestoreInput', 'singleWorkbenchRenderMode']) ctx[name] = () => {};
   ctx.currentProfile = () => 'krea2';
@@ -430,8 +430,8 @@ test('single restores stale profile resources and serializes the repaired values
     const raw = { workbench: 'single', model_profile: 'krea2', clip_name: clipName, clip_type: profiles.anima.clip_type, single: { unlock_resources: true } };
     ctx.singleWorkbenchApply(raw);
     const value = plain(ctx.singleWorkbenchRead({ model_profile: 'krea2' }));
-    assert.equal(value.clip_name, profiles.krea2.clip_name);
-    assert.equal(value.clip_type, 'krea2');
+    assert.equal(value.clip_name, clipName);
+    assert.equal(value.clip_type, profiles.anima.clip_type);
     assert.equal(raw.clip_name, clipName);
   }
   ctx.singleWorkbenchApply({ workbench: 'single', model_profile: 'krea2', clip_name: 'custom/qwen3vl_4b_bf16.safetensors', clip_type: 'krea2', vae_name: 'custom/vae', single: { unlock_resources: true } });

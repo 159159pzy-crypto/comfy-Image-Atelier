@@ -240,6 +240,8 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
     public async Task StartComfy(LauncherConfig config, RuntimeManifest manifest, CancellationToken ct)
     {
         config.Validate();
+        var extension = ResourceInspectionExtension.Ensure(config, await PortOpen(config.ComfyPort, ct));
+        log(extension.Message);
         var before = owned.Count;
         try
         {
@@ -249,12 +251,8 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
             }
             else
             {
-                var assistant = PromptAssistantCompatibility.ResolveDirectory(config.ComfyRoot);
-                if (assistant is not null)
-                    await PromptAssistantCompatibility.CheckOrApply(config, stateDir, assistant, true, ct);
-                var face = ForbiddenVisionCompatibility.ResolveDirectory(config.ComfyRoot);
-                if (face is not null && File.Exists(Path.Combine(config.ComfyRoot, "custom_nodes", "skip_download_model")))
-                    await ForbiddenVisionCompatibility.CheckOrApply(config, stateDir, face, true, ct);
+                // Optional compatibility patches are prepared by selected installation
+                // features. Starting the core service never edits dormant plugins.
                 var args = ComfyLaunchArguments.Build(config);
                 var env = PrepareRuntimeEnvironment(config);
                 var process = await StartProcess(config.Python, args, config.ComfyRoot, "ComfyUI", ct, env);
@@ -265,7 +263,7 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
             // Check the full core contract; selected optional capabilities receive
             // their additional checks in the installation completion probe.
             string[] core = ["UNETLoader", "CLIPLoader", "VAELoader", "KSampler", "KSamplerAdvanced", "VAEDecodeTiled", "EmptyLatentImage"];
-            var missing = RuntimeCapabilities.RequiredClasses(manifest).Concat(core).Distinct().Where(n => !nodes.TryGetProperty(n, out _)).ToArray();
+            var missing = RuntimeCapabilities.StartupClasses(manifest).Concat(core).Distinct().Where(n => !nodes.TryGetProperty(n, out _)).ToArray();
             if (missing.Length > 0) throw new InvalidOperationException("缺少节点或导入失败：" + string.Join("、", missing));
             if (nodes.TryGetProperty("PromptExpand", out var expand) &&
                 (!expand.TryGetProperty("input", out var inputs) ||
@@ -288,7 +286,7 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
     {
         config.Validate();
         RuntimePolicies.ValidateWorkbenchDirectory(config.AppRoot);
-        var nodeDirectories = Inventory.ResolveNodeDirectories(config.ComfyRoot, manifest);
+        var nodeDirectories = Inventory.ResolveNodeDirectories(config.ComfyRoot, SetupFeatures.SelectRuntime(manifest, []));
         var before = owned.Count;
         try
         {

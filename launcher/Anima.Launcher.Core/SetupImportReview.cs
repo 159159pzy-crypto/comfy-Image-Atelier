@@ -52,9 +52,13 @@ print(json.dumps([name for name in ('aiohttp', 'yaml', 'torch') if importlib.uti
                 var probe = await NvidiaRuntimePreparation.ProbeAsync(config, runtimeRoot, ct);
                 if (probe.Supported)
                 {
-                    var status = await NvidiaRuntimePreparation.ValidateStatusAsync(config, runtimeRoot, ct);
-                    if (!NvidiaRuntimePreparation.IsReadyFor(probe, status))
-                        preparation.Add("当前显卡的 NVIDIA VFX 与 DLSS 运行库需要准备或重新验证。");
+                    foreach (var feature in new[] { ("nvidia-rtx-vsr-pro", "nvidia"), ("DLSS5-Comfyui", "dlss") })
+                    {
+                        if (!manifest.Nodes.Any(node => node.Id == feature.Item1)) continue;
+                        var status = await NvidiaRuntimePreparation.ValidateStatusAsync(config, runtimeRoot, ct, [feature.Item2]);
+                        if (!NvidiaRuntimePreparation.IsReadyFor(probe, status, [feature.Item2]))
+                            preparation.Add("当前显卡的 NVIDIA " + feature.Item2 + " 运行库需要准备或重新验证。");
+                    }
                 }
             }
             catch (OperationCanceledException) { throw; }

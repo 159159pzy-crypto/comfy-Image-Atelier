@@ -8,7 +8,7 @@ public sealed record InstallJournal(string Root, string Stage, string Status, Da
 public sealed record NodeInstallPlan(Repository Repository, string Directory, bool PreserveExisting);
 
 public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloads downloads, Action<string> log, IProgress<DownloadProgress>? progress, Action<string>? stageChanged = null, Action<SetupProgress>? setupProgress = null,
-    Action<DependencyProgress>? dependencyProgress = null)
+    Action<DependencyProgress>? dependencyProgress = null, Func<IDisposable?>? optionalDownloadScope = null)
 {
     public static IReadOnlyList<NodeInstallPlan> PlanNodes(string root, RuntimeManifest runtime)
     {
@@ -16,6 +16,8 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         return runtime.Nodes.Select(repo => new NodeInstallPlan(repo, directories[repo.Id], Directory.Exists(directories[repo.Id]) && !File.Exists(Path.Combine(directories[repo.Id], ".anima-revision.json")))).ToArray();
     }
     private static readonly Regex Sam2Line = new(@"^(?:sam[-_.]?2(?:\[[^\]]*\])?\s*@\s*)?git\+https://github\.com/facebookresearch/sam2(?:\.git)?(?:@[\w./\-]+)?\s*$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private bool featureScoped;
+    public List<SetupRuntimeIssue> OptionalFailures { get; } = [];
     private string? git;
     private string? uv;
     private ComfyDependencySnapshot? activeDependencies;
@@ -363,6 +365,11 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             log(message + " 已保留原环境，继续补齐其他依赖。");
         }
         var nodes = ComfyDependencyResolver.ExistingNodeRequirements(config);
+        if (featureScoped)
+        {
+            var selectedRoots = Inventory.ResolveNodeDirectories(config.ComfyRoot, manifest).Values.Select(Path.GetFullPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            nodes = nodes.Where(file => selectedRoots.Contains(Path.GetDirectoryName(Path.GetFullPath(file))!)).ToArray();
+        }
         if (activeDependencies is null && RuntimeDependencies.NodeCommit(config.ComfyRoot) is { } commit)
             activeDependencies = new(commit, File.ReadAllText(requirements), File.Exists(manager) ? File.ReadAllText(manager) : "", []);
         // Resolve the complete graph with only the GPU ABI frozen. An old full core-only
@@ -548,6 +555,8 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
     public async Task<LauncherConfig> Install(InstallationPlan plan, CancellationToken ct)
     {
         installationDependenciesPath = null;
+        featureScoped = plan.ResourcePolicyVersion > 0;
+        OptionalFailures.Clear();
         RuntimeArtifactPlanning.ValidateIdentity(plan);
         plan = await InstallationPlanner.ResolveStableAsync(plan, manifest, stateDir, ct);
         manifest = plan.ResolvedRuntime ?? manifest;
@@ -640,40 +649,94 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         var skip = Path.Combine(custom, "skip_download_model");
         var hadSkip = File.Exists(skip);
         if (!hadSkip) File.WriteAllText(skip, "Model downloads are managed by Comfy Image Atelier.\n");
-        foreach (var node in nodePlans)
+        if (featureScoped)
         {
-            var repo = node.Repository;
-            var target = node.Directory;
-            await Stage(config, "nodes", "安装节点 " + repo.Id, async () =>
+            var selectedRuntime = manifest;
+            var coreFeatures = fresh ? new[] { "sesqui" } : Array.Empty<string>();
+            var baseline = SetupFeatures.SelectRuntime(selectedRuntime, coreFeatures);
+            async Task PrepareNodes(RuntimeManifest scope, IEnumerable<NodeInstallPlan> planned)
             {
-                if (node.PreserveExisting) log($"保留已有节点源码 {repo.Id}：{target}；检查并补齐声明的依赖。");
-                else await Clone(repo, target, config, ct);
-            });
-        }
-        await InstallCombinedDependencies(config, importedPins, fresh || ComfyLaunchArguments.ManagerEnabled(config.ComfyArguments), ct);
-        await WithInstallationCheckpoint(config, () => CompleteNodeInstallers(config, nodePlans, ct));
-        if (plan.RuntimeArtifactsIdentity.Length > 0)
-            await Stage(config, "nodes", "验证潜空间放大权重",
-                () => SesquiRuntimePreparation.PrepareAsync(config, manifest, runtimeDirectory, downloads, log, progress, ct));
-        await WithInstallationCheckpoint(config, () => Stage(config, "nodes", "检查可选 Triton 加速依赖", () => RepairOptionalDependencies(config, ct)));
-        var assistantDirectory = PromptAssistantCompatibility.ResolveDirectory(config.ComfyRoot);
-        if (assistantDirectory is not null)
-            await Stage(config, "nodes", "验证提示词助手纯模板兼容", () => PromptAssistantCompatibility.CheckOrApply(config, stateDir, assistantDirectory, true, ct));
-        var faceDirectory = ForbiddenVisionCompatibility.ResolveDirectory(config.ComfyRoot);
-        if (faceDirectory is not null)
-            await Stage(config, "nodes", "验证脸部模型受管理下载", () => ForbiddenVisionCompatibility.CheckOrApply(config, stateDir, faceDirectory, true, ct));
-        if (plan.RuntimeArtifactsIdentity.Length > 0 && manifest.Nodes.Any(node => node.Id == "DLSS5-Comfyui"))
-            await WithInstallationCheckpoint(config, () => Stage(config, "nodes", "准备并验证 NVIDIA 运行库",
-                async () =>
+                manifest = scope;
+                var items = planned.ToArray();
+                foreach (var node in items)
+                    await Stage(config, "nodes", "安装节点 " + node.Repository.Id, async () =>
+                    {
+                        if (node.PreserveExisting) log("保留已有节点源码 " + node.Repository.Id);
+                        else await Clone(node.Repository, node.Directory, config, ct);
+                    });
+                await InstallCombinedDependencies(config, importedPins, fresh || ComfyLaunchArguments.ManagerEnabled(config.ComfyArguments), ct);
+                await WithInstallationCheckpoint(config, () => CompleteNodeInstallers(config, items, ct));
+            }
+            await PrepareNodes(baseline, nodePlans.Where(node => baseline.Nodes.Any(item => item.Id == node.Repository.Id)));
+            if (fresh) await SesquiRuntimePreparation.PrepareAsync(config, baseline, runtimeDirectory, downloads, log, progress, ct);
+            foreach (var group in nodePlans.Where(node => !baseline.Nodes.Any(item => item.Id == node.Repository.Id))
+                .GroupBy(node => SetupFeatures.NodeFeature(node.Repository.Id)!))
+            {
+                try
                 {
-                    var native = await NvidiaRuntimePreparation.PrepareAsync(config, runtimeDirectory, downloads, log, progress, ct);
-                    if (native.Supported && !native.Ready) throw new InvalidOperationException(native.Detail);
-                }));
+                    using var optionalScope = optionalDownloadScope?.Invoke();
+                    var scope = selectedRuntime with { Nodes = baseline.Nodes.Concat(group.Select(node => node.Repository)).DistinctBy(node => node.Id).ToArray() };
+                    await PrepareNodes(scope, group);
+                    if (group.Key == "sesqui") await SesquiRuntimePreparation.PrepareAsync(config, scope, runtimeDirectory, downloads, log, progress, ct);
+                    if (group.Key == "prompt-assistant" && PromptAssistantCompatibility.ResolveDirectory(config.ComfyRoot) is { } assistant)
+                        await PromptAssistantCompatibility.CheckOrApply(config, stateDir, assistant, true, ct);
+                    if (group.Key == "face-refine" && ForbiddenVisionCompatibility.ResolveDirectory(config.ComfyRoot) is { } face)
+                        await ForbiddenVisionCompatibility.CheckOrApply(config, stateDir, face, true, ct);
+                    if (group.Key is "nvidia" or "dlss")
+                    {
+                        var native = await NvidiaRuntimePreparation.PrepareAsync(config, runtimeDirectory, downloads, log, progress, ct, [group.Key]);
+                        if (!native.Ready) throw new InvalidOperationException(native.Detail);
+                    }
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception error) when (error is IOException or InvalidOperationException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+                {
+                    var issue = new SetupRuntimeIssue(group.Key, "可选功能尚未准备：" + group.Key + "：" + DiagnosticRedaction.Text(error.Message), SetupFeatures.Prefix + group.Key);
+                    OptionalFailures.Add(issue);
+                    log(issue.Message);
+                }
+            }
+            manifest = selectedRuntime;
+        }
+        else
+        {
+            foreach (var node in nodePlans)
+            {
+                var repo = node.Repository;
+                var target = node.Directory;
+                await Stage(config, "nodes", "安装节点 " + repo.Id, async () =>
+                {
+                    if (node.PreserveExisting) log($"保留已有节点源码 {repo.Id}：{target}；检查并补齐声明的依赖。");
+                    else await Clone(repo, target, config, ct);
+                });
+            }
+            await InstallCombinedDependencies(config, importedPins, fresh || ComfyLaunchArguments.ManagerEnabled(config.ComfyArguments), ct);
+            await WithInstallationCheckpoint(config, () => CompleteNodeInstallers(config, nodePlans, ct));
+            if (plan.RuntimeArtifactsIdentity.Length > 0)
+                await Stage(config, "nodes", "验证潜空间放大权重",
+                    () => SesquiRuntimePreparation.PrepareAsync(config, manifest, runtimeDirectory, downloads, log, progress, ct));
+            await WithInstallationCheckpoint(config, () => Stage(config, "nodes", "检查可选 Triton 加速依赖", () => RepairOptionalDependencies(config, ct)));
+            var assistantDirectory = PromptAssistantCompatibility.ResolveDirectory(config.ComfyRoot);
+            if (assistantDirectory is not null)
+                await Stage(config, "nodes", "验证提示词助手纯模板兼容", () => PromptAssistantCompatibility.CheckOrApply(config, stateDir, assistantDirectory, true, ct));
+            var faceDirectory = ForbiddenVisionCompatibility.ResolveDirectory(config.ComfyRoot);
+            if (faceDirectory is not null)
+                await Stage(config, "nodes", "验证脸部模型受管理下载", () => ForbiddenVisionCompatibility.CheckOrApply(config, stateDir, faceDirectory, true, ct));
+            if (plan.RuntimeArtifactsIdentity.Length > 0 && manifest.Nodes.Any(node => node.Id == "DLSS5-Comfyui"))
+                await WithInstallationCheckpoint(config, () => Stage(config, "nodes", "准备并验证 NVIDIA 运行库",
+                    async () =>
+                    {
+                        var native = await NvidiaRuntimePreparation.PrepareAsync(config, runtimeDirectory, downloads, log, progress, ct);
+                        if (native.Supported && !native.Ready) throw new InvalidOperationException(native.Detail);
+                    }));
+        }
         setupProgress?.Invoke(new("nodes", "必要节点已准备就绪", SetupStageStatus.Complete));
         await Stage(config, "validation", "验证运行依赖", async () =>
         {
             await Commands.Run(config.Python, ["-c", "import aiohttp,yaml,torch; print('PyTorch:',torch.__version__); print('GPU:',torch.cuda.is_available())" + (fresh ? "; assert torch.cuda.is_available()" : "")], config.ComfyRoot, log, ct);
-            if (fresh) await Commands.Run(config.Python, ["-m", "pip", "check"], config.ComfyRoot, log, ct);
+            // New feature installs validate their resolved dependency scope and the
+            // running core. A failed optional package must not become a global gate.
+            if (fresh && !featureScoped) await Commands.Run(config.Python, ["-m", "pip", "check"], config.ComfyRoot, log, ct);
         });
         InstallationPlanner.MarkStableInstallComplete(config, stateDir);
         return config;

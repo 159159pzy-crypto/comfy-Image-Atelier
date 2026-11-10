@@ -177,7 +177,7 @@ function renderSingleDetail(record) {
   ui.detailStats.innerHTML = singleDetailRows(singleDetailSummary(data));
   ui.detailPositive.value = data.positive ?? "未记录";
   ui.detailNegative.value = data.negative ?? "未记录";
-  ui.detailSelection.innerHTML = singleDetailGroups(data);
+  ui.detailSelection.innerHTML = singleDetailGroups(data) + (typeof resourceResolutionRecordMarkup === "function" ? resourceResolutionRecordMarkup(record) : "");
   ui.detailSelection.querySelector("[data-single-prompts]").append(ui.detailPositive.closest("label"), ui.detailNegative.closest("label"));
   bindSingleDetailGroups(ui.detailSelection);
   const reference = ui.detailSelection.querySelector("[data-single-reference]");
@@ -200,7 +200,7 @@ function renderSingleDetail(record) {
   };
   image.onload = setSize; image.onerror = setSize;
   if (image.complete) setSize();
-  ui.variantButton.textContent = "同提示词换种子";
+  ui.variantButton.textContent = "同提示词变体";
   singleDetailActions(true);
   ui.detailPositive.closest("label").firstChild.textContent = "底图最终有效提示词";
   ui.detailNegative.closest("label").firstChild.textContent = data.zeroNegative ? "底图负面提示词 · 编码后条件置零" : "底图负面提示词";

@@ -14,7 +14,7 @@
       document.documentElement.dataset.theme = theme;
     })();
   </script>
-  <link rel="stylesheet" href="/static/styles.css?v=20261109-random-pools-motion">
+  <link rel="stylesheet" href="/static/styles.css?v=20261110-resource-resolution">
   <link rel="stylesheet" href="/static/single-layout.css?v=20261024-motion">
   <link rel="stylesheet" href="/static/single-details.css?v=20261024-motion">
   <link rel="stylesheet" href="/static/history-detail.css?v=20261028-remove-artwork-management">
@@ -134,8 +134,12 @@
               <option value="anima">Anima</option>
               <option value="krea2">Krea 2</option>
             </select></label>
-            <p id="modelProfileHint" class="field-hint">档案会自动切换 UNet、CLIP、VAE、编码方式与采样参数。</p>
-            <label class="field"><span>主模型</span><select id="model_name"><option value="">正在读取模型...</option></select><small class="field-hint">按 LoRA Manager 的 base_model 识别模型；CLIP 与 VAE 随档案绑定。</small></label>
+            <p id="modelProfileHint" class="field-hint">选择当前档案兼容的模型；缺失时自动选择可用模型。</p>
+            <label class="field"><span>主模型</span><select id="model_name"><option value="">正在读取模型...</option></select></label>
+            <div class="parameter-grid compact-parameter-grid">
+              <label class="field"><span>文本编码器 / CLIP</span><select id="clip_name"><option value="">正在读取模型...</option></select></label>
+              <label class="field"><span>VAE</span><select id="vae_name"><option value="">正在读取模型...</option></select></label>
+            </div>
             <button id="manageResourceOwnership" class="button ghost compact" type="button">模型 / LoRA 管理</button>
             <div id="resourceWarning" class="resource-warning" hidden></div>
           </div>
@@ -487,11 +491,11 @@
 
   <dialog id="resourceOwnershipDialog" class="resource-ownership-dialog">
     <form method="dialog" class="resource-ownership-form">
-      <div class="dialog-heading"><div><span class="kicker">LORA MANAGER</span><h2>模型 / LoRA 分类</h2></div><button id="closeResourceOwnership" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
-      <p class="field-hint">分类来自 ComfyUI-Lora-Manager。请在插件中管理资源和 base_model，完成后刷新；无法识别或不支持的资源不会用于生成。</p>
+      <div class="dialog-heading"><div><span class="kicker">MODEL RESOURCES</span><h2>模型用途 / LoRA 分类</h2></div><button id="closeResourceOwnership" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
+      <p class="field-hint">模型按用途选择；尚未识别的文件可在确认兼容后指定用途。已识别为不兼容的文件不能用于当前流程。LoRA 分类仍由 LoRA Manager 管理。</p>
       <div class="ownership-actions"><a id="openLoraManager" class="button ghost compact" target="_blank" rel="noopener noreferrer" hidden>打开 LoRA Manager</a><button id="refreshResourceClassification" class="button ghost compact" type="button">刷新分类</button></div>
       <div class="ownership-toolbar">
-        <label class="field"><span>资源类型</span><select id="ownershipKind"><option value="models">主模型</option><option value="loras">LoRA</option></select></label>
+        <label class="field"><span>资源类型</span><select id="ownershipKind"><option value="models">主模型 / 修复模型</option><option value="clips">文本编码器 / CLIP</option><option value="vaes">VAE</option><option value="upscale_models">放大模型</option><option value="loras">LoRA</option></select></label>
         <label class="field"><span>搜索</span><input id="ownershipSearch" type="search" placeholder="按文件名或文件夹搜索"></label>
       </div>
       <p id="ownershipSummary" class="ownership-summary" aria-live="polite">读取中…</p>
@@ -759,7 +763,7 @@
         <div id="detailDrawerHome" class="detail-drawer-home">
         <section id="replayDrawer" class="regeneration-drawer replay-drawer" aria-labelledby="replayDrawerTitle" hidden>
           <header><div><span class="kicker">REPLAY</span><h3 id="replayDrawerTitle">按原种子重跑</h3></div><button id="closeReplayDrawer" class="icon-button dark" type="button" title="收起" aria-label="收起原种子重跑选项">×</button></header>
-          <p>冻结历史最终提示词，沿用原设置与双种子。资源文件内容被覆盖时无法识别，不承诺像素级一致。</p>
+          <p>冻结历史最终提示词与双种子。缺失模型会使用兼容替代并明确列出；模型变更后不属于严格复现。</p>
           <div id="replaySeedSummary" class="regeneration-seeds"></div>
           <div id="replayStatus" class="regeneration-status" role="status"></div>
           <button id="confirmReplay" class="button primary" type="button" disabled>按原种子重跑</button>
@@ -769,8 +773,8 @@
           <div id="variantStatus" class="regeneration-status regeneration-status-compact" role="status"></div>
           <fieldset id="variantModes" class="regeneration-modes">
             <legend class="sr-only">选择变体方式</legend>
-            <label class="regeneration-mode"><input type="radio" name="regenerationMode" value="prompt_variant" checked><span class="regeneration-mode-indicator" aria-hidden="true"></span><span class="regeneration-mode-copy"><strong>同提示词变体</strong><small>提示词不变，只换图像种子</small></span><span class="regeneration-mode-badge">推荐</span></label>
-            <label class="regeneration-mode"><input type="radio" name="regenerationMode" value="content_redraw"><span class="regeneration-mode-indicator" aria-hidden="true"></span><span class="regeneration-mode-copy"><strong>选择内容重抽</strong><small>只改变勾选的内容维度</small></span></label>
+            <label class="regeneration-mode"><input type="radio" name="regenerationMode" value="prompt_variant" checked><span class="regeneration-mode-indicator" aria-hidden="true"></span><span class="regeneration-mode-copy"><strong>同提示词变体</strong><small>提示词不变，换图像种子；缺失模型使用兼容替代</small></span><span class="regeneration-mode-badge">推荐</span></label>
+            <label class="regeneration-mode"><input type="radio" name="regenerationMode" value="content_redraw"><span class="regeneration-mode-indicator" aria-hidden="true"></span><span class="regeneration-mode-copy"><strong>选择内容重抽</strong><small>重抽勾选内容，缺失模型使用兼容替代</small></span></label>
             <div id="redrawSections" class="redraw-sections" hidden>
               <label><input type="checkbox" value="character">角色</label>
               <label><input type="checkbox" value="clothing">服装</label>
@@ -778,7 +782,7 @@
               <label><input type="checkbox" value="background">背景</label>
               <label><input type="checkbox" value="expression">表情</label>
             </div>
-            <label class="regeneration-mode"><input type="radio" name="regenerationMode" value="settings_reroll"><span class="regeneration-mode-indicator" aria-hidden="true"></span><span class="regeneration-mode-copy"><strong>按此配置再抽</strong><small>候选池和设置不变，全部重新随机</small></span></label>
+            <label class="regeneration-mode"><input type="radio" name="regenerationMode" value="settings_reroll"><span class="regeneration-mode-indicator" aria-hidden="true"></span><span class="regeneration-mode-copy"><strong>按此配置再抽</strong><small>沿用配置重新随机，缺失模型使用兼容替代</small></span></label>
           </fieldset>
           <div class="regeneration-footer"><label class="regeneration-count"><span>生成数量</span><input id="variantDrawerCount" type="number" min="1" max="100" value="4"></label><button id="confirmVariant" class="button primary" type="button" disabled>生成同提示词变体</button></div>
         </section>
@@ -844,21 +848,22 @@
   <script src="/static/request-state.js?v=20261107-mutation-context" defer></script>
   <script src="/static/motion.js?v=20261024-motion" defer></script>
   <script src="/static/workbench-parameters.js?v=20261108-experience-v5" defer></script>
-  <script src="/static/single-layout.js?v=20261029-artwork-favorites" defer></script>
+  <script src="/static/single-layout.js?v=20261110-resource-resolution" defer></script>
   <script src="/static/single-gallery.js?v=20261028-remove-artwork-management" defer></script>
   <script src="/static/shared-favorites.js?v=20261030-source-lifecycle" defer></script>
   <script src="/static/prompt-reverse.js?v=20261108-cancel-state" defer></script>
   <script src="/static/prompt-assistant.js?v=20261108-cancel-state" defer></script>
-  <script src="/static/single-workbench.js?v=20261108-single-lora-experience-v5" defer></script>
+  <script src="/static/single-workbench.js?v=20261110-resource-resolution" defer></script>
   <script src="/static/single-input.js?v=20261028-remove-artwork-management" defer></script>
   <script src="/static/single-compatibility.js?v=20261024-single-ui" defer></script>
-  <script src="/static/single-details.js?v=20261108-experience-v5" defer></script>
+  <script src="/static/single-details.js?v=20261110-resource-resolution" defer></script>
   <script src="/static/krea-pool.js?v=20261030-source-lifecycle" defer></script>
   <script src="/static/history-detail.js?v=20261029-artwork-favorites" defer></script>
   <script src="/static/artwork-favorites.js?v=20261029-favorites-motion" defer></script>
   <script src="/static/detail-actions.js?v=20261027-history-polish" defer></script>
   <script src="/static/lora-manager.js?v=20261107-mutation-context" defer></script>
   <script src="/static/pool-browser.js?v=20261107-binding" defer></script>
-  <script src="/static/app.js?v=20261109-random-pools-motion" defer></script>
+  <script src="/static/resource-resolution.js?v=20261110-resource-resolution" defer></script>
+  <script src="/static/app.js?v=20261110-resource-resolution" defer></script>
 </body>
 </html>

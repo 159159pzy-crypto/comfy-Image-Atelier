@@ -10,6 +10,11 @@ public static class RuntimeCapabilities
     public static bool IsTaggerModel(string id) => id.StartsWith("tagger-", StringComparison.OrdinalIgnoreCase)
         || id.StartsWith("wd-", StringComparison.OrdinalIgnoreCase) || id.Contains("timm", StringComparison.OrdinalIgnoreCase);
 
+    public static string[] StartupClasses(RuntimeManifest runtime) => SetupFeatures.SelectRuntime(runtime, []).Nodes
+        .SelectMany(node => node.RequiredClasses).Concat(new[] { "UNETLoader", "CLIPLoader", "VAELoader", "KSampler",
+            "KSamplerAdvanced", "VAEDecode", "VAEDecodeTiled", "EmptyLatentImage" }).Distinct(StringComparer.Ordinal).ToArray();
+
+    /// <summary>Legacy full-install contract for historical plans/tests. New startup uses StartupClasses; runtime uses the WebUI resolver.</summary>
     public static string[] RequiredClasses(RuntimeManifest runtime, IEnumerable<string>? selectedModelIds = null)
     {
         var selected = (selectedModelIds ?? []).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -30,6 +35,7 @@ public static class RuntimeCapabilities
         if (issues.Length > 0) throw new InvalidOperationException(string.Join("；", issues));
     }
 
+    /// <summary>Legacy full-install validation; do not use as a new-plan or general startup gate.</summary>
     public static string[] ObjectInfoIssues(JsonElement info, IEnumerable<string>? selectedModelIds = null)
     {
         var selected = (selectedModelIds ?? []).ToHashSet(StringComparer.OrdinalIgnoreCase);

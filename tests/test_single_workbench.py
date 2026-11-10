@@ -6,6 +6,7 @@ import pytest
 
 from anima_webui.single_workbench import compose_single_prompt, effective_single_prompts, single_resource_issues
 from anima_webui.model_profiles import get_model_profile
+from anima_webui.resource_resolution import resolve_resources
 from anima_webui.workflow import WorkflowError, WorkflowTemplates, migrate_settings, validate_settings
 
 
@@ -76,25 +77,43 @@ def test_reject_invalid_single_settings(single):
         validate_settings({"workbench": "single", "base_mode": "dual_sampler", "single": single})
 
 
-def test_resource_unlock_only_changes_single():
+@pytest.mark.parametrize("workbench", ["random", "single"])
+@pytest.mark.parametrize("legacy_unlock", [False, True])
+def test_resource_choices_are_preserved_in_both_workbenches(workbench, legacy_unlock):
     custom = {"model_profile": "anima", "clip_name": "custom-clip", "vae_name": "custom-vae", "clip_type": "custom"}
-    assert validate_settings(custom)["clip_name"] == "qwen_3_06b_base.safetensors"
-    assert validate_settings({**custom, "workbench": "single"})["clip_name"] == "custom-clip"
-    assert validate_settings({**custom, "workbench": "single", "single": {"unlock_resources": False}})["clip_name"] == "qwen_3_06b_base.safetensors"
+    settings = validate_settings({**custom, "workbench": workbench, "single": {"unlock_resources": legacy_unlock}})
+    for field in ("clip_name", "vae_name", "clip_type"):
+        assert settings[field] == custom[field]
 
 
 @pytest.mark.parametrize("profile_id,previous_id", [("krea2", "anima"), ("anima", "krea2")])
 @pytest.mark.parametrize("clip_prefix", ["", "text_encoders/nested/", "text_encoders\\nested\\"])
-def test_single_migrates_stale_other_profile_resources(templates, profile_id, previous_id, clip_prefix):
+def test_single_resolves_other_profile_resources_from_live_compatibility(templates, profile_id, previous_id, clip_prefix):
     profile, previous = get_model_profile(profile_id), get_model_profile(previous_id)
     raw = {"workbench": "single", "model_profile": profile_id, "model_name": profile["model_name"],
            "clip_name": clip_prefix + previous["clip_name"].upper(), "clip_type": previous["clip_type"],
            "single": {"unlock_resources": True, "positive_prompt": "a cat"}}
     before = copy.deepcopy(raw)
     for settings in (migrate_settings(raw), validate_settings(raw)):
-        assert settings["clip_name"] == profile["clip_name"]
-        assert settings["clip_type"] == profile["clip_type"]
-    payload = submit(templates, raw)
+        assert settings["clip_name"] == raw["clip_name"]
+        assert settings["clip_type"] == raw["clip_type"]
+    inventory = {
+        "models": [profile["model_name"]], "clips": [raw["clip_name"], profile["clip_name"]],
+        "vaes": [profile["vae_name"]],
+        "resource_catalog": [
+            {"kind": kind, "name": name, "roles": [role], "status": "recognized"}
+            for kind, name, role in (
+                ("models", profile["model_name"], profile_id + ".model"),
+                ("clips", raw["clip_name"], previous_id + ".clip"),
+                ("clips", profile["clip_name"], profile_id + ".clip"),
+                ("vaes", profile["vae_name"], profile_id + ".vae"),
+            )
+        ],
+    }
+    resolution = resolve_resources(validate_settings(raw), inventory)
+    assert resolution["ready"]
+    assert {row["field"] for row in resolution["replacements"]} == {"clip_name", "clip_type"}
+    payload = submit(templates, resolution["effective_settings"])
     clip = payload["prompt"]["167:57"]["inputs"]
     assert clip["clip_name"] == profile["clip_name"]
     assert clip["type"] == profile["clip_type"]

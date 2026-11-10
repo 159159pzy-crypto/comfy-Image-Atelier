@@ -13,7 +13,8 @@ internal sealed partial class LauncherState
     public event Action? DependencyProgressChanged;
 
     private Installer CreateInstaller(RuntimeManifest runtime) => new(Program.StateDir, runtime, Downloads,
-        AppendLog, DownloadProgress(), InstallStageChanged, UpdateSetupProgress, DependencyProgressObserver());
+        AppendLog, DownloadProgress(), InstallStageChanged, UpdateSetupProgress, DependencyProgressObserver(),
+        () => activeDownloadOwner is null ? null : DownloadTasks.WithinOwner(activeDownloadOwner, required: false));
 
     private Action<DependencyProgress> DependencyProgressObserver()
     {

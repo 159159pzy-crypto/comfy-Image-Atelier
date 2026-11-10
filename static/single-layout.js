@@ -103,7 +103,7 @@ function initializeSingleLayout() {
   hide(document.getElementById("seedvr2_weight_dtype")?.closest("label"));
   document.querySelectorAll(".sampling-stage-seedvr2 .sampling-fieldset").forEach(hide);
   for (const id of ["nvidia_resize_type", "nvidia_quality", "seedvr2_sampler_steps", "seedvr2_sampler_cfg", "seedvr2_sampler_name", "seedvr2_scheduler", "seedvr2_sampler_denoise"]) hide(document.getElementById(id)?.closest("label"));
-  const faceKeep = new Set(["face_steps", "face_cfg_scale", "face_sampler", "face_scheduler", "face_denoise_strength"]);
+  const faceKeep = new Set(["face_steps", "face_cfg_scale", "face_sampler", "face_scheduler", "face_denoise_strength", "face_upscaler_model"]);
   for (const node of document.querySelectorAll("#faceRefineFields > label")) {
     if (!faceKeep.has(node.querySelector("input, select, textarea")?.id)) hide(node);
   }

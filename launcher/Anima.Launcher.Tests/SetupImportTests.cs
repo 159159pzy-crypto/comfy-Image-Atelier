@@ -74,7 +74,7 @@ folder_names_and_paths = {key: ([str(Path(models_dir) / key)], set()) for key in
 
         var tinyModels = new ModelManifest(models.SchemaVersion, SetupModelSelection.MandatoryModels(models, profiles, "anima")
             .Select(model => model with { Size = 1, Sha256 = new string('0', 64) }).ToArray());
-        var plan = InstallationPlanner.Create(config, noNodes, Path.Combine(directory, "state"), false, tinyModels, profiles, []);
+        var plan = InstallationPlanner.Create(config, noNodes, Path.Combine(directory, "state"), false, tinyModels, profiles, tinyModels.Models.Select(model => model.Id));
         var script = Path.Combine(repository, "launcher", "scripts", "probe_comfy.py");
         var prepared = await InstallationPlanner.PreparePlanAsync(plan, tinyModels, profiles, script, default);
         Check(!prepared.ModelPathsDeferred && prepared.ModelInventory.Length == tinyModels.Models.Length,

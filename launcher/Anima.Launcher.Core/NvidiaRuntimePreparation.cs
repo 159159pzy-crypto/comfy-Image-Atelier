@@ -21,6 +21,7 @@ public sealed record NvidiaRuntimeStatus(bool Supported, bool Ready, string Gene
     public string DlssRoot { get; init; } = "";
     public string PythonIdentity { get; init; } = "";
     public DateTimeOffset CheckedUtc { get; init; }
+    public string[] Features { get; init; } = ["nvidia", "dlss"];
 }
 
 /// <summary>Prepare fixed native assets, then prove VFX and DLSS can execute on this machine.</summary>
@@ -54,25 +55,31 @@ public static class NvidiaRuntimePreparation
         pythonTag is "cp310" or "cp311" ? wheel.FileName.Contains(pythonTag + "-" + pythonTag)
         : int.TryParse(pythonTag.StartsWith("cp3") ? pythonTag[3..] : "", out var minor) && minor >= 12 && wheel.FileName.Contains("cp312-abi3"));
 
-    public static bool IsReadyFor(NvidiaRuntimeProbe probe, NvidiaRuntimeStatus? status) => !probe.Supported ||
-        status is { Supported: true, Ready: true } && status.Generation == probe.Generation && status.Gpu == probe.Gpu
-        && probe.VcRuntime && WheelFor(probe.PythonTag)?.Version == probe.VfxVersion;
+    private static string[] SelectedFeatures(IEnumerable<string>? features) => (features ?? new[] { "nvidia", "dlss" })
+        .Where(value => value is "nvidia" or "dlss").Distinct().Order(StringComparer.Ordinal).ToArray();
 
-    private static string StatePath(LauncherConfig config, string runtimeRoot)
+    public static bool IsReadyFor(NvidiaRuntimeProbe probe, NvidiaRuntimeStatus? status, IEnumerable<string>? features = null) => !probe.Supported ||
+        status is { Supported: true, Ready: true } && status.Generation == probe.Generation && status.Gpu == probe.Gpu
+        && SelectedFeatures(features).All(status.Features.Contains)
+        && probe.VcRuntime && (!SelectedFeatures(features).Contains("nvidia") || WheelFor(probe.PythonTag)?.Version == probe.VfxVersion);
+
+    private static string StatePath(LauncherConfig config, string runtimeRoot, IEnumerable<string>? features = null)
     {
         var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(config.ComfyRoot).ToUpperInvariant())))[..24];
-        return Path.Combine(runtimeRoot, "nvidia-runtime", key, "status.json");
+        var suffix = features is null ? "" : "-" + string.Join("-", SelectedFeatures(features));
+        return Path.Combine(runtimeRoot, "nvidia-runtime", key, "status" + suffix + ".json");
     }
     private static string InterpreterIdentity(string python)
     {
         var info = new FileInfo(python);
         return info.Exists ? $"{Path.GetFullPath(python)}|{info.Length}|{info.LastWriteTimeUtc.Ticks}" : "";
     }
-    public static NvidiaRuntimeStatus? ReadStatus(LauncherConfig config, string runtimeRoot)
+    public static NvidiaRuntimeStatus? ReadStatus(LauncherConfig config, string runtimeRoot, IEnumerable<string>? features = null)
     {
         try
         {
-            var path = StatePath(config, runtimeRoot);
+            var path = StatePath(config, runtimeRoot, features);
+            if (!File.Exists(path) && features is not null) path = StatePath(config, runtimeRoot);
             if (!File.Exists(path)) return null;
             var status = JsonFile.Read<NvidiaRuntimeStatus>(path);
             return status.ComfyRoot.Equals(Path.GetFullPath(config.ComfyRoot), StringComparison.OrdinalIgnoreCase)
@@ -81,10 +88,12 @@ public static class NvidiaRuntimePreparation
         }
         catch (Exception error) when (error is IOException or JsonException or ArgumentException) { return null; }
     }
-    public static async Task<NvidiaRuntimeStatus?> ValidateStatusAsync(LauncherConfig config, string runtimeRoot, CancellationToken ct = default)
+    public static async Task<NvidiaRuntimeStatus?> ValidateStatusAsync(LauncherConfig config, string runtimeRoot, CancellationToken ct = default, IEnumerable<string>? features = null)
     {
-        var status = ReadStatus(config, runtimeRoot);
+        var status = ReadStatus(config, runtimeRoot, features);
         if (status is not { Ready: true }) return status;
+        if (!SelectedFeatures(features).All(status.Features.Contains)) return status with { Ready = false, Detail = "所选 NVIDIA 功能尚未验证。" };
+        if (!SelectedFeatures(features).Contains("dlss")) return status;
         var runtime = Catalog().DlssRuntimes.SingleOrDefault(item => item.Generation == status.Generation);
         if (runtime is null || ResolveDlssDirectory(config.ComfyRoot) is not { } node
             || !Path.GetFullPath(node).Equals(Path.GetFullPath(status.DlssRoot), StringComparison.OrdinalIgnoreCase))
@@ -134,19 +143,20 @@ public static class NvidiaRuntimePreparation
     }
 
     public static async Task<NvidiaRuntimeStatus> PrepareAsync(LauncherConfig config, string runtimeRoot, Downloads downloads,
-        Action<string> log, IProgress<DownloadProgress>? progress, CancellationToken ct)
+        Action<string> log, IProgress<DownloadProgress>? progress, CancellationToken ct, IEnumerable<string>? features = null)
     {
+        var selected = SelectedFeatures(features);
+        if (selected.Length == 0) throw new ArgumentException("至少选择一个 NVIDIA 功能。", nameof(features));
         var probe = await ProbeAsync(config, runtimeRoot, ct);
         var status = new NvidiaRuntimeStatus(probe.Supported, false, probe.Generation,
             probe.Supported ? "正在准备 NVIDIA 运行库。" : "当前设备不支持 RTX 30/40/50 的 N 卡放大与 DLSS；基础生图仍可使用。")
-        { ComfyRoot = Path.GetFullPath(config.ComfyRoot), Python = Path.GetFullPath(config.Python), PythonIdentity = InterpreterIdentity(config.Python), Gpu = probe.Gpu, CheckedUtc = DateTimeOffset.UtcNow };
-        var statePath = StatePath(config, runtimeRoot);
+        { ComfyRoot = Path.GetFullPath(config.ComfyRoot), Python = Path.GetFullPath(config.Python), PythonIdentity = InterpreterIdentity(config.Python), Gpu = probe.Gpu, CheckedUtc = DateTimeOffset.UtcNow, Features = selected };
+        var statePath = StatePath(config, runtimeRoot, features);
         JsonFile.Write(statePath, status);
         if (!probe.Supported) { log(status.Detail); return status; }
         try
         {
             var catalog = Catalog();
-            var wheel = WheelFor(probe.PythonTag) ?? throw new InvalidOperationException("当前 Python ABI 没有已验证的 NVIDIA VFX 运行库；保留现有 Python 与 Torch。");
             if (!probe.VcRuntime)
             {
                 var installer = await ArtifactCache.FetchAsync(runtimeRoot, catalog.VcRuntime, config, downloads, progress, ct);
@@ -155,12 +165,19 @@ public static class NvidiaRuntimePreparation
                 var afterVc = await ProbeAsync(config, runtimeRoot, ct);
                 if (!afterVc.VcRuntime) throw new InvalidOperationException("Visual C++ 运行库尚不可用；请按系统提示完成安装或重启后重试。");
             }
-            if (probe.VfxVersion != wheel.Version)
+            if (selected.Contains("nvidia"))
             {
-                var file = await ArtifactCache.FetchAsync(runtimeRoot, wheel, config, downloads, progress, ct);
-                await Commands.Run(config.Python, ["-m", "pip", "install", "--no-index", "--no-deps", "--disable-pip-version-check", file], config.ComfyRoot, log, ct, timeout: TimeSpan.FromMinutes(5));
+                var wheel = WheelFor(probe.PythonTag) ?? throw new InvalidOperationException("当前 Python ABI 没有已验证的 NVIDIA VFX 运行库；保留现有 Python 与 Torch。");
+                if (probe.VfxVersion != wheel.Version)
+                {
+                    var file = await ArtifactCache.FetchAsync(runtimeRoot, wheel, config, downloads, progress, ct);
+                    await Commands.Run(config.Python, ["-m", "pip", "install", "--no-index", "--no-deps", "--disable-pip-version-check", file], config.ComfyRoot, log, ct, timeout: TimeSpan.FromMinutes(5));
+                }
             }
-            var node = ResolveDlssDirectory(config.ComfyRoot) ?? throw new InvalidOperationException("缺少 DLSS5 节点，请先补齐节点安装。");
+            var node = "";
+            if (selected.Contains("dlss"))
+            {
+            node = ResolveDlssDirectory(config.ComfyRoot) ?? throw new InvalidOperationException("缺少 DLSS5 节点，请先补齐节点安装。");
             status = status with { DlssRoot = node };
             var runtime = catalog.DlssRuntimes.Single(item => item.Generation == probe.Generation);
             var host = Path.Combine(node, "vendor", catalog.DlssHost.FileName);
@@ -180,11 +197,15 @@ public static class NvidiaRuntimePreparation
                 await Commands.Run(sevenZip, ["e", archive, "-o" + staging, runtime.Dll.FileName, "-r", "-y"], runtimeRoot, log, ct, timeout: TimeSpan.FromMinutes(3));
                 await Publish(Path.Combine(staging, runtime.Dll.FileName), dll, runtime.Dll, ct);
             }
+            }
             var script = await Script(runtimeRoot, ct);
-            var result = await Commands.Run(config.Python, ["-B", script, "--dlss-root", node, "--state-dir", Path.GetDirectoryName(statePath)!, "--generation", runtime.Generation], config.ComfyRoot, log, ct, timeout: TimeSpan.FromMinutes(5));
+            var arguments = new List<string> { "-B", script, "--state-dir", Path.GetDirectoryName(statePath)!, "--generation", probe.Generation };
+            if (selected.Contains("dlss")) arguments.AddRange(["--dlss-root", node]);
+            arguments.Add("--features"); arguments.AddRange(selected);
+            var result = await Commands.Run(config.Python, arguments.ToArray(), config.ComfyRoot, log, ct, timeout: TimeSpan.FromMinutes(5));
             using var checkedResult = JsonDocument.Parse(ParseOutput<JsonElement>(result).GetRawText());
             if (!checkedResult.RootElement.TryGetProperty("ready", out var ready) || !ready.GetBoolean()) throw new InvalidOperationException("NVIDIA 实际处理验证未通过。");
-            status = status with { Ready = true, Detail = "NVIDIA VFX 与 DLSS 已完成真实图像处理验证。", CheckedUtc = DateTimeOffset.UtcNow };
+            status = status with { Ready = true, Detail = string.Join("、", selected.Select(value => value == "nvidia" ? "NVIDIA VSR" : "DLSS")) + " 已完成真实图像处理验证。", CheckedUtc = DateTimeOffset.UtcNow };
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception error) when (error is IOException or InvalidOperationException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)

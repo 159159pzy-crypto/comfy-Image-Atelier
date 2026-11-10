@@ -39,6 +39,9 @@ public sealed record InstallationPlan(
     long EnvironmentBytes, long RuntimeBytes, long EstimatedDownloadBytes, ImmutableArray<string> Stages)
 {
     public RuntimeManifest? ResolvedRuntime { get; init; }
+    // Absent in historical receipts: those retain their original frozen contract.
+    public int ResourcePolicyVersion { get; init; }
+    public string[] Features { get; init; } = [];
     public ComfyRelease? Release { get; init; }
     public ComfyDependencySnapshot? Dependencies { get; init; }
     public NodeRelease[] NodeVersions { get; init; } = [];
@@ -91,12 +94,14 @@ public static class InstallationPlanner
     public static async Task<InstallationPlan> ResolveStableAsync(InstallationPlan plan, RuntimeManifest runtime, string stateDir,
         CancellationToken ct, ComfyReleases? releases = null, NodeReleases? nodeReleases = null)
     {
+        if (plan.ResourcePolicyVersion > 0) runtime = SetupFeatures.SelectRuntime(runtime, plan.Features);
         if (!plan.Fresh) return await ResolveMissingNodesAsync(plan, runtime, stateDir, ct, nodeReleases);
         if (plan.ResolvedRuntime is not null) return plan;
         var path = StablePlanPath(plan.ComfyRoot, stateDir);
         StableInstallSnapshot snapshot;
         var saved = File.Exists(path) ? JsonFile.Read<StableInstallSnapshot>(path) : null;
-        if (saved is not null && (!saved.Completed || File.Exists(Path.Combine(plan.ComfyRoot, ".anima-revision.json"))))
+        if (saved is not null && (!saved.Completed || File.Exists(Path.Combine(plan.ComfyRoot, ".anima-revision.json")))
+            && (plan.ResourcePolicyVersion == 0 || runtime.Nodes.All(node => saved.Runtime.Nodes.Any(old => old.Id == node.Id))))
         {
             snapshot = saved;
             if (!Path.GetFullPath(snapshot.Root).Equals(Path.GetFullPath(plan.ComfyRoot), StringComparison.OrdinalIgnoreCase)
@@ -113,9 +118,9 @@ public static class InstallationPlanner
             var git = Commands.Find("git.exe");
             releases ??= new ComfyReleases(resolveTag: git is null ? null : (tag, token) => ComfyReleases.ResolveTagWithGit(git, tag, stateDir, config, token), config: config);
             var marker = Path.Combine(plan.ComfyRoot, ".anima-revision.json");
-            var release = File.Exists(marker)
+            var release = saved?.Release ?? (File.Exists(marker)
                 ? new ComfyRelease("继续已安装提交", JsonFile.Read<Repository>(marker).Commit, null, "https://github.com/Comfy-Org/ComfyUI")
-                : await releases.LatestAsync(ct);
+                : await releases.LatestAsync(ct));
             var dependencies = await releases.DependenciesAsync(release, runtime, ct);
             runtime = PreserveExistingNodeVersions(plan.ComfyRoot, runtime);
             var missingNodes = Installer.PlanNodes(plan.ComfyRoot, runtime).Where(node => !Directory.Exists(node.Directory)).Select(node => node.Repository).ToArray();
@@ -138,7 +143,9 @@ public static class InstallationPlanner
             snapshot = new(plan.ComfyRoot, release, resolved, dependencies) { NodeVersions = versions };
             JsonFile.Write(path, snapshot);
         }
-        return plan with { Release = snapshot.Release, ResolvedRuntime = snapshot.Runtime, Dependencies = snapshot.Dependencies, NodeVersions = snapshot.NodeVersions, NodeVersionsResolved = true };
+        var selectedRuntime = plan.ResourcePolicyVersion > 0 ? SetupFeatures.SelectRuntime(snapshot.Runtime, plan.Features) : snapshot.Runtime;
+        return plan with { Release = snapshot.Release, ResolvedRuntime = selectedRuntime, Dependencies = snapshot.Dependencies,
+            NodeVersions = snapshot.NodeVersions.Where(node => selectedRuntime.Nodes.Any(item => item.Id == node.Id)).ToArray(), NodeVersionsResolved = true };
     }
 
     private static async Task<InstallationPlan> ResolveMissingNodesAsync(InstallationPlan plan, RuntimeManifest runtime,
@@ -147,13 +154,15 @@ public static class InstallationPlanner
         if (plan.NodeVersionsResolved && plan.ResolvedRuntime is not null) return plan;
         var path = NodePlanPath(plan.ComfyRoot, stateDir);
         var saved = File.Exists(path) ? JsonFile.Read<NodeInstallSnapshot>(path) : null;
-        if (saved is { Completed: false })
+        if (saved is { Completed: false } && (plan.ResourcePolicyVersion == 0
+            || runtime.Nodes.All(node => saved.Runtime.Nodes.Any(old => old.Id == node.Id))))
         {
             if (!Path.GetFullPath(saved.Root).Equals(Path.GetFullPath(plan.ComfyRoot), StringComparison.OrdinalIgnoreCase)
                 || saved.NodeVersions.Any(node => !saved.Runtime.Nodes.Any(repository => repository.Id == node.Id && repository.Url == node.Url && repository.Commit == node.Commit)))
                 throw new InvalidDataException("已保存的节点补装计划身份不匹配。");
             Safety.ValidateRuntime(saved.Runtime);
-            return plan with { ResolvedRuntime = saved.Runtime, NodeVersions = saved.NodeVersions, NodeVersionsResolved = true };
+            var selectedRuntime = plan.ResourcePolicyVersion > 0 ? SetupFeatures.SelectRuntime(saved.Runtime, plan.Features) : saved.Runtime;
+            return plan with { ResolvedRuntime = selectedRuntime, NodeVersions = saved.NodeVersions.Where(node => selectedRuntime.Nodes.Any(item => item.Id == node.Id)).ToArray(), NodeVersionsResolved = true };
         }
         runtime = PreserveExistingNodeVersions(plan.ComfyRoot, plan.ResolvedRuntime ?? runtime);
         var missing = Installer.PlanNodes(plan.ComfyRoot, runtime).Where(node => !Directory.Exists(node.Directory)).Select(node => node.Repository).ToArray();
@@ -209,6 +218,8 @@ public static class InstallationPlanner
         var snapshot = config.Clone();
         snapshot.Validate();
         Safety.ValidateRuntime(manifest);
+        var features = SetupFeatures.Resolve(fresh, optionalModelIds, snapshot.SelectedProfile);
+        manifest = SetupFeatures.SelectRuntime(manifest, features);
         if (fresh && !string.IsNullOrWhiteSpace(snapshot.InstallRoot))
         {
             snapshot.InstallRoot = Path.GetFullPath(snapshot.InstallRoot.Trim().Trim('"'));
@@ -224,13 +235,12 @@ public static class InstallationPlanner
         if (!fresh) manifest = PreserveExistingNodeVersions(snapshot.ComfyRoot, manifest);
         if (SameOrInside(snapshot.RuntimeRoot, snapshot.ComfyRoot) || SameOrInside(snapshot.ComfyRoot, snapshot.RuntimeRoot))
             throw new InvalidDataException("运行工具目录与 ComfyUI 目录不能相同或互相包含，请使用同一安装目录下的 ComfyUI 和 runtime。");
-        // Legacy callers importing an environment repair nodes only. The wizard explicitly
-        // supplies its optional selection (including []) to include required models on import.
         if (optionalModelIds is not null && (models is null || profiles is null))
             throw new InvalidDataException("所选模型需要完整的模型与档案清单。");
         var required = (fresh || optionalModelIds is not null) && models is not null && profiles is not null
-            ? SetupModelSelection.Resolve(models, profiles, snapshot.SelectedProfile, optionalModelIds) : [];
-        var mandatory = required.Length > 0 ? SetupModelSelection.MandatoryModels(models!, profiles!, snapshot.SelectedProfile) : [];
+            ? SetupModelSelection.Resolve(models, profiles, snapshot.SelectedProfile, optionalModelIds)
+                .Where(model => fresh || (optionalModelIds ?? []).Contains(model.Id)).ToArray() : [];
+        var mandatory = fresh && required.Length > 0 ? SetupModelSelection.MandatoryModels(models!, profiles!, snapshot.SelectedProfile) : [];
         // A package target must come from the actual path probe. Until then reserve its
         // byte size on the environment volume, without manufacturing a download directory.
         var deferredBytes = required.Where(model => model.IsPackage && model.CanDownload).Sum(model => model.Size);
@@ -255,7 +265,7 @@ public static class InstallationPlanner
             : new[] { "检查现有环境", "补齐缺失节点", "验证依赖", "检查所选模型" }).ToImmutableArray();
         return new(JsonSerializer.Serialize(snapshot, JsonFile.Options), snapshot.ComfyRoot, snapshot.RuntimeRoot,
             snapshot.SelectedProfile, fresh, environmentReserve + environmentDownloads, runtimeReserve + runtimeDownloads, networkDownloads, stages)
-        { ResolvedRuntime = fresh ? null : manifest, EnvironmentReserveBytes = environmentReserve, RuntimeReserveBytes = runtimeReserve, Downloads = artifacts.ToImmutableArray(),
+        { ResourcePolicyVersion = SetupFeatures.PolicyVersion, Features = features, ResolvedRuntime = fresh ? null : manifest, EnvironmentReserveBytes = environmentReserve, RuntimeReserveBytes = runtimeReserve, Downloads = artifacts.ToImmutableArray(),
             ModelIds = required.Select(model => model.Id).ToImmutableArray(), MandatoryModelIds = mandatory.Select(model => model.Id).ToImmutableArray(), FrozenModels = required,
             FrozenProfile = profiles?.Get(snapshot.SelectedProfile), DeferredModelBytes = deferredBytes, ModelPathsDeferred = deferredBytes > 0,
             RuntimeArtifactsIdentity = RuntimeArtifactPlanning.Identity };
@@ -353,8 +363,11 @@ public static class InstallationPlanner
         catch { return 0; }
     }
 
-    private static string ProgressPath(LauncherConfig config, RuntimeManifest manifest, string stateDir)
+    private static string ProgressPath(LauncherConfig config, RuntimeManifest manifest, string stateDir, bool legacy = false)
     {
+        // Core completion is independent of selected optional node classes. Each
+        // node already has its own source/interpreter dependency receipt.
+        if (!legacy) manifest = manifest with { Nodes = [], Comfy = manifest.Comfy with { RequiredClasses = [] } };
         var identity = Path.TrimEndingDirectorySeparator(Path.GetFullPath(config.ComfyRoot)).ToUpperInvariant() + "\n" + JsonSerializer.Serialize(manifest, JsonFile.Options);
         return Path.Combine(stateDir, "install-progress", Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity))).ToLowerInvariant() + ".json");
     }
@@ -362,6 +375,7 @@ public static class InstallationPlanner
     {
         var result = new HashSet<string>(StringComparer.Ordinal);
         try { result.UnionWith(JsonFile.Read<string[]>(ProgressPath(config, manifest, stateDir))); } catch { }
+        try { result.UnionWith(JsonFile.Read<string[]>(ProgressPath(config, manifest, stateDir, legacy: true))); } catch { }
         // Adopt old journals only when the root and its full dependency constraints
         // match this manifest. Preserve that evidence before the next stage rewrites it.
         if (!RepositoryMatches(config.ComfyRoot, manifest.Comfy) || !ConstraintsMatch(config, manifest)) return result;

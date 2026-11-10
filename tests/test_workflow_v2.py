@@ -35,6 +35,9 @@ class V2WorkflowRendererTests(unittest.TestCase):
 
     def render(self, **overrides):
         settings = copy.deepcopy(DEFAULT_SETTINGS)
+        if "model_profile" in overrides:
+            profile = get_model_profile(overrides["model_profile"])
+            settings.update({key: profile[key] for key in ("model_name", "clip_name", "vae_name", "clip_type")})
         for key, value in overrides.items():
             settings[key] = value
         return render_workflows(

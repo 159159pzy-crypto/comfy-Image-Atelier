@@ -109,7 +109,7 @@ internal static class SetupCompletionTests
         var filesOnly = SetupCompletionPresentation.Resolve(SetupModelReadiness.Ready);
         var runtimeReady = SetupCompletionPresentation.Resolve(SetupModelReadiness.Ready, runtimeVerified: true);
         Check(filesOnly.Title != runtimeReady.Title && filesOnly.Title.Contains("还需检查")
-            && runtimeReady.Description.Contains("运行检查已通过"),
+            && runtimeReady.Description.Contains("服务检查已通过") && !runtimeReady.Description.Contains("必需模型"),
             "verified files alone cannot display the successful runtime completion message");
         Check(SetupCompletionPresentation.Resolve(SetupModelReadiness.NeedsDownload, canResume: true).PrimaryLabel == "继续下载"
             && SetupCompletionPresentation.Resolve(SetupModelReadiness.NeedsDownload, canResume: true, hasError: true).PrimaryLabel == "重试下载",

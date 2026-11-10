@@ -125,7 +125,7 @@
       },
       "sourceUrl": "https://huggingface.co/Comfy-Org/SeedVR2/blob/df48879708206a403d2a61acd55578c2e80fd233/diffusion_models/seedvr2_3b_int8_convrot.safetensors",
       "name": "SeedVR2 3B INT8",
-      "group": "SeedVR2 修复放大（必装）",
+      "group": "SeedVR2 修复放大（可选）",
       "category": "diffusion_models",
       "relativePath": "seedvr2_3b_int8_convrot.safetensors",
       "revision": "df48879708206a403d2a61acd55578c2e80fd233"
@@ -147,7 +147,7 @@
       },
       "sourceUrl": "https://huggingface.co/Comfy-Org/SeedVR2/blob/df48879708206a403d2a61acd55578c2e80fd233/vae/ema_vae_fp16.safetensors",
       "name": "SeedVR2 EMA VAE FP16",
-      "group": "SeedVR2 修复放大（必装）",
+      "group": "SeedVR2 修复放大（可选）",
       "category": "vae",
       "relativePath": "ema_vae_fp16.safetensors",
       "revision": "df48879708206a403d2a61acd55578c2e80fd233"

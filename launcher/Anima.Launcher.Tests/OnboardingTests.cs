@@ -103,9 +103,9 @@ internal static class OnboardingTests
             upgradeReceipt.ReviewedPlan = legacyPlan;
             var before = JsonSerializer.Serialize(upgradeReceipt, JsonFile.Options);
             var decision = SetupRouting.ResolveForRuntime(configured, upgradeReceipt, manifest, upgradeModels, upgradeProfiles);
-            Check(decision.Step == SetupStep.Installing && decision.RequiresSupplement && !decision.RequiresRepairReview
+            Check(decision.Step == step && !decision.RequiresSupplement && !decision.RequiresRepairReview
                 && JsonSerializer.Serialize(upgradeReceipt, JsonFile.Options) == before,
-                $"legacy unfinished {step} returns to supplemental installation without mutating its frozen plan");
+                $"legacy unfinished {step} retains its frozen plan without adding optional downloads");
             upgradeReceipt.ReviewedPlan = currentPlan;
             Check(SetupRouting.ResolveForRuntime(configured, upgradeReceipt, manifest, upgradeModels, upgradeProfiles).Step == step,
                 $"current unfinished {step} keeps its position and still requires fresh runtime verification");
@@ -123,10 +123,10 @@ internal static class OnboardingTests
         Check(SetupRouting.ResolveForRuntime(configured, noPlan, manifest, upgradeModels, upgradeProfiles).Step is null
             && !SetupRouting.OpenWizardFromEnvironmentPage(configured, false),
             "an explicitly finished legacy wizard stays closed while its maintenance entry can create a new repair plan");
-        Check(SetupRouting.NeedsSupplement(currentPlan with { ResolvedRuntime = manifest with { Nodes = [] } }, manifest, upgradeModels, upgradeProfiles),
-            "a completed plan missing newly required nodes must be supplemented even with current native identity");
-        Check(SetupRouting.NeedsSupplement(legacyPlan with { RuntimeArtifactsIdentity = RuntimeArtifactPlanning.Identity }, manifest, upgradeModels, upgradeProfiles),
-            "a completed generation-only plan must add mandatory SeedVR2 before returning to creation");
+        Check(!SetupRouting.NeedsSupplement(currentPlan with { ResolvedRuntime = manifest with { Nodes = [] } }, manifest, upgradeModels, upgradeProfiles),
+            "new optional nodes never reopen a completed frozen plan");
+        Check(!SetupRouting.NeedsSupplement(legacyPlan with { RuntimeArtifactsIdentity = RuntimeArtifactPlanning.Identity }, manifest, upgradeModels, upgradeProfiles),
+            "a completed generation-only plan does not acquire optional SeedVR2");
 
         saved.SchemaVersion = 999;
         Check(SetupRouting.Resolve(configured, saved) is null && SetupRouting.Resolve(first, saved) == SetupStep.Welcome,

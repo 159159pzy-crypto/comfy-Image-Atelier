@@ -210,9 +210,10 @@ class ModelProfileContractTests(unittest.TestCase):
             disabled_legacy_sampler["upscalers"]["latent"]["second_sampler"]["enabled"]
         )
 
-    def test_explicit_profile_switch_rebinds_profile_resources_but_preserves_selected_unet(self):
+    def test_offline_normalization_preserves_explicit_resources_for_live_resolution(self):
         for profile_id in ("anima", "krea2"):
             with self.subTest(profile=profile_id):
+                profile = get_model_profile(profile_id)
                 settings = validate_settings(
                     {
                         "model_profile": profile_id,
@@ -222,10 +223,10 @@ class ModelProfileContractTests(unittest.TestCase):
                         "clip_type": "stable_diffusion",
                     }
                 )
-                profile = get_model_profile(profile_id)
                 self.assertEqual(settings["model_name"], "wrong.safetensors")
-                for key in ("clip_name", "vae_name", "clip_type"):
-                    self.assertEqual(settings[key], profile[key])
+                self.assertEqual(settings["clip_name"], "wrong-clip.safetensors")
+                self.assertEqual(settings["vae_name"], "wrong-vae.safetensors")
+                self.assertEqual(settings["clip_type"], "stable_diffusion")
                 self.assertEqual(settings["base_mode"], profile["defaults"]["base_mode"])
                 self.assertEqual(settings["sampler_name"], profile["defaults"]["sampler_name"])
                 self.assertEqual(settings["scheduler"], profile["defaults"]["scheduler"])

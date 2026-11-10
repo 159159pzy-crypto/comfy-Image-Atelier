@@ -109,7 +109,7 @@
                             <TextBlock Text="下载慢或连接失败时，可以暂停后切换来源。已完成的下载会继续复用。" Style="{StaticResource StudioBodyStyle}" />
                         </StackPanel>
                         <Border Background="{ThemeResource StudioAccentSoftBrush}" CornerRadius="14" Padding="16,13">
-                            <TextBlock x:Name="ModelSummary" Text="将准备 Anima 三件套和 SeedVR2 两个修复模型，共五项必装模型。" Style="{StaticResource StudioBodyStyle}" />
+                            <TextBlock x:Name="ModelSummary" Text="将准备 Anima 基础三件套与默认双采样使用的 Sesqui；其他功能按需选择。" Style="{StaticResource StudioBodyStyle}" />
                         </Border>
                         <Expander x:Name="AdvancedSettings" Header="高级下载设置" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
                             <StackPanel Spacing="12">

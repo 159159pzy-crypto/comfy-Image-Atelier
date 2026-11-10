@@ -101,8 +101,8 @@ public sealed record SetupCompletionPresentation(string Title, string Descriptio
             hasError ? "重试下载" : "继续下载", SetupCompletionAction.ResumeModels, false);
         return readiness switch
         {
-            SetupModelReadiness.Ready when runtimeVerified => new("环境已准备好。", "必需模型、节点和运行检查已通过，可以开始创作。", "打开工作台", SetupCompletionAction.StartWorkbench, false),
-            SetupModelReadiness.Ready => new("模型已齐备，还需检查运行环境。", "启动时将检查实际节点、模型分类和词库，全部通过后即可开始创作。", "检查并启动工作台", SetupCompletionAction.StartWorkbench, false),
+            SetupModelReadiness.Ready when runtimeVerified => new("环境已准备好。", "环境与服务检查已通过，可打开工作台选择兼容模型并创作。", "打开工作台", SetupCompletionAction.StartWorkbench, false),
+            SetupModelReadiness.Ready => new("环境已连接，还需检查运行状态。", "启动后检查连接和实际资源；缺少生成模型时可进入工作台配置。", "检查并启动工作台", SetupCompletionAction.StartWorkbench, false),
             SetupModelReadiness.Checking => new("正在检查基础模型。", "正在确认实际模型位置和文件状态，请稍候。", "正在检查…", SetupCompletionAction.None, false),
             SetupModelReadiness.ScanFailed => new("还不能确认模型状态。", "环境配置已保留。请重新检查必需模型。", "重新检查模型", SetupCompletionAction.ReviewModels, false),
             SetupModelReadiness.NeedsAttention => new("还有模型需要处理。", "请查看下方说明。已有异常文件会保留，可自动补齐的模型可以单独下载。",

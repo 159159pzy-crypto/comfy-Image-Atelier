@@ -106,6 +106,9 @@ public static class DownloadOwnerRecovery
                 throw new InvalidDataException("固定安装计划缺少基础模型，请重新检查。");
             optional = frozen.ModelIds.Where(id => !required.Contains(id)).ToArray();
         }
+        if (frozen.ResourcePolicyVersion > 0)
+            optional = optional.Concat(frozen.Features.Where(feature => feature is "nvidia" or "dlss" or "prompt-assistant" || feature == "sesqui" && !frozen.Fresh)
+                .Select(feature => SetupFeatures.Prefix + feature)).Distinct(StringComparer.Ordinal).ToArray();
         var setup = sameSetup ? DownloadTaskIdentity.Copy(savedSetup!) : new SetupRecord { AssistantStatus = AssistantSetupStatus.Pending };
         setup.Draft = config.Clone(); setup.Fresh = frozen.Fresh; setup.InstallStarted = true;
         setup.Step = SetupStep.Installing; setup.ReviewedPlan = frozen; setup.OptionalModelIds = optional;

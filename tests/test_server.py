@@ -349,11 +349,11 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["settings"]["model_name"], actual_path)
         await self.client.server.app[MANAGER_KEY].wait()
 
-    async def test_exact_unknown_default_model_cannot_redirect_to_recognized_subfolder(self):
+    async def test_exact_unknown_model_uses_recognized_alternative_with_explicit_record(self):
         exact = "anima-base-v1.0.safetensors"
         nested = "Anima/anima-base-v1.0.safetensors"
         async def inventory():
-            return {"models": [exact, nested], "samplers": ["euler"], "schedulers": ["normal"]}
+            return {"models": [exact, nested], "samplers": ["euler"], "schedulers": ["simple"]}
         self.comfy.resource_inventory = inventory
         self.comfy.base_models[exact] = "Unknown"
         payload = await (await self.client.get("/api/resources")).json()
@@ -361,9 +361,11 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(payload["model_profiles"]["anima"]["available"]["model"])
         self.assertEqual(payload["model_profiles"]["anima"]["model_name"], exact)
         response = await self.client.post("/api/batches", json={**DEFAULT_SETTINGS, "model_name": exact})
-        self.assertEqual(response.status, 400)
-        self.assertIn("Unknown", (await response.json())["error"])
-        self.assertEqual(self.comfy.submissions, [])
+        self.assertEqual(response.status, 201, await response.text())
+        state = await response.json()
+        self.assertEqual(state["settings"]["model_name"], nested)
+        self.assertIn({"module": "base", "field": "model_name", "from": exact, "to": nested, "reason": "unknown_compatibility"}, state["resource_resolution"]["replacements"])
+        await self.client.server.app[MANAGER_KEY].wait()
 
     async def test_batch_rejects_ambiguous_model_basename_but_accepts_exact_path(self):
         first_path = "folder-a/anima-base-v1.0.safetensors"
@@ -412,7 +414,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.status, 400)
         error = (await response.json())["error"]
-        self.assertIn("主模型不适用于 anima 档案", error)
+        self.assertIn("不适用", error)
         self.assertIn("Krea 2 Turbo", error)
 
         stale_path = await self.client.post(
@@ -420,7 +422,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             json={**DEFAULT_SETTINGS, "model_name": "old-folder/krea2_turbo_int8_convrot.safetensors"},
         )
         self.assertEqual(stale_path.status, 400)
-        self.assertIn("不存在于当前 ComfyUI 清单", (await stale_path.json())["error"])
+        self.assertIn("不适用", (await stale_path.json())["error"])
 
     async def test_lora_inventory_uses_same_origin_preview_proxy(self):
         self.comfy.preview_items = [
@@ -488,17 +490,22 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(Path(self.temp.name, "resource_profiles.json").exists())
         self.assertEqual(self.comfy.submissions, [])
 
-    async def test_plugin_failure_blocks_lists_and_submission_without_stale_fallback(self):
+    async def test_plugin_failure_keeps_inventory_configurable_but_cannot_generate_unknown_models(self):
         self.assertEqual((await self.client.get("/api/resources")).status, 200)
         async def offline(kind, *, refresh=False):
             raise ComfyError("LoRA Manager 清单读取失败")
         self.comfy.resource_classifications = offline
-        for endpoint in ("/api/resources", "/api/loras", "/api/resource-ownership?kind=models"):
+        resource_response = await self.client.get("/api/resources")
+        self.assertEqual(resource_response.status, 200)
+        resource_payload = await resource_response.json()
+        self.assertIn("LoRA Manager", resource_payload["classification_error"])
+        self.assertEqual(resource_payload["models"], [])
+        for endpoint in ("/api/loras", "/api/resource-ownership?kind=models"):
             response = await self.client.get(endpoint)
             self.assertEqual(response.status, 503)
             self.assertIn("LoRA Manager", (await response.json())["error"])
         response = await self.client.post("/api/batches", json=DEFAULT_SETTINGS)
-        self.assertEqual(response.status, 503)
+        self.assertEqual(response.status, 400)
         self.assertEqual(self.comfy.submissions, [])
 
     async def test_changed_plugin_classification_blocks_all_history_modes(self):

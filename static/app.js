@@ -338,6 +338,8 @@ const ui = Object.fromEntries(
     "presetList",
     "presetEmpty",
     "model_name",
+    "clip_name",
+    "vae_name",
     "model_profile",
     "modelProfileHint",
     "manageResourceOwnership",
@@ -925,9 +927,11 @@ function normalizeProfileId(value) {
 const pipelineContractState = { source: {}, version: 5, persistenceBlocked: false };
 function currentPipelineVersion() { return pipelineContractState.version; }
 async function canonicalizeWorkflowSettings(settings) {
-  const payload = await request("/api/settings/normalize", { method: "POST", body: JSON.stringify({ settings }) });
+  const input = { ...settings };
+  delete input.resource_replacements;
+  const payload = await request("/api/settings/normalize", { method: "POST", body: JSON.stringify({ settings: input }) });
   if (!payload?.settings || typeof payload.settings !== "object") throw new Error("设置校验未返回有效参数");
-  return payload.settings;
+  return Array.isArray(settings.resource_replacements) ? { ...payload.settings, resource_replacements: clone(settings.resource_replacements) } : payload.settings;
 }
 function defaultUpscalers(profile = "anima") {
   return {
@@ -1025,6 +1029,8 @@ function profileSamplingState() {
     pipeline_version: currentPipelineVersion(),
     sourceSettings: clone(pipelineContractState.source),
     model_name: ui.model_name?.value || "",
+    clip_name: ui.clip_name?.value || "",
+    vae_name: ui.vae_name?.value || "",
     base_mode: ui.base_mode?.value || "normal",
     dual: typeof readRandomDualSettings === "function" ? readRandomDualSettings() : null,
     steps: Number(ui.steps?.value || 0),
@@ -1064,6 +1070,8 @@ function restoreProfileDraft(profile, settings = {}, { preferStored = true } = {
     kreaPromptPoolSelection: [...((preferStored ? stored?.kreaPromptPoolSelection : null) || settings.krea_prompt_pool?.ids || [])],
     extra_prompt: (preferStored ? stored?.extra_prompt : undefined) ?? settings.extra_prompt ?? "",
     model_name: (preferStored ? stored?.model_name : undefined) ?? (sourceProfile === targetProfile ? settings.model_name : null) ?? profileConfig(profile).model_name ?? "",
+    clip_name: (preferStored ? stored?.clip_name : undefined) ?? (sourceProfile === targetProfile ? settings.clip_name : null) ?? profileConfig(profile).clip_name ?? "",
+    vae_name: (preferStored ? stored?.vae_name : undefined) ?? (sourceProfile === targetProfile ? settings.vae_name : null) ?? profileConfig(profile).vae_name ?? "",
     base_mode: (preferStored ? stored?.base_mode : undefined) ?? settings.base_mode,
     dual: clone(preferStored && stored && Object.prototype.hasOwnProperty.call(stored, "dual") ? stored.dual : settings.dual ?? null),
     steps: (preferStored ? stored?.steps : undefined) ?? settings.steps,
@@ -1098,6 +1106,7 @@ function switchProfileDraft(nextProfile, { applyDefaults = true } = {}) {
   pipelineContractState.version = Number(selectedState.pipeline_version ?? 2);
   pipelineContractState.source = clone(selectedState.sourceSettings || selectedState);
   ensureSelectValue(ui.model_name, selectedState.model_name || profileConfig(next).model_name || "");
+  for (const key of ["clip_name", "vae_name"]) if (ui[key]) ensureSelectValue(ui[key], selectedState[key] || profileConfig(next)[key] || "");
   if (applyDefaults) {
     const values = profileDefaults(next);
     const profileSettings = selectedState;
@@ -1128,6 +1137,7 @@ function normalizeSettings(raw) {
   merged.model_profile = normalizeProfileId(raw?.model_profile ?? legacyModelProfile ?? defaults?.model_profile ?? "anima");
   const settingsProfile = normalizeProfileId(raw?.model_profile ?? defaults?.model_profile ?? "anima");
   merged.model_name = String(raw?.model_name ?? (settingsProfile === merged.model_profile ? defaults?.model_name : null) ?? profileConfig(merged.model_profile).model_name ?? "");
+  for (const key of ["clip_name", "vae_name"]) merged[key] = String(raw?.[key] ?? (settingsProfile === merged.model_profile ? defaults?.[key] : null) ?? profileConfig(merged.model_profile)[key] ?? "");
   const kreaRaw = raw?.krea_prompt_pool || defaults?.krea_prompt_pool || {};
   merged.krea_prompt_pool = {
     enabled: Boolean(kreaRaw.enabled),
@@ -1297,6 +1307,7 @@ function applySettings(raw, { useProfileDraft = false } = {}) {
   ui.krea_prompt_pool_enabled.checked = Boolean(settings.krea_prompt_pool?.enabled);
   kreaPromptPoolSelection = [...(settings.krea_prompt_pool?.ids || [])];
   ensureSelectValue(ui.model_name, settings.model_name);
+  for (const key of ["clip_name", "vae_name"]) if (ui[key]) ensureSelectValue(ui[key], settings[key]);
   ensureSelectValue(ui.base_mode, settings.base_mode);
   for (const [name, value] of Object.entries(settings)) {
     const element = ui[name];
@@ -1352,6 +1363,8 @@ function readSettings() {
     base_denoise: Number(ui.base_denoise?.value ?? 1),
     krea_variance: typeof sharedParameterState !== "undefined" ? { ...sharedParameterState.krea_variance, enabled: Boolean(ui.krea_variance_enabled?.checked) } : { enabled: false },
     model_profile: currentProfile(), model_name: ui.model_name.value,
+    clip_name: ui.clip_name?.value ?? pipelineContractState.source.clip_name,
+    vae_name: ui.vae_name?.value ?? pipelineContractState.source.vae_name,
     krea_prompt_pool: {
       enabled: currentProfile() === "krea2" && ui.krea_prompt_pool_enabled.checked,
       ids: currentProfile() === "krea2" ? [...(readKreaPoolSelection().ids || [])] : [],
@@ -1856,6 +1869,7 @@ function modelSelectionIssue(filename = ui.model_name?.value || "") {
   return classificationReason(classificationItem(resources.model_items, filename), filename ? "文件不在当前 ComfyUI 主模型清单中" : "没有识别为当前档案的主模型");
 }
 function generationClassificationIssues(settings = null) {
+  if (typeof resourceResolutionIssues === "function") return resourceResolutionIssues(settings || readSettings());
   const issues = [];
   const modelName = settings?.model_name ?? ui.model_name?.value ?? "";
   const modelIssue = modelSelectionIssue(modelName);
@@ -1882,6 +1896,7 @@ function generationClassificationIssues(settings = null) {
 }
 function updateGenerationAvailability() {
   if (!ui.startButton) return;
+  if (typeof scheduleResourceResolution === "function") scheduleResourceResolution();
   const issues = generationClassificationIssues();
   if (typeof currentBatch !== "undefined" && currentBatch?.memory_release === "pending") issues.push("正在停止任务并释放显存，请稍后再试");
   if (typeof singleWorkbenchInputBlocked === "function" && singleWorkbenchInputBlocked()) issues.push("参考图正在读取或不可用，请等待、重新添加或移除");
@@ -1903,7 +1918,7 @@ function renderLoras() {
   ui.loraEmpty.hidden = loras.length > 0;
   ui.loraList.replaceChildren(
     ...loras.map((item, index) => {
-      const selectionIssue = loraSelectionIssue(item.filename);
+      const selectionIssue = item.enabled ? loraSelectionIssue(item.filename) : "";
       const available = !selectionIssue;
       const high = Math.abs(Number(item.strength)) > 2;
       const row = document.createElement("div");
@@ -2270,6 +2285,7 @@ function renderQueue(queue) {
       label.textContent = entry.kind === "prompt_preview"
         ? `${entry.position}. ${entry.prompt_kind === "reverse" || entry.settings?.kind === "reverse" ? "图像反推" : "提示词重写"} · ${entry.model_name}`
         : `${entry.position}. ${entry.count} 张 · ${entry.model_name}`;
+      if (typeof resourceReplacementText === "function") label.title = resourceReplacementText(entry.resource_resolution?.replacements || []);
       if (ui.queuePanel.children[index] !== row) ui.queuePanel.insertBefore(row, ui.queuePanel.children[index] || null);
   });
   for (const row of existing.values()) if (!retained.has(row)) row.remove();
@@ -2691,7 +2707,7 @@ function renderDetail(record) {
   const loraText = activeLoras.length
     ? activeLoras.map((item) => `${escapeHtml(item.filename)} × ${escapeHtml(item.strength)}`).join("、")
     : "未使用";
-  ui.detailSelection.innerHTML = `<span class="kicker">ACTUAL DRAW</span><div>${SECTIONS.map((section) => `<span><b>${SECTION_META[section].label}</b>${(selected[section] || []).map((item) => escapeHtml(item.title)).join("、") || "未使用"}</span>`).join("")}<span><b>LoRA</b>${loraText}</span></div>${loraRuntimeMarkup(record.lora_runtime)}`;
+  ui.detailSelection.innerHTML = `<span class="kicker">ACTUAL DRAW</span><div>${SECTIONS.map((section) => `<span><b>${SECTION_META[section].label}</b>${(selected[section] || []).map((item) => escapeHtml(item.title)).join("、") || "未使用"}</span>`).join("")}<span><b>LoRA</b>${loraText}</span></div>${loraRuntimeMarkup(record.lora_runtime)}${typeof resourceResolutionRecordMarkup === "function" ? resourceResolutionRecordMarkup(record) : ""}`;
 }
 
 function updateDetailRecord(record) {
@@ -3788,12 +3804,14 @@ function regenerationReasons(mode) {
 
 function renderRegenerationOptions() {
   if (!regenerationOptions || !selectedRecord) return;
+  if (typeof updateHistoricalResourceLabels === "function") updateHistoricalResourceLabels();
   const issues = regenerationOptions.modes?.replay?.resourceIssues || regenerationOptions.resourceIssues || [];
   const issueText = issues.length
     ? `<strong>无法生成</strong><span>${issues.map((item) => `${escapeHtml(item.label)}：${escapeHtml(item.name)}`).join("<br>")}</span>`
     : `<strong>资源检查通过</strong><span>模型、已启用 LoRA、高清模型与采样资源均可用。</span>`;
   ui.replayStatus.dataset.state = issues.length ? "error" : "ok";
   ui.replayStatus.innerHTML = issueText;
+  if (typeof renderHistoricalResourceChanges === "function") renderHistoricalResourceChanges(ui.replayStatus, "replay");
   ui.variantStatus.dataset.state = issues.length ? "error" : "ok";
   ui.variantStatus.innerHTML = issueText;
   const singleRecord = (selectedRecord.settings?.workbench || selectedRecord.workbench) === "single";
@@ -3876,7 +3894,9 @@ function updateVariantDrawer() {
     content_redraw: "重新抽取所选内容",
     settings_reroll: "按此配置再抽",
   };
-  ui.confirmVariant.textContent = labels[mode];
+  const resolution = regenerationOptions?.modes?.[mode];
+  const resourceChanged = resolution?.resourceChanged ?? resolution?.replacements?.some(item => item.reason !== "path_normalized");
+  ui.confirmVariant.textContent = `${resourceChanged ? "使用兼容模型 · " : ""}${labels[mode]}`;
   const available = Boolean(regenerationOptions?.modes?.[mode]?.available);
   const issues = regenerationOptions?.modes?.[mode]?.resourceIssues ?? regenerationOptions?.resourceIssues ?? [];
   const reasons = [...regenerationReasons(mode)];
@@ -3897,6 +3917,7 @@ function updateVariantDrawer() {
     ui.variantStatus.dataset.state = "ok";
     ui.variantStatus.textContent = "资源检查通过，所选方式可用。";
   }
+  if (typeof renderHistoricalResourceChanges === "function") renderHistoricalResourceChanges(ui.variantStatus, mode);
 }
 
 async function submitRegeneration(mode, count = 1, sections = []) {
@@ -3911,6 +3932,7 @@ async function submitRegeneration(mode, count = 1, sections = []) {
       method: "POST",
       body: JSON.stringify(body),
     });
+    if (typeof notifyResourceReplacements === "function") notifyResourceReplacements(state.resource_resolution?.replacements || [], selectedRecord.settings || {});
     toast(state.status === "queued" ? `已加入队列,第 ${state.position} 位` : "批次已开始");
     closeRegenerationDrawers(false);
     suppressDetailReturnFocus();
@@ -5831,7 +5853,7 @@ function populateModelSelect(select, values, selected, missingReason = "当前�
 }
 function refreshCurrentModelSelection() {
   const selected = ui.model_name.value || profileDrafts[currentProfile()]?.model_name || "";
-  const values = resourcesLoaded && resourceInventoryProfile === currentProfile() ? resources.models : [];
+  const values = resourcesLoaded && resourceInventoryProfile === currentProfile() ? (typeof resourceCatalogChoices === "function" ? resourceCatalogChoices(`${currentProfile()}.model`, resources.models) : resources.models) : [];
   // Resolve legacy basenames against the complete inventory before filtering by profile.
   // An incompatible exact path must never be replaced by a similarly named compatible file.
   const allNames = resourcesLoaded && resourceInventoryProfile === currentProfile()
@@ -5855,19 +5877,9 @@ function profileEntries() {
 }
 function updateProfileResources() {
   const profile = profileConfig(currentProfile());
-  const available = profile.available || {};
-  const missing = [
-    ...(available.clip === false ? [profile.clip_name || "CLIP"] : []),
-    ...(available.vae === false ? [profile.vae_name || "VAE"] : []),
-  ];
-  ui.modelProfileHint.textContent = missing.length
-    ? `${profileLabel(currentProfile())}：缺少 ${missing.join("、")}`
-    : `${profileLabel(currentProfile())} 会自动切换绑定模型、编码方式与采样参数。`;
-  const boundSeed = resolveInventoryPath(profile.seedvr2_model || "", resources.seedvr2_models || []);
-  if (boundSeed && resources.seedvr2_models?.includes(boundSeed) && !ui.seedvr2_model_name.value) ensureSelectValue(ui.seedvr2_model_name, boundSeed);
+  ui.modelProfileHint.textContent = `${profileLabel(currentProfile())} 使用兼容的主模型、文本编码器与 VAE；缺失时自动选择可用模型。`;
   ui.seedvr2_model_name.title = profile.seedvr2_model ? `档案默认：${profile.seedvr2_model}` : "请选择 SeedVR2 模型";
-  ui.modelProfileHint.dataset.profileReady = String(!missing.length && available.model !== false);
-  ui.model_name.title = modelSelectionIssue() || `${profileLabel(currentProfile())} 主模型`;
+  ui.model_name.title = `${profileLabel(currentProfile())} 主模型`;
 }
 function profileOptionsFromResources() {
   const entries = profileEntries();
@@ -5878,6 +5890,7 @@ function profileOptionsFromResources() {
   ];
 }
 async function loadResources({ refresh = false } = {}) {
+  if (typeof invalidateResourceResolution === "function") invalidateResourceResolution();
   const cache = loadResources.cache ||= { generation: 0, values: new Map(), pending: new Map() };
   const selectedProfile = currentProfile();
   if (refresh && !cache.pending.get(selectedProfile)?.refresh) { cache.generation++; cache.values.clear(); cache.pending.clear(); }
@@ -5921,6 +5934,7 @@ async function loadResources({ refresh = false } = {}) {
       model_items: Array.isArray(payload.model_items) ? payload.model_items : [],
       profile_models: payload.profile_models && typeof payload.profile_models === "object" ? payload.profile_models : {},
       model_assignments: payload.model_assignments || {},
+      resource_catalog: Array.isArray(payload.resource_catalog) ? payload.resource_catalog : undefined,
       seedvr2_models: Array.isArray(payload.seedvr2_models) ? payload.seedvr2_models : [],
       seedvr2_vaes: Array.isArray(payload.seedvr2_vaes) ? payload.seedvr2_vaes : [],
       upscale_models: Array.isArray(payload.upscale_models) ? payload.upscale_models : [],
@@ -5961,6 +5975,7 @@ async function loadResources({ refresh = false } = {}) {
     for (const id of ["latent_sampler_name", "latent_second_sampler_name", "seedvr2_sampler_name", "face_sampler"].filter(id => ui[id])) ui[id].disabled = resources.samplers.length === 0;
     for (const id of ["latent_sampler_scheduler", "latent_second_scheduler", "seedvr2_scheduler", "face_scheduler"].filter(id => ui[id])) ui[id].disabled = resources.schedulers.length === 0;
     applyNodeResourceControls();
+    if (typeof populateCompatibleResources === "function") populateCompatibleResources();
     if (typeof sharedParameterResources === "function") sharedParameterResources();
   } catch (error) {
     if (generation !== cache.generation || requestId !== resourceRequest || selectedProfile !== currentProfile()) return;
@@ -6053,38 +6068,7 @@ function updateRepairControls() {
   for (const id of Object.values(UPSCALER_CONTROL_IDS.face_refine).filter((id) => id !== "face_refine_enabled")) ui[id].disabled = !upscalers.face;
   if (typeof sharedParameterVisibility === "function") sharedParameterVisibility();
   if (typeof singleWorkbenchLayout === "function" && typeof singleWorkbenchState !== "undefined" && singleWorkbenchState.ready) singleWorkbenchLayout();
-  const settings = readSettings();
-  const profile = profileConfig(currentProfile());
-  const warnings = [];
-  if (resourceError) warnings.push(resourceError);
-  if (resourcesLoaded && profile.missing?.length) warnings.push(`${profileLabel(currentProfile())} 缺少资源：${profile.missing.join("、")}`);
-  warnings.push(...generationClassificationIssues(settings));
-  if (resourcesLoaded && upscalers.seedvr2 && settings.upscalers.seedvr2.model_name && resources.seedvr2_models.length && !resources.seedvr2_models.includes(settings.upscalers.seedvr2.model_name)) warnings.push(`SeedVR2 模型不可用：${settings.upscalers.seedvr2.model_name}`);
-  if (resourcesLoaded && upscalers.face && settings.upscalers.face_refine.upscaler_model && !resources.upscale_models.includes(settings.upscalers.face_refine.upscaler_model)) warnings.push(`脸部放大模型不可用：${settings.upscalers.face_refine.upscaler_model}`);
-  const advertisedAvailability = (inventory, names) => {
-    if (inventory == null) return null;
-    if (Array.isArray(inventory)) {
-      const available = new Set(inventory.map((item) => String(item).toLowerCase()));
-      return names.some((name) => available.has(name.toLowerCase()));
-    }
-    if (typeof inventory !== "object") return false;
-    const advertised = names.filter((name) => Object.prototype.hasOwnProperty.call(inventory, name));
-    if (!advertised.length) return null;
-    return advertised.some((name) => inventory[name] === true);
-  };
-  if (resourcesLoaded && upscalers.nvidia) {
-    const nvidiaNode = advertisedAvailability(resources.nodes, ["NvidiaUpscale", "RTXVideoSuperResolution"]);
-    const nvidiaPlugin = advertisedAvailability(resources.plugins, ["nvidia_upscale"]);
-    if ((nvidiaNode !== null || nvidiaPlugin !== null) && nvidiaNode !== true && nvidiaPlugin !== true) {
-      warnings.push("N 卡放大节点不可用：RTXVideoSuperResolution");
-    }
-  }
-  if (resourcesLoaded && !resources.samplers.length) warnings.push("ComfyUI 当前没有可用 Sampler");
-  if (resourcesLoaded && !resources.schedulers.length) warnings.push("ComfyUI 当前没有可用 Scheduler");
-  if (resourcesLoaded && !resources.samplers.includes(settings.sampler_name)) warnings.push(`Sampler 不可用：${settings.sampler_name}`);
-  if (resourcesLoaded && !resources.schedulers.includes(settings.scheduler)) warnings.push(`Scheduler 不可用：${settings.scheduler}`);
-  ui.resourceWarning.hidden = warnings.length === 0;
-  ui.resourceWarning.textContent = warnings.join("；");
+  if (typeof renderResourceResolution === "function") renderResourceResolution();
   updateProfileResources();
   updateGenerationAvailability();
 }
@@ -6107,8 +6091,12 @@ function setLoraManagerUrl(value) {
 function renderResourceOwnership() {
   const query = ui.ownershipSearch.value.trim().toLocaleLowerCase();
   const filtered = ownershipItems.filter((item) => `${item.name || ""} ${item.folder || ""} ${item.basename || ""} ${item.base_model || ""} ${item.classification_reason || ""}`.toLocaleLowerCase().includes(query));
-  ui.ownershipSummary.textContent = `${ownershipItems.length} 项资源 · ${ownershipItems.filter((item) => !item.model_profile).length} 项未识别或不支持 · 分类来自 LoRA Manager`;
+  const catalog = ui.ownershipKind.value !== "loras";
+  ui.ownershipSummary.textContent = catalog
+    ? `${ownershipItems.length} 项资源 · ${ownershipItems.filter(item => item.status === "unknown").length} 项待指定用途`
+    : `${ownershipItems.length} 项 LoRA · 分类来自 LoRA Manager`;
   ui.ownershipList.replaceChildren(...filtered.map((item) => {
+    if (catalog && typeof renderResourceUsageItem === "function") return renderResourceUsageItem(item);
     const row = document.createElement("article");
     row.className = "ownership-row";
     const copy = document.createElement("div");
@@ -6140,14 +6128,16 @@ async function loadResourceOwnership({ refresh = false } = {}) {
   ownershipItems = [];
   ui.openLoraManager.hidden = true;
   ui.openLoraManager.removeAttribute("href");
-  setLoraManagerUrl(`${String(config.comfy_url || "").replace(/\/+$/, "")}/${kind === "models" ? "checkpoints" : "loras"}`);
+  if (["models", "loras"].includes(kind)) setLoraManagerUrl(`${String(config.comfy_url || "").replace(/\/+$/, "")}/${kind === "models" ? "checkpoints" : "loras"}`);
   ui.ownershipError.hidden = true;
   ui.ownershipSummary.textContent = "正在读取资源清单…";
   ui.ownershipList.replaceChildren();
   try {
-    const payload = await request(`/api/resource-ownership?kind=${encodeURIComponent(kind)}${refresh ? "&refresh=1" : ""}`);
+    const payload = await request(kind === "loras"
+      ? `/api/resource-ownership?kind=loras${refresh ? "&refresh=1" : ""}`
+      : `/api/resources?model_profile=${encodeURIComponent(currentProfile())}${refresh ? "&refresh=1" : ""}`);
     if (requestId !== ownershipRequest || kind !== ui.ownershipKind.value) return;
-    ownershipItems = Array.isArray(payload.items) ? payload.items : [];
+    ownershipItems = kind === "loras" ? (Array.isArray(payload.items) ? payload.items : []) : (payload.resource_catalog || []).filter(item => item.kind === kind);
     setLoraManagerUrl(payload.manager_url);
     renderResourceOwnership();
   } catch (error) {
@@ -6684,7 +6674,7 @@ async function submitBatch(settings, seeds = null) {
   }
   settings = clone(settings);
   seeds = seeds ? clone(seeds) : null;
-  const classificationIssues = generationClassificationIssues(settings);
+  const classificationIssues = typeof resolveSubmissionResources === "function" ? [] : generationClassificationIssues(settings);
   if (classificationIssues.length) {
     updateGenerationAvailability();
     toast(classificationIssues.join("；"));
@@ -6693,8 +6683,12 @@ async function submitBatch(settings, seeds = null) {
   submitInFlight = true;
   ui.startButton.disabled = true;
   try {
+    if (typeof resolveSubmissionResources === "function") settings = await resolveSubmissionResources(settings);
+    const submittedResourceKey = typeof resourceResolutionKey === "function" ? resourceResolutionKey(settings) : "";
     const body = seeds ? { ...settings, seeds } : settings;
     const state = await request("/api/batches", { method: "POST", body: JSON.stringify(body) });
+    if (typeof acceptSubmittedResourceResolution === "function") acceptSubmittedResourceResolution(state, settings, submittedResourceKey);
+    else if (typeof notifyResourceReplacements === "function") notifyResourceReplacements(state.resource_resolution?.replacements || [], settings);
     if (state.status === "queued") toast(`已加入队列,第 ${state.position} 位`);
     else toast("批次已开始");
     return true;
@@ -6730,9 +6724,12 @@ ui.settingsForm.addEventListener("submit", async (event) => {
   }
 });
 ui.settingsForm.addEventListener("input", (event) => {
-  if (event.target.matches("input, textarea, select")) schedulePersist();
+  if (event.target.matches("input, textarea, select")) { schedulePersist(); updateGenerationAvailability(); }
 });
-ui.settingsForm.addEventListener("change", schedulePersist);
+ui.settingsForm.addEventListener("change", event => {
+  if (typeof clearDraftResourceReplacement === "function") clearDraftResourceReplacement(event.target.id);
+  schedulePersist(); updateGenerationAvailability();
+});
 document.addEventListener("input", (event) => {
   if (promptFieldForElement(event.target) || event.target.matches?.("[data-single-prompt]")) invalidatePromptNormalization();
 });
@@ -7064,7 +7061,7 @@ ui.model_profile.addEventListener("change", () => {
   schedulePersist();
   void refreshProfileData();
 });
-ui.model_name.addEventListener("change", () => {
+for (const control of [ui.model_name, ui.clip_name, ui.vae_name].filter(Boolean)) control.addEventListener("change", () => {
   saveCurrentProfileDraft();
   updateRepairControls();
   schedulePersist();

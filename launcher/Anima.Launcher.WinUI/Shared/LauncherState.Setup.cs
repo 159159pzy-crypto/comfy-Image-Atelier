@@ -378,13 +378,13 @@ internal sealed partial class LauncherState
         Setup.Step = SetupStep.Installing;
         Setup.InstallStarted = true;
         PersistSetup();
-        if (!Setup.InstallFinished)
+        if (!Setup.InstallFinished || Setup.FailedFeatureIds.Length > 0)
         {
             // Recheck this frozen owner's interpreter, including after restart/resume.
             // The last UI review flag may belong to a different environment or be stale.
             var import = reviewed.Fresh ? null
                 : await SetupImportReview.InspectAsync(Config, reviewed.ResolvedRuntime ?? Program.Runtime, ct, Program.StateDir);
-            if (import is { NeedsRepair: false })
+            if (import is { NeedsRepair: false } && Setup.FailedFeatureIds.Length == 0)
             {
                 UpdateSetupProgress(new("verify", "检查已有环境", SetupStageStatus.Running));
                 Config.ComfyRoot = Inventory.NormalizeRoot(Config.ComfyRoot);
@@ -501,8 +501,9 @@ internal sealed partial class LauncherState
         {
             SetupOptionalFailures.Clear();
             setupFailedOptionalModelIds.Clear();
-            await VerifySetupRuntimeAsync(SetupModelSelection.ResolveIds(OperationModels, OperationProfiles,
-                Config.SelectedProfile, Setup.OptionalModelIds.Except(Setup.SkippedOptionalModelIds)).ToArray(), ct);
+            var selected = (activeInstallationPlan ?? Setup.ReviewedPlan)?.ModelIds.ToArray()
+                ?? SetupRequiredDownloads.Select(model => model.Id).Concat(Setup.OptionalModelIds).ToArray();
+            await VerifySetupRuntimeAsync(selected.Except(Setup.SkippedOptionalModelIds).ToArray(), ct);
             if (SetupOptionalFailures.Count > 0)
             {
                 Setup.Step = SetupStep.Installing;
@@ -589,8 +590,7 @@ internal sealed partial class LauncherState
 
     private void UpdateSetupMissingModels(List<ModelStatus> scan)
     {
-        var selected = SetupModelSelection.MandatoryModels(OperationModels, OperationProfiles, SetupActive ? Setup.Draft.SelectedProfile : Config.SelectedProfile)
-            .Select(m => m.Id).ToHashSet();
+        var selected = SetupRequiredDownloads.Select(m => m.Id).ToHashSet();
         SetupMissingModels = scan.Where(m => selected.Contains(m.Model.Id) && m.Missing).Select(m => m.Model.Name).ToArray();
         if (SetupActive && Setup.Step is SetupStep.Installing or SetupStep.Complete)
         {

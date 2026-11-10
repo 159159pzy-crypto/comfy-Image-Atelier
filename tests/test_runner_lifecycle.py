@@ -237,16 +237,16 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_shutdown_during_preflight_rejects_unsubmitted_batch(self):
         preflight = asyncio.Event()
         release = asyncio.Event()
-        original = self.comfy.lora_filenames
+        original = self.comfy.resource_inventory
 
         async def blocked_inventory():
             preflight.set()
             await release.wait()
             return await original()
 
-        with patch.object(self.comfy, "lora_filenames", blocked_inventory):
+        with patch.object(self.comfy, "resource_inventory", blocked_inventory):
             starting = asyncio.create_task(self.manager.start(DEFAULT_SETTINGS))
-            await preflight.wait()
+            await asyncio.wait_for(preflight.wait(), 2)
             closing = asyncio.create_task(self.manager.shutdown())
             await asyncio.sleep(0)
             release.set()
@@ -265,7 +265,7 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_idle_shutdown_rechecks_inflight_start_before_reserving(self):
         preflight = asyncio.Event()
         release = asyncio.Event()
-        original = self.comfy.lora_filenames
+        original = self.comfy.resource_inventory
         self.comfy.block = asyncio.Event()
 
         async def blocked_inventory():
@@ -273,9 +273,9 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
             await release.wait()
             return await original()
 
-        with patch.object(self.comfy, "lora_filenames", blocked_inventory):
+        with patch.object(self.comfy, "resource_inventory", blocked_inventory):
             starting = asyncio.create_task(self.manager.start(DEFAULT_SETTINGS))
-            await preflight.wait()
+            await asyncio.wait_for(preflight.wait(), 2)
             closing = asyncio.create_task(self.manager.begin_idle_shutdown())
             await asyncio.sleep(0)
             self.assertFalse(closing.done())

@@ -237,7 +237,8 @@ function singleWorkbenchRead(settings) {
   document.querySelectorAll("[data-single-path]").forEach(element => singleWorkbenchPath(single, element.dataset.singlePath, element.type === "checkbox" ? element.checked : element.type === "number" ? Number(element.value) : element.value));
   singleWorkbenchForgetRemovedTriggers();
   const result = { ...settings, workbench: "single", generation_mode: singleWorkbenchState.generationMode, count: 1, single: singleWorkbenchClone(single), negative_prompt: document.getElementById("singleNegative").value,
-    ...singleWorkbenchResourceValues({ ...settings, single, ...singleWorkbenchState.resourceValues }),
+    ...singleWorkbenchResourceValues({ ...settings, single, ...singleWorkbenchState.resourceValues,
+      ...Object.fromEntries(["clip_name", "vae_name"].filter(key => typeof ui !== "undefined" && ui[key]).map(key => [key, ui[key].value])) }),
     extra_prompt: "", quality_prompt: "", manual_artist: "", krea_prompt_pool: { enabled: false, ids: [] } };
   if (typeof readRandomDualControls === "function") Object.assign(result.single.dual, readRandomDualControls());
   if (typeof sharedParameterState !== "undefined" && settings.upscalers?.latent) Object.assign(result.single.latent, { upscale_method: settings.upscalers.latent.upscale_method, model_format: settings.upscalers.latent.model_format, half_precision: settings.upscalers.latent.half_precision });
@@ -250,13 +251,8 @@ function singleWorkbenchRead(settings) {
 function singleWorkbenchResourceValues(settings) {
   const profile = settings.model_profile || currentProfile();
   const bound = profileConfig(profile);
-  const others = ["anima", "krea2"].filter(id => id !== profile).map(profileConfig);
   return Object.fromEntries(["clip_name", "vae_name", "clip_type"].map(key => {
-    let value = settings[key] || bound[key] || "";
-    const normalized = String(value).replaceAll("\\", "/").split("/").at(-1).toLowerCase();
-    const stale = others.some(other => other[key] !== bound[key] && other[key]?.toLowerCase() === normalized);
-    if (bound[key] && (stale || settings.single?.unlock_resources === false)) value = bound[key];
-    return [key, value];
+    return [key, settings[key] || bound[key] || ""];
   }));
 }
 function singleWorkbenchApply(raw) {
@@ -290,7 +286,7 @@ function singleWorkbenchLegacyDrafts(settings, legacyProfiles) {
     // Inactive v4 profile drafts may still contain nested v2 stages even when
     // the active profile was upgraded while loading the page.
     const restored = { ...singleWorkbenchClone(settings), ...singleWorkbenchClone(stored.sourceSettings || {}), pipeline_version: stored.pipeline_version ?? 2, model_profile: profile, workbench: "random", generation_mode: "txt2img" };
-    for (const key of ["model_name", "base_mode", "base_denoise", "krea_variance", "dual", "steps", "cfg", "sampler_name", "scheduler", "upscalers", "extra_prompt", "loras", "pools"]) if (stored[key] !== undefined) restored[key] = singleWorkbenchClone(stored[key]);
+    for (const key of ["model_name", "clip_name", "vae_name", "base_mode", "base_denoise", "krea_variance", "dual", "steps", "cfg", "sampler_name", "scheduler", "upscalers", "extra_prompt", "loras", "pools"]) if (stored[key] !== undefined) restored[key] = singleWorkbenchClone(stored[key]);
     restored.base_denoise = stored.base_denoise ?? 1;
     restored.krea_variance = typeof sharedKreaFromSettings === "function" ? sharedKreaFromSettings({ ...stored, workbench: "random", model_profile: profile }) : { enabled: profile === "krea2", ...(stored.krea_variance || {}) };
     restored.lora_managed_triggers = singleWorkbenchClone(stored.managedTriggers || []);
@@ -436,7 +432,9 @@ async function singleWorkbenchProcessPrompt() {
   document.getElementById("singleCancelPrompt").hidden = false;
   const revision = singleWorkbenchState.promptRevision;
   try {
-    const job = await request("/api/prompt-jobs", { method: "POST", body: JSON.stringify({ settings: readSettings(), force: true }) });
+    const settings = readSettings();
+    delete settings.resource_replacements;
+    const job = await request("/api/prompt-jobs", { method: "POST", body: JSON.stringify({ settings, force: true }) });
     if (revision !== singleWorkbenchState.promptRevision || !singleWorkbenchActive()) return;
     singleWorkbenchState.promptJob = job;
     singleWorkbenchState.single.prompt_job_id = job.id;

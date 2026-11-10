@@ -435,13 +435,16 @@ internal sealed partial class LauncherState : IDisposable
         SetStatus("正在安装环境；已完成的下载和步骤会自动复用…");
         var installer = CreateInstaller(Program.Runtime);
         Config = await installer.Install(plan, ct);
+        setupEnvironmentFailures.Clear();
+        setupEnvironmentFailures.AddRange(installer.OptionalFailures);
+        Setup.FailedFeatureIds = installer.OptionalFailures.Select(issue => issue.ModelId).ToArray();
         Config.InstallPending = fresh;
         Save();
         Reloaded();
         if (prepareModels)
         {
-            UpdateSetupProgress(new("models", "准备必需生成模型与 SeedVR2", SetupStageStatus.Running));
-            SetStatus("环境已安装，正在准备必需生成模型与 SeedVR2…");
+            UpdateSetupProgress(new("models", "准备本次选择的生成模型", SetupStageStatus.Running));
+            SetStatus("环境已安装，正在准备本次选择的生成模型…");
             var probe = await TaggerRuntime.Probe(Config, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
             var selected = SetupModelSelection.RequiredForPlan(plan, OperationModels, OperationProfiles, Config.SelectedProfile).Select(m => m.Id).ToHashSet();
             var inventory = await Inventory.Scan(probe, OperationModels, true, ct);
@@ -460,16 +463,13 @@ internal sealed partial class LauncherState : IDisposable
         Reloaded();
         if (prepareModels)
         {
-            if (plan.RuntimeArtifactsIdentity.Length == 0
-                || SetupModelSelection.SupplementalModels(plan, Program.Models, Program.ModelProfiles).Length > 0
-                || plan.ResolvedRuntime is { } frozen && Program.Runtime.Nodes.Any(node => !frozen.Nodes.Any(old => old.Id == node.Id)))
+            if (SetupRouting.NeedsSupplement(plan, Program.Runtime, Program.Models, Program.ModelProfiles))
             {
                 await SupplementReviewedSetupAsync(plan, ct);
                 return;
             }
             await Scan(ct, true);
-            await VerifySetupRuntimeAsync(SetupModelSelection.MandatoryModels(OperationModels, OperationProfiles, Config.SelectedProfile)
-                .Select(model => model.Id).ToArray(), ct);
+            await VerifySetupRuntimeAsync(plan.ModelIds.ToArray(), ct);
         }
         if (!SetupActive) GoTo(0);
         SetStatus(prepareModels ? "安装完成。必需模型、节点、模型分类和词库检查已通过。"
@@ -533,6 +533,7 @@ internal sealed partial class LauncherState : IDisposable
 
     private async Task<List<ModelStatus>> ResolveModelIdsAsync(string[] modelIds, bool hashes, CancellationToken ct, LauncherConfig? configuration = null)
     {
+        if (modelIds.Length == 0) return [];
         var config = configuration ?? Config;
         if (string.IsNullOrWhiteSpace(config.ComfyRoot)) throw new InvalidOperationException("请先选择 ComfyUI 环境。");
         config.ComfyRoot = Inventory.NormalizeRoot(config.ComfyRoot);
