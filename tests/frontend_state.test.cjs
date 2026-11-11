@@ -879,24 +879,29 @@ test('a failed single bitmap preserves detail and supports retry without a sideb
 
 function installHistoryDeletion(ctx) {
   const detailSource = fs.readFileSync(require('node:path').join(__dirname, '../static/history-detail.js'), 'utf8');
-  ctx.historyDetailState = { busy: false, record: null, owner: null };
+  ctx.historyDetailState = { busy: false, record: null, owner: null, session: 0 };
   ctx.historyDetailWritable = () => true;
   ctx.renderHistoryDelete = () => {};
   ctx.historyDetailElement = id => ctx.document.getElementById(id);
-  ctx.historyDetailElement('historyDeleteMode').value = 'record';
+  ctx.historyDetailElement('historyDeleteDialog').open = true;
+  ctx.historyDetailElement('historyDeleteResults').classList = { add() {}, remove() {} };
   ctx.historyViewState = () => ({ page: ctx.historyPage });
   ctx.removeHistoryViewRecord = (_, record) => { ctx.historyCache.clear(); ctx.historyItems = ctx.historyItems.filter(item => item.id !== record.id); };
-  ctx.setHistoryDetailView = (_, options) => options?.focusTarget?.focus();
+  ctx.historyDetailFocus = element => element?.focus();
+  ctx.closeHistoryDelete = () => { ctx.historyDetailState.record = ctx.historyDetailState.owner = null; ctx.historyDetailElement('historyDeleteDialog').open = false; ++ctx.historyDetailState.session; };
   ctx.singleWorkbenchActive = () => true;
   ctx.toast = () => {};
-  for (const name of ['applyHistoryDeleted', 'confirmHistoryDelete']) {
-    const start = detailSource.indexOf(`async function ${name}(`);
+  for (const name of ['historyDeleteSuccessMessage', 'historyDeleteFailureMessage', 'applyHistoryDeleted', 'confirmHistoryDelete']) {
+    let start = detailSource.indexOf(`function ${name}(`);
+    if (detailSource.slice(start - 6, start) === 'async ') start -= 6;
     vm.runInContext(detailSource.slice(start, detailSource.indexOf('\n}', start) + 2), ctx);
   }
   return () => {
     ctx.historyDetailState.record = ctx.selectedRecord;
     ctx.historyDetailState.owner = ctx.detailContext;
-    return ctx.confirmHistoryDelete({ preventDefault() {} });
+    ctx.historyDetailElement('historyDeleteDialog').open = true;
+    ++ctx.historyDetailState.session;
+    return ctx.confirmHistoryDelete('record');
   };
 }
 

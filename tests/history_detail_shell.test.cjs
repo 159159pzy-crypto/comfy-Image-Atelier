@@ -98,7 +98,7 @@ function dismissalContext(extra = {}) {
     ui: { detailDialog: host, closeDialog: { addEventListener: (_, callback) => { events.x = callback; } }, replayDrawer: { hidden: true }, variantDrawer: { hidden: true } },
     historyDetailState: { busy: false }, singleWorkbenchState: { historyTransferRequest: 0 },
     closeImagePreview: () => calls.push('preview'), closeRegenerationDrawers: () => calls.push('drawers'),
-    closeDetailActionPanels: () => false, historyDetailVisible: () => true, historyDetailBack: () => false,
+    closeDetailActionPanels: () => false, historyDetailVisible: () => true,
     // Keep the host open: its actual close event arrives after an animation.
     motionDialog: () => calls.push('close-intent'), ...extra,
   });
@@ -137,7 +137,7 @@ test('X, backdrop and final Escape invalidate a pending import before the close 
 
 test('a busy deletion consumes backdrop and Escape without dismissing or invalidating its owner', () => {
   for (const close of ['x', 'click', 'cancel']) {
-    const h = dismissalContext({ historyDetailState: { busy: true }, historyDetailBack: () => { throw new Error('must not navigate during write'); } });
+    const h = dismissalContext({ historyDetailState: { busy: true } });
     const event = { target: h.host, prevented: false, preventDefault() { this.prevented = true; } };
     h.events[close](event);
     assert.deepEqual(h.calls, [], close); assert.equal(h.ctx.singleWorkbenchState.historyTransferRequest, 0);
@@ -145,12 +145,11 @@ test('a busy deletion consumes backdrop and Escape without dismissing or invalid
   }
 });
 
-test('Escape in an internal panel ignores hidden detail drawers and returns only one level', () => {
-  let backs = 0, actions = 0;
-  const h = dismissalContext({ historyDetailVisible: () => false, historyDetailBack: () => { backs++; return true; }, closeDetailActionPanels: () => { actions++; return true; } });
-  h.ctx.ui.replayDrawer.hidden = false;
+test('Escape closes the active detail actions without dismissing the detail', () => {
+  let actions = 0;
+  const h = dismissalContext({ closeDetailActionPanels: () => { actions++; return true; } });
   const event = { preventDefault() {} }; h.events.cancel(event);
-  assert.equal(backs, 1); assert.equal(actions, 0); assert.deepEqual(h.calls, []);
+  assert.equal(actions, 1); assert.deepEqual(h.calls, []);
   assert.equal(h.ctx.singleWorkbenchState.historyTransferRequest, 0);
 });
 
@@ -177,12 +176,12 @@ test('the detail focus boundary respects Tab already handled by its collection p
 });
 
 test('Escape ignores a drawer already exiting and returns the next active level', () => {
-  let backs = 0;
-  const h = dismissalContext({ historyDetailBack: () => { backs++; return true; } });
+  let actions = 0;
+  const h = dismissalContext({ closeDetailActionPanels: () => { actions++; return true; } });
   h.ctx.ui.replayDrawer.hidden = false;
   h.ctx.ui.replayDrawer.dataset = { motionState: 'closing' };
   h.events.cancel({ preventDefault() {} });
-  assert.equal(backs, 1); assert.deepEqual(h.calls, []);
+  assert.equal(actions, 1); assert.deepEqual(h.calls, []);
 });
 
 test('clicking detail metadata folds all actions without restoring the old trigger focus', () => {

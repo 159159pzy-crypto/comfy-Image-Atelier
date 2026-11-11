@@ -17,7 +17,8 @@
   <link rel="stylesheet" href="/static/styles.css?v=20261110-resource-resolution">
   <link rel="stylesheet" href="/static/single-layout.css?v=20261024-motion">
   <link rel="stylesheet" href="/static/single-details.css?v=20261024-motion">
-  <link rel="stylesheet" href="/static/history-detail.css?v=20261028-remove-artwork-management">
+  <link rel="stylesheet" href="/static/history-detail.css?v=20261110-delete-choice">
+  <link rel="stylesheet" href="/static/character-classification.css?v=20261111-local-classification">
   <link rel="stylesheet" href="/static/artwork-favorites.css?v=20261029-favorites-motion">
   <link rel="stylesheet" href="/static/lora-manager.css?v=20261107-remove-pool-lora-entry">
   <link rel="stylesheet" href="/static/pool-browser.css?v=20261107-binding">
@@ -84,7 +85,7 @@
           <div class="section-heading"><h2>提示词池</h2><span id="poolOverview">0 项已选</span></div>
           <div id="animaPromptPoolControls">
           <div id="dimensionList" class="dimension-list"></div>
-          <label class="field"><span>角色标签</span><select id="character_detail" aria-describedby="characterDetailHint"><option value="trigger_tags">触发词 + 特征</option><option value="trigger">仅触发词</option><option value="trigger_tags_no_clothing">触发词 + 特征（剔除服装）</option></select><small id="characterDetailHint" class="field-hint">剔除服装仅处理内置角色的衣物标签，保留配饰与身体特征；触发词仍可能带出默认服装。</small></label>
+          <label class="field"><span>角色标签</span><select id="character_detail" aria-describedby="characterDetailHint"><option value="trigger_tags">触发词 + 特征</option><option value="trigger">仅触发词</option><option value="trigger_tags_no_clothing">触发词 + 特征（剔除服装）</option></select><small id="characterDetailHint" class="field-hint">内置与已确认的自定义角色均支持三种模式。剔除服装保留触发词、配饰与身体特征；触发词仍可能带出默认服装。</small><button id="reviewCharacters" type="button" class="button ghost compact character-review-link">处理待确认角色</button></label>
           <label class="field"><span>固定画师</span><input id="manual_artist" type="text" placeholder="例如 @anmi, @rella" autocomplete="off" spellcheck="false"></label>
           <details class="artist-favorites-section">
             <summary><span>收藏画师</span><span id="artistFavoriteCount" class="summary-value">0 位</span><i>+</i></summary>
@@ -381,6 +382,7 @@
       <div class="pool-content-actions" role="group" aria-label="管理词条">
       <button id="importCustom" class="button ghost compact" type="button">批量导入</button>
       <button id="addCustom" class="button primary compact" type="button"><span aria-hidden="true">+</span> 自定义</button>
+      <button id="reviewPoolCharacters" class="button ghost compact" type="button" hidden>待确认角色</button>
       </div>
     </div>
     <div class="pool-browser">
@@ -524,8 +526,18 @@
       </div>
       <fieldset class="field group-fieldset"><legend>自定义分组（可多选）</legend><div id="customGroupChecks" class="favorite-groups"></div></fieldset>
       <label class="field"><span>提示词</span><textarea id="customPrompt" rows="6" maxlength="20000" required></textarea></label>
+      <section id="customCharacterClassification" aria-label="角色标签分类" hidden></section>
       <div class="dialog-actions"><button id="deleteCustom" class="button danger" type="button" hidden>删除</button><span></span><button id="cancelCustom" class="button ghost" type="button">取消</button><button class="button primary" type="submit">保存</button></div>
     </form>
+  </dialog>
+
+  <dialog id="characterReviewDialog" class="compact-dialog character-review-dialog" aria-labelledby="characterReviewTitle">
+    <div class="character-review-content">
+      <div class="dialog-heading"><h2 id="characterReviewTitle">待确认角色</h2><button type="button" class="icon-button dark" data-close-character-review aria-label="关闭待确认角色">×</button></div>
+      <p id="characterReviewHint" class="field-hint" role="status"></p>
+      <div id="characterReviewList" class="character-review-list"></div>
+      <div class="dialog-actions"><span></span><span></span><button type="button" class="button primary" data-close-character-review>完成</button></div>
+    </div>
   </dialog>
 
   <dialog id="customGroupDialog" class="compact-dialog">
@@ -722,21 +734,10 @@
 
   <dialog id="detailDialog" class="detail-dialog history-host" aria-label="作品">
     <header class="history-host-header">
-      <button id="historyDetailBack" class="history-back" type="button" hidden><span aria-hidden="true">‹</span> 返回作品</button>
       <h2 id="historyDetailTitle" tabindex="-1">作品详情</h2>
       <button id="closeDialog" class="dialog-close" type="button" title="关闭" aria-label="关闭">×</button>
     </header>
     <div class="history-host-body">
-    <section id="historyDeletePanel" class="history-internal-panel" aria-labelledby="historyDeleteTitle" hidden>
-      <form id="historyDeleteForm">
-        <h2 id="historyDeleteTitle">删除作品</h2>
-        <p id="historyDeleteSummary"></p>
-        <label class="field"><span>删除方式</span><select id="historyDeleteMode"><option value="record">只删除记录，保留原文件</option><option value="file">永久删除原文件及记录</option></select></label>
-        <p id="historyDeleteWarning" class="field-hint"></p>
-        <p id="historyDeleteResults" class="field-error history-results" role="status"></p>
-        <div class="history-panel-actions"><button type="button" class="button ghost" data-history-back>取消</button><button id="historyDeleteSubmit" type="submit" class="button danger">只删除记录</button></div>
-      </form>
-    </section>
     <div id="historyDetailView" class="detail-layout">
       <figure><img id="detailImage" tabindex="0" role="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="imagePreviewDialog" aria-label="展开全尺寸图片预览" title="点击查看全尺寸图片" alt="生成结果"></figure>
       <div class="detail-copy">
@@ -801,6 +802,30 @@
     </div>
   </dialog>
 
+  <dialog id="historyDeleteDialog" class="compact-dialog history-delete-dialog" aria-labelledby="historyDeleteTitle" aria-describedby="historyDeleteSummary">
+    <div class="history-delete-content">
+      <header class="history-delete-heading">
+        <h2 id="historyDeleteTitle">删除作品</h2>
+        <button id="closeHistoryDelete" class="icon-button dark" type="button" title="关闭" aria-label="关闭删除作品弹窗">×</button>
+      </header>
+      <p id="historyDeleteSummary" class="history-delete-summary"></p>
+      <div class="history-delete-choices">
+        <button id="historyDeleteRecord" class="history-delete-choice" type="button" data-history-delete-mode="record">
+          <strong>只删除记录</strong>
+          <small>移除作品记录和缩略图，保留原图文件。</small>
+        </button>
+        <button id="historyDeleteFile" class="history-delete-choice" type="button" data-history-delete-mode="file">
+          <strong>同时删除原图</strong>
+          <small>删除作品记录并永久删除原图，不进入回收站。</small>
+        </button>
+      </div>
+      <p id="historyDeleteResults" class="history-results" role="status" aria-live="polite" tabindex="-1"></p>
+      <footer class="history-delete-actions">
+        <button id="cancelHistoryDelete" class="button ghost" type="button" autofocus>取消</button>
+      </footer>
+    </div>
+  </dialog>
+
   <dialog id="imagePreviewDialog" class="image-preview-dialog" aria-labelledby="imagePreviewTitle">
     <div id="imagePreviewVeil" class="image-preview-veil" aria-hidden="true"></div>
     <button id="closeImagePreview" class="dialog-close" type="button" title="关闭图片预览" aria-label="关闭图片预览">×</button>
@@ -858,12 +883,13 @@
   <script src="/static/single-compatibility.js?v=20261024-single-ui" defer></script>
   <script src="/static/single-details.js?v=20261110-resource-resolution" defer></script>
   <script src="/static/krea-pool.js?v=20261030-source-lifecycle" defer></script>
-  <script src="/static/history-detail.js?v=20261029-artwork-favorites" defer></script>
+  <script src="/static/history-detail.js?v=20261110-delete-choice" defer></script>
   <script src="/static/artwork-favorites.js?v=20261029-favorites-motion" defer></script>
   <script src="/static/detail-actions.js?v=20261027-history-polish" defer></script>
   <script src="/static/lora-manager.js?v=20261107-mutation-context" defer></script>
   <script src="/static/pool-browser.js?v=20261107-binding" defer></script>
   <script src="/static/resource-resolution.js?v=20261110-resource-resolution" defer></script>
-  <script src="/static/app.js?v=20261110-resource-resolution" defer></script>
+  <script src="/static/character-classification.js?v=20261111-local-classification" defer></script>
+  <script src="/static/app.js?v=20261111-local-classification" defer></script>
 </body>
 </html>

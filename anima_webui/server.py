@@ -22,7 +22,7 @@ from aiohttp.web_protocol import RequestPayloadError
 from .comfy import ComfyClient, ComfyError
 from .artwork_deletion import ArtworkDeletionService
 from .imported_images import ImportedImageService
-from .catalog import CatalogError, PromptCatalog, SECTIONS, resolve_history_selection
+from .catalog import CatalogError, CharacterReviewRequired, PromptCatalog, SECTIONS, resolve_history_selection
 from .persistence import StorageReadOnlyError
 from .custom_prompts import CustomPromptStore
 from .favorites import FavoriteSavePendingError, FavoritesService, FavoritesExtensionStore, favorite_key
@@ -217,6 +217,11 @@ async def error_middleware(request: web.Request, handler: Any) -> web.StreamResp
         response = web.json_response(error.payload, status=409)
     except WorkflowError as error:
         response = web.json_response({"error": str(error)}, status=400)
+    except CharacterReviewRequired as error:
+        response = web.json_response(
+            {"error": str(error), "code": "character_review_required", "characters": error.pending},
+            status=400,
+        )
     except CatalogError as error:
         response = web.json_response({"error": str(error)}, status=400)
     except BatchConflict as error:
@@ -330,7 +335,8 @@ def create_app(
     thumbnails = ThumbnailStore(storage / "history-thumbnails", client, history=history)
     catalog = PromptCatalog(root, anima_tools_dir)
     custom_prompts = CustomPromptStore(
-        custom_prompts_path or storage / "custom_prompts.json", catalog
+        custom_prompts_path or storage / "custom_prompts.json", catalog,
+        migration_journal_path=storage / "favorites-lifecycle-anima.json",
     )
     favorite_extensions = FavoritesExtensionStore(storage / "favorite_extensions.json")
     favorites = FavoritesService(client, catalog, expression_store=favorite_extensions)
@@ -703,6 +709,18 @@ def create_app(
                 str(body.get("bundleName") or ""),
             )
         )
+
+    async def analyze_custom_character(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        reanalyze = body.pop("reanalyze", False)
+        previous = body.pop("previous", None)
+        if type(reanalyze) is not bool:
+            raise CatalogError("reanalyze 必须是布尔值")
+        if previous is not None and not isinstance(previous, dict):
+            raise CatalogError("previous 必须是角色分类对象")
+        # Classification reads local dictionaries only. It neither mutates the
+        # pool nor needs the source store to be writable or ComfyUI to be online.
+        return web.json_response(catalog.analyze_character(body, previous=previous, reanalyze=reanalyze))
 
     async def commit_custom_import(request: web.Request) -> web.Response:
         body = await _json_body(request)
@@ -2007,6 +2025,7 @@ def create_app(
     app.router.add_post("/api/pools/{section}/ids", pool_ids)
     app.router.add_get("/api/custom-prompts", list_custom_prompts)
     app.router.add_post("/api/custom-prompts", create_custom_prompt)
+    app.router.add_post("/api/custom-prompts/character-analysis", analyze_custom_character)
     app.router.add_put("/api/custom-prompts/{item_id}", update_custom_prompt)
     app.router.add_delete("/api/custom-prompts/{item_id}", delete_custom_prompt)
     app.router.add_get("/api/custom-prompts/templates/{section}/{format}", custom_template)

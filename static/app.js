@@ -532,6 +532,11 @@ let poolTotalsRequest = 0;
 let editingCustom = null;
 let customEditorSession = 0;
 let customWriteBusy = false;
+let customCharacterController = null;
+let customCharacterTimer = null;
+const importCharacterControllers = new Set();
+let characterReviewEpoch = 0;
+let characterReviewIds = null;
 let editingCustomGroup = null;
 let editingFavoriteItem = null;
 let loraInventory = [];
@@ -656,7 +661,7 @@ async function requestFavorites(path, options = {}) {
 // Protection lasts until restart. Observe new controls and later enable attempts
 // so asynchronous resource/history refreshes cannot re-enable protected writes.
 const STORAGE_CONTROLS = {
-  history: "#startButton, #confirmReplay, #confirmVariant, #deleteRecord, #historyDeleteSubmit",
+  history: "#startButton, #confirmReplay, #confirmVariant, #deleteRecord, #historyDeleteRecord, #historyDeleteFile",
   style_presets: "#savePreset, .preset-actions button",
   custom_prompts: '#customForm button[type="submit"], #deleteCustom, #customGroupForm button[type="submit"], #deleteCustomGroup, #commitImport, [data-storage-write="custom_prompts"], [data-favorite-custom-write]',
   lora_triggers: '#loraTriggerForm button[type="submit"], #resetLoraTriggers',
@@ -4283,6 +4288,8 @@ async function openPool(section) {
   ui.drawerBackdrop.classList.remove("closing");
   animatePoolSurface(ui.poolDrawer, ui.drawerBackdrop, true);
   ui.poolTitle.textContent = `${SECTION_META[section].label}池`;
+  const reviewCharacters = typeof document !== "undefined" ? document.getElementById("reviewPoolCharacters") : null;
+  if (reviewCharacters) reviewCharacters.hidden = section !== "character";
   ui.poolKicker.textContent = "PROMPT POOL";
   ui.poolSearch.value = view.query;
   ui.poolSort.value = view.sort;
@@ -4946,6 +4953,7 @@ function categoryDisplay(value) {
 function itemBadges(item) {
   const values = [];
   if (activeSection === "character") {
+    if (item.character_status === "needs_review") values.push("角色标签待确认");
     values.push(item.gender === "1girl" ? "女性" : item.gender === "1boy" ? "男性" : "未标注");
     if (item.hair) values.push(`${item.hair} hair`);
     if (item.eye) values.push(`${item.eye} eyes`);
@@ -5464,6 +5472,127 @@ function selectCurrentPage(checked) {
   return poolSelectionChanged();
 }
 
+function characterAnalysisRequest(payload) {
+  return request("/api/custom-prompts/character-analysis", { method: "POST", body: JSON.stringify(payload) });
+}
+function customCharacterInput() {
+  return { prompt: ui.customPrompt.value, title: ui.customTitle.value, subtitle: ui.customSubtitle.value, copyright: ui.customSeries.value };
+}
+function disposeCustomCharacter() {
+  clearTimeout(customCharacterTimer);
+  customCharacterController?.dispose();
+  customCharacterController = null;
+}
+function setupCustomCharacter(item) {
+  disposeCustomCharacter();
+  const root = document.getElementById("customCharacterClassification");
+  if (!root || typeof CharacterClassification === "undefined") return;
+  root.hidden = activeSection !== "character";
+  if (root.hidden) { root.replaceChildren(); return; }
+  const session = customEditorSession, profile = currentProfile();
+  customCharacterController = CharacterClassification.createController({
+    root, initial: item, getInput: customCharacterInput, analyze: characterAnalysisRequest,
+    current: () => session === customEditorSession && profile === currentProfile() && activeSection === "character" && ui.customDialog.open,
+  });
+  if (ui.customPrompt.value.trim()) void customCharacterController.refresh(false).catch(() => {});
+}
+function customCharacterInputChanged() {
+  if (!customCharacterController) return;
+  customCharacterController.invalidate();
+  clearTimeout(customCharacterTimer);
+  const controller = customCharacterController;
+  customCharacterTimer = setTimeout(() => { if (controller === customCharacterController) void controller.refresh(false).catch(() => {}); }, 300);
+}
+async function openCharacterReview(characters = null) {
+  if (currentProfile() !== "anima") return;
+  if (activeSection !== "character" || !ui.poolDrawer.classList.contains("open")) await openPool("character");
+  if (currentProfile() !== "anima" || activeSection !== "character") return;
+  characterReviewIds = characters ? new Set(characters.map(item => item.id)) : null;
+  const dialog = document.getElementById("characterReviewDialog");
+  if (!dialog) return;
+  motionDialog(dialog, true);
+  await refreshCharacterReview();
+}
+async function refreshCharacterReview() {
+  const dialog = document.getElementById("characterReviewDialog"), list = document.getElementById("characterReviewList"), hint = document.getElementById("characterReviewHint");
+  if (!dialog?.open || !list || !hint) return;
+  const epoch = ++characterReviewEpoch;
+  hint.textContent = "正在读取待确认角色…";
+  try {
+    const payload = await request("/api/custom-prompts?section=character&model_profile=anima");
+    if (epoch !== characterReviewEpoch || !dialog.open) return;
+    const items = (payload.items || []).filter(item => item.character_status === "needs_review" && (!characterReviewIds || characterReviewIds.has(item.id)));
+    hint.textContent = items.length ? `${items.length} 个角色需要确认。完整模式仍可用；另外两种模式需先确认有效候选池中的角色。` : "当前范围内的角色均已完成分类，可以关闭此窗口后重新提交。";
+    list.replaceChildren(...items.map(item => {
+      const row = document.createElement("div");
+      row.className = "character-review-row";
+      const pending = (item.character_parts || []).filter(part => part.role === "unknown").length;
+      row.innerHTML = `<span><strong>${escapeHtml(item.title)}</strong><small>${pending ? `${pending} 个标签待确认` : "请确认是否没有独立触发词"}</small></span><button type="button" class="button ghost compact">查看并确认</button>`;
+      row.querySelector("button").addEventListener("click", () => openCustom(item));
+      return row;
+    }));
+  } catch (error) { if (epoch === characterReviewEpoch && dialog.open) hint.textContent = error.message; }
+}
+function disposeImportCharacters() {
+  for (const controller of importCharacterControllers) controller.dispose();
+  importCharacterControllers.clear();
+}
+function importCharacterReady(row) {
+  return row.item?.section !== "character" || (typeof CharacterClassification !== "undefined" && CharacterClassification.isReady(row.item) && !row._classificationPending && !row._classificationError);
+}
+function updateImportCommitState() {
+  const preview = importPreview;
+  if (!preview) { ui.commitImport.disabled = true; return; }
+  const selected = preview.rows.filter(row => row.status !== "error" && row.action !== "skip");
+  ui.commitImport.disabled = preview.saving || !ui.importBundleName.value.trim() || !selected.length || selected.some(row => !importCharacterReady(row));
+  const counter = ui.importSummary?.querySelector?.("[data-character-pending-count]");
+  if (counter) {
+    const pending = preview.rows.filter(row => row.status !== "error" && row.item?.section === "character" && !importCharacterReady(row)).length;
+    counter.textContent = `角色分类待确认 ${pending}`;
+    counter.hidden = !pending;
+  }
+}
+function updateImportCharacterDraft(row, value, state) {
+  // Keep manual label edits even if changing a destination or another row
+  // rebuilds this preview while its read-only validation is still in flight.
+  if (value) Object.assign(row.item, value);
+  row._classificationPending = state.pending;
+  row._classificationError = state.error;
+}
+function attachImportCharacter(element, row, preview, select) {
+  if (row.item?.section !== "character" || row.status === "error" || typeof CharacterClassification === "undefined") return;
+  const details = document.createElement("details"), summary = document.createElement("summary"), content = document.createElement("div");
+  details.className = "character-import-details";
+  const update = () => {
+    const ready = importCharacterReady(row);
+    details.dataset.review = String(!ready);
+    summary.textContent = row._classificationPending ? "正在核对角色分类…" : ready ? "查看角色分类与三种模式" : "角色标签待确认 · 展开处理";
+    for (const option of select.options) if (option.value !== "skip") option.disabled = !ready;
+    if (!CharacterClassification.isReady(row.item) && row.action !== "skip") { row.action = "skip"; select.value = "skip"; }
+    updateImportCommitState();
+  };
+  details.append(summary, content);
+  let controller = null;
+  details.addEventListener("toggle", () => {
+    row._classificationOpen = details.open;
+    if (!details.open || controller || preview !== importPreview) return;
+    controller = CharacterClassification.createController({
+      root: content, initial: row.item, getInput: () => row.item, analyze: characterAnalysisRequest,
+      current: () => preview === importPreview && customImportCurrent(preview.context), disabled: () => preview.saving,
+      onChange: (value, state) => {
+        if (preview !== importPreview) return;
+        updateImportCharacterDraft(row, value, state);
+        update();
+      },
+    });
+    importCharacterControllers.add({ dispose() { controller.dispose(); row._classificationPending = false; } });
+    if (!preview.saving) void controller.refresh(false).catch(() => {});
+  });
+  element.append(details);
+  details.open = !!row._classificationOpen;
+  update();
+}
+
 function openCustom(item = null) {
   ++customEditorSession;
   const error = document.getElementById("customMutationError");
@@ -5499,6 +5628,7 @@ function openCustom(item = null) {
     ui.customGroupChecks.innerHTML = `<div class="inline-empty">尚未创建自定义分组，可在随机池侧栏新建。</div>`;
   ui.deleteCustom.hidden = !item;
   motionDialog(ui.customDialog, true);
+  if (typeof setupCustomCharacter === "function") setupCustomCharacter(item);
 }
 async function saveCustom(event) {
   event.preventDefault();
@@ -5506,8 +5636,17 @@ async function saveCustom(event) {
   const context = { model_profile: currentProfile(), section: activeSection }, session = customEditorSession, previousId = editingCustom?.id;
   customWriteBusy = true;
   try {
-    await normalizePromptFields({ custom_prompt: ui.customPrompt.value });
+    // Character classification refers to the exact original tag text. Keep it
+    // unchanged; generation still applies the user's usual prompt rules later.
+    if (context.section !== "character") await normalizePromptFields({ custom_prompt: ui.customPrompt.value });
     if (session !== customEditorSession || context.model_profile !== currentProfile() || context.section !== activeSection) return;
+    let classified = null;
+    if (context.section === "character" && typeof customCharacterController !== "undefined" && customCharacterController) {
+      const controller = customCharacterController;
+      classified = await controller.ensure();
+      if (session !== customEditorSession || controller !== customCharacterController || context.model_profile !== currentProfile() || context.section !== activeSection) return;
+      if (classified.prompt !== ui.customPrompt.value) throw new Error("角色提示词已改变，请等待重新识别后保存");
+    }
     const payload = {
       section: context.section,
       model_profile: context.model_profile,
@@ -5525,6 +5664,7 @@ async function saveCustom(event) {
         .filter(Boolean),
       groupIds: [...ui.customGroupChecks.querySelectorAll("input:checked")].map((input) => input.value),
     };
+    if (classified) Object.assign(payload, CharacterClassification.fields(classified));
     const item = previousId
       ? await request(`/api/custom-prompts/${previousId}?model_profile=${encodeURIComponent(context.model_profile)}`, { method: "PUT", body: JSON.stringify(payload) })
       : await request("/api/custom-prompts", { method: "POST", body: JSON.stringify(payload) });
@@ -5532,6 +5672,7 @@ async function saveCustom(event) {
     if (typeof poolSourceChanged === "function") poolSourceChanged({ ...context, ...item, updatedItemIds: item.updatedItemIds || [item.id] });
     if (session !== customEditorSession || context.model_profile !== currentProfile() || context.section !== activeSection) return;
     motionDialog(ui.customDialog, false);
+    if (typeof refreshCharacterReview === "function") void refreshCharacterReview();
     toast(previousId ? "自定义项及关联收藏已更新" : "自定义项已加入随机池");
   } catch (error) {
     const message = typeof poolMutationError === "function" ? poolMutationError(error, context) : error.message;
@@ -5625,6 +5766,7 @@ function renderImportTargetGroups() {
   );
 }
 function invalidateCustomImport() {
+  if (typeof disposeImportCharacters === "function") disposeImportCharacters();
   importReadGate.cancel();
   importViewEpoch.invalidate();
   importPreview = null;
@@ -5703,10 +5845,12 @@ async function previewImportFile() {
 function renderImportPreview() {
   if (!importPreview || !customImportCurrent(importPreview.context)) return;
   const preview = importPreview;
+  if (typeof disposeImportCharacters === "function") disposeImportCharacters();
   const summary = importPreview.summary || {};
   ui.importHint.textContent = `${importPreview.filename} · 已完成校验`;
   ui.importSummary.hidden = false;
-  ui.importSummary.innerHTML = `<span>新增 ${summary.new || 0}</span><span>冲突 ${summary.conflict || 0}</span><span>错误 ${summary.error || 0}</span>`;
+  const pendingCharacters = preview.rows.filter(row => row.item?.section === "character" && !importCharacterReady(row)).length;
+  ui.importSummary.innerHTML = `<span>新增 ${summary.new || 0}</span><span>冲突 ${summary.conflict || 0}</span><span>错误 ${summary.error || 0}</span><span data-character-pending-count ${pendingCharacters ? "" : "hidden"}>角色分类待确认 ${pendingCharacters}</span>`;
   const labels = { new: "新增", conflict: "冲突", error: "错误" };
   ui.importRows.replaceChildren(
     ...importPreview.rows.map((row, index) => {
@@ -5728,17 +5872,19 @@ function renderImportPreview() {
         preview.rows[index].action = select.value;
         renderImportPreview();
       });
+      attachImportCharacter(element, row, preview, select);
       return element;
     }),
   );
-  ui.commitImport.disabled =
-    preview.saving || !ui.importBundleName.value.trim() ||
-    !importPreview.rows.some((row) => row.status !== "error" && row.action !== "skip");
+  updateImportCommitState();
 }
 async function commitCustomImport() {
   const preview = importPreview;
   if (!preview || preview.saving || !customImportCurrent(preview.context) || !ui.importBundleName.value.trim()
     || !preview.rows.some(row => row.status !== "error" && row.action !== "skip")) return;
+  if (preview.rows.some(row => row.status !== "error" && row.action !== "skip" && row.item?.section === "character" && !importCharacterReady(row))) {
+    toast("请先确认所选角色的标签分类，或将该条目设为跳过"); return;
+  }
   const context = preview.context;
   const current = () => preview === importPreview && customImportCurrent(context);
   const payload = clone({ rows: preview.rows, section: context.section, model_profile: context.model_profile,
@@ -6694,6 +6840,9 @@ async function submitBatch(settings, seeds = null) {
     return true;
   } catch (error) {
     toast(error.message);
+    if (error.code === "character_review_required" && typeof openCharacterReview === "function") {
+      await openCharacterReview(error.payload?.characters || null);
+    }
     await refreshConnection();
     return false;
   } finally {
@@ -6876,7 +7025,6 @@ ui.detailDialog.addEventListener("cancel", (event) => {
     return;
   }
   if (inDetail && closeDetailActionPanels({ restoreFocus: true })) return;
-  if (typeof historyDetailBack === "function" && historyDetailBack()) return;
   invalidateHistoryTransfer();
   motionDialog(ui.detailDialog, false);
 });
@@ -6992,6 +7140,11 @@ ui.cancelFavoriteSelection.addEventListener("click", () => motionDialog(ui.favor
 ui.addCustom.addEventListener("click", () => openCustom());
 ui.importCustom.addEventListener("click", openImportDialog);
 ui.customForm.addEventListener("submit", saveCustom);
+for (const input of [ui.customTitle, ui.customSubtitle, ui.customSeries, ui.customPrompt]) input.addEventListener("input", customCharacterInputChanged);
+ui.customDialog.addEventListener("close", disposeCustomCharacter);
+ui.customDialog.addEventListener("cancel", disposeCustomCharacter);
+for (const id of ["reviewCharacters", "reviewPoolCharacters"]) document.getElementById(id)?.addEventListener("click", () => { void openCharacterReview().catch(error => toast(error.message)); });
+for (const button of document.querySelectorAll("[data-close-character-review]")) button.addEventListener("click", () => { ++characterReviewEpoch; motionDialog(document.getElementById("characterReviewDialog"), false); });
 ui.cancelCustom.addEventListener("click", () => motionDialog(ui.customDialog, false));
 ui.closeCustom.addEventListener("click", () => motionDialog(ui.customDialog, false));
 ui.deleteCustom.addEventListener("click", deleteCustomItem);
@@ -7043,7 +7196,10 @@ ui.manual_artist.addEventListener("blur", () => {
   normalizePromptElement(ui.manual_artist);
 });
 for (const input of [ui.quality_prompt, ui.extra_prompt, ui.negative_prompt, ui.customPrompt])
-  input.addEventListener("blur", () => normalizePromptElement(input));
+  input.addEventListener("blur", () => {
+    if (input === ui.customPrompt && activeSection === "character") return;
+    normalizePromptElement(input);
+  });
 ui.undoPromptNormalization.addEventListener("click", undoPromptNormalization);
 ui.managePromptRules.addEventListener("click", openPromptRuleDialog);
 ui.promptRuleForm.addEventListener("submit", savePromptRule);

@@ -1,21 +1,14 @@
 /* History filtering and the ordinary image detail/delete surface. */
 const historyDetailState = {
-  ready: false, busy: false, view: "detail", record: null, owner: null,
-  homeQuery: { source: "", folderId: "" }, viewRevision: 0,
-  viewFocus: {}, viewFocusFallback: {}, viewOffsets: new Map(),
+  ready: false, busy: false, record: null, owner: null, session: 0, fileOutcome: null,
+  homeQuery: { source: "", folderId: "" },
 };
 const historyDetailElement = id => document.getElementById(id);
-const HISTORY_DETAIL_VIEWS = { detail: "historyDetailView", delete: "historyDeletePanel" };
 const HISTORY_SOURCES = new Set(["", "single", "random"]);
 function historyDetailFocus(element) {
   if (!element || element.isConnected === false || element.disabled || element.hidden || element.inert || element.closest?.("[hidden], [inert]")) return false;
   if (element.getClientRects && !element.getClientRects().length) return false;
   element.focus({ preventScroll: true }); return true;
-}
-function historyDetailPresence(element, visible, { immediate = false, x = 0, y = 6, onComplete } = {}) {
-  if (!element) return;
-  if (typeof StudioMotion === "undefined") { element.hidden = !visible; element.inert = !visible; onComplete?.(); return; }
-  return StudioMotion.presence(element, visible, { from: { opacity: 0, x, y }, response: .3, damping: 1, immediate, onComplete });
 }
 function renderHistorySource({ immediate = false } = {}) {
   const group = historyDetailElement("historyWorkbenchFilter");
@@ -58,62 +51,27 @@ function invalidateHistoryView(view = historyViewState()) {
     }
   }
 }
-function setHistoryDetailView(view, { immediate = false, returning = false, focus = true, focusTarget = null } = {}) {
-  const state = historyDetailState, dialog = historyDetailElement("detailDialog");
-  if (!Object.hasOwn(HISTORY_DETAIL_VIEWS, view)) return;
-  const previous = state.view, changed = previous !== view, revision = ++state.viewRevision;
-  immediate ||= !dialog?.open;
-  if (changed) {
-    state.viewFocus[previous] = document.activeElement;
-    const actionPanel = document.activeElement?.closest?.("[data-detail-panel]");
-    state.viewFocusFallback[previous] = actionPanel ? document.querySelector?.(`[data-detail-action="${actionPanel.dataset.detailPanel}"]`) : null;
-  }
-  if (previous === "detail" && changed) {
-    if (typeof invalidateHistoryTransfer === "function") invalidateHistoryTransfer();
-    if (typeof closeDetailActionPanels === "function") closeDetailActionPanels({ immediate: true });
-    if (typeof closeRegenerationDrawers === "function") closeRegenerationDrawers(false, true);
-  }
-  state.view = view;
-  if (dialog) {
-    dialog.classList.toggle("is-history-delete", view === "delete");
-    dialog.dataset.historyView = view;
-    const title = view === "delete" ? "删除作品" : "作品详情";
-    dialog.setAttribute("aria-label", title);
-    if (historyDetailElement("historyDetailTitle")) historyDetailElement("historyDetailTitle").textContent = title;
-    if (view !== "detail") dialog.classList.remove("is-single-detail", "is-regenerating");
-    if (changed) dialog.scrollTop = 0;
-  }
-  const back = historyDetailElement("historyDetailBack");
-  if (back) { back.hidden = view === "detail"; back.textContent = "返回"; }
-  for (const [name, id] of Object.entries(HISTORY_DETAIL_VIEWS)) {
-    const node = historyDetailElement(id); if (!node) continue;
-    const visible = view === name, running = typeof StudioMotion !== "undefined" && StudioMotion.snapshot(node, "presence")?.active;
-    // A reversal keeps the existing spatial path as well as its value/velocity.
-    // Changing the path while a spring is active would itself create a jump.
-    if (!running) state.viewOffsets.set(name, (returning ? -1 : 1) * (visible ? 12 : -12));
-    node.classList.toggle("history-view-exiting", !visible && !node.hidden && !immediate);
-    historyDetailPresence(node, visible, { immediate: immediate || (!changed && !running), x: state.viewOffsets.get(name), y: 0,
-      onComplete() { if (revision === state.viewRevision) node.classList.remove("history-view-exiting"); },
-    });
-  }
-  if (changed && focus && dialog?.open) {
-    const target = focusTarget || (returning ? state.viewFocus[view] : null);
-    if (!historyDetailFocus(target) && !(returning && historyDetailFocus(state.viewFocusFallback[view]))) historyDetailFocus(historyDetailElement("historyDetailTitle")) || historyDetailFocus(back);
-  }
+function showHistoryDetail() { resetHistoryDetail(); }
+function historyDetailVisible() {
+  return Boolean(historyDetailElement("detailDialog")?.open) && !historyDetailElement("historyDeleteDialog")?.open;
 }
-
-function showHistoryDetail() { setHistoryDetailView("detail"); }
-function historyDetailVisible() { return historyDetailState.view === "detail" && Boolean(historyDetailElement("detailDialog")?.open); }
-function historyDetailBack() {
-  if (historyDetailState.busy) return true;
-  if (historyDetailState.view !== "delete" || !selectedRecord) return false;
-  renderDetail(selectedRecord); setHistoryDetailView("detail", { returning: true }); return true;
+function closeHistoryDelete({ restoreFocus = true, immediate = false, force = false } = {}) {
+  const state = historyDetailState, dialog = historyDetailElement("historyDeleteDialog");
+  if (!force && (state.busy || !state.record)) return false;
+  const record = state.record, owner = state.owner, session = ++state.session;
+  state.record = state.owner = state.fileOutcome = null;
+  renderHistoryDelete();
+  if (!dialog?.open) return false;
+  const onComplete = () => {
+    if (!restoreFocus || session !== state.session || dialog.open || !historyDetailElement("detailDialog")?.open
+      || detailContext !== owner || String(selectedRecord?.id) !== String(record?.id)) return;
+    historyDetailFocus(document.querySelector('[data-detail-action="more"]')) || historyDetailFocus(historyDetailElement("historyDetailTitle"));
+  };
+  motionDialog(dialog, false, { immediate, restoreFocus: false, onComplete });
+  if (typeof StudioMotion === "undefined") onComplete();
+  return true;
 }
-function resetHistoryDetail() {
-  historyDetailState.record = historyDetailState.owner = null;
-  setHistoryDetailView("detail", { immediate: true, focus: false });
-  historyDetailState.viewFocus = {}; historyDetailState.viewFocusFallback = {};
-}
+function resetHistoryDetail() { closeHistoryDelete({ immediate: true, restoreFocus: false, force: true }); }
 function revealHistoryWorkbench() {
   const dialog = historyDetailElement("detailDialog");
   if (dialog?.open) motionDialog(dialog, false, { immediate: true, restoreFocus: false });
@@ -121,19 +79,37 @@ function revealHistoryWorkbench() {
 }
 function openHistoryDelete(record) {
   if (!record || historyDetailState.busy || !historyDetailWritable()) return;
-  historyDetailState.record = record; historyDetailState.owner = detailContext;
-  historyDetailElement("historyDeleteMode").value = "record";
-  historyDetailElement("historyDeleteResults").textContent = "";
-  renderHistoryDelete(); setHistoryDetailView("delete", { focusTarget: historyDetailElement("historyDeleteMode") });
+  const state = historyDetailState;
+  ++state.session; state.record = record; state.owner = detailContext; state.fileOutcome = null;
+  if (typeof invalidateHistoryTransfer === "function") invalidateHistoryTransfer();
+  if (typeof closeArtworkPopovers === "function") closeArtworkPopovers({ restoreFocus: false, immediate: true });
+  if (typeof closeDetailActionPanels === "function") closeDetailActionPanels({ immediate: true });
+  if (typeof closeRegenerationDrawers === "function") closeRegenerationDrawers(false, true);
+  const results = historyDetailElement("historyDeleteResults");
+  results.textContent = ""; results.classList.remove("is-error");
+  renderHistoryDelete();
+  motionDialog(historyDetailElement("historyDeleteDialog"), true, { restoreFocus: false });
+  historyDetailFocus(historyDetailElement("cancelHistoryDelete"));
 }
 function renderHistoryDelete() {
-  const state = historyDetailState, permanent = historyDetailElement("historyDeleteMode").value === "file";
-  historyDetailElement("historyDeleteSummary").textContent = state.record ? `删除作品：${state.record.filename || `#${state.record.id}`}` : "作品已删除。";
-  historyDetailElement("historyDeleteWarning").textContent = permanent ? "原图将永久删除，不进入回收站。文件无法访问或仍被其他作品引用时，会保留记录并说明原因。" : "仅删除作品记录和缩略图；原图文件保留。";
-  const button = historyDetailElement("historyDeleteSubmit");
-  button.textContent = permanent ? "永久删除原图及记录" : "只删除记录";
-  button.disabled = !state.record || state.busy || !historyDetailWritable();
-  historyDetailElement("historyDeleteMode").disabled = state.busy;
+  const state = historyDetailState;
+  // Keep the filename visible while a closing animation finishes.
+  if (state.record) historyDetailElement("historyDeleteSummary").textContent = state.record.filename || `作品 #${state.record.id}`;
+  for (const id of ["historyDeleteRecord", "historyDeleteFile"]) {
+    historyDetailElement(id).disabled = !state.record || state.busy || !historyDetailWritable();
+  }
+  for (const id of ["closeHistoryDelete", "cancelHistoryDelete"]) historyDetailElement(id).disabled = state.busy;
+  historyDetailElement("historyDeleteDialog").setAttribute("aria-busy", String(state.busy));
+}
+function containHistoryDeleteFocus(event) {
+  const dialog = historyDetailElement("historyDeleteDialog");
+  if (event.defaultPrevented || event.key !== "Tab" || !dialog.open) return;
+  const buttons = [...dialog.querySelectorAll("button")].filter(button => !button.disabled && button.getClientRects().length);
+  const index = buttons.indexOf(document.activeElement);
+  if (!buttons.length) { event.preventDefault(); historyDetailFocus(historyDetailElement("historyDeleteResults")); }
+  else if (index < 0 || (event.shiftKey ? index === 0 : index === buttons.length - 1)) {
+    event.preventDefault(); historyDetailFocus(event.shiftKey ? buttons.at(-1) : buttons[0]);
+  }
 }
 function removeHistoryViewRecord(view, record) {
   const key = String(record.id), cached = [...view.cache.values()], elements = view.elements;
@@ -157,7 +133,7 @@ function removeHistoryViewRecord(view, record) {
   if (elements?.emptyState) elements.emptyState.hidden = view.items.length > 0;
   invalidateHistoryView(view);
 }
-async function applyHistoryDeleted(record, owner) {
+async function applyHistoryDeleted(record, owner, { beforeDetailUpdate } = {}) {
   const id = String(record.id), view = historyViewState(), warnings = [];
   removeHistoryViewRecord(view, record);
   if (typeof artworkRecordRemoved === "function") artworkRecordRemoved(record.id);
@@ -166,9 +142,11 @@ async function applyHistoryDeleted(record, owner) {
   let neighbor = null;
   try { if (typeof singleGalleryDeleted === "function") neighbor = await singleGalleryDeleted(record.id); }
   catch (error) { warnings.push(`单图列表刷新失败：${error.message}`); }
+  // Keep the choice modal blocking stale detail actions while the next image loads.
+  beforeDetailUpdate?.();
   if (ownsDetail()) {
     if (owner?.origin === "single" && neighbor && ui.detailDialog.open) {
-      updateDetailRecord(neighbor); setHistoryDetailView("detail", { focusTarget: ui.detailImage });
+      updateDetailRecord(neighbor); historyDetailFocus(ui.detailImage);
     } else { selectedRecord = null; motionDialog(ui.detailDialog, false); }
   }
   historyDirty = true;
@@ -181,39 +159,105 @@ async function applyHistoryDeleted(record, owner) {
   }
   return warnings;
 }
-async function confirmHistoryDelete(event) {
-  event.preventDefault();
-  const state = historyDetailState, record = state.record, owner = state.owner;
-  if (!record || state.busy || !historyDetailWritable()) return;
-  const mode = historyDetailElement("historyDeleteMode").value;
-  state.busy = true; renderHistoryDelete();
-  const results = historyDetailElement("historyDeleteResults"); results.textContent = "正在删除…";
+function historyDeleteSuccessMessage(mode, result = {}) {
+  if (result.code === "already_missing") return "作品记录已不存在，列表已更新";
+  if (result.file_deleted) return "记录及原图已删除";
+  if (result.file_missing) return "记录已删除，原图原已不存在";
+  if (mode === "record") return "记录已删除，原图保留";
+  return "记录已删除";
+}
+function historyDeleteFailureMessage(error) {
+  const result = error.payload?.results?.[0];
+  let message = String(result?.error || error.message || "删除未完成").replace(/[。；\s]+$/, "");
+  if (result?.file_deleted && !result.record_deleted && !/原(?:图|文件)已删除/.test(message)) {
+    message += "。原图已删除，但记录仍保留；可重试完成记录删除";
+  }
+  if (!message.includes("重试")) message += "。可重试";
+  return `${message}。`;
+}
+async function confirmHistoryDelete(mode) {
+  const state = historyDetailState, record = state.record, owner = state.owner, session = state.session;
+  if (!["record", "file"].includes(mode) || !record || state.busy || !historyDetailWritable()) return;
+  if (detailContext !== owner || String(selectedRecord?.id) !== String(record.id)) {
+    closeHistoryDelete({ immediate: true, restoreFocus: false }); return;
+  }
+  const current = () => state.session === session && state.record === record && state.owner === owner;
+  const results = historyDetailElement("historyDeleteResults"), button = historyDetailElement(mode === "file" ? "historyDeleteFile" : "historyDeleteRecord");
+  results.textContent = "正在删除…"; results.classList.remove("is-error");
+  state.busy = true; button.setAttribute("aria-busy", "true"); renderHistoryDelete();
+  historyDetailFocus(results);
   try {
     let response;
     try { response = await request(`/api/history/${encodeURIComponent(record.id)}?mode=${mode}`, { method: "DELETE" }); }
     catch (error) {
-      if (error.status === 404) response = { deleted: true };
-      else {
-        const failure = error.payload?.results?.[0];
-        if (failure) throw new Error(`${failure.error || failure.code || error.message}${failure.file_deleted ? "（原文件已删除，记录未删除；可重试完成记录删除）" : ""}`);
-        throw error;
-      }
+      if (error.status === 404) response = { deleted: true, results: [{ ...error.payload?.results?.[0], code: "already_missing" }] };
+      else throw error;
     }
-    if (!response.deleted) throw new Error(response.results?.[0]?.error || "删除未完成，请重试");
-    state.record = null;
-    const warnings = await applyHistoryDeleted(record, owner);
-    toast(`已删除作品${mode === "file" ? "及对应原文件" : "记录，原文件保留"}${warnings.length ? `。${warnings.join("；")}` : ""}`);
+    if (!response.deleted) {
+      const error = new Error("删除未完成"); error.payload = response; throw error;
+    }
+    const result = { ...response.results?.[0] };
+    // A record-only retry must not claim to preserve a file removed on the prior attempt.
+    if (state.fileOutcome === "deleted" && current()) result.file_deleted = true;
+    else if (state.fileOutcome === "missing" && current()) result.file_missing = true;
+    const warnings = result.warning ? [result.warning] : [];
+    const closeCommitted = () => { if (current()) closeHistoryDelete({ immediate: true, restoreFocus: false, force: true }); };
+    if (current()) results.textContent = "删除已完成，正在更新作品…";
+    try { warnings.push(...await applyHistoryDeleted(record, owner, { beforeDetailUpdate: closeCommitted })); }
+    catch (error) { warnings.push(`删除已完成，但界面刷新失败：${error.message}`); }
+    finally { closeCommitted(); }
+    toast([historyDeleteSuccessMessage(mode, result), ...new Set(warnings)].join("。"));
   } catch (error) {
-    results.textContent = state.record ? `${error.message}。可重试。` : `删除已完成，但界面刷新失败：${error.message}`;
-  } finally { state.busy = false; renderHistoryDelete(); }
+    const message = historyDeleteFailureMessage(error);
+    if (current()) {
+      const failure = error.payload?.results?.[0];
+      if (failure?.file_deleted) state.fileOutcome = "deleted";
+      else if (failure?.file_missing && state.fileOutcome !== "deleted") state.fileOutcome = "missing";
+      results.textContent = message; results.classList.add("is-error");
+    }
+    else toast(message);
+  } finally {
+    state.busy = false; button.removeAttribute("aria-busy"); renderHistoryDelete();
+    if (current()) historyDetailFocus(button);
+  }
 }
 function initializeHistoryDetail() {
   if (historyDetailState.ready) return;
   historyDetailState.ready = true;
-  historyDetailElement("historyDetailBack").addEventListener("click", historyDetailBack);
-  for (const button of document.querySelectorAll("[data-history-back]")) button.addEventListener("click", historyDetailBack);
-  historyDetailElement("historyDeleteForm").addEventListener("submit", confirmHistoryDelete);
-  historyDetailElement("historyDeleteMode").addEventListener("change", renderHistoryDelete);
+  const dialog = historyDetailElement("historyDeleteDialog");
+  for (const button of dialog.querySelectorAll("[data-history-delete-mode]")) {
+    button.addEventListener("click", () => { void confirmHistoryDelete(button.dataset.historyDeleteMode); });
+  }
+  for (const id of ["closeHistoryDelete", "cancelHistoryDelete"]) historyDetailElement(id).addEventListener("click", () => closeHistoryDelete());
+  dialog.addEventListener("cancel", event => { event.preventDefault(); closeHistoryDelete(); });
+  dialog.addEventListener("keydown", event => {
+    if (event.key === "Escape") {
+      // Repeated native CloseWatcher cancel events can become non-cancelable.
+      // Own the key before its default action so a pending deletion stays modal.
+      event.preventDefault(); event.stopPropagation(); closeHistoryDelete();
+    } else containHistoryDeleteFocus(event);
+  });
+  let outsidePointer = false;
+  const outside = event => {
+    if (event.target !== dialog) return false;
+    const rect = dialog.getBoundingClientRect();
+    return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
+  };
+  dialog.addEventListener("pointerdown", event => { outsidePointer = outside(event); });
+  dialog.addEventListener("click", event => {
+    if (event.target === dialog) {
+      // Consume generic dismissal, even during a pending delete or a drag from inside.
+      event.preventDefault();
+      if (outsidePointer && outside(event)) closeHistoryDelete();
+    }
+    outsidePointer = false;
+  });
+  dialog.addEventListener("close", () => {
+    if (dialog.open || !historyDetailState.record) return;
+    ++historyDetailState.session;
+    historyDetailState.record = historyDetailState.owner = historyDetailState.fileOutcome = null;
+    renderHistoryDelete();
+  });
   const group = historyDetailElement("historyWorkbenchFilter"), sources = [...group.querySelectorAll("[data-history-source]")];
   for (const button of sources) button.addEventListener("click", () => setHistorySource(button.dataset.historySource));
   group.addEventListener("keydown", event => {

@@ -920,7 +920,14 @@ class BatchManager:
             if self.catalog and settings.get("workbench") != "single" and not (
                 regeneration and regeneration.get("frozen_positive_prompt")
             ):
-                self.catalog.validate_settings(settings)
+                validation_settings = settings
+                if regeneration and regeneration.get("mode") == "content_redraw":
+                    # Preserved dimensions use historical effective prompts,
+                    # even if their current source now needs classification.
+                    validation_settings = copy.deepcopy(settings)
+                    for section in (regeneration.get("fixed_selection") or {}):
+                        validation_settings[f"random_{section}"] = False
+                self.catalog.validate_settings(validation_settings)
             lora_filenames = getattr(self.comfy, "lora_filenames", None)
             active = active_lora_pipelines(settings)
             uses_loras = ("primary" in active and any(item["enabled"] for item in settings["loras"])) or (
