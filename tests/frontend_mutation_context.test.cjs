@@ -91,28 +91,6 @@ test('old import completion or failure leaves a newly opened preview and its pen
     h.calls[3].resolve({ imported: 1, bundleName: 'B' }); await second;
   }
 });
-test('a create completion after a profile change does not mix lists or erase the new name', async () => {
-  const h = harness(); h.ui.presetName.value = 'Anima style'; const task = h.ctx.createStylePreset();
-  h.profile('krea2'); h.ui.presetName.value = 'Krea draft'; h.ctx.stylePresets = [{ id: 'K', settings: { model_profile: 'krea2' } }];
-  h.calls[0].resolve({ id: 'A', name: 'Anima style', settings: { model_profile: 'anima' } }); await task;
-  assert.equal(h.ctx.stylePresets.length, 1); assert.equal(h.ctx.stylePresets[0].id, 'K'); assert.equal(h.ui.presetName.value, 'Krea draft');
-  assert.ok(h.messages.some(text => /Anima/.test(text))); assert.equal(h.calls[0].options.signal, undefined);
-});
-test('returning to a profile does not give an old create ownership of the new form', async () => {
-  const h = harness(); h.ui.presetName.value = 'old'; const task = h.ctx.createStylePreset();
-  h.profile('krea2'); h.profile('anima'); h.ui.presetName.value = 'new draft';
-  h.calls[0].resolve({ id: 'A', name: 'old', settings: { model_profile: 'anima' } }); await flush();
-  for (const call of h.calls.slice(1)) call.resolve({ items: [{ id: 'A', settings: { model_profile: 'anima' } }] }); await task;
-  assert.equal(h.ui.presetName.value, 'new draft'); assert.notEqual(h.ui.presetError.textContent, '已保存“old”');
-});
-test('an old create finally cannot unlock a new profile create', async () => {
-  const h = harness(); h.ui.presetName.value = 'A'; const a = h.ctx.createStylePreset(); h.profile('krea2');
-  h.ui.presetName.value = 'K'; h.ui.savePreset.disabled = false; const b = h.ctx.createStylePreset();
-  h.calls[0].resolve({ id: 'A', name: 'A', settings: { model_profile: 'anima' } }); await a;
-  assert.equal(h.ui.savePreset.disabled, true);
-  h.calls[1].resolve({ id: 'K', name: 'K', settings: { model_profile: 'krea2' } }); await flush();
-  for (const call of h.calls.slice(2)) call.resolve({ items: [] }); await b;
-});
 test('metadata updates use the item profile and cross-profile overwrites never send a write', async () => {
   const h = harness(), item = { id: 'A', settings: { model_profile: 'anima' } }; h.profile('krea2');
   const update = h.ctx.updateStylePreset(item, { favorite: true }); assert.equal(h.calls[0].body.model_profile, 'anima');
@@ -120,16 +98,16 @@ test('metadata updates use the item profile and cross-profile overwrites never s
   await h.ctx.updateStylePreset(item, { settings: { model_profile: 'krea2' } }); assert.equal(h.calls.length, 1);
 });
 test('a write success invalidates older list reads before a fresh list can be replaced', async () => {
-  const h = harness(); const old = h.ctx.loadStylePresets(); h.ui.presetName.value = 'A'; const saving = h.ctx.createStylePreset();
+  const h = harness(); const old = h.ctx.loadStylePresets(); const saving = h.ctx.updateStylePreset({ id: 'A', name: 'A', model_profile: 'anima' }, { favorite: true });
   h.calls[1].resolve({ id: 'A', name: 'A', settings: { model_profile: 'anima' } }); await flush();
   assert.equal(h.calls[0].options.signal?.aborted, true);
   h.calls.at(-1).resolve({ items: [{ id: 'A', settings: { model_profile: 'anima' } }] }); await saving;
   h.calls[0].resolve({ items: [] }); await old; assert.equal(h.ctx.stylePresets[0].id, 'A');
 });
-test('a failed create from an old view cannot overwrite new feedback or clear its draft', async () => {
-  const h = harness(); h.ui.presetName.value = 'A'; const task = h.ctx.createStylePreset();
-  h.profile('krea2'); h.ui.presetName.value = 'new Krea'; h.ctx.setPresetFeedback('new view message');
-  h.calls[0].reject(new Error('Anima write failed')); await task;
-  assert.equal(h.ui.presetName.value, 'new Krea'); assert.equal(h.ui.presetError.textContent, 'new view message');
-  assert.ok(h.messages.some(message => /Anima.*write failed/.test(message)));
+
+test('homepage save opens the explicit carry-options editor without writing', async () => {
+  const h = harness(); let opened = 0;
+  h.ctx.StylePresetManager = { create() { opened++; } };
+  await h.ctx.createStylePreset(); assert.equal(opened, 1); assert.equal(h.calls.length, 0);
+  h.ui.savePreset.disabled = true; await h.ctx.createStylePreset(); assert.equal(opened, 1);
 });

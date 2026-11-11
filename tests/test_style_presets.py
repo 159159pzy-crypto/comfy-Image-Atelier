@@ -9,7 +9,7 @@ APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_DIR))
 
 from anima_webui.style_presets import PRESET_SETTING_KEYS, StylePresetStore, preset_settings  # noqa: E402
-from anima_webui.workflow import DEFAULT_SETTINGS, WorkflowError, validate_settings  # noqa: E402
+from anima_webui.workflow import DEFAULT_SETTINGS, WorkflowError  # noqa: E402
 
 
 def snapshot(**overrides):
@@ -38,7 +38,7 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
 
         updated = await self.store.update(
             regular["id"],
-            {"name": "Renamed", "favorite": True, "settings": snapshot(width=1024)},
+            {"name": "Renamed", "favorite": True, "include": {"size": True}, "settings": snapshot(width=1024)},
         )
         self.assertEqual(updated["name"], "Renamed")
         self.assertEqual(updated["settings"]["width"], 1024)
@@ -48,7 +48,7 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
     async def test_atomic_save_leaves_valid_json_without_temp_files(self):
         await self.store.create({"name": "Atomic", "settings": snapshot(), "favorite": False})
         payload = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["version"], 2)
+        self.assertEqual(payload["version"], 3)
         self.assertEqual(payload["items"][0]["name"], "Atomic")
         for removed in ("hires", "detailers", "cfg_zero_star", "second_sampler"):
             self.assertNotIn(removed, payload["items"][0]["settings"])
@@ -81,9 +81,9 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
             },
             {
                 "id": "broken",
-                "name": "Broken Width",
+                "name": "Broken Steps",
                 "favorite": False,
-                "settings": {"width": "wide"},
+                "settings": {"steps": "many"},
             },
         ]
         self.path.write_text(
@@ -96,17 +96,18 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(store.items), 1)
         self.assertEqual(store.items[0]["model_profile"], "anima")
         self.assertEqual(store.items[0]["settings"]["model_profile"], "anima")
-        self.assertTrue(any("Broken Width" in warning for warning in store.load_warnings))
+        self.assertTrue(any("Broken Steps" in warning for warning in store.load_warnings))
         self.assertTrue(any("已迁移" in warning for warning in store.load_warnings))
-        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["version"], 2)
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["version"], 3)
 
-    def test_partial_legacy_snapshot_receives_defaults_without_upgrading_pipeline(self):
+    def test_partial_capture_has_core_defaults_without_unselected_groups_or_pipeline(self):
         settings = preset_settings({"width": 1024, "manual_artist": "anmi"})
         self.assertEqual(settings["model_name"], DEFAULT_SETTINGS["model_name"])
         self.assertEqual(settings["model_profile"], "anima")
         self.assertEqual(settings["base_mode"], DEFAULT_SETTINGS["base_mode"])
-        self.assertEqual(settings["pipeline_version"], 2)
-        self.assertEqual(settings["upscalers"], validate_settings({})["upscalers"])
+        self.assertNotIn("pipeline_version", settings)
+        self.assertNotIn("upscalers", settings)
+        self.assertNotIn("width", settings)
         self.assertEqual(settings["sampler_name"], DEFAULT_SETTINGS["sampler_name"])
         self.assertEqual(settings["scheduler"], DEFAULT_SETTINGS["scheduler"])
         self.assertEqual(settings["manual_artist"], "@anmi")

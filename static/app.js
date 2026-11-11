@@ -332,10 +332,11 @@ const ui = Object.fromEntries(
     "artistFavoriteList",
     "artistFavoriteCount",
     "presetSummary",
-    "presetName",
+    "manageStylePresets",
     "savePreset",
     "presetError",
     "presetList",
+    "presetScroll",
     "presetEmpty",
     "model_name",
     "clip_name",
@@ -1294,7 +1295,9 @@ function invalidateResourceInventories() {
   loraInventoryLoaded = false;
 }
 
-function applySettings(raw, { useProfileDraft = false } = {}) {
+function applySettings(raw, { useProfileDraft = false, preservePromptProcessing = false, preservePoolDraft = false } = {}) {
+  const keptPools = preservePoolDraft ? clone({ modes: draft.modes, counts: draft.counts, fixed: draft.fixed, pools: draft.pools,
+    kreaEnabled: ui.krea_prompt_pool_enabled.checked, kreaIds: kreaPromptPoolSelection }) : null;
   if (typeof invalidatePoolContext === "function") invalidatePoolContext();
   invalidatePromptNormalization();
   const settings = normalizeSettings(raw || defaults || {});
@@ -1326,6 +1329,16 @@ function applySettings(raw, { useProfileDraft = false } = {}) {
   if (typeof setRandomDualControls === "function") setRandomDualControls(settings);
   if (typeof sharedParametersApply === "function") sharedParametersApply(settings, raw);
   restoreProfileDraft(settings.model_profile, useProfileDraft ? (profileDrafts[settings.model_profile] || settings) : settings, { preferStored: useProfileDraft });
+  if (keptPools) {
+    for (const key of ["modes", "counts", "fixed", "pools"]) {
+      draft[key] = clone(keptPools[key]);
+      profileDrafts[settings.model_profile][key] = clone(keptPools[key]);
+    }
+    ui.krea_prompt_pool_enabled.checked = keptPools.kreaEnabled;
+    kreaPromptPoolSelection = [...keptPools.kreaIds];
+    profileDrafts[settings.model_profile].kreaPromptPoolEnabled = keptPools.kreaEnabled;
+    profileDrafts[settings.model_profile].kreaPromptPoolSelection = [...keptPools.kreaIds];
+  }
   if (typeof refreshPoolSelectionTotals === "function") void refreshPoolSelectionTotals();
   const storedProfileState = profileDrafts[settings.model_profile];
   if (useProfileDraft && storedProfileState) {
@@ -1341,8 +1354,10 @@ function applySettings(raw, { useProfileDraft = false } = {}) {
   updatePeopleTotal();
   updatePoolOverview();
   updateRepairControls();
-  if (typeof singleWorkbenchApply === "function") singleWorkbenchApply(raw || {});
-  if (loraInventoryLoaded) reconcileLoraTriggers(draft.loras.filter((item) => item.enabled));
+  if (typeof singleWorkbenchApply === "function") singleWorkbenchApply(raw || {}, { preservePromptProcessing });
+  // Presets already resolve explicit affixes on the server. Reconciliation here
+  // would rewrite the current prefix even when its carry option is off.
+  if (loraInventoryLoaded && !(preservePromptProcessing && settings.workbench === "single")) reconcileLoraTriggers(draft.loras.filter((item) => item.enabled));
   if (initialized && previousProfile !== settings.model_profile) void refreshProfileData();
 }
 
@@ -6310,34 +6325,91 @@ async function refreshResourceClassification() {
   }
 }
 
-const PRESET_SETTING_KEYS = [
-  "pipeline_version",
-  "workbench", "generation_mode", "single", "clip_name", "vae_name", "clip_type",
-  "model_profile",
-  "model_name",
-  "krea_prompt_pool",
-  "base_mode",
-  "base_denoise",
-  "krea_variance",
-  "dual",
-  "upscalers",
-  "loras",
-  "lora_managed_triggers",
-  "manual_artist",
-  "quality_prompt",
-  "extra_prompt",
-  "negative_prompt",
-  "zero_negative",
-  "width",
-  "height",
-  "steps",
-  "cfg",
-  "sampler_name",
-  "scheduler",
-];
-function presetSnapshot() {
-  const settings = readSettings();
-  return Object.fromEntries(PRESET_SETTING_KEYS.filter(key => settings[key] !== undefined).map((key) => [key, clone(settings[key])]));
+let presetScrollObserver = null;
+let presetScrollFrame = null;
+let presetScrollNeedsMeasure = false;
+let presetObservedRows = [];
+const PRESET_EDGE_PREVIEW = 24;
+function measurePresetScroll() {
+  const list = ui.presetList, wrapper = ui.presetScroll;
+  if (!list || !wrapper) return;
+  const rows = [...list.children].slice(0, 6);
+  if (presetScrollObserver && (rows.length !== presetObservedRows.length || rows.some((row, index) => row !== presetObservedRows[index]))) {
+    for (const row of presetObservedRows) presetScrollObserver.unobserve(row);
+    for (const row of rows) presetScrollObserver.observe(row);
+    presetObservedRows = rows;
+  }
+  const heights = rows.map(row => row.getBoundingClientRect().height);
+  if (heights.length && heights[0] > 0) {
+    const gap = Number.parseFloat(getComputedStyle(list).rowGap) || 0;
+    const height = heights.reduce((sum, value) => sum + value, 0) + (rows.length - 1) * gap
+      + (list.children.length > 6 ? gap + PRESET_EDGE_PREVIEW : 0);
+    const value = `${height}px`;
+    if (list.style.maxHeight !== value) list.style.maxHeight = value;
+  } else if (!rows.length) {
+    list.style.removeProperty("max-height");
+  }
+  const nativeWidth = Math.max(0, list.offsetWidth - list.clientWidth);
+  // Overlay scrollbars occupy no layout width. Give their hover-expanded track
+  // a clear lane so the content mask cannot also fade native scroll controls.
+  const overlay = nativeWidth === 0 && list.scrollHeight > list.clientHeight + 1 ? 12 : 0;
+  for (const [key, value] of [["--preset-scrollbar-width", `${nativeWidth || overlay}px`], ["--preset-overlay-gutter", `${overlay}px`]]) {
+    if (list.style.getPropertyValue(key) !== value) list.style.setProperty(key, value);
+  }
+}
+function syncPresetScrollEdges() {
+  const list = ui.presetList, wrapper = ui.presetScroll;
+  if (!list || !wrapper) return;
+  const remaining = Math.max(0, list.scrollHeight - list.clientHeight);
+  const overflow = remaining > 1;
+  const position = Math.max(0, Math.min(remaining, list.scrollTop));
+  const top = overflow && position > 1 ? Math.min(PRESET_EDGE_PREVIEW, position) : 0;
+  const bottom = overflow && remaining - position > 1 ? Math.min(PRESET_EDGE_PREVIEW, remaining - position) : 0;
+  wrapper.classList.toggle("can-scroll-up", top > 0);
+  wrapper.classList.toggle("can-scroll-down", bottom > 0);
+  for (const [edge, distance] of [["top", top], ["bottom", bottom]]) {
+    const key = `--preset-fade-${edge}`, value = `${Math.round(distance * 100) / 100}px`;
+    if (list.style.getPropertyValue(key) !== value) list.style.setProperty(key, value);
+  }
+  list.tabIndex = overflow ? 0 : -1;
+}
+function schedulePresetScroll(measure = false) {
+  presetScrollNeedsMeasure ||= measure;
+  if (presetScrollFrame !== null) return;
+  presetScrollFrame = requestAnimationFrame(() => {
+    presetScrollFrame = null;
+    if (presetScrollNeedsMeasure) { presetScrollNeedsMeasure = false; measurePresetScroll(); }
+    syncPresetScrollEdges();
+  });
+}
+function updatePresetScroll() {
+  measurePresetScroll();
+  syncPresetScrollEdges();
+}
+function revealPresetFocus(event) {
+  const list = ui.presetList, target = event.target;
+  if (target === list || !target.closest?.(".preset-row")) return;
+  requestAnimationFrame(() => {
+    if (!list.contains(document.activeElement)) return;
+    const masked = getComputedStyle(list).maskImage !== "none";
+    const edge = masked ? PRESET_EDGE_PREVIEW : 0;
+    const viewport = list.getBoundingClientRect(), focus = document.activeElement.getBoundingClientRect();
+    const top = viewport.top + (list.scrollTop > 1 ? edge : 0) + 3;
+    const bottom = viewport.bottom - (list.scrollTop + list.clientHeight < list.scrollHeight - 1 ? edge : 0) - 3;
+    const offset = focus.top < top ? focus.top - top : focus.bottom > bottom ? focus.bottom - bottom : 0;
+    if (offset) { list.scrollTop += offset; syncPresetScrollEdges(); }
+  });
+}
+function initializePresetScroll() {
+  ui.presetList.addEventListener("scroll", () => schedulePresetScroll(), { passive: true });
+  ui.presetList.addEventListener("focusin", revealPresetFocus);
+  if (typeof ResizeObserver !== "undefined") {
+    presetScrollObserver = new ResizeObserver(() => schedulePresetScroll(true));
+    presetScrollObserver.observe(ui.presetList);
+  }
+  document.fonts?.ready.then(() => schedulePresetScroll(true));
+  document.fonts?.addEventListener("loadingdone", () => schedulePresetScroll(true));
+  updatePresetScroll();
 }
 function stylePresetItemProfile(item) {
   return normalizeProfileId(item.settings?.model_profile || item.model_profile || "anima");
@@ -6350,6 +6422,7 @@ function syncStylePresetControls() {
 }
 function stylePresetContextChanged() {
   stylePresetViewEpoch.invalidate();
+  if (typeof StylePresetManager !== "undefined") StylePresetManager.contextChanged();
   const profile = currentProfile();
   if (stylePresetProfile !== profile) {
     stylePresetReadGate.cancel();
@@ -6382,6 +6455,7 @@ async function loadStylePresets() {
     if (!token.current() || requestedProfile !== currentProfile()) return;
     stylePresets = (data.items || []).filter(item => stylePresetItemProfile(item) === requestedProfile);
     renderStylePresets();
+    if (typeof StylePresetManager !== "undefined") StylePresetManager.refresh();
   } catch (error) {
     if (!token.current() || requestedProfile !== currentProfile()) return;
     toast(error.message);
@@ -6391,88 +6465,66 @@ function setPresetFeedback(message = "", type = "error") {
   ui.presetError.textContent = message;
   ui.presetError.hidden = !message;
   ui.presetError.dataset.type = type;
-  ui.presetName.setAttribute("aria-invalid", String(Boolean(message) && type === "error"));
 }
 function renderStylePresets() {
+  const active = document.activeElement;
+  const focusedId = active?.closest?.("[data-preset-id]")?.dataset.presetId;
+  const focusedAction = active?.classList?.contains("preset-apply") ? ".preset-apply"
+    : ["favorite", "update", "rename", "delete"].map(key => `[data-preset-${key}]`).find(selector => active?.matches?.(selector));
+  const scrollTop = ui.presetList.scrollTop;
   stylePresets = stylePresets.filter(item => stylePresetItemProfile(item) === currentProfile());
   ui.presetSummary.textContent = `${stylePresets.length} 个预设`;
   ui.presetEmpty.hidden = stylePresets.length > 0;
   ui.presetList.replaceChildren(
     ...stylePresets.map((item) => {
       const row = document.createElement("div");
+      row.dataset.presetId = item.id;
       row.className = `preset-row${item.favorite ? " favorite" : ""}`;
       const activeLoras = (item.settings?.loras || []).filter((lora) => lora.enabled).length;
       const settings = item.settings || {};
       const modelShort = profileLabel(settings.model_profile || "anima");
       const metaParts = [
         modelShort,
-        `${settings.width || "?"}×${settings.height || "?"}`,
+        item.include?.size ? `${settings.width}×${settings.height}` : "当前尺寸",
         `${settings.steps || "?"} 步`,
         settings.base_mode === "dual_sampler" ? "双采样底图" : "普通底图",
-        settings.upscalers?.latent?.enabled ? "潜空间放大" : "无潜空间放大",
+        item.include?.repair ? "携带放大修复" : "当前放大修复",
       ];
       if (activeLoras) metaParts.push(`${activeLoras} LoRA`);
       row.innerHTML = `<button class="preset-apply" type="button" title="${escapeHtml(settings.model_profile || "anima")}"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(metaParts.join(" · "))}</small></button><div class="preset-actions"><button type="button" data-preset-favorite title="${item.favorite ? "取消收藏" : "收藏"}" aria-label="${item.favorite ? "取消收藏" : "收藏"}">${item.favorite ? "★" : "☆"}</button><button type="button" data-preset-update title="用当前设置覆盖" aria-label="用当前设置覆盖">↻</button><button type="button" data-preset-rename title="重命名" aria-label="重命名">✎</button><button type="button" data-preset-delete title="删除" aria-label="删除">×</button></div>`;
-      row.querySelector(".preset-apply").addEventListener("click", async () => {
-        try {
-          if (typeof singleWorkbenchApplyPreset === "function") { if (await singleWorkbenchApplyPreset(item) === false) return; }
-          else applySettings({ ...readSettings(), ...await canonicalizeWorkflowSettings(item.settings || {}) });
-          schedulePersist();
-          toast(`已应用预设：${item.name}`);
-        } catch (error) { toast(`预设加载失败，当前草稿未更改：${error.message}`); }
-      });
+      row.querySelector(".preset-apply").addEventListener("click", () => applyStylePreset(item));
       row
         .querySelector("[data-preset-favorite]")
         .addEventListener("click", () => updateStylePreset(item, { favorite: !item.favorite }));
       row.querySelector("[data-preset-update]").addEventListener("click", () => {
-        if (confirm(`用当前设置覆盖“${item.name}”？`)) updateStylePreset(item, { settings: presetSnapshot() });
+        StylePresetManager.overwrite(item);
       });
       row.querySelector("[data-preset-rename]").addEventListener("click", () => {
-        const name = prompt("新的预设名称", item.name);
-        if (name?.trim()) updateStylePreset(item, { name: name.trim() });
+        StylePresetManager.edit(item);
       });
       row.querySelector("[data-preset-delete]").addEventListener("click", () => deleteStylePreset(item));
       return row;
     }),
   );
+  ui.presetList.scrollTop = scrollTop;
+  if (focusedId && focusedAction) {
+    [...ui.presetList.children].find(row => row.dataset.presetId === focusedId)?.querySelector(focusedAction)?.focus({ preventScroll: true });
+  }
+  updatePresetScroll();
 }
 async function createStylePreset() {
-  const profile = currentProfile();
-  if (ui.savePreset.disabled || stylePresetCreates.has(profile)) return;
-  const name = ui.presetName.value.trim();
-  if (!name) {
-    setPresetFeedback("请输入预设名称");
-    ui.presetName.focus();
-    return;
-  }
-  if (stylePresets.some((item) => item.name.trim().toLocaleLowerCase() === name.toLocaleLowerCase())) {
-    setPresetFeedback("已有同名预设，请改名或使用覆盖按钮");
-    ui.presetName.focus();
-    return;
-  }
-  const operation = stylePresetViewEpoch.capture();
-  const current = () => operation.current() && profile === currentProfile();
-  const payload = clone({ name, favorite: false, model_profile: profile, settings: presetSnapshot() });
-  stylePresetCreates.set(profile, operation);
-  syncStylePresetControls();
-  setPresetFeedback("正在写入本地预设…", "pending");
+  if (ui.savePreset.disabled) return;
+  return StylePresetManager.create();
+}
+async function applyStylePreset(item, { isCurrent = () => true } = {}) {
   try {
-    const created = await request("/api/style-presets", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-    if (current()) {
-      if (ui.presetName.value.trim() === name) ui.presetName.value = "";
-      setPresetFeedback(`已保存“${created.name}”`, "success");
-    }
-    await stylePresetWriteCompleted(profile, `已保存风格预设“${created.name}”`);
+    if (await singleWorkbenchApplyPreset(item, { isCurrent }) === false) return false;
+    schedulePersist();
+    toast(`已应用预设：${item.name}`);
+    return true;
   } catch (error) {
-    if (current()) setPresetFeedback(error.message);
-    toast(`${profileLabel(profile)}：${error.message}`);
-  } finally {
-    if (stylePresetCreates.get(profile) === operation) stylePresetCreates.delete(profile);
-    // Derive from the current operation map, never an older button snapshot.
-    syncStylePresetControls();
+    toast(`预设加载失败，当前草稿未更改：${error.message}`);
+    return false;
   }
 }
 async function updateStylePreset(item, changes) {
@@ -6498,7 +6550,9 @@ async function updateStylePreset(item, changes) {
   }
 }
 async function deleteStylePreset(item) {
-  if (stylePresetWrites.has(item.id) || !confirm(`删除预设“${item.name}”？`)) return;
+  if (stylePresetWrites.has(item.id)) return;
+  if (!await StylePresetManager.confirm({ title: "删除风格预设", message: `删除“${item.name}”？预设与封面将被移除。`, confirmLabel: "删除", danger: true })) return;
+  if (stylePresetWrites.has(item.id)) return;
   const profile = stylePresetItemProfile(item);
   stylePresetWrites.add(item.id);
   try {
@@ -7166,13 +7220,8 @@ ui.saveCurrentArtists.addEventListener("click", saveCurrentArtistFavorites);
 ui.closeArtists.addEventListener("click", () => motionDialog(ui.artistDialog, false));
 ui.cancelArtists.addEventListener("click", () => motionDialog(ui.artistDialog, false));
 ui.savePreset.addEventListener("click", createStylePreset);
-ui.presetName.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") {
-    event.preventDefault();
-    createStylePreset();
-  }
-});
-ui.presetName.addEventListener("input", () => setPresetFeedback());
+ui.manageStylePresets.addEventListener("click", () => StylePresetManager.open());
+initializePresetScroll();
 ui.manual_artist.addEventListener("input", () => {
   normalizeArtistField(false);
   schedulePersist();

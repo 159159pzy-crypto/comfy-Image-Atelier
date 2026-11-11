@@ -88,9 +88,9 @@ def test_preset_save_reload_and_edit_retain_source_version_and_nested_settings(t
     sampler = {"steps": 11, "cfg": 3, "sampler_name": "heun", "scheduler": "karras", "denoise": .4}
     if hidden_sampler:
         source["upscalers"]["latent"]["sampler"] = sampler
-    expected = preset_settings(source)
-    assert expected["pipeline_version"] == (version or 2)
-    assert expected["dual"] is None
+    expected = preset_settings(source, include={"repair": True})
+    assert "pipeline_version" not in expected
+    assert expected["dual"]["switch_step"] == 15
     assert expected["upscalers"]["latent"]["second_sampler"]["enabled"]
     assert expected["upscalers"]["latent"]["second_sampler"]["steps"] == 23
     assert expected["upscalers"]["nvidia"]["dlss"]["intensity"] == .6
@@ -102,7 +102,8 @@ def test_preset_save_reload_and_edit_retain_source_version_and_nested_settings(t
     async def scenario():
         path = tmp_path / "presets.json"
         store = StylePresetStore(path)
-        item = await store.create({"name": "Legacy", "settings": source})
+        item = await store.create({"name": "Legacy", "include": {"repair": True}, "settings": source})
+        assert item["source"]["pipeline_version"] == (version or 2)
         assert item["settings"] == expected
         before = path.read_bytes()
         reloaded = StylePresetStore(path)
@@ -136,15 +137,15 @@ def test_legacy_hidden_sampler_roundtrip_does_not_change_graph_or_resource_requi
     assert after == before
 
 
-def test_loading_versionless_preset_does_not_write_current_version_to_disk(tmp_path):
+def test_loading_versionless_preset_backs_up_source_and_disables_optional_groups(tmp_path):
     path = tmp_path / "presets.json"
     source = {"hires": {"enabled": True, "percent": 50},
               "second_sampler": {"enabled": True, "steps": 23, "denoise": .6}}
     path.write_text(json.dumps({"version": 2, "items": [{"id": "old", "name": "Legacy", "settings": source}]}), encoding="utf-8")
     before = path.read_bytes()
-    saved = StylePresetStore(path).items[0]["settings"]
-    assert path.read_bytes() == before
-    assert saved["pipeline_version"] == 2
-    assert saved["upscalers"]["latent"]["scale_by"] == 2
-    assert saved["upscalers"]["latent"]["second_sampler"]["steps"] == 23
-    assert not saved["upscalers"]["pixel_hires"]["enabled"]
+    saved = StylePresetStore(path).items[0]
+    assert path.with_name(path.name + ".v3.bak").read_bytes() == before
+    assert saved["source"]["pipeline_version"] == 2
+    assert not any(saved["include"].values())
+    assert "upscalers" not in saved["settings"]
+    assert saved["settings"]["dual"]["scale"] == 2

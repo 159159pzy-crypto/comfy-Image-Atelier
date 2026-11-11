@@ -33,7 +33,7 @@ def test_krea_updates_without_profile_keep_ownership_and_same_profile_remains_su
         item = await store.create({"name": "Krea", "model_profile": "krea2", "settings": {"model_profile": "krea2"}})
         updated = await store.update(item["id"], {"favorite": True})
         assert updated["settings"]["model_profile"] == "krea2"
-        updated = await store.update(item["id"], {"settings": {"width": 896}})
+        updated = await store.update(item["id"], {"include": {"size": True}, "settings": {"width": 896}})
         assert updated["settings"]["model_profile"] == "krea2"
         updated = await store.update(item["id"], {"name": "Renamed", "model_profile": "krea2"})
         assert updated["name"] == "Renamed"

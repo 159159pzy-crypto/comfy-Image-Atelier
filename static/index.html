@@ -14,7 +14,7 @@
       document.documentElement.dataset.theme = theme;
     })();
   </script>
-  <link rel="stylesheet" href="/static/styles.css?v=20261110-resource-resolution">
+  <link rel="stylesheet" href="/static/styles.css?v=20261112-preset-fade-only">
   <link rel="stylesheet" href="/static/single-layout.css?v=20261024-motion">
   <link rel="stylesheet" href="/static/single-details.css?v=20261024-motion">
   <link rel="stylesheet" href="/static/history-detail.css?v=20261110-delete-choice">
@@ -22,6 +22,7 @@
   <link rel="stylesheet" href="/static/artwork-favorites.css?v=20261029-favorites-motion">
   <link rel="stylesheet" href="/static/lora-manager.css?v=20261107-remove-pool-lora-entry">
   <link rel="stylesheet" href="/static/pool-browser.css?v=20261107-binding">
+  <link rel="stylesheet" href="/static/style-preset-manager.css?v=20261112-presets-v3">
 </head>
 <body>
   <div class="ambient" aria-hidden="true"></div>
@@ -72,11 +73,11 @@
           <summary><span>风格预设</span><span id="presetSummary" class="summary-value">0 个预设</span><i>+</i></summary>
           <div class="details-content">
             <div class="preset-create-row">
-              <input id="presetName" type="text" maxlength="100" placeholder="预设名称" aria-label="风格预设名称" aria-describedby="presetError">
+              <button id="manageStylePresets" class="button ghost preset-manage-entry" type="button" aria-haspopup="dialog">管理风格预设 <span aria-hidden="true">↗</span></button>
               <button id="savePreset" class="button primary compact" type="button">保存当前</button>
             </div>
             <div id="presetError" class="field-error" role="status" hidden></div>
-            <div id="presetList" class="preset-list"></div>
+            <div id="presetScroll" class="preset-scroll"><div id="presetList" class="preset-list" tabindex="0" aria-label="风格预设列表"></div></div>
             <div id="presetEmpty" class="inline-empty">还没有风格预设。</div>
           </div>
         </details>
@@ -878,7 +879,7 @@
   <script src="/static/shared-favorites.js?v=20261030-source-lifecycle" defer></script>
   <script src="/static/prompt-reverse.js?v=20261108-cancel-state" defer></script>
   <script src="/static/prompt-assistant.js?v=20261108-cancel-state" defer></script>
-  <script src="/static/single-workbench.js?v=20261110-resource-resolution" defer></script>
+  <script src="/static/single-workbench.js?v=20261112-presets-v3" defer></script>
   <script src="/static/single-input.js?v=20261028-remove-artwork-management" defer></script>
   <script src="/static/single-compatibility.js?v=20261024-single-ui" defer></script>
   <script src="/static/single-details.js?v=20261110-resource-resolution" defer></script>
@@ -890,6 +891,7 @@
   <script src="/static/pool-browser.js?v=20261107-binding" defer></script>
   <script src="/static/resource-resolution.js?v=20261110-resource-resolution" defer></script>
   <script src="/static/character-classification.js?v=20261111-local-classification" defer></script>
-  <script src="/static/app.js?v=20261111-local-classification" defer></script>
+  <script src="/static/style-preset-manager.js?v=20261112-presets-v3" defer></script>
+  <script src="/static/app.js?v=20261112-preset-fade-only" defer></script>
 </body>
 </html>

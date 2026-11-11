@@ -73,7 +73,7 @@ test('generation omits inactive fixed drafts while retaining pools and count', (
   assert.equal(ctx.draft.fixed.character, 'hidden identity');
 });
 
-test('random zero-negative defaults off and survives request and preset serialization without clearing text', () => {
+test('random zero-negative defaults off and survives complete settings serialization without clearing text', () => {
   const ctx = context();
   ctx.canonicalArtists = value => value;
   ctx.defaultLorasForProfile = () => [];
@@ -90,14 +90,10 @@ test('random zero-negative defaults off and survives request and preset serializ
   ctx.ui = Object.fromEntries(fields.map(key => [key, { value: '1', checked: false }]));
   ctx.ui.negative_prompt.value = 'saved negative text';
   ctx.draft = { modes: {}, fixed: {}, counts: {}, pools: {}, loras: [] };
-  const start = source.indexOf('const PRESET_SETTING_KEYS = [');
-  vm.runInContext(source.slice(start, source.indexOf('\n];', start) + 3), ctx);
-  vm.runInContext(functionSource('presetSnapshot'), ctx);
   for (const zero of [true, false]) {
     ctx.ui.zero_negative.checked = zero;
     assert.equal(ctx.readSettings().zero_negative, zero);
-    assert.equal(ctx.presetSnapshot().zero_negative, zero);
-    assert.equal(ctx.presetSnapshot().negative_prompt, 'saved negative text');
+    assert.equal(ctx.readSettings().negative_prompt, 'saved negative text');
   }
 });
 test('profile drafts preserve each source version without borrowing post settings', () => {
@@ -519,27 +515,6 @@ test('legacy v4 drafts migrate inactive model profiles into the random workbench
   const reverse = plain(run('singleWorkbenchLegacyDrafts(settings, profiles)'));
   assert.equal(reverse.anima.settings.krea_variance.enabled, false);
   assert.equal(reverse.krea2.settings.krea_variance.enabled, true);
-});
-test('applying a single preset preserves input image and active workbench while invalidating old preview', () => {
-  let applied;
-  const current = { workbench: 'single', generation_mode: 'img2img', single: { input_image_id: 'asset-current', prompt_job_id: 'old-job', processed_prompt_override: 'old result', positive_prompt: 'current' } };
-  const { ctx, run } = singleContext({ readSettings: () => current, applySettings: value => { applied = plain(value); } });
-  run('singleWorkbenchState.ready = true; singleWorkbenchState.mode = "single"');
-  ctx.preset = { settings: { workbench: 'single', generation_mode: 'txt2img', cfg: 5, single: { input_image_id: '', positive_prompt: 'preset prompt' } } };
-  run('singleWorkbenchApplyPreset(preset)');
-  assert.equal(applied.workbench, 'single'); assert.equal(applied.generation_mode, 'img2img');
-  assert.equal(applied.single.input_image_id, 'asset-current');
-  assert.equal(applied.single.positive_prompt, 'preset prompt');
-  assert.equal(applied.single.prompt_job_id, ''); assert.equal(applied.single.processed_prompt_override, null);
-});
-test('random workbench does not accept single-only settings when applying a shared preset', () => {
-  let applied;
-  const { ctx, run } = singleContext({ readSettings: () => ({ workbench: 'random', count: 12 }), applySettings: value => { applied = plain(value); } });
-  run('singleWorkbenchState.ready = true');
-  ctx.preset = { settings: { workbench: 'single', generation_mode: 'img2img', single: { input_image_id: 'source' }, clip_name: 'override', cfg: 4 } };
-  run('singleWorkbenchApplyPreset(preset)');
-  assert.equal(applied.workbench, 'random'); assert.equal(applied.count, 12); assert.equal(applied.cfg, 4);
-  assert.equal(applied.single, undefined); assert.equal(applied.clip_name, undefined);
 });
 test('shared LoRA reconciliation delegates single mode to its prefix synchronizer', () => {
   let received;

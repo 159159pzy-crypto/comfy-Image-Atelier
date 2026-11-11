@@ -106,8 +106,8 @@ test('the latest history normalization wins and both requests retain source vers
   assert.equal(h.imported.length, 1); assert.equal(h.imported[0].settings.pipeline_version, 3);
 });
 
-test('preset and restore normalization cannot overwrite a newly selected workbench', async () => {
-  for (const action of ['singleWorkbenchApplyPreset', 'singleWorkbenchRestoreHistory']) {
+test('restore normalization cannot overwrite a newly selected workbench', async () => {
+  for (const action of ['singleWorkbenchRestoreHistory']) {
     const h = setup(); let resolve;
     h.ctx.canonicalizeWorkflowSettings = settings => new Promise(yes => { resolve = () => yes(settings); });
     const record = historyRecord('random');
@@ -214,98 +214,6 @@ test('rolling a new seed changes random mode to an editable fixed seed', () => {
   assert.deepEqual(layouts, [{ mode: 'fixed', seed: 9090 }]);
 });
 
-test('random presets change shared style while retaining the current single prompt, routes and custom resources', () => {
-  const { ctx } = setup();
-  const current = plain(ctx.singleWorkbenchDefaultSettings('anima'));
-  Object.assign(current, {
-    generation_mode: 'img2img', clip_name: 'custom-clip', vae_name: 'custom-vae', clip_type: 'custom-type', cfg: 3,
-  });
-  Object.assign(current.single, {
-    positive_prompt: 'my unfinished scene', prefix: 'my prefix', suffix: 'my suffix', lora_prefix_managed_triggers: ['my prefix'],
-    input_image_id: 'current-reference', prompt_job_id: 'old-job', processed_prompt_override: 'old result',
-  });
-  const before = plain(current);
-  let applied;
-  ctx.readSettings = () => current;
-  ctx.applySettings = value => { applied = plain(value); };
-  for (const workbench of ['random', undefined]) {
-    const preset = { settings: {
-      ...historyRecord('random').settings, cfg: 6, width: 896,
-      clip_name: 'profile-clip', vae_name: 'profile-vae', clip_type: 'profile-type',
-    } };
-    if (workbench === undefined) delete preset.settings.workbench;
-    preset.settings.single.positive_prompt = '';
-    const presetBefore = plain(preset);
-    ctx.singleWorkbenchApplyPreset(preset);
-    assert.equal(applied.cfg, 6);
-    assert.equal(applied.width, 896);
-    assert.deepEqual(applied.loras, preset.settings.loras);
-    assert.equal(applied.workbench, 'single');
-    assert.equal(applied.generation_mode, 'img2img');
-    assert.equal(applied.single.positive_prompt, 'my unfinished scene');
-    assert.equal(applied.single.prefix, 'my prefix');
-    assert.deepEqual(applied.single.lora_prefix_managed_triggers, ['my prefix']);
-    assert.equal(applied.single.suffix, 'my suffix');
-    assert.equal(applied.single.input_image_id, 'current-reference');
-    assert.equal(applied.single.prompt_job_id, '');
-    assert.equal(applied.single.processed_prompt_override, null);
-    assert.deepEqual([applied.single.normal_pipeline, applied.single.dual.first_pipeline,
-      applied.single.dual.second_pipeline, applied.single.latent.pipeline, applied.single.face_pipeline], Array(5).fill('primary'));
-    assert.deepEqual(applied.single.loras_secondary, []);
-    assert.deepEqual([applied.clip_name, applied.vae_name, applied.clip_type], ['custom-clip', 'custom-vae', 'custom-type']);
-    assert.deepEqual(current, before);
-    assert.deepEqual(preset, presetBefore);
-  }
-});
-
-test('single presets still load their saved prompt, secondary routes and resources while retaining the current reference', () => {
-  const { ctx } = setup();
-  const current = plain(ctx.singleWorkbenchDefaultSettings('anima'));
-  current.generation_mode = 'img2img';
-  current.single.input_image_id = 'current-reference';
-  let applied;
-  ctx.readSettings = () => current;
-  ctx.applySettings = value => { applied = plain(value); };
-  const preset = { settings: {
-    ...historyRecord('single').settings, clip_name: 'saved-clip', vae_name: 'saved-vae', clip_type: 'saved-type',
-    generation_mode: 'txt2img',
-  } };
-  Object.assign(preset.settings.single, {
-    positive_prompt: 'saved single scene', input_image_id: '', prompt_job_id: 'stale-job', processed_prompt_override: 'stale result',
-  });
-  const before = plain(preset);
-  ctx.singleWorkbenchApplyPreset(preset);
-  assert.equal(applied.workbench, 'single');
-  assert.equal(applied.generation_mode, 'img2img');
-  assert.equal(applied.single.positive_prompt, 'saved single scene');
-  assert.equal(applied.single.prefix, 'saved prefix');
-  assert.deepEqual(applied.single.lora_prefix_managed_triggers, ['saved prefix']);
-  assert.deepEqual([applied.single.normal_pipeline, applied.single.dual.first_pipeline,
-    applied.single.dual.second_pipeline, applied.single.latent.pipeline, applied.single.face_pipeline], Array(5).fill('secondary'));
-  assert.deepEqual(applied.single.loras_secondary, preset.settings.single.loras_secondary);
-  assert.equal(applied.single.vae_encode.tile_size, 1536);
-  assert.deepEqual([applied.clip_name, applied.vae_name, applied.clip_type], ['saved-clip', 'saved-vae', 'saved-type']);
-  assert.equal(applied.single.input_image_id, 'current-reference');
-  assert.equal(applied.single.prompt_job_id, '');
-  assert.equal(applied.single.processed_prompt_override, null);
-  assert.deepEqual(preset, before);
-});
-
-test('legacy single presets do not inherit automatic prefix ownership from the current draft', () => {
-  const { ctx } = setup();
-  const current = plain(ctx.singleWorkbenchDefaultSettings('anima'));
-  current.single.prefix = 'same words';
-  current.single.lora_prefix_managed_triggers = ['same words'];
-  ctx.readSettings = () => current;
-  let applied;
-  ctx.applySettings = value => { applied = plain(value); };
-  ctx.singleWorkbenchApplyPreset({ settings: {
-    workbench: 'single', single: { prefix: 'same words', positive_prompt: 'legacy authored description' },
-  } });
-  assert.equal(applied.single.prefix, 'same words');
-  assert.deepEqual(applied.single.lora_prefix_managed_triggers, []);
-});
-
 test('changing the main model cancels an in-flight upload but preserves reference restoration and random mode', () => {
   const { ctx, state } = setup();
   let change, cancellations = 0;
@@ -355,42 +263,5 @@ test('history transfer maps random zero-negative into the new primary route and 
     assert.equal(imported[0].settings.single.zero_negative, workbench === 'random' ? zero : !zero);
     assert.equal(imported[0].settings.single.secondary_zero_negative, workbench === 'random' ? false : zero);
     assert.deepEqual(record, before);
-  }
-});
-
-test('random presets apply zero-negative only to active single routes without changing stored snapshots', async () => {
-  for (const zero of [false, true]) {
-    const { ctx } = setup();
-    const current = plain(ctx.singleWorkbenchDefaultSettings('anima'));
-    Object.assign(current.single, { normal_pipeline: 'secondary', zero_negative: true, secondary_zero_negative: !zero });
-    current.upscalers = { face_refine: { enabled: false } };
-    const preset = { settings: { workbench: 'random', base_mode: 'normal', zero_negative: zero } };
-    const before = plain(current), presetBefore = plain(preset); let applied;
-    ctx.readSettings = () => current; ctx.applySettings = value => { applied = plain(value); };
-    await ctx.singleWorkbenchApplyPreset(preset);
-    assert.equal(applied.single.zero_negative, true, 'inactive primary keeps its previous value');
-    assert.equal(applied.single.secondary_zero_negative, zero);
-    assert.deepEqual(current, before); assert.deepEqual(preset, presetBefore);
-  }
-});
-
-test('single presets retain separate zero-negative values or convert the final base route for random', async () => {
-  for (const destination of ['single', 'random']) for (const baseMode of ['normal', 'dual_sampler']) {
-    const { ctx, state } = setup(); state.mode = destination;
-    const current = plain(ctx.singleWorkbenchDefaultSettings('anima')); current.workbench = destination;
-    const preset = { settings: { workbench: 'single', base_mode: baseMode, zero_negative: false,
-      single: { normal_pipeline: 'primary', dual: { first_pipeline: 'primary', second_pipeline: 'secondary' },
-        zero_negative: true, secondary_zero_negative: false } } };
-    const before = plain(preset), notices = []; let applied;
-    ctx.readSettings = () => current; ctx.applySettings = value => { applied = plain(value); }; ctx.toast = value => notices.push(value);
-    await ctx.singleWorkbenchApplyPreset(preset);
-    if (destination === 'single') {
-      assert.equal(applied.single.zero_negative, true); assert.equal(applied.single.secondary_zero_negative, false);
-      assert.deepEqual(notices, []);
-    } else {
-      assert.equal(applied.zero_negative, baseMode === 'normal');
-      assert.match(notices[0], /底图最后一段/);
-    }
-    assert.deepEqual(preset, before);
   }
 });

@@ -117,8 +117,8 @@ def test_v4_preset_roundtrip_keeps_latent_and_post_sampler_independent():
     value = {"pipeline_version": 4, "model_profile": "krea2", "upscalers": {
         "latent": {"enabled": True, "sampler": {"steps": 13, "cfg": 2}},
         "post_sampler": {"enabled": True, "steps": 6, "cfg": 1}}}
-    saved = preset_settings(value)
-    assert saved["pipeline_version"] == 4
+    saved = preset_settings(value, include={"repair": True})
+    assert "pipeline_version" not in saved
     assert saved["upscalers"]["latent"]["sampler"]["steps"] == 13
     assert saved["upscalers"]["post_sampler"]["steps"] == 6
-    assert preset_settings(saved) == saved
+    assert preset_settings(saved, include={"repair": True}, source={"pipeline_version": 4}) == saved

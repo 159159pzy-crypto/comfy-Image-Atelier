@@ -5,6 +5,7 @@ Response gates control ordering without timing sleeps or replacing app functions
 """
 import asyncio
 import importlib
+import io
 import json
 import os
 import sys
@@ -15,6 +16,7 @@ from pathlib import Path
 
 from aiohttp import web
 from aiohttp.test_utils import TestServer
+from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from test_server import APP_DIR, FakeComfy, _write_fake_tools  # noqa: E402
@@ -149,7 +151,17 @@ class WorkbenchRaceTests(unittest.IsolatedAsyncioTestCase):
     async def open_presets(self):
         if not await self.page.locator(".preset-section").get_attribute("open") == "":
             await self.page.locator(".preset-section > summary").click()
-        await self.expect(self.page.locator("#presetName")).to_be_visible()
+        await self.expect(self.page.locator("#manageStylePresets")).to_be_visible()
+
+    async def new_preset(self, name):
+        await self.open_presets()
+        await self.page.locator("#savePreset").click()
+        await self.expect(self.page.locator("#stylePresetEditor")).to_be_visible()
+        await self.page.locator("#stylePresetName").fill(name)
+
+    async def close_preset_editor(self):
+        await self.page.locator("#stylePresetEditor .spm-heading button").click()
+        await self.expect(self.page.locator("#stylePresetEditor")).to_be_hidden()
 
     async def switch_profile(self, profile):
         await self.page.locator("#model_profile").select_option(profile)
@@ -334,11 +346,12 @@ class WorkbenchRaceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_preset_switch_does_not_mix_profiles_or_change_saved_models(self):
         await self.open_presets()
-        await self.page.locator("#presetName").fill("Anima style")
+        await self.new_preset("Anima style")
         old = self.hold("POST", "/api/style-presets")
-        await self.page.locator("#savePreset").click()
+        await self.page.locator("#stylePresetSave").click()
         await self.entered(old)
         before = self.app[STYLE_PRESETS_KEY].list("anima")["items"][0]
+        await self.close_preset_editor()
         await self.switch_profile("krea2")
         await self.release(old)
         self.assertFalse(old.cancelled, "changing profiles must not cancel a committed write")
@@ -355,15 +368,16 @@ class WorkbenchRaceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_preset_round_trip_keeps_new_input_and_shows_committed_save(self):
         await self.open_presets()
-        await self.page.locator("#presetName").fill("Original")
+        await self.new_preset("Original")
         old = self.hold("POST", "/api/style-presets")
-        await self.page.locator("#savePreset").click()
+        await self.page.locator("#stylePresetSave").click()
         await self.entered(old)
+        await self.close_preset_editor()
         await self.switch_profile("krea2")
         await self.switch_profile("anima")
-        await self.page.locator("#presetName").fill("New draft name")
+        await self.new_preset("New draft name")
         await self.release(old)
-        await self.expect(self.page.locator("#presetName")).to_have_value("New draft name")
+        await self.expect(self.page.locator("#stylePresetName")).to_have_value("New draft name")
         await self.expect(self.page.locator("#presetList")).to_contain_text("Original")
 
     async def test_old_preset_list_cannot_hide_successful_save(self):
@@ -372,16 +386,16 @@ class WorkbenchRaceTests(unittest.IsolatedAsyncioTestCase):
         old = self.hold("GET", "/api/style-presets", profile="anima")
         await self.switch_profile("anima")
         await self.entered(old)
-        await self.page.locator("#presetName").fill("New style")
-        await self.page.locator("#savePreset").click()
+        await self.new_preset("New style")
+        await self.page.locator("#stylePresetSave").click()
         await self.expect(self.page.locator("#presetList")).to_contain_text("New style")
         await self.release(old)
         await self.expect(self.page.locator("#presetList")).to_contain_text("New style")
 
     async def test_cross_profile_update_is_atomic_and_same_profile_edits_work(self):
         await self.open_presets()
-        await self.page.locator("#presetName").fill("Protected")
-        await self.page.locator("#savePreset").click()
+        await self.new_preset("Protected")
+        await self.page.locator("#stylePresetSave").click()
         await self.expect(self.page.locator("#presetList")).to_contain_text("Protected")
         item = self.app[STYLE_PRESETS_KEY].list("anima")["items"][0]
         path = self.root / "data" / "style_presets.json"
@@ -390,13 +404,278 @@ class WorkbenchRaceTests(unittest.IsolatedAsyncioTestCase):
                                                   data={"favorite": True, "model_profile": "krea2"})
         self.assertEqual(response.status, 400)
         self.assertEqual(path.read_bytes(), before)
-        self.page.once("dialog", lambda dialog: dialog.accept("Renamed"))
         await self.page.locator("[data-preset-rename]").click()
+        await self.page.locator("#stylePresetName").fill("Renamed")
+        await self.page.locator("#stylePresetSave").click()
         await self.expect(self.page.locator("#presetList")).to_contain_text("Renamed")
-        self.page.once("dialog", lambda dialog: dialog.accept())
+        await self.page.locator("[data-preset-update]").click()
         async with self.page.expect_response(lambda response: response.request.method == "PUT" and "/api/style-presets/" in response.url):
-            await self.page.locator("[data-preset-update]").click()
+            await self.page.locator("#stylePresetSave").click()
         await self.expect(self.page.locator("#presetList")).to_contain_text("Renamed")
         after = self.app[STYLE_PRESETS_KEY].list("anima")["items"][0]
         self.assertEqual(after["settings"]["model_name"], item["settings"]["model_name"])
         self.assertEqual(after["settings"]["clip_name"], item["settings"]["clip_name"])
+
+    async def test_preset_home_six_rows_and_scroll_edge_fades(self):
+        await self.open_presets()
+        await self.expect(self.page.locator("#presetEmpty")).to_be_visible()
+        store = self.app[STYLE_PRESETS_KEY]
+        for count in range(1, 8):
+            await store.create({"name": f"风格 {count}", "settings": {"pipeline_version": 5}})
+            if count not in {1, 6, 7}:
+                continue
+            await self.page.evaluate("loadStylePresets()")
+            await self.expect(self.page.locator(".preset-row")).to_have_count(count)
+            metrics = await self.page.locator("#presetList").evaluate("el => ({height: el.clientHeight, total: el.scrollHeight, rows: [...el.children].slice(0, 6).reduce((n,row) => n + row.getBoundingClientRect().height, 0), gap: parseFloat(getComputedStyle(el).rowGap)})")
+            preview = metrics["gap"] + 24 if count > 6 else 0
+            self.assertAlmostEqual(metrics["height"], metrics["rows"] + (min(count, 6) - 1) * metrics["gap"] + preview, delta=1)
+            if count <= 6:
+                await self.expect(self.page.locator("#presetScroll")).not_to_have_class(__import__("re").compile("can-scroll"))
+        await self.expect(self.page.locator("#presetScroll")).to_have_class(__import__("re").compile("can-scroll-down"))
+        await self.page.locator("#presetList").evaluate("el => { el.scrollTop = el.scrollHeight; }")
+        await self.expect(self.page.locator("#presetScroll")).to_have_class(__import__("re").compile("can-scroll-up"))
+        await self.expect(self.page.locator("#presetScroll")).not_to_have_class(__import__("re").compile("can-scroll-down"))
+
+    async def test_preset_library_cover_groups_tags_and_batch(self):
+        await self.new_preset("晨雾")
+        for key in ("size", "repair", "img2img", "affixes"):
+            await self.expect(self.page.locator("#stylePresetInclude_" + key)).not_to_be_checked()
+        image = Image.new("RGB", (960, 720), "#778e9e")
+        buffer = io.BytesIO()
+        image.save(buffer, "PNG")
+        await self.page.locator("#stylePresetCoverFile").set_input_files({"name": "mist.png", "mimeType": "image/png", "buffer": buffer.getvalue()})
+        await self.expect(self.page.locator("#stylePresetCoverZoom")).to_be_visible()
+        await self.page.locator("#stylePresetCoverZoom").evaluate("el => { el.value = '1.5'; el.dispatchEvent(new Event('input', {bubbles:true})); }")
+        crop = await self.page.locator("#stylePresetCropStage").bounding_box()
+        await self.page.mouse.move(crop["x"] + crop["width"] / 2, crop["y"] + crop["height"] / 2)
+        await self.page.mouse.down()
+        await self.page.mouse.move(crop["x"] + crop["width"] / 2 + 30, crop["y"] + crop["height"] / 2 + 15, steps=5)
+        await self.page.mouse.up()
+        await self.page.locator("#stylePresetSave").click()
+        await self.expect(self.page.locator("#presetList")).to_contain_text("晨雾")
+        store = self.app[STYLE_PRESETS_KEY]
+        first = store.list("anima")["items"][0]
+        self.assertTrue(first["cover_id"])
+        saved_settings = json.loads(json.dumps(first["settings"]))
+        await self.page.locator("#manageStylePresets").click()
+        await self.page.get_by_role("button", name="新建收藏分组", exact=True).click()
+        await self.page.locator("#stylePresetGroupName").fill("自然光")
+        await self.page.locator("#stylePresetOrganizeSave").click()
+        await self.expect(self.page.get_by_role("button", name="自然光", exact=True)).to_be_visible()
+        await self.page.get_by_role("button", name="查看 晨雾", exact=True).click()
+        await self.page.locator("#stylePresetGroups").get_by_label("自然光", exact=True).check()
+        await self.page.locator("#stylePresetTags").fill("柔光, 水彩")
+        await self.page.locator("#stylePresetSave").click()
+        await self.expect(self.page.locator("#stylePresetEditor")).to_be_hidden()
+        updated = store.list("anima")["items"][0]
+        self.assertEqual(updated["settings"], saved_settings)
+        self.assertTrue(updated["favorite"])
+        self.assertEqual(updated["tags"], ["柔光", "水彩"])
+        await store.create({"name": "工笔", "settings": {"pipeline_version": 5}, "tags": ["水彩"]})
+        await self.page.evaluate("loadStylePresets()")
+        await self.expect(self.page.locator(".spm-card")).to_have_count(2)
+        await self.page.locator("#stylePresetSearch").fill("柔光")
+        await self.expect(self.page.locator(".spm-card")).to_have_count(1)
+        await self.page.locator("#stylePresetSearch").fill("")
+        await self.page.locator("#stylePresetSelect").click()
+        await self.page.get_by_role("button", name="选择当前结果", exact=True).click()
+        await self.page.locator('[data-batch-action="tags"]').click()
+        await self.page.locator("#stylePresetBatchTags").fill("常用")
+        await self.page.locator("#stylePresetOrganizeSave").click()
+        await self.expect(self.page.locator("#stylePresetOrganize")).to_be_hidden()
+        self.assertTrue(all("常用" in item["tags"] for item in store.list("anima")["items"]))
+        await self.page.locator("#stylePresetSelect").click()
+        await self.page.screenshot(path=str(APP_DIR / "output/playwright/preset-library-desktop.png"))
+        await self.page.set_viewport_size({"width": 390, "height": 844})
+        await self.page.evaluate("document.documentElement.dataset.theme = 'dark'")
+        await self.page.screenshot(path=str(APP_DIR / "output/playwright/preset-library-mobile-dark.png"))
+        bounds = await self.page.locator("#stylePresetManager").bounding_box()
+        self.assertLessEqual(bounds["width"], 390)
+        self.assertGreaterEqual(bounds["x"], 0)
+        await self.page.keyboard.press("Escape")
+        await self.expect(self.page.locator("#stylePresetManager")).to_be_hidden()
+
+    async def test_preset_apply_retains_current_fields_in_both_profiles_and_workbenches(self):
+        for model in ("anima", "krea2"):
+            for workbench in ("random", "single"):
+                await self.page.locator(f'#{workbench}WorkbenchTab').click()
+                await self.switch_profile(model)
+                if workbench == "single":
+                    await self.page.locator("#single_positive_prompt").fill("current scene stays")
+                pool_ids = await self.page.evaluate("() => { draft.fixed.pose = 'inactive pool draft'; return [...kreaPromptPoolSelection]; }")
+                current = await self.page.evaluate("readSettings()")
+                captured = json.loads(json.dumps(current))
+                captured["cfg"] = 7
+                captured["width"] = 1024
+                captured["single"]["positive_prompt"] = "must never replace current scene"
+                captured["single"]["weight_dtype"] = "fp8_e4m3fn"
+                captured["single"]["vae_decode"]["tile_size"] = 1024
+                item = await self.app[STYLE_PRESETS_KEY].create({"name": f"Portable {model} {workbench}", "model_profile": model, "settings": captured})
+                if workbench == "single":
+                    await self.page.locator("#singleCategory_more").click()
+                await self.open_presets()
+                await self.page.evaluate("loadStylePresets()")
+                await self.page.locator(f'[data-preset-id="{item["id"]}"] .preset-apply').click()
+                await self.page.wait_for_function("readSettings().cfg === 7")
+                after = await self.page.evaluate("readSettings()")
+                self.assertEqual(await self.page.evaluate("draft.fixed.pose"), "inactive pool draft")
+                self.assertEqual(await self.page.evaluate("[...kreaPromptPoolSelection]"), pool_ids)
+                for key in ("width", "height", "pipeline_version", "workbench", "generation_mode", "krea_prompt_pool", "upscalers"):
+                    self.assertEqual(after[key], current[key], (model, workbench, key))
+                for key in ("positive_prompt", "prefix", "suffix", "prompt_processing", "weight_dtype", "vae_encode", "vae_decode", "input_image_id"):
+                    self.assertEqual(after["single"][key], current["single"][key], (model, workbench, key))
+                if workbench == "single":
+                    await self.page.locator("#singleCategory_common").click()
+
+    async def test_preset_polish_motion_dirty_mobile_and_read_only(self):
+        await self.page.emulate_media(reduced_motion="no-preference")
+        await self.new_preset("尚未保存的柔光")
+        await self.page.wait_for_function("document.querySelector('#stylePresetEditor').dataset.motionState === 'open'")
+        artifacts = APP_DIR / "output" / "playwright"
+        artifacts.mkdir(parents=True, exist_ok=True)
+        await self.page.evaluate("document.documentElement.dataset.theme = 'light'")
+        await self.page.wait_for_function("() => !document.querySelector('#stylePresetEditor').getAnimations({subtree: true}).some(a => a.playState === 'running' && Number.isFinite(a.effect?.getComputedTiming().iterations))", timeout=5000)
+        await self.page.screenshot(path=str(artifacts / "preset-editor-light.png"))
+        await self.page.evaluate("document.documentElement.dataset.theme = 'dark'")
+        await self.page.wait_for_function("() => !document.querySelector('#stylePresetEditor').getAnimations({subtree: true}).some(a => a.playState === 'running' && Number.isFinite(a.effect?.getComputedTiming().iterations))", timeout=5000)
+        await self.page.screenshot(path=str(artifacts / "preset-editor-dark.png"))
+        await self.page.keyboard.press("Escape")
+        await self.expect(self.page.locator("#stylePresetConfirm")).to_be_visible()
+        await self.page.locator("#stylePresetConfirm").get_by_role("button", name="取消", exact=True).click()
+        await self.expect(self.page.locator("#stylePresetConfirm")).to_be_hidden()
+        await self.expect(self.page.locator("#stylePresetName")).to_have_value("尚未保存的柔光")
+        await self.page.keyboard.press("Escape")
+        await self.page.locator("#stylePresetConfirmAccept").click()
+        await self.expect(self.page.locator("#stylePresetEditor")).to_be_hidden()
+        await self.expect(self.page.locator("#savePreset")).to_be_focused()
+        self.assertEqual(self.app[STYLE_PRESETS_KEY].list("anima")["count"], 0)
+
+        await self.page.locator("#manageStylePresets").click()
+        await self.page.wait_for_function("document.querySelector('#stylePresetManager').dataset.motionState === 'open'")
+        reversal = await self.page.evaluate("""async () => {
+          const dialog = document.querySelector('#stylePresetManager');
+          dialog.querySelector('.spm-heading .spm-icon-button').click();
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const before = StudioMotion.snapshot(dialog, 'presence');
+          void StylePresetManager.open();
+          const after = StudioMotion.snapshot(dialog, 'presence');
+          return {before: before.value.progress, after: after.value.progress,
+                  moving: before.active, target: StudioMotion.target(dialog)};
+        }""")
+        self.assertTrue(reversal["moving"])
+        self.assertLess(reversal["before"], 1)
+        self.assertEqual(reversal["before"], reversal["after"], "reopening must start from the presented frame")
+        self.assertTrue(reversal["target"])
+        await self.page.wait_for_function("document.querySelector('#stylePresetManager').dataset.motionState === 'open'")
+        await self.page.keyboard.press("Escape")
+        await self.expect(self.page.locator("#stylePresetManager")).to_be_hidden()
+        await self.expect(self.page.locator("#manageStylePresets")).to_be_focused()
+
+        await self.page.set_viewport_size({"width": 390, "height": 844})
+        await self.page.locator("#manageStylePresets").click()
+        await self.page.locator("#stylePresetFiltersToggle").click()
+        await self.expect(self.page.locator("#stylePresetFiltersToggle")).to_have_attribute("aria-expanded", "true")
+        await self.expect(self.page.locator("#stylePresetFilters")).to_be_visible()
+        await self.page.locator('#stylePresetFilters [data-collection="favorite"]').click()
+        await self.expect(self.page.locator('#stylePresetFilters [data-collection="favorite"]')).to_be_focused()
+        await self.page.locator("#stylePresetFiltersToggle").click()
+        await self.expect(self.page.locator("#stylePresetFilters")).to_be_hidden()
+        await self.expect(self.page.locator("#stylePresetFiltersToggle")).to_have_attribute("aria-expanded", "false")
+        await self.page.keyboard.press("Escape")
+        await self.expect(self.page.locator("#stylePresetManager")).to_be_hidden()
+
+        await self.app[STYLE_PRESETS_KEY].create({"name": "只读收藏", "favorite": True, "settings": {"pipeline_version": 5}})
+        await self.page.evaluate("""() => {
+          config.storage_status.style_presets = {read_only: true, reason: '验收用只读状态'};
+          renderStorageStatus();
+        }""")
+        await self.page.locator("#manageStylePresets").click()
+        await self.expect(self.page.locator(".spm-card")).to_have_count(1)
+        await self.expect(self.page.locator("#stylePresetNew")).to_be_disabled()
+        await self.expect(self.page.locator(".spm-star")).to_be_disabled()
+        await self.expect(self.page.locator(".spm-apply")).to_be_enabled()
+        await self.expect(self.page.locator("#stylePresetSearch")).to_be_enabled()
+        await self.page.locator("#stylePresetSearch").fill("只读")
+        await self.expect(self.page.locator(".spm-card")).to_have_count(1)
+        await self.expect(self.page.locator(".spm-content > .spm-error")).to_contain_text("只读")
+        await self.page.get_by_role("button", name="查看 只读收藏", exact=True).click()
+        await self.expect(self.page.locator("#stylePresetSave")).to_be_disabled()
+        await self.expect(self.page.locator("#stylePresetCoverFile")).to_be_disabled()
+
+    async def test_preset_polish_repair_version_confirmation_preserves_current_content(self):
+        await self.page.locator("#singleWorkbenchTab").click()
+        await self.page.locator("#single_positive_prompt").fill("current portrait remains")
+        current = await self.page.evaluate("readSettings()")
+        self.assertEqual(current["pipeline_version"], 5)
+        captured = json.loads(json.dumps(current))
+        captured["pipeline_version"] = 2
+        captured["cfg"] = 7
+        captured["width"] = 1024
+        captured["single"]["positive_prompt"] = "old scene must not return"
+        captured["single"]["prefix"] = "old prefix"
+        item = await self.app[STYLE_PRESETS_KEY].create({"name": "旧版放大修复", "settings": captured, "include": {"repair": True}})
+        await self.page.locator("#singleCategory_more").click()
+        await self.open_presets()
+        await self.page.evaluate("loadStylePresets()")
+        apply = self.page.locator(f'[data-preset-id="{item["id"]}"] .preset-apply')
+        await apply.click()
+        await self.expect(self.page.locator("#stylePresetConfirm")).to_contain_text("v5 切换到 v2")
+        await self.page.locator("#stylePresetConfirm").get_by_role("button", name="取消", exact=True).click()
+        await self.expect(self.page.locator("#stylePresetConfirm")).to_be_hidden()
+        self.assertEqual(await self.page.evaluate("readSettings()"), current)
+        await apply.click()
+        await self.page.locator("#stylePresetConfirmAccept").click()
+        await self.page.wait_for_function("readSettings().pipeline_version === 2")
+        after = await self.page.evaluate("readSettings()")
+        self.assertEqual(after["cfg"], 7)
+        for key in ("width", "height", "workbench", "generation_mode", "krea_prompt_pool"):
+            self.assertEqual(after[key], current[key], key)
+        for key in ("positive_prompt", "prefix", "suffix", "prompt_processing", "weight_dtype", "vae_encode", "vae_decode", "input_image_id"):
+            self.assertEqual(after["single"][key], current["single"][key], key)
+
+    async def test_preset_polish_closed_library_ignores_pending_resolve(self):
+        current = await self.page.evaluate("readSettings()")
+        item = await self.app[STYLE_PRESETS_KEY].create({"name": "迟到的风格", "settings": {**current, "cfg": 7}})
+        await self.open_presets()
+        await self.page.locator("#manageStylePresets").click()
+        await self.expect(self.page.locator(".spm-card")).to_have_count(1)
+        gate = self.hold("POST", f'/api/style-presets/{item["id"]}/resolve')
+        await self.page.locator(".spm-apply").click()
+        await self.entered(gate)
+        await self.page.locator("#stylePresetManager .spm-heading .spm-icon-button").click()
+        await self.expect(self.page.locator("#stylePresetManager")).to_be_hidden()
+        await self.page.locator("#manageStylePresets").click()
+        await self.expect(self.page.locator("#stylePresetManager")).to_be_visible()
+        async with self.page.expect_response(lambda response: response.url.endswith(f'/api/style-presets/{item["id"]}/resolve')):
+            await self.release(gate)
+        await self.page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+        self.assertEqual(await self.page.evaluate("readSettings()"), current)
+        await self.expect(self.page.locator("#stylePresetManager")).to_be_visible()
+
+    async def test_preset_polish_old_batch_failure_does_not_unlock_new_profile(self):
+        for model in ("anima", "krea2"):
+            await self.app[STYLE_PRESETS_KEY].create({"name": "Batch " + model, "model_profile": model, "settings": {"model_profile": model, "pipeline_version": 5}})
+        await self.open_presets()
+        await self.page.locator("#manageStylePresets").click()
+        await self.expect(self.page.locator(".spm-card")).to_have_count(1)
+        await self.page.locator("#stylePresetSelect").click()
+        await self.page.get_by_role("button", name="选择当前结果", exact=True).click()
+        old = self.hold("POST", "/api/style-presets/batch", error=True)
+        await self.page.locator('[data-batch-action="favorite"]').click()
+        await self.entered(old)
+        await self.page.locator("#stylePresetManager .spm-heading .spm-icon-button").click()
+        await self.expect(self.page.locator("#stylePresetManager")).to_be_hidden()
+        await self.switch_profile("krea2")
+        await self.page.locator("#manageStylePresets").click()
+        await self.expect(self.page.locator(".spm-card")).to_have_count(1)
+        await self.page.locator("#stylePresetSelect").click()
+        await self.page.get_by_role("button", name="选择当前结果", exact=True).click()
+        newer = self.hold("POST", "/api/style-presets/batch")
+        await self.page.locator('[data-batch-action="favorite"]').click()
+        await self.entered(newer)
+        await self.release(old)
+        await self.expect(self.page.locator('[data-batch-action="favorite"]')).to_be_disabled()
+        await self.expect(self.page.locator(".spm-content > .spm-error")).to_be_hidden()
+        await self.release(newer)
+        await self.expect(self.page.locator('[data-batch-action="favorite"]')).to_be_enabled()
+        self.assertTrue(self.app[STYLE_PRESETS_KEY].list("krea2")["items"][0]["favorite"])

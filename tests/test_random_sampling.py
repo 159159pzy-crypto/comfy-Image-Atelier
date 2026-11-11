@@ -89,15 +89,19 @@ def test_explicit_dual_invalid_parameters_are_rejected(dual):
         validate_settings({"base_mode": "dual_sampler", "dual": dual})
 
 
-def test_legacy_and_explicit_presets_remain_distinct():
+def test_legacy_generation_contract_stays_frozen_and_style_patch_resolves_its_dual():
     legacy = {"base_mode": "dual_sampler", "steps": 8, "upscalers": {"latent": {"scale_by": 1.75}}}
-    for saved in (validate_settings(legacy), preset_settings(legacy)):
-        assert saved["dual"] is None
-        assert validate_settings(migrate_settings(saved))["dual"] is None
+    saved = validate_settings(legacy)
+    assert saved["dual"] is None
+    assert validate_settings(migrate_settings(saved))["dual"] is None
+    # The old null/8-step graph remains valid for replay; a portable style
+    # requires a valid explicit second-pass start instead of silently clamping.
+    with pytest.raises(WorkflowError, match="起始步"):
+        preset_settings(legacy)
     explicit = preset_settings({"base_mode": "dual_sampler", "dual": {**DUAL_DEFAULTS, "scale": 1.8}})
     assert explicit["dual"]["scale"] == 1.8
     assert preset_settings(explicit)["dual"] == explicit["dual"]
-    assert explicit["single"]["dual"]["scale"] == 1
+    assert "single" not in explicit
 
 
 def test_random_sampling_preflight_uses_enabled_nodes_and_live_ranges():

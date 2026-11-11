@@ -125,13 +125,14 @@ def test_legacy_defaults_and_two_stack_preset_remain_compatible(templates):
     legacy["single"].update(loras_secondary=copy.deepcopy(SECONDARY), face_pipeline="secondary")
     legacy["single"]["dual"]["second_pipeline"] = "secondary"
     legacy["single"]["latent"]["pipeline"] = "secondary"
-    saved = preset_settings({key: value for key, value in legacy.items() if key in PRESET_SETTING_KEYS})
-    assert saved["pipeline_version"] == 2
+    saved = preset_settings({key: value for key, value in legacy.items() if key in PRESET_SETTING_KEYS}, include={"repair": True})
+    assert "pipeline_version" not in saved
     assert saved["loras"] == LORAS
     assert saved["single"]["loras_secondary"] == SECONDARY
     frozen = {"positive": "historical authored text", "negative": "historical negative",
               "effective_positive": {"primary": "historical ink, ", "secondary": "historical paper, "}}
-    payload = templates.submission(saved, 123, 456, "Unified/legacy", "client", 1, single_runtime=frozen)
+    # A sparse style is applied to a full draft before entering generation.
+    payload = templates.submission({**legacy, **saved}, 123, 456, "Unified/legacy", "client", 1, single_runtime=frozen)
     api = payload["prompt"]
     assert_connected(api)
     assert_pipeline(api, "701:1245")
@@ -195,7 +196,7 @@ def test_real_upload_generation_and_replay_keep_unified_triggers(tmp_path, base,
             assert len(comfy.uploads) == int(mode == "img2img")
 
             response = await client.post("/api/style-presets", json={
-                "name": "Prefix ownership", "settings": {
+                "name": "Prefix ownership", "include": {"affixes": True}, "settings": {
                     key: value for key, value in original["settings"].items() if key in PRESET_SETTING_KEYS
                 },
             })

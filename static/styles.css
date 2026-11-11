@@ -581,6 +581,40 @@ input:disabled, select:disabled { opacity: .5; cursor: not-allowed; }
 .prompt-rule-scopes input { width: 15px; height: 15px; accent-color: var(--accent); }
 
 .preset-create-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; margin-bottom: 8px; }
+.preset-manage-entry { display: flex; justify-content: space-between; align-items: center; text-align: left; }
+.preset-manage-entry span { color: var(--text-tertiary); }
+.preset-scroll { position: relative; min-width: 0; isolation: isolate; border-radius: 14px; }
+.preset-scroll .preset-list {
+  --preset-fade-top: 0px;
+  --preset-fade-bottom: 0px;
+  --preset-scrollbar-width: 0px;
+  --preset-overlay-gutter: 0px;
+  padding-inline-end: var(--preset-overlay-gutter);
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--separator-strong) transparent;
+  scroll-padding-block: 27px;
+  /* Only content dissolves. The second mask keeps the native scrollbar opaque. */
+  mask-image: linear-gradient(to bottom,
+    transparent 0, rgb(0 0 0 / .12) calc(var(--preset-fade-top) * .25),
+    rgb(0 0 0 / .45) calc(var(--preset-fade-top) * .5),
+    rgb(0 0 0 / .8) calc(var(--preset-fade-top) * .75),
+    #000 var(--preset-fade-top), #000 calc(100% - var(--preset-fade-bottom)),
+    rgb(0 0 0 / .8) calc(100% - var(--preset-fade-bottom) * .75),
+    rgb(0 0 0 / .45) calc(100% - var(--preset-fade-bottom) * .5),
+    rgb(0 0 0 / .12) calc(100% - var(--preset-fade-bottom) * .25), transparent 100%),
+    linear-gradient(#000, #000);
+  mask-size: calc(100% - var(--preset-scrollbar-width)) 100%, var(--preset-scrollbar-width) 100%;
+  mask-position: left top, right top;
+  mask-repeat: no-repeat;
+}
+.preset-scroll .preset-list:focus-visible { outline: none; }
+.preset-scroll:has(.preset-list:focus-visible) { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more), (forced-colors: active) {
+  .preset-scroll .preset-list { mask-image: none; scroll-padding-block: 3px; }
+  .preset-scroll { outline: 1px solid var(--separator-strong); outline-offset: 3px; }
+}
 .field-error { margin: 0 0 9px; color: var(--danger); font-size: 10.5px; }
 .field-error[data-type="pending"] { color: var(--text-secondary); }
 .field-error[data-type="success"] { color: var(--success); }

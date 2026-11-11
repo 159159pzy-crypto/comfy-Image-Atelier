@@ -255,15 +255,17 @@ function singleWorkbenchResourceValues(settings) {
     return [key, settings[key] || bound[key] || ""];
   }));
 }
-function singleWorkbenchApply(raw) {
+function singleWorkbenchApply(raw, { preservePromptProcessing = false } = {}) {
   if (!singleWorkbenchState.ready) return;
   if (raw.workbench === "single") {
     singleWorkbenchCancelInput({ render: false });
     singleWorkbenchState.mode = "single";
     const full = singleWorkbenchDefaultSettings(raw.model_profile || currentProfile());
     singleWorkbenchState.single = singleWorkbenchMerge(full.single, raw.single || {});
-    if (typeof promptAssistantMigrateLegacy === "function") promptAssistantMigrateLegacy(singleWorkbenchState.single, raw.model_profile || currentProfile());
-    for (const stage of Object.values(singleWorkbenchState.single.prompt_processing || {})) stage.enabled = false;
+    if (!preservePromptProcessing) {
+      if (typeof promptAssistantMigrateLegacy === "function") promptAssistantMigrateLegacy(singleWorkbenchState.single, raw.model_profile || currentProfile());
+      for (const stage of Object.values(singleWorkbenchState.single.prompt_processing || {})) stage.enabled = false;
+    }
     singleWorkbenchState.single.prompt_job_id = ""; singleWorkbenchState.single.processed_prompt_override = null;
     singleWorkbenchState.generationMode = raw.generation_mode === "img2img" ? "img2img" : "txt2img";
     document.querySelectorAll("[data-single-path]").forEach(element => { const value = singleWorkbenchPath(singleWorkbenchState.single, element.dataset.singlePath); if (element.type === "checkbox") element.checked = Boolean(value); else if (element.tagName === "SELECT") ensureSelectValue(element, String(value ?? "")); else element.value = value ?? ""; });
@@ -638,35 +640,38 @@ async function singleWorkbenchFromHistory(record, asImage = false) {
     }
   }
 }
-async function singleWorkbenchApplyPreset(item) {
+async function singleWorkbenchApplyPreset(item, { isCurrent = () => true } = {}) {
   const owner = singleWorkbenchBeginSettingsImport();
-  if (typeof canonicalizeWorkflowSettings === "function") item = { ...item, settings: await canonicalizeWorkflowSettings(item.settings || {}) };
-  if (!singleWorkbenchSettingsImportCurrent(owner)) return false;
-  const current = readSettings(); const snapshot = singleWorkbenchClone(item.settings || {});
-  const sourceWorkbench = snapshot.workbench;
-  delete snapshot.workbench; delete snapshot.generation_mode;
-  if (singleWorkbenchActive()) {
-    snapshot.single = singleWorkbenchMerge(current.single, sourceWorkbench === "single" ? snapshot.single || {} : {});
-    if (sourceWorkbench === "single") snapshot.single.lora_prefix_managed_triggers = singleWorkbenchClone(item.settings?.single?.lora_prefix_managed_triggers || []);
-    if (typeof adaptPostprocessSettings === "function") adaptPostprocessSettings(snapshot, item.settings || {}, "single");
-    if (sourceWorkbench !== "single" && (!snapshot.model_profile || snapshot.model_profile === current.model_profile)) {
-      for (const key of ["clip_name", "vae_name", "clip_type"]) delete snapshot[key];
-    }
-    snapshot.single.input_image_id = current.single.input_image_id;
-    snapshot.single.prompt_job_id = ""; snapshot.single.processed_prompt_override = null;
-  } else {
-    if (typeof adaptPostprocessSettings === "function") adaptPostprocessSettings(snapshot, item.settings || {}, "random");
-    // A legacy null keeps inheriting the source's effective dual parameters.
-    if (sourceWorkbench !== "single") snapshot.dual = item.settings?.dual == null ? null : singleWorkbenchClone(item.settings.dual);
-    delete snapshot.single; delete snapshot.clip_name; delete snapshot.vae_name; delete snapshot.clip_type;
+  const captured = JSON.parse(owner.settings);
+  const replacements = captured.resource_replacements;
+  delete captured.resource_replacements;
+  // Generation deliberately disables legacy automatic AI jobs when serializing.
+  // A style application must nevertheless retain the editor's actual config.
+  const processing = owner.mode === "single" ? JSON.stringify(singleWorkbenchState.single.prompt_processing || {}) : null;
+  if (processing !== null) captured.single.prompt_processing = JSON.parse(processing);
+  const stillCurrent = () => isCurrent() && singleWorkbenchSettingsImportCurrent(owner)
+    && (processing === null || processing === JSON.stringify(singleWorkbenchState.single.prompt_processing || {}));
+  const profile = item.model_profile || item.settings?.model_profile || "anima";
+  if (profile !== currentProfile()) throw new Error("请先切换到预设所属模型");
+  const resolved = await request(`/api/style-presets/${encodeURIComponent(item.id)}/resolve`, {
+    method: "POST", body: JSON.stringify({ settings: captured, model_profile: profile }),
+  });
+  if (!stillCurrent()) return false;
+  if (resolved.version_change) {
+    const change = resolved.version_change;
+    const accepted = await StylePresetManager.confirm({
+      title: "应用预设的放大修复流程",
+      message: `此预设携带放大修复，将生成流程从 v${change.from} 切换到 v${change.to}，以保留其修复效果。正文、AI 配置和设备设置保持当前值。`,
+      confirmLabel: "应用预设",
+    });
+    if (!accepted || !stillCurrent()) return false;
   }
+  if (!resolved.settings || resolved.settings.model_profile !== profile) throw new Error("预设解析结果无效");
+  if (Array.isArray(replacements)) resolved.settings.resource_replacements = singleWorkbenchClone(replacements);
   const modes = typeof sharedSamplingDrafts === "function" ? sharedSamplingDrafts() : null;
-  const target = { ...current, ...snapshot, workbench: singleWorkbenchState.mode };
-  const zeroNegativeNotice = singleWorkbenchAdaptZeroNegative(target, item.settings || {}, target.workbench);
-  applySettings(target);
-  if (typeof showPipelineUpgradeNotice === "function") showPipelineUpgradeNotice(item.settings);
+  applySettings(resolved.settings, { preservePromptProcessing: true, preservePoolDraft: true });
   if (typeof sharedSamplingRestoreDrafts === "function") sharedSamplingRestoreDrafts(modes);
-  if (zeroNegativeNotice) toast(zeroNegativeNotice);
+  if (resolved.notice) toast(resolved.notice);
   return true;
 }
 async function initializeSingleWorkbench({ legacyRestored = false } = {}) {

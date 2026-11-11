@@ -48,6 +48,7 @@ from .prompt_pools import PromptPoolStore, parse_prompt_import_details, parse_pr
 from .runner import BatchConflict, BatchManager
 from .regeneration import prompt_source_issues
 from .style_presets import StylePresetStore
+from .style_preset_covers import StylePresetCoverStore
 from .thumbnails import ThumbnailStore
 from .workflow import WorkflowError, WorkflowTemplates, normalize_lora_path, validate_settings
 from .model_profiles import (
@@ -74,6 +75,7 @@ CATALOG_KEY: web.AppKey[Any] = web.AppKey("catalog", object)
 CUSTOM_PROMPTS_KEY: web.AppKey[Any] = web.AppKey("custom_prompts", object)
 FAVORITES_KEY: web.AppKey[Any] = web.AppKey("favorites", object)
 STYLE_PRESETS_KEY: web.AppKey[Any] = web.AppKey("style_presets", object)
+STYLE_PRESET_COVERS_KEY: web.AppKey[Any] = web.AppKey("style_preset_covers", object)
 LORA_TRIGGER_OVERRIDES_KEY: web.AppKey[Any] = web.AppKey("lora_trigger_overrides", object)
 LORA_LIBRARY_KEY: web.AppKey[Any] = web.AppKey("lora_library", object)
 PROMPT_RULES_KEY: web.AppKey[Any] = web.AppKey("prompt_rules", object)
@@ -359,6 +361,7 @@ def create_app(
     style_presets = StylePresetStore(
         style_presets_path or storage / "style_presets.json", prompt_rules
     )
+    style_preset_covers = StylePresetCoverStore(storage / "style-preset-covers", style_presets)
     prompt_pools = PromptPoolStore(storage / "prompt_pools.json")
     pool_lifecycle = PoolLifecycleService(storage, custom_prompts, prompt_pools, profile_favorites)
     # Deprecated argument retained for embedded callers. The legacy ownership
@@ -400,6 +403,7 @@ def create_app(
     app[CUSTOM_PROMPTS_KEY] = custom_prompts
     app[FAVORITES_KEY] = favorites
     app[STYLE_PRESETS_KEY] = style_presets
+    app[STYLE_PRESET_COVERS_KEY] = style_preset_covers
     app[LORA_TRIGGER_OVERRIDES_KEY] = lora_trigger_overrides
     app[LORA_LIBRARY_KEY] = lora_library
     app[PROMPT_RULES_KEY] = prompt_rules
@@ -1114,21 +1118,75 @@ def create_app(
         return web.Response(body=body, content_type=content_type,
                             headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
+    def preset_public(item: dict[str, Any]) -> dict[str, Any]:
+        return {**item, "cover_url": style_preset_covers.url(item.get("cover_id"))}
+
+    def presets_public(payload: dict[str, Any]) -> dict[str, Any]:
+        return {**payload, "items": [preset_public(item) for item in payload.get("items", [])]}
+
     async def list_style_presets(request: web.Request) -> web.Response:
-        return web.json_response(style_presets.list(request.query.get("model_profile")))
+        return web.json_response(presets_public(style_presets.list(request.query.get("model_profile"))))
 
     async def create_style_preset(request: web.Request) -> web.Response:
-        return web.json_response(await style_presets.create(await _json_body(request)), status=201)
+        body = await _json_body(request)
+        item = await style_preset_covers.mutate(style_presets.create, body, payload=body)
+        return web.json_response(preset_public(item), status=201)
 
     async def update_style_preset(request: web.Request) -> web.Response:
-        return web.json_response(
-            await style_presets.update(request.match_info["preset_id"], await _json_body(request))
+        body = await _json_body(request)
+        item = await style_preset_covers.mutate(
+            style_presets.update, request.match_info["preset_id"], body, payload=body
         )
+        return web.json_response(preset_public(item))
 
     async def delete_style_preset(request: web.Request) -> web.Response:
-        if not await style_presets.delete(request.match_info["preset_id"]):
+        style_presets.ensure_writable()
+        style_presets.get(request.match_info["preset_id"], request.query.get("model_profile"))
+        if not await style_preset_covers.mutate(style_presets.delete, request.match_info["preset_id"]):
             raise KeyError(request.match_info["preset_id"])
         return web.json_response({"deleted": True})
+
+    async def resolve_style_preset(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        if set(body) - {"settings", "model_profile"} or not isinstance(body.get("settings"), dict):
+            raise WorkflowError("应用预设需要 settings 对象及可选的 model_profile")
+        return web.json_response(style_presets.resolve(
+            request.match_info["preset_id"], body["settings"], body.get("model_profile")
+        ))
+
+    async def list_style_preset_groups(request: web.Request) -> web.Response:
+        payload = style_presets.list(request.query.get("model_profile"))
+        return web.json_response({"groups": payload["groups"], "model_profile": payload["model_profile"]})
+
+    async def create_style_preset_group(request: web.Request) -> web.Response:
+        return web.json_response(await style_presets.create_group(await _json_body(request)), status=201)
+
+    async def update_style_preset_group(request: web.Request) -> web.Response:
+        return web.json_response(await style_presets.update_group(
+            request.match_info["group_id"], await _json_body(request)
+        ))
+
+    async def delete_style_preset_group(request: web.Request) -> web.Response:
+        if not await style_presets.delete_group(request.match_info["group_id"], request.query.get("model_profile")):
+            raise KeyError(request.match_info["group_id"])
+        return web.json_response({"deleted": True})
+
+    async def batch_style_presets(request: web.Request) -> web.Response:
+        result = await style_preset_covers.mutate(style_presets.batch, await _json_body(request))
+        return web.json_response(presets_public(result))
+
+    async def upload_style_preset_cover(request: web.Request) -> web.Response:
+        style_presets.ensure_writable()
+        body, _, crop = await read_uploaded_fields(request, allow_crop=True)
+        return web.json_response(await style_preset_covers.add(body, crop), status=201)
+
+    async def style_preset_cover(request: web.Request) -> web.Response:
+        asset_id = request.match_info["asset_id"]
+        body = await style_preset_covers.read(asset_id)
+        return web.Response(body=body, content_type="image/webp", headers={
+            "Cache-Control": "private, max-age=31536000, immutable", "ETag": f'"{asset_id}"',
+            "X-Content-Type-Options": "nosniff",
+        })
 
     async def list_prompt_rules(request: web.Request) -> web.Response:
         return web.json_response(prompt_rules.list(request.query.get("model_profile", "anima")))
@@ -1374,24 +1432,35 @@ def create_app(
         state = await manager.start(body, seeds=seeds, resource_resolution={"replacements": valid_replacements})
         return web.json_response(state, status=201)
 
-    async def read_uploaded_image(request: web.Request) -> tuple[bytes, str]:
+    async def read_uploaded_fields(request: web.Request, *, allow_crop: bool = False) -> tuple[bytes, str, Any]:
         if request.content_type != "multipart/form-data":
             raise WorkflowError("请以 multipart image 字段上传图片")
         if request.content_length is not None and request.content_length > request.client_max_size:
             raise web.HTTPRequestEntityTooLarge(max_size=request.client_max_size, actual_size=request.content_length)
         found = None
+        crop = None
+        fields = set()
         try:
             stream = LimitedMultipartStream(request.content, request.client_max_size)
             reader = MultipartReader(request.headers, stream)
             async for part in reader:
-                if not isinstance(part, BodyPartReader) or part.name != "image" or found is not None:
-                    raise WorkflowError("上传请求只能包含一个 image 字段")
+                allowed = {"image", "crop"} if allow_crop else {"image"}
+                if not isinstance(part, BodyPartReader) or part.name not in allowed or part.name in fields:
+                    raise WorkflowError("上传请求字段无效或重复")
+                fields.add(part.name)
                 data = bytearray()
+                limit = MAX_IMAGE_BYTES if part.name == "image" else 4096
                 while chunk := await part.read_chunk():
-                    if len(data) + len(chunk) > MAX_IMAGE_BYTES:
-                        raise web.HTTPRequestEntityTooLarge(max_size=MAX_IMAGE_BYTES, actual_size=len(data) + len(chunk))
+                    if len(data) + len(chunk) > limit:
+                        raise web.HTTPRequestEntityTooLarge(max_size=limit, actual_size=len(data) + len(chunk))
                     data.extend(chunk)
-                found = (bytes(data), part.filename or "image")
+                if part.name == "image":
+                    found = (bytes(data), part.filename or "image")
+                else:
+                    try:
+                        crop = strict_json_loads(bytes(data).decode("utf-8"))
+                    except (UnicodeError, ValueError) as error:
+                        raise WorkflowError("封面裁切 JSON 无效") from error
             # MultipartReader may stop before the optional MIME epilogue.
             # Account for that tail too, including bodies without a length.
             while await stream.read(64 * 1024):
@@ -1402,7 +1471,11 @@ def create_app(
             raise WorkflowError("上传 multipart 数据无效") from error
         if found is None:
             raise WorkflowError("缺少 image 文件")
-        return found
+        return *found, crop
+
+    async def read_uploaded_image(request: web.Request) -> tuple[bytes, str]:
+        body, filename, _ = await read_uploaded_fields(request)
+        return body, filename
 
     async def upload_input_image(request: web.Request) -> web.Response:
         found = await read_uploaded_image(request)
@@ -2001,8 +2074,16 @@ def create_app(
     app.router.add_delete("/api/prompt-pools/items", delete_prompt_pool_item)
     app.router.add_get("/api/style-presets", list_style_presets)
     app.router.add_post("/api/style-presets", create_style_preset)
+    app.router.add_post("/api/style-presets/batch", batch_style_presets)
+    app.router.add_post("/api/style-presets/{preset_id}/resolve", resolve_style_preset)
     app.router.add_put("/api/style-presets/{preset_id}", update_style_preset)
     app.router.add_delete("/api/style-presets/{preset_id}", delete_style_preset)
+    app.router.add_get("/api/style-preset-groups", list_style_preset_groups)
+    app.router.add_post("/api/style-preset-groups", create_style_preset_group)
+    app.router.add_put("/api/style-preset-groups/{group_id}", update_style_preset_group)
+    app.router.add_delete("/api/style-preset-groups/{group_id}", delete_style_preset_group)
+    app.router.add_post("/api/style-preset-covers", upload_style_preset_cover)
+    app.router.add_get("/api/style-preset-covers/{asset_id}", style_preset_cover)
     app.router.add_get("/api/prompt-rules", list_prompt_rules)
     app.router.add_post("/api/prompt-rules", create_prompt_rule)
     app.router.add_put("/api/prompt-rules/{rule_id}", update_prompt_rule)
@@ -2081,13 +2162,17 @@ def create_app(
         for profile, failure in recovery_failures.items():
             logger.warning("%s 收藏一致性恢复尚未完成: %s", profile, failure["error"])
         await imported_images.start(manager)
+        style_preset_covers.start()
 
     async def cleanup_resources() -> None:
         try:
             try:
                 try:
                     try:
-                        await lora_library.close()
+                        try:
+                            await style_preset_covers.close()
+                        finally:
+                            await lora_library.close()
                     finally:
                         await imported_images.prompt_cache.stop()
                 finally:
