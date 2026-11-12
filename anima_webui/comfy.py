@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
+from io import BytesIO
 from typing import Any
 from urllib.parse import urlencode, urlparse
 
 import aiohttp
+from PIL import Image, UnidentifiedImageError
 
 from .resource_classification import classify_resources
 from .workflow import WorkflowError, normalize_lora_path
@@ -14,6 +16,13 @@ from .workflow import WorkflowError, normalize_lora_path
 
 HISTORY_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0, 8.0)
 HISTORY_RECOVERY_TIMEOUT = 60.0
+_LORA_PREVIEW_IMAGE_TYPES = {
+    "PNG": "image/png",
+    "JPEG": "image/jpeg",
+    "WEBP": "image/webp",
+    "GIF": "image/gif",
+    "AVIF": "image/avif",
+}
 
 
 class ComfyError(RuntimeError):
@@ -45,6 +54,17 @@ class ComfyAborted(RuntimeError):
 
 class ComfyMetadataPendingError(ComfyError):
     """The plugin acknowledged a save; only verification remains retryable."""
+
+
+def _lora_preview_image_type(body: bytes) -> str:
+    """Identify generic binary previews without changing their original bytes."""
+    try:
+        with Image.open(BytesIO(body), formats=list(_LORA_PREVIEW_IMAGE_TYPES)) as image:
+            content_type = _LORA_PREVIEW_IMAGE_TYPES[image.format]
+            image.verify()
+        return content_type
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError, Image.DecompressionBombError) as error:
+        raise ComfyError("LoRA 预览格式不支持") from error
 
 
 def validate_comfy_url(value: str) -> str:
@@ -295,7 +315,8 @@ class ComfyClient:
                     raise ComfyError(f"ComfyUI 返回 {response.status}: 无法读取 LoRA 预览")
                 content_type = response.headers.get("Content-Type", "application/octet-stream")
                 media_type = content_type.split(";", 1)[0].strip().lower()
-                if media_type not in {"image/png", "image/jpeg", "image/webp", "image/gif", "image/avif", "video/mp4", "video/webm"}:
+                generic_type = media_type in {"", "application/octet-stream"}
+                if not generic_type and media_type not in {"image/png", "image/jpeg", "image/webp", "image/gif", "image/avif", "video/mp4", "video/webm"}:
                     raise ComfyError("LoRA 预览格式不支持")
                 limit = 32 * 1024 * 1024
                 if response.content_length is not None and response.content_length > limit:
@@ -306,8 +327,11 @@ class ComfyClient:
                     if size > limit:
                         raise ComfyError("LoRA 预览超过 32 MiB 限制")
                     chunks.append(chunk)
+                body = b"".join(chunks)
+                if generic_type:
+                    content_type = await asyncio.to_thread(_lora_preview_image_type, body)
                 cache_control = response.headers.get("Cache-Control", "private, max-age=300")
-                return b"".join(chunks), content_type, cache_control
+                return body, content_type, cache_control
         except (aiohttp.ClientError, asyncio.TimeoutError) as error:
             raise ComfyError(f"无法连接 ComfyUI: {error}") from error
 

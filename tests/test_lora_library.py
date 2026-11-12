@@ -3,11 +3,13 @@ import copy
 import json
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+from PIL import Image
 
 from anima_webui.comfy import ComfyClient, ComfyError, ComfyMetadataPendingError
 from anima_webui.lora_library import LoraLibraryService, LoraLibraryStore, LoraLibraryPartialError, register_lora_routes
@@ -104,14 +106,30 @@ class MetadataProxyTests(unittest.IsolatedAsyncioTestCase):
             return web.Response(text="<script>bad</script>", content_type="text/html")
         async def large(_):
             return web.Response(body=b"x", content_type="image/png", headers={"Content-Length": str(33 * 1024 * 1024)})
+        async def large_binary(_):
+            return web.Response(body=b"x", content_type="application/octet-stream",
+                                headers={"Content-Length": str(33 * 1024 * 1024)})
+        async def streamed_binary(request):
+            response = web.StreamResponse(headers={"Content-Type": "application/octet-stream"})
+            await response.prepare(request)
+            try:
+                for _ in range(33):
+                    await response.write(b"x" * (1024 * 1024))
+                await response.write_eof()
+            except ConnectionResetError:
+                pass  # The proxy closes the stream once its limit is reached.
+            return response
         app.router.add_get("/redirect", redirect)
         app.router.add_get("/html", html)
         app.router.add_get("/large", large)
+        app.router.add_get("/large-binary", large_binary)
+        app.router.add_get("/streamed-binary", streamed_binary)
         server = TestServer(app)
         await server.start_server()
         client = ComfyClient(str(server.make_url("")))
         try:
-            for path, message in (("/redirect", "302"), ("/html", "格式"), ("/large", "32 MiB")):
+            for path, message in (("/redirect", "302"), ("/html", "格式"), ("/large", "32 MiB"),
+                                  ("/large-binary", "32 MiB"), ("/streamed-binary", "32 MiB")):
                 with self.subTest(path=path), self.assertRaisesRegex(ComfyError, message):
                     await client.lora_preview_asset(path)
         finally:
@@ -731,6 +749,37 @@ class LoraLibraryTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue((await response.json())["character_missing"])
         finally:
             await client.close()
+
+    async def test_preview_route_returns_webp_for_binary_plugin_response(self):
+        output = BytesIO()
+        Image.new("RGB", (4, 4), (30, 60, 90)).save(output, format="WEBP")
+        image_bytes = output.getvalue()
+
+        async def plugin_preview(_):
+            return web.Response(body=image_bytes, content_type="application/octet-stream",
+                                headers={"Cache-Control": "private, max-age=90"})
+
+        plugin = web.Application()
+        plugin.router.add_get("/preview", plugin_preview)
+        plugin_server = TestServer(plugin)
+        await plugin_server.start_server()
+        proxy = ComfyClient(str(plugin_server.make_url("")))
+        app = web.Application()
+        register_lora_routes(app, self.service)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            first = await self.first()
+            with patch.object(self.client, "lora_preview_asset", proxy.lora_preview_asset, create=True):
+                response = await client.get(first["preview"])
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.headers["Content-Type"], "image/webp")
+                self.assertEqual(response.headers["Cache-Control"], "private, max-age=90")
+                self.assertEqual(await response.read(), image_bytes)
+        finally:
+            await client.close()
+            await proxy.close()
+            await plugin_server.close()
 
     async def test_character_job_http_contract_and_retry_results(self):
         app = web.Application()

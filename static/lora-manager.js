@@ -79,7 +79,7 @@
     ? require("./request-state.js") : globalThis.StudioRequestState).createReadGate;
   function createController({ request, getProfile, getLoras = () => [], onChange = () => {} }) {
     const state = { q: "", scope: "current", folder: "", root: "", recursive: true, collection: "", tag: [], tag_exclude: [], tag_mode: "all", base_model: "", in_configured: "", has_preview: "", bound: "", sort: "name", order: "asc", page: 1,
-      items: [], total: 0, pages: 1, groups: [], facets: {}, selected: new Set(), selectionResources: new Map(), known: new Map(), loading: false, selectionLoading: false, error: "", profile: getProfile(), revision: null, resultKey: "", offline:false,cached:false,writable:true,lastSyncedAt:null };
+      items: [], total: 0, pages: 1, groups: [], facets: {}, selected: new Set(), selectionResources: new Map(), known: new Map(), loading: false, selectionLoading: false, error: "", profile: getProfile(), revision: null, resultKey: "", offline:false,cached:false,writable:true,lastSyncedAt:null,previewRetryGeneration:0 };
     const gate = createRequestGate(), selectionGate = createRequestGate(), queryCache=new Map();
     const query = ({ all = false } = {}) => ({ q: state.q, model_profile: state.scope === "current" ? getProfile() : state.scope, folder: state.folder, root: state.root,
       recursive: state.recursive, collection: state.collection, tag: state.tag, tag_exclude: state.tag_exclude, tag_mode: state.tag_mode,
@@ -105,6 +105,7 @@
         state.resultKey = JSON.stringify(query());
         state.items.forEach(item => state.known.set(identity(item), item));
         if(!state.offline){queryCache.set(state.resultKey,copy(data));if(queryCache.size>24)queryCache.delete(queryCache.keys().next().value);}
+        if(refresh&&!state.offline)state.previewRetryGeneration++;
         return !state.offline;
       } catch (error) {
         if (token.current() && profile === getProfile() && error.name !== "AbortError") {
@@ -153,6 +154,7 @@
   let host, controller, ui, ready = false, expanded = false, selectionMode = false, view = "grid", detailItem = null, detailEpoch = 0, detailOpener = null;
   let searchTimer, characterTimer, bindingLoraTimer, jobTimer, activeJob, groupEditor, batchEditor, bindingEditor, selectionBusy = false, pendingFocus = null;
   let detailEditing = false, detailSaving = false, restoreTriggerDraft = false, leaveAction = null;
+  const previewRetrySession = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   let compactScroll = 0, compactPaneScroll = 0, expandedScroll = 0, morphRevision = 0;
   const paneRects = new Map();
   const collapsedGroups = new Set(), collapsedFolders = new Set(), detailDrafts = new Map(), mutationBusy = new Set();
@@ -249,6 +251,7 @@
       let cursor=ui.loraCatalog.firstElementChild;
       for(const card of cards){if(card===cursor)cursor=cursor.nextElementSibling;else ui.loraCatalog.insertBefore(card,cursor);}
       const retained=new Set(cards);for(const card of [...ui.loraCatalog.children])if(!retained.has(card))card.remove();
+      for(const card of cards)retryCardPreview(card,state);
       ui.loraCatalog.classList.toggle("lm-list-view", view === "list");
       if (oldFocus && focused !== document.activeElement) ui.loraCatalog.querySelector(`[data-lm-card="${CSS.escape(oldFocus)}"] ${focusKind}`)?.focus({ preventScroll: true });
     }
@@ -265,9 +268,33 @@
   function renderCard(item) {
     const id = identity(item), preview = safeImage(item.preview);
     const card = document.createElement("article"); card.className = "lm-card"; card.dataset.lmCard = id;
-    card.innerHTML = `<button type="button" class="lm-card-open" data-lm-open="${escape(id)}"><span class="lm-card-preview">${preview ? `<img src="${escape(preview)}" loading="lazy" decoding="async" alt="">` : icons.folder}</span><span class="lm-card-copy"><strong title="${escape(title(item))}">${escape(title(item))}</strong><small title="${escape(item.filename)}"></small></span></button><span class="lm-card-controls"><button class="lm-card-star" type="button" data-lm-star="${escape(id)}">${icons.star}</button><button class="lm-card-add" type="button" data-lm-add="${escape(id)}"></button></span><span class="lm-card-select" aria-hidden="true"></span><span class="lm-card-badge"></span>`;
-    card.querySelector("img")?.addEventListener("error", event => event.currentTarget.remove());
+    card.innerHTML = `<button type="button" class="lm-card-open" data-lm-open="${escape(id)}"><span class="lm-card-preview">${preview ? "" : icons.folder}</span><span class="lm-card-copy"><strong title="${escape(title(item))}">${escape(title(item))}</strong><small title="${escape(item.filename)}"></small></span></button><span class="lm-card-controls"><button class="lm-card-star" type="button" data-lm-star="${escape(id)}">${icons.star}</button><button class="lm-card-add" type="button" data-lm-add="${escape(id)}"></button></span><span class="lm-card-select" aria-hidden="true"></span><span class="lm-card-badge"></span>`;
+    if(preview)loadCardPreview(card,preview,currentState().previewRetryGeneration);
     updateCard(card,item); return card;
+  }
+  function loadCardPreview(card,source,generation,{retry=false}={}) {
+    const image=document.createElement("img"),attempt={image,source,generation,phase:"loading"};
+    card._previewAttempt=attempt;image.loading="lazy";image.decoding="async";image.alt="";
+    image.addEventListener("load",()=>{if(card._previewAttempt===attempt&&attempt.phase==="loading"&&image.isConnected)attempt.phase="loaded";});
+    image.addEventListener("error",()=>{
+      if(card._previewAttempt!==attempt||attempt.phase!=="loading"||!card.isConnected)return;
+      attempt.phase="failed";image.remove();
+      // A request already in flight may fail after the refresh response arrived.
+      retryCardPreview(card);
+    });
+    const url=new URL(source);
+    if(retry)url.searchParams.set("_studio_preview_retry",`${previewRetrySession}-${generation}`);
+    image.src=retry?url.href:source;
+    card.querySelector(".lm-card-preview").append(image);
+  }
+  function retryCardPreview(card,state=currentState()) {
+    const attempt=card._previewAttempt;
+    if(!attempt||attempt.phase!=="failed"||attempt.generation>=state.previewRetryGeneration)return;
+    if(!card.isConnected||card.parentElement!==ui.loraCatalog||state.loading||state.offline||state.error)return;
+    if(state.profile!==host.getProfile()||state.resultKey!==JSON.stringify(controller.query()))return;
+    // Only failed images consume a completed refresh; successful images and
+    // their cards remain intact, and another failure cannot loop in this generation.
+    loadCardPreview(card,attempt.source,state.previewRetryGeneration,{retry:true});
   }
   function updateCard(card,item) {
     const selected=currentState().selected.has(identity(item)),added=configured(item),allowed=usable(item);

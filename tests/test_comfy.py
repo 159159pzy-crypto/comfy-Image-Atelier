@@ -2,10 +2,12 @@ import asyncio
 import sys
 import unittest
 from collections import Counter
+from io import BytesIO
 from pathlib import Path
 
 from aiohttp import web
 from aiohttp.test_utils import TestServer
+from PIL import Image
 
 
 APP_DIR = Path(__file__).resolve().parents[1]
@@ -129,6 +131,8 @@ class MemoryReleaseTests(unittest.IsolatedAsyncioTestCase):
 class LoraPreviewTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         app = web.Application()
+        self.preview_body = self.image_bytes("WEBP")
+        self.preview_content_type = "image/webp"
 
         async def object_info(request):
             return web.json_response(
@@ -155,11 +159,16 @@ class LoraPreviewTests(unittest.IsolatedAsyncioTestCase):
             )
 
         async def preview(request):
-            return web.Response(
-                body=b"webp",
-                content_type="image/webp",
-                headers={"Cache-Control": "private, max-age=90"},
-            )
+            headers = {"Cache-Control": "private, max-age=90"}
+            if self.preview_content_type is not None:
+                headers["Content-Type"] = self.preview_content_type
+            return web.Response(body=self.preview_body, headers=headers)
+
+        async def preview_headers(request, response):
+            if request.path == "/api/lm/previews" and self.preview_content_type is None:
+                response.headers.pop("Content-Type", None)
+
+        app.on_response_prepare.append(preview_headers)
 
         async def roots(request):
             return web.json_response({"success": True, "roots": ["F:/comfyui/models/loras"]})
@@ -172,6 +181,12 @@ class LoraPreviewTests(unittest.IsolatedAsyncioTestCase):
         await self.server.start_server()
         self.client = ComfyClient(f"http://127.0.0.1:{self.server.port}")
 
+    @staticmethod
+    def image_bytes(image_format):
+        output = BytesIO()
+        Image.new("RGB", (4, 4), (30, 60, 90)).save(output, format=image_format)
+        return output.getvalue()
+
     async def asyncTearDown(self):
         await self.client.close()
         await self.server.close()
@@ -180,7 +195,7 @@ class LoraPreviewTests(unittest.IsolatedAsyncioTestCase):
         body, content_type, cache_control = await self.client.lora_preview(
             "风格/one.safetensors"
         )
-        self.assertEqual(body, b"webp")
+        self.assertEqual(body, self.preview_body)
         self.assertEqual(content_type, "image/webp")
         self.assertEqual(cache_control, "private, max-age=90")
 
@@ -188,6 +203,58 @@ class LoraPreviewTests(unittest.IsolatedAsyncioTestCase):
             await self.client.lora_preview("../one.safetensors")
         with self.assertRaises(KeyError):
             await self.client.lora_preview("missing.safetensors")
+
+    async def test_generic_or_missing_content_type_uses_real_raster_format(self):
+        for image_format, expected_type in (
+            ("PNG", "image/png"), ("JPEG", "image/jpeg"), ("WEBP", "image/webp"),
+            ("GIF", "image/gif"), ("AVIF", "image/avif"),
+        ):
+            self.preview_body = self.image_bytes(image_format)
+            for content_type in (None, "", "application/octet-stream", "Application/Octet-Stream; charset=binary"):
+                with self.subTest(image_format=image_format, content_type=content_type):
+                    self.preview_content_type = content_type
+                    body, actual_type, cache_control = await self.client.lora_preview("风格/one.safetensors")
+                    self.assertEqual(body, self.preview_body)
+                    self.assertEqual(actual_type, expected_type)
+                    self.assertEqual(cache_control, "private, max-age=90")
+
+    async def test_generic_content_type_rejects_unknown_active_and_broken_content(self):
+        self.preview_content_type = "application/octet-stream"
+        for body in (
+            b"", b"unknown data", b"<html><script>alert(1)</script></html>",
+            b'<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+            b"RIFF\x08\x00\x00\x00WEBPVP8 ", self.image_bytes("PNG")[:-15],
+        ):
+            with self.subTest(body=body[:20]):
+                self.preview_body = body
+                with self.assertRaisesRegex(ComfyError, "LoRA 预览格式不支持"):
+                    await self.client.lora_preview_asset("/api/lm/previews?path=one")
+
+    async def test_explicit_supported_types_keep_existing_passthrough_behavior(self):
+        self.preview_body = b"existing preview body"
+        for content_type in (
+            "image/png", "image/jpeg", "image/webp", "image/gif", "image/avif",
+            "video/mp4", "video/webm", "image/webp; charset=binary",
+        ):
+            with self.subTest(content_type=content_type):
+                self.preview_content_type = content_type
+                body, actual_type, cache_control = await self.client.lora_preview_asset("/api/lm/previews?path=one")
+                self.assertEqual((body, actual_type, cache_control),
+                                 (self.preview_body, content_type, "private, max-age=90"))
+
+    async def test_explicit_unsupported_type_is_not_overridden_by_image_bytes(self):
+        for content_type in ("text/html", "image/svg+xml", "application/json"):
+            with self.subTest(content_type=content_type):
+                self.preview_content_type = content_type
+                with self.assertRaisesRegex(ComfyError, "LoRA 预览格式不支持"):
+                    await self.client.lora_preview_asset("/api/lm/previews?path=one")
+
+    async def test_preview_path_and_missing_asset_rules_are_unchanged(self):
+        for preview in ("https://example.invalid/preview", "//example.invalid/preview", "relative/preview"):
+            with self.subTest(preview=preview), self.assertRaisesRegex(ComfyError, "地址无效"):
+                await self.client.lora_preview_asset(preview)
+        with self.assertRaises(KeyError):
+            await self.client.lora_preview_asset("/missing-preview")
 
 
 class FakeInventoryClient(ComfyClient):

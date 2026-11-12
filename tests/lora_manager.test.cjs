@@ -182,6 +182,56 @@ test('server-side offline snapshots remain browseable but never imply writable o
   assert.equal(h.controller.state.known.has('cached'),false);
 });
 
+test('only completed online refreshes give failed covers another retry generation', async () => {
+  const h = harness();
+  let loading = h.controller.load(); h.pending[0].resolve(page(['one'])); await loading;
+  assert.equal(h.controller.state.previewRetryGeneration, 0);
+  h.controller.toggle('one'); h.controller.clearSelection();
+  h.controller.replace({id: 'one', filename: 'one.safetensors', favorite: true});
+  assert.equal(h.controller.state.previewRetryGeneration, 0, 'ordinary renders must not authorize image retries');
+
+  loading = h.controller.load({refresh: true});
+  assert.equal(h.controller.state.previewRetryGeneration, 0, 'wait for the inventory response');
+  h.pending[1].resolve(page(['one'])); assert.equal(await loading, true);
+  assert.equal(h.controller.state.previewRetryGeneration, 1);
+
+  loading = h.controller.load(); h.pending[2].resolve(page(['one'])); await loading;
+  assert.equal(h.controller.state.previewRetryGeneration, 1, 'ordinary reads do not retry failed covers');
+  loading = h.controller.load({refresh: true}); h.pending[3].resolve(page(['one'], {writable: false})); await loading;
+  assert.equal(h.controller.state.previewRetryGeneration, 2, 'local metadata write restrictions do not prevent online image recovery');
+});
+
+test('offline snapshots and failed refreshes do not authorize cover retries', async () => {
+  const h = harness();
+  let loading = h.controller.load({refresh: true}); h.pending[0].resolve(page(['one'])); await loading;
+  loading = h.controller.load({refresh: true}); h.pending[1].reject(new Error('plugin offline')); await loading;
+  assert.equal(h.controller.state.previewRetryGeneration, 1);
+  assert.equal(h.controller.state.cached, true);
+  loading = h.controller.load({refresh: true});
+  h.pending[2].resolve(page(['one'], {offline: true, cached: true, writable: false, error: 'plugin offline'}));
+  assert.equal(await loading, false);
+  assert.equal(h.controller.state.previewRetryGeneration, 1);
+});
+
+test('obsolete refresh responses never grant another cover retry', async t => {
+  for (const invalidation of ['cancel', 'query', 'model', 'newer response']) {
+    await t.test(invalidation, async () => {
+      const h = harness();
+      let loading = h.controller.load({refresh: true}); h.pending[0].resolve(page(['one'])); await loading;
+      const stale = h.controller.load({refresh: true});
+      if (invalidation === 'cancel') h.controller.cancel();
+      if (invalidation === 'query') h.controller.state.q = 'changed';
+      if (invalidation === 'model') h.profile('krea2');
+      if (invalidation === 'newer response') {
+        loading = h.controller.load({refresh: true}); h.pending[2].resolve(page(['newer'])); await loading;
+      }
+      const generation = h.controller.state.previewRetryGeneration;
+      h.pending[1].resolve(page(['stale'])); assert.equal(await stale, false);
+      assert.equal(h.controller.state.previewRetryGeneration, generation);
+    });
+  }
+});
+
 test('a successful item edit updates the local offline cache rather than restoring superseded metadata', async () => {
   const h=harness();let loading=h.controller.load();h.pending[0].resolve(page(['one']));await loading;
   h.controller.replace({id:'one',filename:'one.safetensors',tags:['saved']});
