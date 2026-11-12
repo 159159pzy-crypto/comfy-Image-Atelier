@@ -170,7 +170,7 @@ class ReverseTests(unittest.IsolatedAsyncioTestCase):
         second = await self.create(asset, model_profile="krea2")
         self.assertEqual(second["status"], "queued")
         self.comfy.vision_templates["vision_custom"]["content"] = "Changed template"
-        local = await self.create(await self.upload("local prompt\nSteps: 1, Seed: 0"))
+        local = await self.create(await self.upload("local prompt\nSteps: 1, Seed: 0"), method="metadata")
         self.assertEqual(local["status"], "completed")
         self.assertEqual(self.manager.state["id"], first["id"])
         self.comfy.block.set()
@@ -346,15 +346,66 @@ class ReverseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.comfy.uploads, [])
         self.assertFalse(self.manager.active())
 
-    async def test_metadata_precedes_each_method_and_invalid_engine_settings(self):
+    async def test_explicit_metadata_ignores_unrelated_engine_settings(self):
         asset = await self.upload("original flower\nSteps: 4, Seed: 0")
-        with patch.object(self.comfy, "_json", side_effect=AssertionError("metadata takes priority")):
-            for method in ("metadata", "vision", "tagger"):
-                job = await self.create(asset, method=method, seed="not a valid seed", tagger={"model": "missing"})
-                self.assertEqual(job["result"]["source"], "metadata")
-                self.assertEqual(job["result"]["method"], "metadata")
-                self.assertEqual(job["result"]["outcome"], "found")
+        with patch.object(self.comfy, "_json", side_effect=AssertionError("metadata must stay local")):
+            job = await self.create(asset, method="metadata", seed="not a valid seed", tagger={"model": "missing"})
+        self.assertEqual(job["result"]["source"], "metadata")
+        self.assertEqual(job["result"]["method"], "metadata")
+        self.assertEqual(job["result"]["outcome"], "found")
         self.assertEqual(self.comfy.submissions, [])
+
+    async def test_metadata_image_runs_each_selected_model_and_keeps_original_metadata(self):
+        asset = await self.upload("original flower\nNegative prompt: blurry\nSteps: 4, Seed: 0")
+        local_config = self.install_fake_tagger()
+        original = await self.create(asset, method="metadata")
+        for profile in ("anima", "krea2"):
+            for method, source, node in (("vision", "ai", "ImageCaptionNode"), ("tagger", "tagger", "WDTimmTagger")):
+                with self.subTest(profile=profile, method=method):
+                    before = len(self.comfy.submissions)
+                    config = local_config if method == "tagger" else {"seed": "77"}
+                    job = await self.create(asset, model_profile=profile, **config)
+                    await self.manager.wait()
+                    saved = await self.manager.prompt_jobs.get(job["id"])
+                    self.assertEqual(saved["status"], "completed", saved["error"])
+                    self.assertEqual(saved["settings"]["method"], method)
+                    self.assertEqual(saved["result"]["source"], source)
+                    self.assertEqual(saved["result"]["method"], method)
+                    self.assertNotEqual(saved["result"]["text"], "original flower")
+                    self.assertEqual(saved["result"]["negative"], "")
+                    self.assertEqual(saved["result"]["parameters"], {})
+                    self.assertEqual(len(self.comfy.submissions), before + 1)
+                    graph = self.comfy.submissions[-1]["prompt"]
+                    self.assertEqual({item["class_type"] for item in graph.values()}, {"LoadImage", node, "PreviewAny"})
+                    if method == "vision":
+                        self.assertEqual(saved["result"]["recognition"]["seed"], "77")
+                    else:
+                        self.assertEqual(saved["result"]["recognition"], {"method": "tagger", **local_config["tagger"]})
+        with patch.object(self.comfy, "_json", side_effect=AssertionError("metadata must stay local")):
+            extracted = await self.create(asset, method="metadata")
+        self.assertEqual(extracted["result"], original["result"])
+        restored = await (await self.client.get(f"/api/prompt-images/{asset['id']}")).json()
+        self.assertEqual(restored["metadata"], asset["metadata"])
+        self.assertEqual((await self.app[HISTORY_KEY].list_images())["total"], 0)
+
+    async def test_metadata_image_does_not_bypass_selected_model_validation(self):
+        asset = await self.upload("original flower\nSteps: 4, Seed: 0")
+        for overrides in ({"seed": "invalid"}, {"service_id": "missing"}, {"model_name": "missing"},
+                          {"template_id": "missing"}, {"method": "tagger", "tagger": {"general_threshold": 2}}):
+            with self.subTest(overrides=overrides):
+                response = await self.client.post("/api/prompt-jobs", json=self.request(asset["id"], **overrides))
+                self.assertEqual(response.status, 400, await response.text())
+        self.comfy.vision_available = False
+        response = await self.client.post("/api/prompt-jobs", json=self.request(asset["id"]))
+        self.assertEqual(response.status, 400, await response.text())
+        with patch.object(self.manager.prompt_tagger, "_nodes", return_value=["available-local"]):
+            response = await self.client.post("/api/prompt-jobs", json=self.request(
+                asset["id"], method="tagger", tagger={"model": "missing"}))
+        self.assertEqual(response.status, 400, await response.text())
+        self.assertIn("所选本地打标模型已不可用", (await response.json())["error"])
+        self.assertEqual(self.comfy.submissions, [])
+        self.assertEqual(self.comfy.uploads, [])
+        self.assertEqual((await self.client.get(asset["image_url"])).status, 200)
 
     async def test_fixed_and_random_visual_seeds_are_frozen_strings(self):
         asset = await self.upload()
@@ -378,12 +429,17 @@ class ReverseTests(unittest.IsolatedAsyncioTestCase):
         self.comfy.block = asyncio.Event()
         await self.create(asset)
         await self.submitted()
-        for method in ("vision", "tagger"):
-            response = await self.client.post("/api/prompt-jobs", json=self.request(asset["id"], method=method))
-            self.assertEqual(response.status, 409)
+        metadata_asset = await self.upload("original flower\nSteps: 4, Seed: 0")
+        for image in (asset, metadata_asset):
+            for method in ("vision", "tagger"):
+                response = await self.client.post("/api/prompt-jobs", json=self.request(image["id"], method=method))
+                self.assertEqual(response.status, 409)
         inspected = await self.create(asset, method="metadata")
         self.assertEqual(inspected["status"], "completed")
         self.assertEqual(inspected["result"]["outcome"], "no_metadata")
+        extracted = await self.create(metadata_asset, method="metadata")
+        self.assertEqual(extracted["status"], "completed")
+        self.assertEqual(extracted["result"]["outcome"], "found")
         other = await self.create(asset, model_profile="krea2")
         self.assertEqual(other["status"], "queued")
         self.comfy.block.set()

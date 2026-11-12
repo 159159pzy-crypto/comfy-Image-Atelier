@@ -72,6 +72,83 @@ test('metadata upload extracts automatically without AI configuration and keeps 
   assert.equal(ctx.singleWorkbenchState.single.input_image_id, 'reference-untouched'); assert.equal(ctx.singleWorkbenchState.generationMode, 'img2img');
 });
 
+test('metadata images run the selected models and preserve all three results across profiles and reloads', async () => {
+  const ui = setup(); await tick();
+  const { ctx, calls, elements } = ui;
+  const results = {
+    metadata: metadata(),
+    vision: metadata({ source: 'ai', text: 'visual description', negative: '', parameters: {} }),
+    tagger: metadata({ source: 'tagger', text: 'forest, tree', negative: '', parameters: {} }),
+  };
+  ctx.request = async (url, init) => {
+    calls.push({ url, init });
+    const payload = JSON.parse(init.body);
+    return { id: `${payload.model_profile}-${payload.method}`, status: 'completed', result: results[payload.method] };
+  };
+  for (const profile of ['anima', 'krea2']) {
+    ctx.profile = profile;
+    await ctx.promptReverseAcceptInput([file()]);
+    const draft = ctx.promptReverseDraft();
+    assert.equal(draft.method, 'metadata'); assert.equal(draft.result, results.metadata.text);
+    for (const method of ['vision', 'tagger']) {
+      const before = calls.filter(item => item.url === '/api/prompt-jobs').length;
+      ctx.promptReverseSetMethod(method);
+      assert.equal(calls.filter(item => item.url === '/api/prompt-jobs').length, before);
+      assert.equal(elements.reverseStart.disabled, false);
+      await ctx.promptReverseStart();
+      assert.equal(draft.method, method); assert.equal(draft.jobMethod, method);
+      assert.equal(draft.source, results[method].source); assert.equal(draft.result, results[method].text);
+      assert.equal(draft.negative, ''); assert.deepEqual(plain(draft.parameters), {});
+    }
+    ctx.promptReverseSetMethod('metadata');
+    assert.equal(draft.result, results.metadata.text); assert.equal(draft.negative, 'blur');
+    assert.deepEqual(plain(draft.parameters), { Seed: '123' });
+  }
+  const posts = calls.filter(item => item.url === '/api/prompt-jobs').map(item => JSON.parse(item.init.body));
+  assert.deepEqual(posts.map(item => item.method), ['metadata', 'vision', 'tagger', 'metadata', 'vision', 'tagger']);
+  assert.deepEqual(posts.map(item => item.model_profile), ['anima', 'anima', 'anima', 'krea2', 'krea2', 'krea2']);
+  assert.equal(posts[1].service_id, 'service'); assert.equal(posts[1].model_name, 'vision'); assert.equal(posts[1].seed, 'random');
+  assert.equal(posts[2].tagger.model, 'pixai-tagger-v0.9-timm');
+  assert.equal(elements.single_positive_prompt.value, 'current body'); assert.equal(elements.singleNegative.value, 'current negative');
+  assert.equal(ctx.singleWorkbenchState.single.input_image_id, 'reference-untouched');
+  const restored = setup({ saved: JSON.parse(ui.storage.get('anima-studio:prompt-reverse:v2')) });
+  await tick(); await tick();
+  for (const profile of ['anima', 'krea2']) {
+    restored.ctx.profile = profile;
+    for (const method of ['metadata', 'vision', 'tagger']) {
+      restored.ctx.promptReverseSetMethod(method);
+      assert.equal(restored.ctx.promptReverseDraft().result, results[method].text);
+      assert.equal(restored.ctx.promptReverseDraft().source, results[method].source);
+      assert.equal(restored.elements.reverseReplace.disabled, false);
+    }
+  }
+  assert.equal(restored.calls.filter(item => item.init?.method === 'POST').length, 0);
+});
+
+test('unselected metadata candidates do not block either model or lose the metadata choices', async () => {
+  for (const method of ['vision', 'tagger']) {
+    const { ctx, configure, elements } = setup(); await tick();
+    const details = metadata({ text: '', candidates: [
+      { id: 'first', label: 'First', text: 'first prompt' },
+      { id: 'second', label: 'Second', text: 'second prompt' },
+    ] });
+    const draft = configure(asset('multiple', details));
+    ctx.promptReverseApplyResult(draft, details); ctx.promptReverseRender();
+    assert.equal(elements.reverseReplace.disabled, true);
+    let submitted;
+    ctx.request = async (_url, init) => {
+      submitted = JSON.parse(init.body);
+      return { id: 'model-job', status: 'completed', result: { source: method === 'vision' ? 'ai' : 'tagger', text: 'new recognition' } };
+    };
+    ctx.promptReverseSetMethod(method); await ctx.promptReverseStart();
+    assert.equal(submitted.method, method); assert.equal(draft.method, method);
+    assert.equal(draft.result, 'new recognition'); assert.equal(elements.reverseReplace.disabled, false);
+    ctx.promptReverseSetMethod('metadata');
+    assert.equal(draft.result, ''); assert.equal(draft.candidate, '');
+    assert.deepEqual(plain(draft.candidates), details.candidates); assert.equal(elements.reverseReplace.disabled, true);
+  }
+});
+
 test('image without metadata waits for explicit method and start, then polls exactly one model job', async () => {
   const { ctx, calls, timers } = setup({ fetch: async () => response(asset('plain', { source: 'none' })) });
   await tick(); let reads = 0;
@@ -105,6 +182,10 @@ test('unavailable vision bridge blocks AI with its reason while metadata remains
   assert.equal(ctx.promptReverseIssue(draft), '视觉节点不兼容，请更新插件');
   await ctx.promptReverseStart(); assert.equal(calls.filter(item => item.init).length, 0);
   draft.image = asset(); draft.imageId = draft.image.id;
+  ctx.promptReverseRender(); assert.equal(elements.reverseStart.disabled, true);
+  await ctx.promptReverseStart(); assert.equal(calls.filter(item => item.init).length, 0);
+  assert.equal(draft.method, 'vision');
+  ctx.promptReverseSetMethod('metadata');
   ctx.promptReverseRender(); assert.equal(elements.reverseStart.disabled, false);
   await ctx.promptReverseStart(); assert.equal(draft.result, 'a quiet forest');
 });
@@ -300,7 +381,7 @@ test('tagger runs without vision configuration using a frozen exact local payloa
   assert.equal(draft.result, ''); assert.match(draft.status, /未覆盖/);
 });
 
-test('only ready local models can execute, metadata bypasses missing models', async () => {
+test('only ready local models can execute even with metadata, explicit metadata extraction remains available', async () => {
   const { ctx, state, configure, elements, calls } = setup(); await tick(); const draft = configure(asset('plain', { source: 'none' }));
   ctx.promptReverseSetMethod('tagger');
   for (const status of ['missing', 'incomplete', 'invalid', 'unverifiable']) {
@@ -310,26 +391,35 @@ test('only ready local models can execute, metadata bypasses missing models', as
   }
   assert.equal(calls.filter(item => item.init).length, 0);
   draft.image = asset(); draft.imageId = draft.image.id;
+  ctx.promptReverseRender(); assert.equal(elements.reverseStart.disabled, true);
+  await ctx.promptReverseStart(); assert.equal(calls.filter(item => item.init).length, 0);
+  assert.equal(draft.method, 'tagger');
+  ctx.promptReverseSetMethod('metadata');
   await ctx.promptReverseStart(); assert.equal(draft.method, 'metadata'); assert.equal(draft.source, 'metadata');
-  assert.equal(JSON.parse(calls.at(-1).init.body).method, 'tagger');
+  assert.equal(JSON.parse(calls.at(-1).init.body).method, 'metadata');
 });
 
-test('seed strings and local thresholds reject invalid values without model calls', async () => {
-  const { ctx, configure, elements, calls } = setup(); await tick(); const draft = configure(asset('plain', { source: 'none' }));
-  for (const seed of ['', '-1', '0.1', '18446744073709551616', '999999999999999999999', '1e3']) {
-    ctx.promptReverseEditSeed(seed); assert.equal(elements.reverseStart.disabled, true); await ctx.promptReverseStart();
-  }
-  for (const seed of ['0', '18446744073709551615']) { ctx.promptReverseEditSeed(seed); assert.equal(elements.reverseStart.disabled, false); assert.equal(draft.seed, seed); }
-  ctx.promptReverseEditSeed('random', true); assert.equal(draft.seed, 'random');
-  ctx.promptReverseEditSeed('fixed', true); assert.equal(draft.seed, '18446744073709551615');
-  ctx.promptReverseSetMethod('tagger');
-  for (const threshold of ['', '-0.1', '1.1', 'NaN']) { ctx.promptReverseEditTagger('general_threshold', threshold); assert.equal(elements.reverseStart.disabled, true); await ctx.promptReverseStart(); }
-  for (const threshold of ['0', '1']) { ctx.promptReverseEditTagger('general_threshold', threshold); assert.equal(elements.reverseStart.disabled, false); }
-  assert.equal(calls.filter(item => item.init).length, 0);
-});
+for (const hasMetadata of [false, true]) {
+  test(`seed strings and local thresholds reject invalid values without model calls (metadata: ${hasMetadata})`, async () => {
+    const { ctx, configure, elements, calls } = setup(); await tick();
+    const draft = configure(asset('image', hasMetadata ? metadata() : { source: 'none' }));
+    ctx.promptReverseSetMethod('vision');
+    for (const seed of ['', '-1', '0.1', '18446744073709551616', '999999999999999999999', '1e3']) {
+      ctx.promptReverseEditSeed(seed); assert.equal(elements.reverseStart.disabled, true); await ctx.promptReverseStart();
+    }
+    for (const seed of ['0', '18446744073709551615']) { ctx.promptReverseEditSeed(seed); assert.equal(elements.reverseStart.disabled, false); assert.equal(draft.seed, seed); }
+    ctx.promptReverseEditSeed('random', true); assert.equal(draft.seed, 'random');
+    ctx.promptReverseEditSeed('fixed', true); assert.equal(draft.seed, '18446744073709551615');
+    ctx.promptReverseSetMethod('tagger');
+    for (const threshold of ['', '-0.1', '1.1', 'NaN']) { ctx.promptReverseEditTagger('general_threshold', threshold); assert.equal(elements.reverseStart.disabled, true); await ctx.promptReverseStart(); }
+    for (const threshold of ['0', '1']) { ctx.promptReverseEditTagger('general_threshold', threshold); assert.equal(elements.reverseStart.disabled, false); }
+    assert.equal(calls.filter(item => item.init).length, 0);
+  });
+}
 
 test('one task per profile and switched-away completion fills only its original method', async () => {
-  const { ctx, configure, calls, elements } = setup(); await tick(); const draft = configure(asset('plain', { source: 'none' }));
+  const { ctx, configure, calls, elements } = setup(); await tick(); const draft = configure(asset());
+  ctx.promptReverseSetMethod('vision');
   const gate = deferred(); ctx.request = async (url, init) => { calls.push({ url, init }); return init ? { id: 'vision-job', status: 'queued' } : gate.promise; };
   const pending = ctx.promptReverseStart(); await tick();
   ctx.promptReverseSetMethod('tagger'); ctx.promptReverseEdit('result', 'my local draft');

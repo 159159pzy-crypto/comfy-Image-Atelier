@@ -593,7 +593,7 @@ class BatchManager:
             metadata = asset["metadata"]
             method = payload.get("method", "metadata")
             has_metadata = metadata.get("source") == "metadata" and bool(metadata.get("candidates"))
-            if has_metadata or method == "metadata":
+            if method == "metadata":
                 # Local extraction is independent of both ComfyUI and its queue.
                 settings = {"kind": "reverse", "workbench": "single", "model_profile": profile,
                             "image_id": asset["id"], "source": "metadata", "method": "metadata"}
