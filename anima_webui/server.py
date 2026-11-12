@@ -2158,6 +2158,7 @@ def create_app(
     app.router.add_static("/static/", root / "static", show_index=False)
 
     async def start_resources(_: web.Application) -> None:
+        await thumbnails.start()
         recovery_failures = await pool_lifecycle.recover_pending()
         for profile, failure in recovery_failures.items():
             logger.warning("%s 收藏一致性恢复尚未完成: %s", profile, failure["error"])

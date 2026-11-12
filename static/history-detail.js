@@ -120,7 +120,7 @@ function removeHistoryViewRecord(view, record) {
   view.items = view.items.filter(item => String(item.id) !== key);
   for (const page of cached) page.items = (page.items || []).filter(item => String(item.id) !== key);
   for (const node of [...(elements?.gallery?.children || [])]) if (node.dataset.recordId === key) {
-    if (typeof card !== "undefined") card.visibilityObserver?.unobserve(node);
+    if (typeof ArtworkThumbnails !== "undefined") ArtworkThumbnails.remove(node);
     node.remove();
   }
   if (Number.isFinite(total) && (present || matches)) {

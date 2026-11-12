@@ -780,7 +780,10 @@ class ComfyClient:
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
-    async def image_bytes(self, image: dict[str, Any]) -> tuple[bytes, str]:
+    async def image_bytes(self, image: dict[str, Any], *, max_bytes: int | None = None) -> tuple[bytes, str]:
+        """Read an original, optionally bounding the thumbnail source while downloading."""
+        if max_bytes is not None and max_bytes < 1:
+            raise ValueError("max_bytes must be positive")
         query = urlencode(
             {
                 "filename": image["filename"],
@@ -793,7 +796,18 @@ class ComfyClient:
             async with session.get(f"{self.base_url}/view?{query}") as response:
                 if response.status >= 400:
                     raise ComfyError(f"读取图片失败: HTTP {response.status}")
-                return await response.read(), response.headers.get("Content-Type", "image/png")
+                if max_bytes is None:
+                    body = await response.read()
+                else:
+                    if response.content_length is not None and response.content_length > max_bytes:
+                        raise ComfyError("历史图片超过缩略图处理大小限制")
+                    collected = bytearray()
+                    async for chunk in response.content.iter_chunked(64 * 1024):
+                        if len(collected) + len(chunk) > max_bytes:
+                            raise ComfyError("历史图片超过缩略图处理大小限制")
+                        collected.extend(chunk)
+                    body = bytes(collected)
+                return body, response.headers.get("Content-Type", "image/png")
         except (aiohttp.ClientError, asyncio.TimeoutError) as error:
             raise ComfyError(f"读取图片失败: {error}") from error
 

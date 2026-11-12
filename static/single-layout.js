@@ -397,6 +397,7 @@ function singleWorkbenchLayout() {
   if (typeof sharedParameterVisibility === "function") sharedParameterVisibility();
   if (typeof singleWorkbenchRenderZeroNegative === "function") singleWorkbenchRenderZeroNegative();
   document.getElementById("randomArchive").hidden = active;
+  if (typeof ArtworkThumbnails !== "undefined") ArtworkThumbnails.setActive(!active);
   document.querySelector('[data-mobile-view="gallery"]').textContent = active ? "预览" : "作品库";
   if (active && !state.mobile.matches) {
     const commandSlot = document.getElementById("singleCommandSlot"), previewRail = document.getElementById("singlePreviewRail");

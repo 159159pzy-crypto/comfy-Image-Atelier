@@ -150,7 +150,7 @@ class FakeComfy:
             "prompt": [0, prompt_id, {}, {"extra_pnginfo": {"anima_prompt": {"42": {"positive": "generated"}}}}],
         }
 
-    async def image_bytes(self, image):
+    async def image_bytes(self, image, *, max_bytes=None):
         return b"png", "image/png"
 
     async def close(self):

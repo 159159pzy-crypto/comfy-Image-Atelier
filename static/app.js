@@ -2542,35 +2542,21 @@ function card(record, index, historyView = null) {
   button.className = "image-card-open";
   button.dataset.recordId = String(record.id);
   button.setAttribute("aria-label", `查看 ${record.filename || "生成结果"}`);
-  button.innerHTML = `<img loading="lazy" decoding="async" fetchpriority="low" src="/api/images/${record.id}/thumbnail" alt="Anima 生成结果"><span class="image-failure" hidden>图片加载失败</span><div class="card-copy"><strong>${escapeHtml(record.filename)}</strong><span>#${record.sequence} · Seed ${record.sample_seed}</span></div>`;
+  button.innerHTML = `<img decoding="async" data-thumbnail-url="/api/images/${record.id}/thumbnail" alt="Anima 生成结果"><span class="image-failure" hidden>图片加载失败</span><div class="card-copy"><strong>${escapeHtml(record.filename)}</strong><span>#${record.sequence} · Seed ${record.sample_seed}</span></div>`;
   button.addEventListener("click", () => {
     if (typeof artworkActivateCard === "function" && artworkActivateCard(article.record)) return;
     openDetail(article.record, { historyView: article.historyView });
   });
-  const image = button.querySelector("img");
-  const markLoaded = () => {
-    article.classList.remove("is-loading");
-    image.classList.add("image-loaded");
-  };
-  image.addEventListener("load", markLoaded, { once: true });
-  const markFailed = (event) => {
-    article.classList.remove("is-loading");
-    event?.target?.classList.add("image-failed");
-    button.querySelector(".image-failure").hidden = false;
-  };
-  image.addEventListener("error", markFailed, { once: true });
-  if (image.complete) {
-    if (image.naturalWidth) markLoaded();
-    else markFailed({ target: image });
-  }
   article.append(button);
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.className = "image-retry";
+  retry.textContent = "重试";
+  retry.setAttribute("aria-label", "重新加载缩略图");
+  retry.hidden = true;
+  article.append(retry);
+  ArtworkThumbnails.attach(article, button.querySelector("img"), retry);
   if (typeof decorateArtworkCard === "function") decorateArtworkCard(article, record, button);
-  if (typeof IntersectionObserver !== "undefined") {
-    card.visibilityObserver ||= new IntersectionObserver(entries => {
-      for (const entry of entries) entry.target.classList.toggle("is-offscreen", !entry.isIntersecting);
-    }, { rootMargin: "100px" });
-    card.visibilityObserver.observe(article);
-  }
   return article;
 }
 let historyRequest = 0;
@@ -2627,9 +2613,10 @@ function renderHistoryPage(data, historyView = null) {
     }
   });
   for (const node of existing.values()) if (!retained.has(node)) {
-    card.visibilityObserver?.unobserve(node);
+    ArtworkThumbnails.remove(node);
     node.remove();
   }
+  ArtworkThumbnails.refresh();
   if (previousPage !== view.page && typeof StudioMotion !== "undefined") {
     StudioMotion.spring(elements.gallery, "page", { opacity: 1 }, {
       initial: { opacity: .4 }, response: .2,

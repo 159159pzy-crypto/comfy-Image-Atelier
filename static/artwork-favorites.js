@@ -81,7 +81,7 @@ function renderArtworkDetail(record) {
 function artworkRenderCards() {
   for (const article of document.querySelectorAll("#gallery .image-card")) {
     if (artworkFavoritesState.missingRecords.has(String(article.record?.id))) {
-      if (typeof card !== "undefined") card.visibilityObserver?.unobserve(article);
+      if (typeof ArtworkThumbnails !== "undefined") ArtworkThumbnails.remove(article);
       article.remove();
     } else if (article.record) decorateArtworkCard(article, article.record);
   }

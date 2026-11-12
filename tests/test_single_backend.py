@@ -68,7 +68,7 @@ class SingleComfy(FakeComfy):
     async def cancel_prompt(self, prompt_id):
         self.cancelled.append(prompt_id)
 
-    async def image_bytes(self, image):
+    async def image_bytes(self, image, *, max_bytes=None):
         return png(), "image/png"
 
 

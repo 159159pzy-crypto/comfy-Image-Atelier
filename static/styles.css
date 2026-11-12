@@ -727,7 +727,10 @@ input:disabled, select:disabled { opacity: .5; cursor: not-allowed; }
 .image-card img { display: block; width: 100%; aspect-ratio: 3 / 4; object-fit: cover; background: var(--surface-muted); border-radius: calc(var(--r-md) - 6px); opacity: .28; transition: transform var(--motion-slow) var(--spring), opacity var(--motion-fast) ease, filter var(--motion-fast) ease; }
 .image-card img.image-loaded { opacity: 1; }
 @media (hover: hover) and (pointer: fine) { .image-card:hover img { transform: scale(1.015); } }
-.image-card img.image-failed { opacity: .16; }
+.image-card img.image-failed { visibility: hidden; }
+.image-retry { position: absolute; z-index: 2; top: calc(50% + 26px); left: 50%; transform: translateX(-50%); padding: 6px 14px; border: 1px solid var(--separator-strong); border-radius: 999px; color: var(--text); background: var(--surface); font: inherit; font-size: 11px; cursor: pointer; }
+.image-retry:hover { background: var(--surface-muted); }
+.image-retry:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .card-copy { padding: 11px 8px 6px; }
 .card-copy strong { display: block; overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 570; }
 .card-copy span { display: block; margin-top: 4px; color: var(--text-tertiary); font-size: 9.5px; font-variant-numeric: tabular-nums; }
