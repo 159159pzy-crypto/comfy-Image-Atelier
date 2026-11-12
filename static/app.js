@@ -6442,7 +6442,7 @@ async function stylePresetWriteCompleted(profile, message) {
     await loadStylePresets();
   }
 }
-async function loadStylePresets() {
+async function loadStylePresets({ refreshManager = true } = {}) {
   const requestedProfile = currentProfile();
   const token = stylePresetReadGate.next();
   if (stylePresetProfile && stylePresetProfile !== requestedProfile) {
@@ -6455,11 +6455,11 @@ async function loadStylePresets() {
     if (!token.current() || requestedProfile !== currentProfile()) return;
     stylePresets = (data.items || []).filter(item => stylePresetItemProfile(item) === requestedProfile);
     renderStylePresets();
-    if (typeof StylePresetManager !== "undefined") StylePresetManager.refresh();
   } catch (error) {
     if (!token.current() || requestedProfile !== currentProfile()) return;
     toast(error.message);
   }
+  if (refreshManager && typeof StylePresetManager !== "undefined") await StylePresetManager.refresh();
 }
 function setPresetFeedback(message = "", type = "error") {
   ui.presetError.textContent = message;
@@ -6516,14 +6516,15 @@ async function createStylePreset() {
   if (ui.savePreset.disabled) return;
   return StylePresetManager.create();
 }
-async function applyStylePreset(item, { isCurrent = () => true } = {}) {
+async function applyStylePreset(item, { isCurrent = () => true, onError } = {}) {
   try {
     if (await singleWorkbenchApplyPreset(item, { isCurrent }) === false) return false;
     schedulePersist();
     toast(`已应用预设：${item.name}`);
     return true;
   } catch (error) {
-    toast(`预设加载失败，当前草稿未更改：${error.message}`);
+    if (onError) { if (isCurrent()) onError(error); }
+    else toast(`预设加载失败，当前草稿未更改：${error.message}`);
     return false;
   }
 }

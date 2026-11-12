@@ -27,6 +27,32 @@ function setup() {
 const item = { id: 'preset-A', model_profile: 'anima', settings: { cfg: 7 } };
 const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
 
+test('library application reports failures in the active surface and ignores stale errors', async () => {
+  const start = app.indexOf('async function applyStylePreset(');
+  const code = app.slice(start, app.indexOf('\nasync function updateStylePreset', start));
+  const notices = [], errors = [], failure = new Error('missing model');
+  const ctx = vm.createContext({ singleWorkbenchApplyPreset: async () => { throw failure; }, schedulePersist() {}, toast: message => notices.push(message) });
+  vm.runInContext(code, ctx);
+  assert.equal(await ctx.applyStylePreset(item, { onError: error => errors.push(error) }), false);
+  assert.deepEqual(errors, [failure]); assert.deepEqual(notices, []);
+  await ctx.applyStylePreset(item, { isCurrent: () => false, onError: error => errors.push(error) });
+  assert.equal(errors.length, 1, 'a closed library must not receive a late failure');
+  await ctx.applyStylePreset(item);
+  assert.match(notices[0], /missing model/, 'the existing homepage retains its toast feedback');
+});
+
+test('homepage refresh can leave manager refresh to its caller without losing its default behavior', async () => {
+  const start = app.indexOf('async function loadStylePresets('), code = app.slice(start, app.indexOf('\nfunction setPresetFeedback', start));
+  let refreshes = 0, failed = false;
+  const ctx = vm.createContext({ currentProfile: () => 'anima', stylePresetReadGate: { next: () => ({ signal: undefined, current: () => true }) },
+    stylePresetProfile: 'anima', stylePresets: [], stylePresetItemProfile: () => 'anima', renderStylePresets() {}, toast() {},
+    request: async () => { if (failed) throw new Error('offline'); return { items: [] }; }, StylePresetManager: { refresh: async () => { refreshes++; } } });
+  vm.runInContext(code, ctx);
+  await ctx.loadStylePresets({ refreshManager: false }); assert.equal(refreshes, 0);
+  await ctx.loadStylePresets(); assert.equal(refreshes, 1);
+  failed = true; await ctx.loadStylePresets({ refreshManager: false }); assert.equal(refreshes, 1);
+});
+
 test('preset application sends complete current settings and commits only the server-resolved result', async () => {
   const h = setup(); const before = plain(h.draft); const task = h.ctx.singleWorkbenchApplyPreset(item);
   assert.equal(h.pending[0].url, '/api/style-presets/preset-A/resolve');
