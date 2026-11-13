@@ -238,6 +238,12 @@ class LoraLibraryService:
         self._inventory_version += 1
         self._last_synced_at = datetime.now(timezone.utc).isoformat()
 
+    @staticmethod
+    def _editable_metadata(raw: dict[str, Any]) -> dict[str, Any]:
+        return {"favorite": raw.get("favorite") is True,
+                "tags": [tag for tag in raw.get("tags", []) if isinstance(tag, str)],
+                "notes": str(raw.get("notes") or ""), "sha256": str(raw.get("sha256") or "").casefold()}
+
     def default_strength(self, filename: str) -> float:
         identity = normalize_lora_path(filename).casefold()
         matches = [item for item in self.store.data["resources"].values()
@@ -247,9 +253,13 @@ class LoraLibraryService:
     async def available_bindings(self) -> dict[str, Any]:
         return await self.client.resource_classifications("loras", refresh=True)
 
-    async def _inventory_index(self, *, refresh: bool = False, allow_cached: bool = False) -> dict[str, dict[str, Any]]:
-        # Still consult the client on every access: it owns the five-second TTL,
-        # explicit refresh and connection checks. Only normalize a new snapshot.
+    async def _inventory_index(self, *, refresh: bool = False, allow_cached: bool = False,
+                               use_snapshot: bool = False) -> dict[str, dict[str, Any]]:
+        if use_snapshot and self._inventory_snapshot is not None:
+            return self._normalized_index()
+        # Ordinary inventory/detail reads retain the client's strict five-second
+        # TTL. Previews and metadata writes may reuse known paths; writes validate
+        # the target separately before saving.
         try:
             inventory = await self.client.resource_classifications("loras", refresh=refresh)
         except ComfyError as error:
@@ -267,7 +277,10 @@ class LoraLibraryService:
                 self._source_inventory = inventory
                 self._source_identity = identity
                 self._inventory_version += 1
-            self._last_synced_at = datetime.now(timezone.utc).isoformat()
+                self._last_synced_at = datetime.now(timezone.utc).isoformat()
+        return self._normalized_index()
+
+    def _normalized_index(self) -> dict[str, dict[str, Any]]:
         key = (self._inventory_version, self.store.data["revision"], getattr(self.trigger_store, "revision", None))
         if key != self._normalized_key or self._normalized_store is not self.store.data:
             items = self._normalize_inventory(self._inventory_snapshot)
@@ -363,8 +376,9 @@ class LoraLibraryService:
     def public(item: dict[str, Any]) -> dict[str, Any]:
         return {key: value for key, value in item.items() if not key.startswith("_")}
 
-    async def item(self, resource_id: str, *, refresh: bool = False, model_profile: str = "all", allow_cached: bool = False) -> dict[str, Any]:
-        result = (await self._inventory_index(refresh=refresh, allow_cached=allow_cached)).get(resource_id)
+    async def item(self, resource_id: str, *, refresh: bool = False, model_profile: str = "all",
+                   allow_cached: bool = False, use_snapshot: bool = False) -> dict[str, Any]:
+        result = (await self._inventory_index(refresh=refresh, allow_cached=allow_cached, use_snapshot=use_snapshot)).get(resource_id)
         if result is None:
             raise KeyError(resource_id)
         return self._current_item(result, model_profile)
@@ -486,7 +500,18 @@ class LoraLibraryService:
         async with self._item_locks.setdefault(resource_id, asyncio.Lock()):
             if resource_id in self._pending_local:
                 raise LoraLibraryPartialError(resource_id, WorkflowError("请先重试完成上次本地整理"))
-            item = await self.item(resource_id, refresh=True)
+            item = await self.item(resource_id, use_snapshot=True)
+            # Metadata writes verify the exact path in ComfyClient. Only local
+            # edits and read/modify/write tag merges need a separate current read.
+            if not updates or "tags" in values and merge_mode != "replace":
+                metadata_reader = getattr(self.client, "lora_metadata", None)
+                if callable(metadata_reader):
+                    current = await metadata_reader(item["file_path"], sha256=item["sha256"])
+                    verified = self._editable_metadata(current)
+                    item.update(verified)
+                    self._cache_verified_metadata(item["file_path"], verified)
+                else:
+                    item = await self.item(resource_id, refresh=True)
             for key in ("groupIds", "tags"):
                 if key in values and merge_mode != "replace":
                     incoming = ids if key == "groupIds" else updates["tags"]
@@ -502,12 +527,13 @@ class LoraLibraryService:
                 local_values["default_strength"] = _strength(values["default_strength"])
             if updates:
                 try:
-                    await self.client.update_lora_metadata(item["file_path"], updates)
+                    current = await self.client.update_lora_metadata(item["file_path"], updates)
                 except ComfyMetadataPendingError as error:
                     self._pending_local[resource_id] = {"item": copy.deepcopy(item), "values": local_values, "metadata": updates}
                     raise LoraLibraryPartialError(resource_id, error, readback_pending=True) from error
-                item.update(updates)
-                self._cache_verified_metadata(item["file_path"], updates)
+                verified = self._editable_metadata(current)
+                item.update(verified)
+                self._cache_verified_metadata(item["file_path"], verified)
             if not {"groupIds", "default_strength"}.intersection(values):
                 return self.public(item)
             def edit(data: dict[str, Any]) -> None:
@@ -865,7 +891,7 @@ def register_lora_routes(app: web.Application, service: LoraLibraryService) -> N
         return web.json_response(value)
 
     async def preview(request: web.Request) -> web.Response:
-        value = await service.item(request.match_info["id"], allow_cached=True)
+        value = await service.item(request.match_info["id"], allow_cached=True, use_snapshot=True)
         if not value.get("_preview"):
             raise KeyError(value["id"])
         content, content_type, cache_control = await service.client.lora_preview_asset(value["_preview"])

@@ -77,48 +77,69 @@
   }
   const createRequestGate = (typeof module !== "undefined" && module.exports
     ? require("./request-state.js") : globalThis.StudioRequestState).createReadGate;
-  function createController({ request, getProfile, getLoras = () => [], onChange = () => {} }) {
+  function createController({ request, getProfile, getLoras = () => [], onChange = () => {}, now = Date.now, cacheTtl = 30000 }) {
     const state = { q: "", scope: "current", folder: "", root: "", recursive: true, collection: "", tag: [], tag_exclude: [], tag_mode: "all", base_model: "", in_configured: "", has_preview: "", bound: "", sort: "name", order: "asc", page: 1,
-      items: [], total: 0, pages: 1, groups: [], facets: {}, selected: new Set(), selectionResources: new Map(), known: new Map(), loading: false, selectionLoading: false, error: "", profile: getProfile(), revision: null, resultKey: "", offline:false,cached:false,writable:true,lastSyncedAt:null,previewRetryGeneration:0 };
+      items: [], total: 0, pages: 1, groups: [], facets: {}, selected: new Set(), selectionResources: new Map(), known: new Map(), pendingMutations: new Map(), loading: false, revalidating: false, revalidationNeeded: false, selectionLoading: false, error: "", profile: getProfile(), revision: null, resultKey: "", offline:false,cached:false,writable:true,lastSyncedAt:null,previewRetryGeneration:0 };
     const gate = createRequestGate(), selectionGate = createRequestGate(), queryCache=new Map();
+    let mutationRevision = 0, viewRevision = 0;
     const query = ({ all = false } = {}) => ({ q: state.q, model_profile: state.scope === "current" ? getProfile() : state.scope, folder: state.folder, root: state.root,
       recursive: state.recursive, collection: state.collection, tag: state.tag, tag_exclude: state.tag_exclude, tag_mode: state.tag_mode,
       in_configured: state.in_configured, ...(state.in_configured === "" ? {} : { configured_filenames: getLoras().map(item => item.filename) }),
       has_preview: state.has_preview, bound: state.bound, base_model: state.base_model, sort: state.sort, order: state.order,
       ...(all ? {} : { page: state.page, limit: 60 }) });
     const selectionKey = () => JSON.stringify(query({ all: true }));
+    const cacheKey = (profile = getProfile(), value = query()) => JSON.stringify([profile, value]);
+    const readCurrent = () => { const revision = mutationRevision; return () => revision === mutationRevision; };
+    const captureView = () => { const revision = viewRevision, profile = getProfile(), current = () => revision === viewRevision && profile === getProfile(); current.profile = profile; return current; };
+    const overlay = item => {
+      const mutation=state.pendingMutations.get(identity(item));
+      return mutation?{...item,...Object.fromEntries(mutation.changedFields.map(field=>[field,mutation.optimistic[field]]))}:item;
+    };
+    function apply(data, key) {
+      state.items = (data.items || []).map(item => copy(overlay(item))); state.total = Number(data.total || 0);
+      state.pages = Math.max(1, Number(data.total_pages || data.pages || 1)); state.page = Number(data.page || state.page);
+      state.groups = copy(data.groups || []); state.facets = copy(data.facets || {}); state.revision = data.revision; state.resultKey = key;
+      state.items.forEach(item => state.known.set(identity(item), item));
+    }
+    function invalidate() { mutationRevision++; for (const entry of queryCache.values()) entry.at = -Infinity; }
     function profileChanged() {
       if (state.profile === getProfile()) return false;
-      gate.cancel(); selectionGate.cancel(); state.profile = getProfile(); state.items = []; state.known.clear(); state.selected.clear();state.selectionResources.clear();
-      state.page = 1; state.selectionLoading = false; state.error = ""; state.offline=false;state.cached=false;state.writable=true;return true;
+      viewRevision++; gate.cancel(); selectionGate.cancel(); state.profile = getProfile(); state.items = []; state.known.clear(); state.selected.clear();state.selectionResources.clear();
+      state.resultKey = ""; state.page = 1; state.loading = false; state.revalidating = false; state.revalidationNeeded=false;state.selectionLoading = false; state.error = ""; state.offline=false;state.cached=false;state.writable=true;return true;
     }
-    async function load({ refresh = false } = {}) {
-      profileChanged(); const token = gate.next(), profile = getProfile(), key = JSON.stringify(query());
-      state.loading = true; state.error = ""; onChange(state);
+    async function load({ refresh = false, revalidate = false } = {}) {
+      profileChanged(); const profile = getProfile(), key = JSON.stringify(query()), entry = queryCache.get(cacheKey());
+      if (entry) {
+        apply(entry.data, key);
+        if (!state.offline) { state.writable = entry.data.writable !== false; state.cached = false; state.error = ""; }
+        if (!refresh && !revalidate && !state.offline && now() - entry.at < cacheTtl) {
+          gate.cancel(); state.loading = false; state.revalidating = false; onChange(state); return true;
+        }
+      }
+      const token = gate.next(), currentRead = readCurrent();
+      state.loading = !entry && state.resultKey !== key; state.revalidating = !state.loading; state.revalidationNeeded=false;state.error = ""; onChange(state);
       try {
         const data = await request(`${API}?${queryString({...query(),...(refresh?{refresh:true}:{})})}`, { signal: token.signal });
         if (!token.current() || profile !== getProfile() || key !== JSON.stringify(query())) return false;
+        if (!currentRead()) { state.revalidationNeeded=true;return false; }
         if(state.offline&&!data.offline)state.known.clear();
         state.offline=data.offline===true;state.cached=data.cached===true;state.writable=data.writable!==false&&!state.offline;state.error=data.error||"";state.lastSyncedAt=data.last_synced_at||(state.offline?state.lastSyncedAt:new Date().toISOString());
-        state.items = data.items || []; state.total = Number(data.total || 0); state.pages = Math.max(1, Number(data.total_pages || data.pages || 1));
-        state.page = Number(data.page || state.page); state.groups = data.groups || []; state.facets = data.facets || {}; state.revision = data.revision;
-        state.resultKey = JSON.stringify(query());
-        state.items.forEach(item => state.known.set(identity(item), item));
-        if(!state.offline){queryCache.set(state.resultKey,copy(data));if(queryCache.size>24)queryCache.delete(queryCache.keys().next().value);}
+        apply(data, key);
+        if(!state.offline){const id=cacheKey();queryCache.delete(id);queryCache.set(id,{data:copy(data),at:state.pendingMutations.size?-Infinity:now(),query:copy(query()),profile});if(queryCache.size>24)queryCache.delete(queryCache.keys().next().value);}
         if(refresh&&!state.offline)state.previewRetryGeneration++;
         return !state.offline;
       } catch (error) {
-        if (token.current() && profile === getProfile() && error.name !== "AbortError") {
+        if (token.current() && currentRead() && profile === getProfile() && error.name !== "AbortError") {
           state.error=error.message||"读取失败";state.offline=!error.status||error.status>=500||error.status===408;state.writable=false;
-          const cached=state.offline?queryCache.get(key):null;state.cached=!!cached;
-          if(cached){state.items=copy(cached.items||[]);state.total=Number(cached.total||0);state.pages=Math.max(1,Number(cached.total_pages||cached.pages||1));state.groups=copy(cached.groups||[]);state.facets=copy(cached.facets||{});state.revision=cached.revision;state.lastSyncedAt=cached.last_synced_at||state.lastSyncedAt;state.resultKey=key;state.items.forEach(item=>state.known.set(identity(item),item));}
+          const cached=state.offline?queryCache.get(cacheKey(profile)):null;state.cached=!!cached;
+          if(cached){apply(cached.data,key);state.lastSyncedAt=cached.data.last_synced_at||state.lastSyncedAt;}
           else{state.items=[];state.resultKey="";}
         }
         return false;
-      } finally { if (token.current() && profile === getProfile()) { state.loading = false; onChange(state); } }
+      } finally { if (token.current() && profile === getProfile()) { state.loading = false; state.revalidating = false; onChange(state); } }
     }
     function stage(patch) {
-      gate.cancel(); selectionGate.cancel(); Object.assign(state, patch); state.selectionLoading = false; state.loading = false;
+      viewRevision++; gate.cancel(); selectionGate.cancel(); Object.assign(state, patch); state.selectionLoading = false; state.loading = false; state.revalidating = false;state.revalidationNeeded=false;
       if (!("page" in patch)) state.page = 1;
     }
     function update(patch, { loadNow = true } = {}) {
@@ -126,11 +147,11 @@
       return loadNow ? load() : onChange(state);
     }
     async function selectAll() {
-      const token = selectionGate.next(), key = selectionKey(), profile = getProfile(), captured = copy(query({ all: true }));
+      const token = selectionGate.next(), key = selectionKey(), profile = getProfile(), captured = copy(query({ all: true })), currentRead = readCurrent();
       state.selectionLoading = true; onChange(state);
       try {
         const data = await request(`${API}/selection`, { method: "POST", body: JSON.stringify({ query: captured }), signal: token.signal });
-        if (!token.current() || key !== selectionKey() || profile !== getProfile()) return false;
+        if (!token.current() || !currentRead() || key !== selectionKey() || profile !== getProfile()) return false;
         if(data.offline){state.offline=true;state.cached=state.items.length>0;state.writable=false;state.error=data.error||"";state.lastSyncedAt=data.last_synced_at||state.lastSyncedAt;}
         for (const id of data.ids || []) state.selected.add(String(id));
         for (const item of data.resources || []) state.selectionResources.set(String(item.id),{id:String(item.id),filename:item.filename});
@@ -140,12 +161,51 @@
     function toggle(id) { state.selected.has(id) ? state.selected.delete(id) : state.selected.add(id); onChange(state); }
     function selectPage() { state.items.forEach(item => state.selected.add(identity(item))); onChange(state); }
     function clearSelection() { selectionGate.cancel(); state.selectionLoading = false; state.selected.clear(); onChange(state); }
-    function replace(item) { const id = identity(item); state.known.set(id, item); state.items = state.items.map(old => identity(old) === id ? item : old);
-      if(!item.offline)for(const cached of queryCache.values())cached.items=(cached.items||[]).map(old=>identity(old)===id?copy(item):old);
-      onChange(state); }
-    return { state, query, load, stage, update, selectAll, toggle, selectPage, clearSelection, replace, profileChanged,
+    function inCollection(item, collection, groups) {
+      if (!collection) return true;
+      return !!item.favorite && (collection === "__all__" || collection === "__ungrouped__" && !item.groupIds?.length || (item.groupIds || []).some(id => descendants(groups, collection).has(id)));
+    }
+    function replace(item, { changedFields = [], fromRead = false, owner = null, updateFields = null } = {}) {
+      const id = identity(item), membership = changedFields.some(field => ["favorite", "groupIds"].includes(field));
+      if (!fromRead) mutationRevision++;
+      const merge = old => {
+        const saved=updateFields?{...old,...Object.fromEntries(updateFields.map(field=>[field,item[field]]))}:copy(item);
+        // Availability and connection flags describe the receiving view, while
+        // metadata is shared across profiles (including an all-models view).
+        if(!fromRead)for(const field of ["available","offline","cached","writable"])if(old&&Object.hasOwn(old,field))saved[field]=old[field];
+        return saved;
+      };
+      const patch = (items, collection, groups) => items.map(old => identity(old) === id ? merge(old) : old).filter(old => identity(old) !== id || !membership || inCollection(item, collection, groups));
+      if (!item.offline) for (const entry of queryCache.values()) {
+        const oldLength=entry.data.items.length;entry.data.items=patch(entry.data.items,entry.query.collection,entry.data.groups||[]);
+        entry.data.total=Math.max(0,Number(entry.data.total||0)-(oldLength-entry.data.items.length));entry.data.total_pages=Math.max(1,Math.ceil(entry.data.total/60));
+        if(changedFields.length && (membership && (entry.query.collection || entry.query.sort==="favorite") || changedFields.some(field => !["favorite","groupIds"].includes(field))))entry.at=-Infinity;
+      }
+      if (!owner || owner() || state.items.some(value => identity(value) === id)) {
+        state.known.set(id, overlay(merge(state.known.get(id)))); const before=state.items.length;state.items=patch(state.items,state.collection,state.groups).map(overlay);
+        state.total=Math.max(0,state.total-(before-state.items.length));state.pages=Math.max(1,Math.ceil(state.total/60));
+        if (before!==state.items.length) { state.page=Math.min(state.page,state.pages);state.resultKey=JSON.stringify(query()); }
+        onChange(state);
+      }
+    }
+    function beginMutation(id, patch) {
+      const before=state.known.get(id);if(!before||before.pending_local||state.pendingMutations.has(id))return null;
+      const mutation={id,before:copy(before),optimistic:{...copy(before),...patch},current:captureView(),profile:getProfile(),changedFields:Object.keys(patch)};
+      state.pendingMutations.set(id,mutation);mutationRevision++;state.known.set(id,mutation.optimistic);state.items=state.items.map(item=>identity(item)===id?mutation.optimistic:item);onChange(state);return mutation;
+    }
+    function finishMutation(mutation, item, { failed = false, partial = false } = {}) {
+      if(state.pendingMutations.get(mutation.id)!==mutation)return;
+      state.pendingMutations.delete(mutation.id);
+      const saved=partial?{...mutation.optimistic,pending_local:true}:failed?mutation.before:item;
+      if(partial)state.revalidationNeeded=false;
+      replace(saved,{changedFields:failed||partial?[]:mutation.changedFields,owner:mutation.current,updateFields:failed||partial?[...mutation.changedFields,"pending_local"]:null});
+      if(partial)for(const entry of queryCache.values())entry.at=-Infinity;
+      if(state.revalidationNeeded&&!state.pendingMutations.size)onChange(state);
+      return saved;
+    }
+    return { state, query, load, stage, update, selectAll, toggle, selectPage, clearSelection, replace, profileChanged, beginMutation, finishMutation, readCurrent, captureView, invalidate,
       markOffline(error=""){state.offline=true;state.cached=state.items.length>0;state.writable=false;state.error=error;onChange(state);},
-      cancel() { gate.cancel(); selectionGate.cancel(); state.loading = false; state.selectionLoading = false; } };
+      cancel() { viewRevision++;gate.cancel(); selectionGate.cancel(); state.loading = false; state.revalidating = false;state.revalidationNeeded=false; state.selectionLoading = false; } };
   }
   const core = { createController, createRequestGate, descendants, groupRows, groupPath, bindingPayload, mergeDetailDraft, detailDirtyFields, metadataPatch, submitLibraryLoras, configuredRemoval, cardNavigationIndex, words, queryString };
   if (typeof module !== "undefined" && module.exports) module.exports = core;
@@ -230,7 +290,7 @@
     const resultsCurrent = state.resultKey === JSON.stringify(controller.query());
     ui.loraCatalog.setAttribute("aria-busy", String(state.loading || !resultsCurrent));
     ui.loraCatalog.inert = state.loading || !resultsCurrent;
-    ui.lmRefresh.disabled = state.loading;
+    ui.lmRefresh.disabled = state.loading || state.revalidating;
     ui.loraCatalogMeta.textContent = state.loading || !resultsCurrent && !state.error ? "正在读取资料库…" : state.offline&&state.cached?`${state.total.toLocaleString()} 个 LoRA · 只读缓存`:state.error ? "资料库暂不可用" : `${state.total.toLocaleString()} 个 LoRA${state.scope === "current" ? ` · ${host.getProfile() === "anima" ? "Anima" : "Krea 2"}` : ""}`;
     ui.lmPage.textContent = `${state.page} / ${state.pages}`;
     ui.lmPrev.disabled = state.loading || state.page <= 1; ui.lmNext.disabled = state.loading || state.page >= state.pages;
@@ -304,7 +364,8 @@
     opener.setAttribute("aria-label",`${selectionMode ? selected ? "取消选择" : "选择" : "查看详情"} ${title(item)}`);
     if(selectionMode)opener.setAttribute("aria-pressed",String(selected));else opener.removeAttribute("aria-pressed");
     check.hidden=!selectionMode;check.textContent=selected?"✓":"";
-    star.classList.toggle("is-favorite",!!item.favorite);star.setAttribute("aria-pressed",String(!!item.favorite));star.setAttribute("aria-label",`${item.favorite?"取消收藏":"收藏"} ${title(item)}`);star.disabled=!writable();
+    const saving=currentState().pendingMutations.has(identity(item))||mutationBusy.has(identity(item));
+    star.classList.toggle("is-favorite",!!item.favorite);star.classList.toggle("is-saving",saving);star.setAttribute("aria-pressed",String(!!item.favorite));star.setAttribute("aria-busy",String(saving));star.setAttribute("aria-label",`${saving?"正在保存收藏":item.pending_local?"收藏状态待确认":item.favorite?"取消收藏":"收藏"} ${title(item)}`);star.disabled=!writable()||saving||!!item.pending_local;
     add.classList.toggle("is-configured",added);add.setAttribute("aria-label",`${added?"移出当前配置":"加入当前配置"} ${title(item)}`);add.title=added?"移出当前配置":allowed?"加入当前配置":"与当前模型不兼容";
     if(add.dataset.added!==String(added)){add.innerHTML=added?icons.minus:icons.plus;add.dataset.added=String(added);}
     add.disabled=!added&&(!allowed||!writable());
@@ -506,7 +567,7 @@
     if(!ready)return;if(controller.profileChanged()){detailDrafts.clear();closeDetail({force:true});}
     if(query!==undefined&&String(query)!==currentState().q)controller.stage({q:String(query)});
     if(!ui.loraDialog.open){ui.lmCompactPane.hidden=false;ui.lmExpandedPane.hidden=true;ui.loraDialog.classList.remove("lm-expanded");expanded=false;dialog(ui.loraDialog,true);}
-    expand(desired);syncFilters();notice("");await controller.load({refresh:true});
+    expand(desired);syncFilters();notice("");await controller.load();
   }
   function allowDetailLeave(action) {
     if(!detailEditing||!detailItem)return true;
@@ -532,7 +593,7 @@
   async function openDetail(id,{force=false}={}) {
     if(!force&&!allowDetailLeave(()=>void openDetail(id,{force:true})))return;
     detailEditing=false;restoreTriggerDraft=false;detailOpener=document.activeElement;expand(true);
-    const token=detailGate.next(),epoch=++detailEpoch,profile=host.getProfile(),cached=currentState().known.get(id);
+    const token=detailGate.next(),epoch=++detailEpoch,profile=host.getProfile(),cached=currentState().known.get(id),currentRead=controller.readCurrent();
     ui.lmExpandedPane.classList.add("lm-detail-open");
     if(globalThis.StudioMotion)StudioMotion.presence(ui.lmDetail,true,{response:.30,damping:1,from:{opacity:0,x:20}});else ui.lmDetail.hidden=false;
     updateLayerInert();
@@ -540,7 +601,7 @@
     ui.lmCloseDetail.focus({preventScroll:true});
     try {
       const item=currentState().offline&&cached?{...cached,offline:true,cached:true,writable:false}:await api(`/items/${encodeURIComponent(id)}?model_profile=${encodeURIComponent(profile)}`,"GET",undefined,{signal:token.signal});
-      if(!token.current()||epoch!==detailEpoch||profile!==host.getProfile())return;
+      if(!token.current()||!currentRead()||epoch!==detailEpoch||profile!==host.getProfile()||currentState().pendingMutations.has(id))return;
       if(item.offline)controller.markOffline(item.error||currentState().error);
       reconcileDetailItem(item);
     } catch(error){if(token.current()&&error.name!=="AbortError"){if(cached)notice(`详情更新失败：${error.message}`);else ui.lmDetailBody.innerHTML=`<p class="field-error">${escape(error.message)}</p><button class="button ghost compact" type="button" data-lm-detail-retry="${escape(id)}">重试</button>`;}}
@@ -560,8 +621,8 @@
     target.focus({preventScroll:true});if(focus.start!=null&&target.setSelectionRange)try{target.setSelectionRange(focus.start,focus.end);}catch{/* Number inputs do not expose text selection. */}
   }
   function detailQuickActions(item) {
-    const id=identity(item),added=configured(item);
-    return `<div class="lm-detail-quick"><button class="button ${added?"ghost":"primary"} compact" type="button" data-lm-add="${escape(id)}" ${added||usable(item)&&writable()?"":"disabled"}>${added?"移出当前配置":"加入当前配置"}</button><button class="button ghost compact" type="button" data-lm-star="${escape(id)}" aria-pressed="${!!item.favorite}" ${writable()?"":"disabled"}>${item.favorite?"已收藏":"收藏"}</button></div>`;
+    const id=identity(item),added=configured(item),saving=currentState().pendingMutations.has(id)||mutationBusy.has(id);
+    return `<div class="lm-detail-quick"><button class="button ${added?"ghost":"primary"} compact" type="button" data-lm-add="${escape(id)}" ${added||usable(item)&&writable()?"":"disabled"}>${added?"移出当前配置":"加入当前配置"}</button><button class="button ghost compact${saving?" is-saving":""}" type="button" data-lm-star="${escape(id)}" aria-pressed="${!!item.favorite}" aria-busy="${saving}" ${writable()&&!saving&&!item.pending_local?"":"disabled"}>${saving?"保存中…":item.pending_local?"待确认":item.favorite?"已收藏":"收藏"}</button></div>`;
   }
   function renderDetail(item,{focus=captureDetailFocus()}={}) {
     const id=identity(item),draft=detailDraft(item),preview=safeImage(item.preview),groups=currentState().groups;
@@ -573,12 +634,13 @@
     }else{
       const size=Number(item.size||0),modified=Number(item.modified||0),date=modified?new Date(modified<1e12?modified*1000:modified):null;
       ui.lmDetailBody.innerHTML=`<div class="lm-detail-overview"><button class="lm-detail-preview" type="button" ${preview?"":"disabled"} aria-label="放大预览">${preview?`<img src="${escape(preview)}" alt="${escape(title(item))}">`:icons.folder}</button><div class="lm-detail-heading"><h3 id="lmDetailTitle">${escape(title(item))}</h3><button id="lmEditDetail" class="button ghost compact" type="button" ${writable()&&!item.pending_local?"":"disabled"}>编辑</button></div><p class="lm-detail-path" title="${escape(item.filename)}">${escape(item.filename||item.normalized_path)}</p>${detailQuickActions(item)}${!usable(item)?'<p class="lm-muted">当前模型不可启用，仍可查看和整理。</p>':""}<section class="lm-read-section"><h4>标签</h4><div class="lm-read-tags">${(item.tags||[]).length?item.tags.map(tag=>`<span class="lm-read-tag">${escape(tag)}</span>`).join(""):'<span class="lm-muted">暂无标签</span>'}</div></section><section class="lm-read-section"><h4>备注</h4><p class="lm-read-value">${escape(item.notes||"暂无备注")}</p></section><section class="lm-read-section"><h4>默认权重</h4><p class="lm-read-value">${Number(item.default_strength??1)} <small class="lm-muted">用于之后添加</small></p></section><section class="lm-read-section"><h4>自动触发词${item.trigger_override?'<small class="lm-muted"> · 已自定义</small>':""}</h4><p class="lm-read-value">${escape((item.trigger_words||[]).join(", ")||"不自动添加触发词")}</p></section><section class="lm-read-section"><h4>收藏分组</h4><div class="lm-read-tags">${(item.groupIds||[]).length?(item.groupIds||[]).map(groupId=>`<span class="lm-read-tag">${escape(groupPath(groups.find(group=>group.id===groupId)||{name:"分组"},groups))}</span>`).join(""):'<span class="lm-muted">未分组</span>'}</div></section><section class="lm-read-section"><div class="lm-detail-heading"><h4>人物绑定</h4><button id="lmBindFromDetail" class="button ghost compact" type="button" ${item.model_profile==="anima"&&writable()?"":"disabled"}>选择人物</button></div><div class="lm-read-tags">${(item.bindings||[]).map(binding=>`<button class="lm-filter-chip" type="button" data-lm-bound-character="${escape(binding.character_id)}">${escape(binding.name||binding.character_id)}${binding.enabled===false?" · 已停用":""}</button>`).join("")||'<span class="lm-muted">尚未绑定人物</span>'}</div><p class="lm-muted">${item.model_profile==="anima"?"抽中人物时自动启用，绑定可独立调整。":"人物池绑定适用于 Anima。"}</p></section><details class="lm-resource-info"><summary>模型信息</summary><dl><dt>基础模型</dt><dd>${escape(item.base_model||"未识别")}</dd><dt>文件大小</dt><dd>${size?`${(size/1048576).toLocaleString(undefined,{maximumFractionDigits:1})} MB`:"未知"}</dd><dt>修改时间</dt><dd>${date&&!Number.isNaN(date.valueOf())?escape(date.toLocaleString()):"未知"}</dd><dt>根目录</dt><dd>${escape(item.root||"—")}</dd><dt>使用次数</dt><dd>${Number(item.usage_count||0)}</dd></dl></details></div>`;
+      ui.lmDetailBody.querySelector("#lmEditDetail").disabled=!writable()||!!item.pending_local||mutationBusy.has(id)||currentState().pendingMutations.has(id);
       ui.lmDetailBody.querySelector("#lmEditDetail").onclick=()=>{detailEditing=true;renderDetail(detailItem);ui.lmDetailBody.querySelector('[name="tags"]')?.focus({preventScroll:true});};
       ui.lmDetailBody.querySelector("#lmBindFromDetail").onclick=()=>void openBinding({lora:detailItem});
       ui.lmDetailBody.querySelector(".lm-detail-preview").onclick=()=>{if(preview)openPreview(preview,title(item));};
     }
     if(item.pending_local){
-      ui.lmDetailBody.insertAdjacentHTML("afterbegin",`<section class="lm-inline-confirm"><p>插件资料已保存，本地整理信息尚未完成。</p><button class="button primary compact" type="button" data-lm-retry-local="${escape(id)}">完成本地保存</button><button class="lm-text-button" type="button" data-lm-discard-local="${escape(id)}">放弃本地修改</button></section>`);
+      ui.lmDetailBody.insertAdjacentHTML("afterbegin",`<section class="lm-inline-confirm"><p>插件资料已保存，整理状态尚待确认。</p><button class="button primary compact" type="button" data-lm-retry-local="${escape(id)}">确认并完成整理</button><button class="lm-text-button" type="button" data-lm-discard-local="${escape(id)}">放弃本地修改</button></section>`);
       ui.lmDetailBody.querySelector('#lmMetadataForm [type="submit"]')?.setAttribute("disabled","");
     }
     ui.lmDetail.dataset.readonly=String(!writable());if(!writable())applyDetailReadonly();restoreDetailFocus(focus);
@@ -594,10 +656,10 @@
     if(!ui.lmDetailBody.querySelector(".lm-readonly-detail"))ui.lmDetailBody.insertAdjacentHTML("afterbegin",`<p class="lm-readonly-detail lm-muted">${currentState().offline?"当前显示上次同步的资料；已加入项仍可移出配置。":"本地管理数据受保护，当前仅供查看。"}</p>`);
   }
   function reconcileDetailItem(saved) {
-    if(!detailEditing){detailItem=saved;controller.replace(saved);renderDetail(saved);return;}
+    if(!detailEditing){detailItem=saved;controller.replace(saved,{fromRead:true});renderDetail(saved);return;}
     captureDetailDraft();const id=identity(saved),draft=mergeDetailDraft(saved,detailDrafts.get(id));draft.dirty=detailDirtyFields(saved,draft);
     if(Object.values(draft.dirty).some(Boolean))detailDrafts.set(id,draft);else detailDrafts.delete(id);
-    detailItem=saved;ui.lmDetail.dataset.readonly=String(!writable());controller.replace(saved);
+    detailItem=saved;ui.lmDetail.dataset.readonly=String(!writable());controller.replace(saved,{fromRead:true});
     const form=ui.lmDetailBody.querySelector("#lmMetadataForm");if(!form){renderDetail(saved);return;}
     for(const key of ["tags","notes","strength","triggers"]){const control=form.elements[key];if(control&&control.value!==String(draft[key]))control.value=draft[key];}
     form.querySelectorAll('[name="groups"]').forEach(input=>input.checked=draft.groups.includes(input.value));
@@ -614,47 +676,68 @@
     if(!Object.values(value.dirty).some(Boolean))detailDrafts.delete(identity(detailItem));else detailDrafts.set(identity(detailItem),value);
   }
   async function saveDetail() {
-    if(!detailItem||detailSaving||!requireWritable())return false;captureDetailDraft();
-    const original=detailItem,id=identity(original),draft=detailDraft(original),epoch=detailEpoch,form=ui.lmDetailBody.querySelector("#lmMetadataForm"),errors=[];
+    if(!detailItem||detailItem.pending_local||detailSaving||mutationBusy.has(identity(detailItem))||currentState().pendingMutations.has(identity(detailItem))||!requireWritable())return false;captureDetailDraft();
+    const original=detailItem,id=identity(original),draft=detailDraft(original),epoch=detailEpoch,form=ui.lmDetailBody.querySelector("#lmMetadataForm"),errors=[],changedFields=[],owner=controller.captureView(),profile=host.getProfile(),restore=restoreTriggerDraft;
     if(draft.strength===""||!Number.isFinite(Number(draft.strength))||Math.abs(Number(draft.strength))>100){showError(form.querySelector("#lmMetadataError"),"默认权重须在 -100 到 100 之间");return false;}
     const patch=metadataPatch(original,draft),triggerChanged=restoreTriggerDraft||detailDirtyFields(original,draft).triggers;
-    detailSaving=true;form.querySelectorAll("input,textarea,button").forEach(control=>control.disabled=true);
+    detailSaving=true;mutationBusy.add(id);controller.invalidate();render();form.querySelectorAll("input,textarea,button").forEach(control=>control.disabled=true);
     let saved=original;
     try{
-      if(Object.keys(patch).length){try{saved=await api(`/items/${encodeURIComponent(id)}`,"PATCH",patch);}catch(error){errors.push(`资料：${error.message}`);if(error.payload?.metadata_saved)saved={...saved,pending_local:true};}}
+      if(Object.keys(patch).length){try{saved=await api(`/items/${encodeURIComponent(id)}`,"PATCH",patch);changedFields.push(...Object.keys(patch));}catch(error){errors.push(`资料：${error.message}`);if(error.payload?.metadata_saved||error.payload?.readback_pending)saved={...saved,pending_local:true};}}
       if(triggerChanged){try{
-        const profile=original.model_profile||host.getProfile();
-        if(restoreTriggerDraft)await host.request(`/api/loras/triggers?${queryString({filename:original.filename,model_profile:profile})}`,{method:"DELETE"});
-        else await host.request("/api/loras/triggers",{method:"PUT",body:JSON.stringify({filename:original.filename,model_profile:profile,triggerWords:words(draft.triggers)})});
-        const refreshed=await api(`/items/${encodeURIComponent(id)}?model_profile=${encodeURIComponent(host.getProfile())}`);
-        saved=refreshed;draft.triggers=(saved.trigger_words||[]).join("\n");restoreTriggerDraft=false;
+        const triggerProfile=original.model_profile||profile;
+        if(restore)await host.request(`/api/loras/triggers?${queryString({filename:original.filename,model_profile:triggerProfile})}`,{method:"DELETE"});
+        else await host.request("/api/loras/triggers",{method:"PUT",body:JSON.stringify({filename:original.filename,model_profile:triggerProfile,triggerWords:words(draft.triggers)})});
+        saved=await api(`/items/${encodeURIComponent(id)}?model_profile=${encodeURIComponent(profile)}`);
+        changedFields.push("trigger_words","trigger_override");draft.triggers=(saved.trigger_words||[]).join("\n");if(owner()&&epoch===detailEpoch)restoreTriggerDraft=false;
       }catch(error){errors.push(`触发词：${error.message}`);}}
+      controller.replace(saved,{changedFields,owner});if(changedFields.length)host.onItemChanged?.({item:saved,changedFields});
+      if(!owner()||epoch!==detailEpoch||!detailItem||identity(detailItem)!==id)return !errors.length;
       draft.dirty=detailDirtyFields(saved,draft);if(Object.values(draft.dirty).some(Boolean))detailDrafts.set(id,draft);else detailDrafts.delete(id);
-      controller.replace(saved);host.onInventoryChanged?.();
-      if(epoch!==detailEpoch||!detailItem||identity(detailItem)!==id)return !errors.length;
       detailItem=saved;
       if(errors.length){renderDetail(saved);showError(ui.lmDetailBody.querySelector("#lmMetadataError"),errors.join("；"));return false;}
-      detailEditing=false;detailDrafts.delete(id);renderDetail(saved);notify("资料已保存");ui.lmDetailBody.querySelector("#lmEditDetail")?.focus({preventScroll:true});return true;
-    }finally{detailSaving=false;form.querySelectorAll("input,textarea,button").forEach(control=>control.disabled=false);}
+      detailEditing=false;detailDrafts.delete(id);renderDetail(saved);notify("资料已保存");ui.lmDetailBody.querySelector("#lmEditDetail")?.focus({preventScroll:true});if(changedFields.length)void controller.load({revalidate:true});return true;
+    }finally{detailSaving=false;mutationBusy.delete(id);form.querySelectorAll("input,textarea,button").forEach(control=>control.disabled=false);if(owner())render();}
   }
   async function toggleFavorite(id) {
     if(mutationBusy.has(id)||!requireWritable())return;const item=currentState().known.get(id)||detailItem;if(!item)return;
-    mutationBusy.add(id);const favorite=!item.favorite;
-    try { const saved=await api(`/items/${encodeURIComponent(id)}`,"PATCH",{favorite});controller.replace(saved);
-      if(detailItem&&identity(detailItem)===id)reconcileDetailItem(saved);host.onInventoryChanged?.();
-      if(currentState().collection)await controller.load();
+    const favorite=!item.favorite,mutation=controller.beginMutation(id,{favorite});if(!mutation)return;
+    mutationBusy.add(id);const epoch=detailEpoch;
+    if(detailItem&&identity(detailItem)===id){detailItem=mutation.optimistic;if(!detailEditing)renderDetail(detailItem);}
+    try {
+      const saved=await api(`/items/${encodeURIComponent(id)}`,"PATCH",{favorite});controller.finishMutation(mutation,saved);
+      host.onItemChanged?.({item:saved,changedFields:["favorite"]});
+      if(!mutation.current())return;
+      if(epoch===detailEpoch&&detailItem&&identity(detailItem)===id)reconcileDetailItem(saved);
       notify(favorite?"已加入收藏":(saved.groupIds?.length?"已取消收藏，再次收藏后恢复原分组":"已取消收藏"));
-    }catch(error){notice(error.message);if(error.payload?.metadata_saved){item.pending_local=true;controller.replace(item);await openDetail(id);}}finally{mutationBusy.delete(id);}
+      if(currentState().collection||currentState().sort==="favorite")void controller.load({revalidate:true});
+    } catch(error) {
+      const partial=!!(error.payload?.metadata_saved||error.payload?.readback_pending),saved=controller.finishMutation(mutation,null,{failed:true,partial});
+      if(!mutation.current())return;
+      notice(partial?`收藏状态待确认：${error.message}`:error.message);
+      if(epoch===detailEpoch&&detailItem&&identity(detailItem)===id){
+        if(partial&&detailEditing)captureDetailDraft();
+        detailItem=saved;if(!detailEditing||partial)renderDetail(saved);
+      }
+    } finally {
+      mutationBusy.delete(id);
+      if(ui.loraDialog.open&&(mutation.profile===host.getProfile()||currentState().items.some(item=>identity(item)===id))){
+        render();
+        if(detailItem&&identity(detailItem)===id&&!detailEditing){detailItem=currentState().known.get(id)||detailItem;renderDetail(detailItem);}
+      }
+    }
   }
   async function finishPending(id,discard=false){
     if(mutationBusy.has(id)||!requireWritable())return;captureDetailDraft();mutationBusy.add(id);
+    const owner=controller.captureView(),profile=host.getProfile(),epoch=detailEpoch;controller.invalidate();
     try{
       const draft=detailDrafts.get(id);
       await api(`/items/${encodeURIComponent(id)}/${discard?"discard-pending":"retry"}`,"POST",{});
-      const saved=await api(`/items/${encodeURIComponent(id)}?model_profile=${encodeURIComponent(host.getProfile())}`);
+      const saved=await api(`/items/${encodeURIComponent(id)}?model_profile=${encodeURIComponent(profile)}`),changedFields=["favorite","groupIds","tags","notes","default_strength"];
+      controller.replace(saved,{changedFields,owner});host.onItemChanged?.({item:saved,changedFields});if(!owner()||epoch!==detailEpoch)return;
       if(draft){if(discard)for(const key of ["tags","notes","strength","groups"])draft.dirty[key]=false;const rebased=mergeDetailDraft(saved,draft);rebased.dirty=detailDirtyFields(saved,rebased);if(Object.values(rebased.dirty).some(Boolean))detailDrafts.set(id,rebased);else detailDrafts.delete(id);}
-      controller.replace(saved);if(detailItem&&identity(detailItem)===id){detailItem=saved;renderDetail(saved);}host.onInventoryChanged?.();notice("");notify(discard?"已放弃未保存的本地修改":"本地保存已完成");
-    }catch(error){notice(error.message);}finally{mutationBusy.delete(id);}
+      if(detailItem&&identity(detailItem)===id){detailItem=saved;renderDetail(saved);}notice("");notify(discard?"已放弃未保存的本地修改":"本地保存已完成");void controller.load({revalidate:true});
+    }catch(error){if(owner())notice(error.message);}finally{mutationBusy.delete(id);}
   }
   async function addItems(ids) {
     if(selectionBusy||!requireWritable())return;selectionBusy=true;renderSelection();const profile=host.getProfile(),items=[],failures=[];let cursor=0;
@@ -685,13 +768,13 @@
   async function saveGroup(event) {
     event.preventDefault();const editor=groupEditor;if(!editor||!requireWritable())return;const name=ui.lmGroupName.value.trim();if(!name){showError(ui.lmGroupError,"请输入分组名称");return;}
     const button=ui.lmGroupForm.querySelector('[type="submit"]');button.disabled=true;
-    try {await api(editor.id?`/groups/${encodeURIComponent(editor.id)}`:"/groups",editor.id?"PATCH":"POST",{name,parentId:ui.lmGroupParent.value||null});if(groupEditor===editor){dialog(ui.lmGroupDialog,false);groupEditor=null;}await controller.load();notify("分组已保存");}
+    try {controller.invalidate();await api(editor.id?`/groups/${encodeURIComponent(editor.id)}`:"/groups",editor.id?"PATCH":"POST",{name,parentId:ui.lmGroupParent.value||null});controller.invalidate();if(groupEditor===editor){dialog(ui.lmGroupDialog,false);groupEditor=null;}await controller.load({revalidate:true});notify("分组已保存");}
     catch(error){showError(ui.lmGroupError,error.message);}finally{button.disabled=false;}
   }
   async function deleteGroup() {
     const editor=groupEditor;if(!editor?.id||!requireWritable())return;ui.lmGroupDeleteCommit.disabled=true;
     const removed=descendants(currentState().groups,editor.id);
-    try{await api(`/groups/${encodeURIComponent(editor.id)}`,"DELETE");if(removed.has(currentState().collection))currentState().collection="__all__";removed.forEach(id=>collapsedGroups.delete(id));dialog(ui.lmGroupDialog,false);groupEditor=null;await controller.load();persistView();notify("分组已删除，收藏已保留");}
+    try{controller.invalidate();await api(`/groups/${encodeURIComponent(editor.id)}`,"DELETE");controller.invalidate();if(removed.has(currentState().collection))currentState().collection="__all__";removed.forEach(id=>collapsedGroups.delete(id));dialog(ui.lmGroupDialog,false);groupEditor=null;await controller.load({revalidate:true});persistView();notify("分组已删除，收藏已保留");}
     catch(error){showError(ui.lmGroupError,error.message);}finally{ui.lmGroupDeleteCommit.disabled=false;}
   }
   function openBatch(action) {
@@ -732,12 +815,12 @@
   }
   function pollJob() {
     clearTimeout(jobTimer);const job=activeJob;if(!job)return;
-    if(!["queued","running"].includes(job.status)){void controller.load();void refreshDetail();host.onInventoryChanged?.();return;}
+    if(!["queued","running"].includes(job.status)){controller.invalidate();void controller.load({revalidate:true});void refreshDetail();if(!["favorite","groups","tags"].includes(job.action))host.onInventoryChanged?.();return;}
     jobTimer=setTimeout(async()=>{try{const next=await api(`/jobs/${encodeURIComponent(job.id)}`);if(activeJob?.id!==job.id)return;activeJob=next;renderJob();pollJob();}catch(error){notice(`批量任务状态读取失败：${error.message}；任务可能仍在后台执行。`);jobTimer=setTimeout(pollJob,2000);}},650);
   }
   async function refreshDetail(){
-    if(!detailItem||ui.lmDetail.hidden)return;const id=identity(detailItem),epoch=detailEpoch,profile=host.getProfile();
-    try{const saved=await api(`/items/${encodeURIComponent(id)}?model_profile=${encodeURIComponent(profile)}`);if(epoch!==detailEpoch||profile!==host.getProfile()||!detailItem||identity(detailItem)!==id)return;
+    if(!detailItem||ui.lmDetail.hidden)return;const id=identity(detailItem),epoch=detailEpoch,profile=host.getProfile(),currentRead=controller.readCurrent();
+    try{const saved=await api(`/items/${encodeURIComponent(id)}?model_profile=${encodeURIComponent(profile)}`);if(!currentRead()||epoch!==detailEpoch||profile!==host.getProfile()||!detailItem||identity(detailItem)!==id||currentState().pendingMutations.has(id))return;
       if(saved.offline)controller.markOffline(saved.error||currentState().error);
       reconcileDetailItem(saved);
     }catch(error){if(epoch===detailEpoch)notice(`资料已更新，详情刷新失败：${error.message}`);}
@@ -804,7 +887,7 @@
     let loras;try{loras=bindingPayload(editor.rows);}catch(error){showError(ui.lmBindingError,error.message);return;}
     editor.loading=true;ui.lmBindingSave.disabled=true;showError(ui.lmBindingError);
     try{await api(`/bindings/${encodeURIComponent(editor.character.id)}`,"PUT",{loras});
-      if(bindingEditor===editor){dialog(ui.lmBindingDialog,false);bindingEditor=null;}notify("人物绑定已保存");await controller.load();if(detailItem)await openDetail(identity(detailItem));host.onBindingsChanged?.();
+      controller.invalidate();if(bindingEditor===editor){dialog(ui.lmBindingDialog,false);bindingEditor=null;}notify("人物绑定已保存");await controller.load({revalidate:true});if(detailItem)await openDetail(identity(detailItem));host.onBindingsChanged?.();
     }catch(error){if(bindingEditor===editor)showError(ui.lmBindingError,error.message);}finally{editor.loading=false;if(bindingEditor===editor)ui.lmBindingSave.disabled=false;}
   }
   function treeKeydown(event) {
@@ -819,7 +902,16 @@
     if(ready)return;host=eventsHost;ui=Object.fromEntries(elements.map(id=>[id,document.getElementById(id)]));if(!ui.loraDialog)return;
     for(const [oldId,newId] of Object.entries({loraSearch:"lmSearch",loraCatalog:"lmCatalog",loraCatalogEmpty:"lmCatalogEmpty",loraCatalogMeta:"lmCatalogMeta",closeLora:"lmClose",cancelLora:"lmDone"}))ui[oldId]=document.getElementById(newId);
     ui.lmMorphToggle=document.createElement("button");ui.lmMorphToggle.type="button";ui.lmMorphToggle.className="icon-button dark lm-morph-toggle";ui.lmMorphToggle.hidden=true;ui.loraDialog.append(ui.lmMorphToggle);ui.lmMorphToggle.onclick=()=>expand(!expanded);
-    controller=createController({request:host.request,getProfile:host.getProfile,getLoras:host.getLoras,onChange:render});
+    let revalidationQueued=false;
+    controller=createController({request:host.request,getProfile:host.getProfile,getLoras:host.getLoras,onChange:state=>{
+      render(state);
+      if(state.revalidationNeeded&&!revalidationQueued){
+        revalidationQueued=true;queueMicrotask(()=>{
+          revalidationQueued=false;
+          if(state.revalidationNeeded&&!state.loading&&!state.revalidating&&!state.pendingMutations.size&&ui.loraDialog.open&&expanded)void controller.load({revalidate:true});
+        });
+      }
+    }});
     try{const saved=JSON.parse(localStorage.getItem(VIEW_KEY)||"{}");view=saved.view==="list"?"list":"grid";
       for(const key of ["scope","collection","folder","root","recursive","sort","order"])if(saved[key]!==undefined)controller.state[key]=saved[key];
       (saved.collapsedGroups||[]).forEach(id=>collapsedGroups.add(id));(saved.collapsedFolders||[]).forEach(id=>collapsedFolders.add(id));
@@ -911,11 +1003,12 @@
     globalThis.addEventListener("resize",()=>{if(ui.loraDialog.classList.contains("lm-morphing"))globalThis.StudioMotion?.finish(ui.loraDialog,"library-shell");setSidebar(ui.lmSidebar.classList.contains("mobile-open"));});
     ui.lmBindingDialog.addEventListener("close",()=>{characterGate.cancel();bindingGate.cancel();bindingLoraGate.cancel();clearTimeout(characterTimer);clearTimeout(bindingLoraTimer);bindingEditor=null;});
     ui.lmBatchDialog.addEventListener("close",()=>{batchEditor=null;});
-    globalThis.addEventListener?.("focus",()=>{if(ui.loraDialog.open&&expanded&&!currentState().loading)void controller.load({refresh:true});});
+    let lastFocusRead=-Infinity;
+    globalThis.addEventListener?.("focus",()=>{const now=Date.now();if(ui.loraDialog.open&&expanded&&!currentState().loading&&!currentState().revalidating&&now-lastFocusRead>=30000){lastFocusRead=now;void controller.load();}});
   }
   globalThis.LoraManager=Object.freeze({init:initialize,get ready(){return ready;},open,
     openCharacter:character=>ready?openBinding({character}):Promise.resolve(),
-    refresh:()=>ready&&ui.loraDialog.open&&expanded?controller.load():Promise.resolve(),
+    refresh:()=>ready&&ui.loraDialog.open&&expanded?controller.load({revalidate:true}):Promise.resolve(),
     refreshConfigured(){if(!ready)return;render();if(detailItem&&!detailEditing)renderDetail(detailItem);if(expanded&&currentState().in_configured!==""&&!currentState().loading&&currentState().resultKey!==JSON.stringify(controller.query()))void controller.load();},
     profileChanged(){if(!ready)return;controller.profileChanged();detailDrafts.clear();closeDetail({force:true});if(ui.lmBindingDialog.open)dialog(ui.lmBindingDialog,false);if(ui.lmBatchDialog.open)dialog(ui.lmBatchDialog,false);if(ui.loraDialog.open)void controller.load();},
   });

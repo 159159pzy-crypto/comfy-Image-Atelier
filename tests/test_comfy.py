@@ -280,6 +280,9 @@ class FakeInventoryClient(ComfyClient):
         }
 
     async def _json(self, method, path, **kwargs):
+        if path.startswith("/object_info/"):
+            node_name = path.rsplit("/", 1)[-1]
+            return {node_name: (await self.object_info())[node_name]}
         if path == "/api/lm/loras/roots":
             return {"success": True, "roots": ["F:/comfyui/models/loras"]}
         if path.startswith("/api/lm/loras/list?"):
@@ -386,6 +389,9 @@ class ManagerClassificationApiTests(unittest.IsolatedAsyncioTestCase):
                 return web.json_response(value)
             if request.path == "/object_info":
                 return web.json_response(self.info)
+            if request.path.startswith("/object_info/"):
+                node_name = request.path.rsplit("/", 1)[-1]
+                return web.json_response({node_name: self.info[node_name]} if node_name in self.info else {})
             if request.path == "/api/lm/loras/roots":
                 return web.json_response({"success": True, "roots": ["F:/models/loras"]})
             if request.path == "/api/lm/checkpoints/unet_roots":
@@ -414,7 +420,9 @@ class ManagerClassificationApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(models["items"][0]["model_profile"], "krea2")
         self.assertEqual(loras["items"][0]["name"], "style/one.safetensors")
         self.assertEqual(await self.client.lora_filenames(), ["style\\one.safetensors"])
-        self.assertEqual(self.calls["/object_info"], 1)
+        self.assertEqual(self.calls["/object_info"], 0)
+        self.assertEqual(self.calls["/object_info/LoraLoader"], 1)
+        self.assertEqual(self.calls["/object_info/UNETLoader"], 1)
         self.assertFalse(any("anima-tools" in path or "scan" in path or "health-check" in path for path in self.calls))
 
     async def test_all_pages_are_read_before_matching(self):
@@ -520,7 +528,48 @@ class ManagerClassificationApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refreshed["items"][0]["model_profile"], "krea2")
         self.assertEqual(refreshed["items"][1]["classification_status"], "unindexed")
         self.assertIs(await self.client.lora_inventory(), refreshed)
+        self.assertEqual(self.calls["/object_info/LoraLoader"], 2)
+        self.assertEqual(self.calls["/object_info"], 0)
+        self.assertEqual(self.calls["/api/lm/loras/list"], 2)
+
+    async def test_node_endpoint_falls_back_only_when_explicitly_unsupported(self):
+        self.overrides["/object_info/LoraLoader"] = web.Response(status=404, text="Not Found")
+        self.assertEqual((await self.client.lora_inventory())["count"], 1)
+        await self.client.lora_inventory(refresh=True)
+        self.assertEqual(self.calls["/object_info/LoraLoader"], 1)
         self.assertEqual(self.calls["/object_info"], 2)
+
+    async def test_failed_or_malformed_node_endpoint_does_not_silently_fall_back(self):
+        for response in (web.Response(status=503, text="busy"), {}, {"LoraLoader": {}}):
+            with self.subTest(response=response):
+                self.overrides["/object_info/LoraLoader"] = response
+                with self.assertRaises(ComfyError):
+                    await self.client.lora_inventory(refresh=True)
+        self.assertEqual(self.calls["/object_info"], 0)
+
+    async def test_concurrent_forced_refreshes_share_one_fetch_and_survive_waiter_cancellation(self):
+        await self.client.lora_inventory()
+        started, release = asyncio.Event(), asyncio.Event()
+        original = self.client._json
+
+        async def delayed(method, path, **kwargs):
+            if path == "/object_info/LoraLoader":
+                started.set()
+                await release.wait()
+            return await original(method, path, **kwargs)
+
+        self.client._json = delayed
+        first = asyncio.create_task(self.client.lora_inventory(refresh=True))
+        await asyncio.wait_for(started.wait(), 2)
+        others = [asyncio.create_task(self.client.lora_inventory(refresh=True)) for _ in range(8)]
+        await asyncio.sleep(0)
+        first.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await first
+        release.set()
+        results = await asyncio.gather(*others)
+        self.assertTrue(all(result is results[0] for result in results))
+        self.assertEqual(self.calls["/object_info/LoraLoader"], 2)
         self.assertEqual(self.calls["/api/lm/loras/list"], 2)
 
     async def test_expired_cache_reloads_and_failed_refresh_does_not_return_stale_classification(self):

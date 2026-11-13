@@ -2131,8 +2131,26 @@ function initializeLoraManager() {
     onCompactRestore: query => { ui.loraSearch.value = query ?? ui.loraSearch.value; renderLoraCatalog(); },
     request,
     notify: toast,
+    onItemChanged: managedLoraItemChanged,
     onInventoryChanged: () => loadLoraInventory({ refresh: true }),
   });
+}
+function managedLoraItemChanged({ item, changedFields = [] } = {}) {
+  if (!item?.filename) return;
+  const triggersChanged = changedFields.some(field => ["trigger_words", "trigger_override", "source_trigger_words"].includes(field));
+  // Stars, folders, tags and notes belong to the library. They do not change
+  // generation inputs and must not invalidate or redraw the host inventories.
+  if (!triggersChanged && !changedFields.includes("default_strength")) return;
+  replaceLoraInventoryItem(item);
+  if (item.model_profile !== currentProfile()) return;
+  if (triggersChanged) {
+    reconcileLoraTriggers(draft.loras.filter(value => value.enabled));
+    renderLoras();
+    schedulePersist();
+  }
+  // The compact picker renders on restore. Avoid rebuilding its hidden images
+  // while the manager is open, including when only a future default changes.
+  if (ui.loraDialog.open && !ui.loraDialog.classList.contains("lm-expanded")) renderLoraCatalog();
 }
 function parseLoraTriggerInput(value) {
   return normalizeTriggerWords(

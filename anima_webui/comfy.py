@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from collections.abc import AsyncIterator, Callable
 from io import BytesIO
@@ -87,6 +88,8 @@ class ComfyClient:
         self._classification_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._classification_generations = {kind: 0 for kind in ("models", "loras")}
         self._classification_locks = {kind: asyncio.Lock() for kind in ("models", "loras")}
+        self._classification_pending: dict[tuple[str, bool], asyncio.Task[dict[str, Any]]] = {}
+        self._node_info_supported = True
         self._inspection_cache: dict[tuple[str, ...], tuple[float, dict[str, Any]]] = {}
         self._inspection_lock = asyncio.Lock()
 
@@ -97,7 +100,7 @@ class ComfyClient:
         return self.session
 
     async def close(self) -> None:
-        pending = list(self._object_info_pending.values())
+        pending = list(self._object_info_pending.values()) + list(self._classification_pending.values())
         for task in pending:
             task.cancel()
         if pending:
@@ -154,7 +157,18 @@ class ComfyClient:
             task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
         return await asyncio.shield(task)
 
-    async def _manager_inventory(self, prefix: str) -> list[dict[str, Any]]:
+    async def _resource_object_info(self, node_name: str) -> dict[str, Any]:
+        """Read only the loader needed by classification, without downloading all nodes."""
+        if self._node_info_supported:
+            try:
+                return await self._json("GET", f"/object_info/{node_name}")
+            except ComfyHTTPError as error:
+                if error.status not in {404, 405}:
+                    raise
+                self._node_info_supported = False
+        return await self.object_info()
+
+    async def _manager_inventory(self, prefix: str, *, sha256: str = "") -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         expected_pages: int | None = None
         expected_total: int | None = None
@@ -162,7 +176,7 @@ class ComfyClient:
         page = 1
         while True:
             payload = await self._json(
-                "GET", f"/api/lm/{prefix}/list?{urlencode({'page': page, 'page_size': 100})}"
+                "GET", f"/api/lm/{prefix}/list?{urlencode({'page': page, 'page_size': 100, **({'hash': sha256} if sha256 else {})})}"
             )
             values = payload.get("items")
             total_pages = payload.get("total_pages")
@@ -205,6 +219,23 @@ class ComfyClient:
     async def resource_classifications(self, kind: str, *, refresh: bool = False) -> dict[str, Any]:
         if kind not in {"models", "loras"}:
             raise ValueError("资源类型必须是 models 或 loras")
+        # Concurrent refreshes share one new read. A refresh queued behind an
+        # older ordinary read still gets its own turn under the source lock.
+        key = (kind, refresh)
+        task = self._classification_pending.get((kind, True)) or self._classification_pending.get(key)
+        if task is None:
+            async def fetch() -> dict[str, Any]:
+                try:
+                    return await self._load_resource_classifications(kind, refresh=refresh)
+                finally:
+                    self._classification_pending.pop(key, None)
+
+            task = asyncio.create_task(fetch())
+            self._classification_pending[key] = task
+            task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        return await asyncio.shield(task)
+
+    async def _load_resource_classifications(self, kind: str, *, refresh: bool) -> dict[str, Any]:
         async with self._classification_locks[kind]:
             loop = asyncio.get_running_loop()
             if refresh:
@@ -215,8 +246,8 @@ class ComfyClient:
             if cached is not None and loop.time() - cached[0] < 5.0:
                 return cached[1]
 
-            object_info = await self.object_info()
             node_name, input_name = ("UNETLoader", "unet_name") if kind == "models" else ("LoraLoader", "lora_name")
+            object_info = await self._resource_object_info(node_name)
             node = object_info.get(node_name)
             inputs = node.get("input") if isinstance(node, dict) else None
             required = inputs.get("required") if isinstance(inputs, dict) else None
@@ -259,32 +290,75 @@ class ComfyClient:
     async def lora_inventory(self, *, refresh: bool = False) -> dict[str, Any]:
         return await self.resource_classifications("loras", refresh=refresh)
 
-    async def update_lora_metadata(self, file_path: str, updates: dict[str, Any]) -> dict[str, Any]:
-        """Write only library metadata for an exact, currently indexed file."""
+    def _cached_lora_sha(self, file_path: str) -> str:
         from .resource_classification import _absolute_path, _path_key
 
-        if not updates or set(updates) - {"favorite", "tags", "notes"}:
-            raise ComfyError("不支持此 LoRA 元数据修改")
-        inventory = await self.lora_inventory(refresh=True)
         identity = _path_key(_absolute_path(file_path))
-        matches = [item for item in inventory["manager_items"]
-                   if _path_key(_absolute_path(item["file_path"])) == identity]
+        cached = self._classification_cache.get("loras")
+        matches = [item for item in cached[1]["manager_items"]
+                   if _path_key(_absolute_path(item["file_path"])) == identity] if cached else []
+        return str(matches[0].get("sha256") or "") if len(matches) == 1 else ""
+
+    async def _manager_item_by_path(self, file_path: str, *, sha256: str = "") -> dict[str, Any]:
+        from .resource_classification import _absolute_path, _path_key
+
+        identity = _path_key(_absolute_path(file_path))
+        items = await self._manager_inventory("loras", sha256=sha256)
+        matches = [item for item in items if _path_key(_absolute_path(item.get("file_path"))) == identity]
+        if not matches and sha256:
+            # A replaced file can have a new hash at the same indexed path.
+            # Fall back only to the plugin list; loader metadata is irrelevant.
+            items = await self._manager_inventory("loras")
+            matches = [item for item in items if _path_key(_absolute_path(item.get("file_path"))) == identity]
         if len(matches) != 1:
             raise ComfyError("LoRA 文件不存在或路径不唯一，请刷新后重试")
-        response = await self._json("POST", "/api/lm/loras/save-metadata",
-                                    json={"file_path": matches[0]["file_path"], **updates})
-        self._classification_cache.pop("loras", None)
-        if response.get("success") is not True:
-            raise ComfyError("LoRA Manager 未确认元数据已保存")
-        try:
-            checked = await self.lora_inventory(refresh=True)
-            result = next((item for item in checked["manager_items"]
-                           if _path_key(_absolute_path(item["file_path"])) == identity), None)
-            if result is None or any(result.get(key) != value for key, value in updates.items()):
-                raise ComfyError("LoRA 元数据写入后回读不一致")
-        except (ComfyError, ValueError) as error:
-            raise ComfyMetadataPendingError(f"插件已确认保存，回读待确认：{error}") from error
-        return result
+        return matches[0]
+
+    async def lora_metadata(self, file_path: str, *, sha256: str = "") -> dict[str, Any]:
+        """Validate an indexed path and read its current editable metadata."""
+        async with self._classification_locks["loras"]:
+            result = await self._manager_item_by_path(file_path, sha256=sha256 or self._cached_lora_sha(file_path))
+            self._patch_lora_metadata(file_path, result)
+            return result
+
+    def _patch_lora_metadata(self, file_path: str, metadata: dict[str, Any]) -> None:
+        from .resource_classification import _absolute_path, _path_key
+
+        cached = self._classification_cache.get("loras")
+        if cached is None:
+            return
+        updates = {"favorite": metadata.get("favorite") is True, "tags": metadata.get("tags", []),
+                   "notes": str(metadata.get("notes") or ""), "sha256": str(metadata.get("sha256") or "").casefold()}
+        identity = _path_key(_absolute_path(file_path))
+        for collection in ("manager_items", "items"):
+            for item in cached[1].get(collection, []):
+                if item.get("file_path") and _path_key(_absolute_path(item["file_path"])) == identity:
+                    item.update(copy.deepcopy(updates))
+        # Do not extend the strict inventory TTL just because one item changed.
+        self._classification_generations["loras"] += 1
+
+    async def update_lora_metadata(self, file_path: str, updates: dict[str, Any]) -> dict[str, Any]:
+        """Write only library metadata for an exact, currently indexed file."""
+        if not updates or set(updates) - {"favorite", "tags", "notes"}:
+            raise ComfyError("不支持此 LoRA 元数据修改")
+        # Sharing the source lock prevents an older full refresh from publishing
+        # a pre-save favorite after this transaction has been verified.
+        async with self._classification_locks["loras"]:
+            item = await self._manager_item_by_path(file_path, sha256=self._cached_lora_sha(file_path))
+            response = await self._json("POST", "/api/lm/loras/save-metadata",
+                                        json={"file_path": item["file_path"], **updates})
+            if response.get("success") is not True:
+                self._classification_cache.pop("loras", None)
+                raise ComfyError("LoRA Manager 未确认元数据已保存")
+            try:
+                result = await self._manager_item_by_path(item["file_path"], sha256=str(item.get("sha256") or ""))
+                if any(result.get(key) != value for key, value in updates.items()):
+                    raise ComfyError("LoRA 元数据写入后回读不一致")
+            except (ComfyError, ValueError) as error:
+                self._classification_cache.pop("loras", None)
+                raise ComfyMetadataPendingError(f"插件已确认保存，回读待确认：{error}") from error
+            self._patch_lora_metadata(item["file_path"], result)
+            return result
 
     async def lora_preview(self, filename: str) -> tuple[bytes, str, str]:
         normalized = normalize_lora_path(filename)

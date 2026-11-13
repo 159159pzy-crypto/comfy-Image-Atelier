@@ -6,6 +6,7 @@ import unittest
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -68,25 +69,44 @@ class Characters:
         return {"items": list(self.items.values()), "total": len(self.items)}
 
 
+class MetadataClient(ComfyClient):
+    """Exercise the real client cache/transaction logic with an in-memory plugin."""
+
+    def __init__(self):
+        super().__init__()
+        self.rows = [{"file_path": "F:/loras/one.safetensors", "base_model": "Anima", "sha256": "a" * 64,
+                      "favorite": False, "tags": [], "notes": ""}]
+        self.requests = []
+        self.posts = []
+        self.commit = True
+        self.readback_error = False
+
+    async def _json(self, method, path, **kwargs):
+        self.requests.append((method, path))
+        if method == "POST":
+            values = kwargs["json"]
+            self.posts.append(copy.deepcopy(values))
+            if self.commit:
+                next(row for row in self.rows if row["file_path"] == values["file_path"]).update(copy.deepcopy(values))
+            return {"success": True}
+        if path == "/object_info/LoraLoader":
+            return {"LoraLoader": {"input": {"required": {"lora_name": [[row["file_path"].split("/loras/")[1] for row in self.rows]]}}}}
+        if path == "/api/lm/loras/roots":
+            return {"success": True, "roots": ["F:/loras"]}
+        if path.startswith("/api/lm/loras/list?"):
+            if self.readback_error and self.posts:
+                raise ComfyError("fixture readback offline")
+            params = parse_qs(urlsplit(path).query)
+            rows = [row for row in self.rows if not params.get("hash") or row.get("sha256") == params["hash"][0]]
+            page = int(params["page"][0])
+            return {"items": copy.deepcopy(rows[(page - 1) * 100:page * 100]), "total": len(rows),
+                    "page": page, "page_size": 100, "total_pages": (len(rows) + 99) // 100}
+        raise AssertionError(f"Unexpected request: {method} {path}")
+
+
 class MetadataProxyTests(unittest.IsolatedAsyncioTestCase):
     async def test_metadata_proxy_accepts_only_exact_inventory_paths_and_verifies_readback(self):
-        class Client(ComfyClient):
-            def __init__(self):
-                super().__init__()
-                self.rows = [{"file_path": "F:/loras/one.safetensors", "favorite": False}]
-                self.posts = []
-                self.commit = True
-
-            async def lora_inventory(self, refresh=False):
-                return {"manager_items": copy.deepcopy(self.rows)}
-
-            async def _json(self, method, path, **kwargs):
-                self.posts.append(kwargs["json"])
-                if self.commit:
-                    self.rows[0].update(kwargs["json"])
-                return {"success": True}
-
-        client = Client()
+        client = MetadataClient()
         await client.update_lora_metadata("f:/LORAS/one.safetensors", {"favorite": True})
         self.assertTrue(client.rows[0]["favorite"])
         with self.assertRaises(ComfyError):
@@ -97,6 +117,83 @@ class MetadataProxyTests(unittest.IsolatedAsyncioTestCase):
         client.commit = False
         with self.assertRaisesRegex(ComfyMetadataPendingError, "回读不一致"):
             await client.update_lora_metadata("F:/loras/one.safetensors", {"favorite": False})
+
+    async def test_hot_star_uses_two_targeted_reads_and_patches_canonical_metadata_without_extending_ttl(self):
+        client = MetadataClient()
+        await client.lora_inventory()
+        timestamp, _ = client._classification_cache["loras"]
+        generation = client.classification_generation("loras")
+        client.rows[0].update(tags=["external"], notes="edited in plugin")
+        client.requests.clear()
+        result = await client.update_lora_metadata("f:\\loras\\ONE.safetensors", {"favorite": True})
+        self.assertEqual(len(client.requests), 3)
+        self.assertEqual(sum("&hash=" in path for method, path in client.requests if method == "GET"), 2)
+        cached = (await client.lora_inventory())["manager_items"][0]
+        self.assertEqual((cached["favorite"], cached["tags"], cached["notes"]), (True, ["external"], "edited in plugin"))
+        self.assertEqual(cached, result)
+        self.assertEqual(client._classification_cache["loras"][0], timestamp)
+        self.assertEqual(client.classification_generation("loras"), generation + 1)
+
+    async def test_hash_collision_uses_exact_path_and_no_hash_falls_back_only_to_plugin_list(self):
+        client = MetadataClient()
+        client.rows.append({**client.rows[0], "file_path": "F:/loras/other.safetensors"})
+        await client.lora_inventory()
+        await client.update_lora_metadata("F:/loras/one.safetensors", {"favorite": True})
+        self.assertFalse(client.rows[1]["favorite"])
+        client.rows[0].pop("sha256")
+        client._classification_cache.clear()
+        client.requests.clear()
+        await client.update_lora_metadata("F:/loras/one.safetensors", {"favorite": False})
+        self.assertEqual([path for method, path in client.requests if method == "GET"],
+                         ["/api/lm/loras/list?page=1&page_size=100"] * 2)
+
+    async def test_missing_or_duplicate_path_is_rejected_before_post_and_replaced_hash_is_reread(self):
+        client = MetadataClient()
+        await client.lora_inventory()
+        client.rows[0]["sha256"] = "b" * 64
+        result = await client.update_lora_metadata("F:/loras/one.safetensors", {"favorite": True})
+        self.assertEqual(result["sha256"], "b" * 64)
+        self.assertEqual(client._cached_lora_sha("F:/loras/one.safetensors"), "b" * 64)
+        client.rows.append(copy.deepcopy(client.rows[0]))
+        with self.assertRaisesRegex(ComfyError, "路径不唯一"):
+            await client.update_lora_metadata("F:/loras/one.safetensors", {"favorite": False})
+        client.rows.clear()
+        with self.assertRaisesRegex(ComfyError, "不存在"):
+            await client.update_lora_metadata("F:/loras/one.safetensors", {"favorite": False})
+        self.assertEqual(len(client.posts), 1)
+
+    async def test_readback_failure_invalidates_cache_without_repeating_save(self):
+        client = MetadataClient()
+        await client.lora_inventory()
+        client.readback_error = True
+        with self.assertRaises(ComfyMetadataPendingError):
+            await client.update_lora_metadata("F:/loras/one.safetensors", {"favorite": True})
+        self.assertTrue(client.rows[0]["favorite"])
+        self.assertEqual(len(client.posts), 1)
+        self.assertNotIn("loras", client._classification_cache)
+
+    async def test_refresh_in_flight_cannot_overwrite_a_later_verified_star(self):
+        client = MetadataClient()
+        await client.lora_inventory()
+        started, release = asyncio.Event(), asyncio.Event()
+        original = client._json
+
+        async def delayed(method, path, **kwargs):
+            payload = await original(method, path, **kwargs)
+            if path.startswith("/api/lm/loras/list?") and not started.is_set():
+                started.set()
+                await release.wait()
+            return payload
+
+        client._json = delayed
+        refresh = asyncio.create_task(client.lora_inventory(refresh=True))
+        await asyncio.wait_for(started.wait(), 2)
+        save = asyncio.create_task(client.update_lora_metadata("F:/loras/one.safetensors", {"favorite": True}))
+        await asyncio.sleep(0)
+        self.assertFalse(save.done())
+        release.set()
+        await asyncio.gather(refresh, save)
+        self.assertTrue((await client.lora_inventory())["manager_items"][0]["favorite"])
 
     async def test_preview_proxy_rejects_redirects_active_content_and_oversized_assets(self):
         app = web.Application()
