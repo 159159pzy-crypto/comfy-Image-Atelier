@@ -193,6 +193,21 @@ Anima 人物池支持为每个人物绑定多个 LoRA：抽到人物后逐张自
 
 ### 普通底图、双采样和多阶段后处理
 
+新建配置与「恢复默认」按模型档案使用以下均衡起点；单图与随机工作台一致。已有草稿、风格预设与历史中的明确参数继续保留，更新后不会自动覆盖。
+
+| 参数 | Anima 基础版 | Krea 2 Turbo |
+| --- | --- | --- |
+| 普通底图 | 30 步 / CFG 4 / `er_sde` / `simple` / 降噪 1 | 8 步 / CFG 1 / `euler` / `simple` / 降噪 1 |
+| 双采样第一、二轮 | 两轮均用 CFG 4 / `er_sde` / `simple`；总步数 30、第二轮起点 15 | 两轮均用 CFG 1 / `euler` / `simple`；总步数 8、第二轮起点 4 |
+| 脸部细化 | 16 步 / CFG 4 / `er_sde` / `simple` / 降噪 0.30 | 8 步 / CFG 1 / `euler` / `simple` / 降噪 0.30 |
+| 独立潜空间采样、整图后采样 | 各 16 步 / CFG 4 / `er_sde` / `simple` / 降噪 0.20 | 各 10 步 / CFG 1 / `er_sde` / `simple` / 降噪 0.30 |
+
+双采样先完成第一轮，再放大并执行第二轮的后半段，因此实际采样量为 **Anima 30 + 15 步、Krea 2 Turbo 8 + 4 步**，第二轮按放大后的尺寸计算；界面中的「总步数」不是两轮之和。独立潜空间采样与整图后采样保留原默认值，各自开启时额外执行。
+
+这次调整只更新采样参数：随机工作台的 Anima 默认双采样、Krea 2 默认普通底图，单图工作台默认普通底图；各功能开关、底图尺寸、放大倍率、种子策略、提示词及资源选择规则保持原设定。脸部细化等可选模块不会因为获得新参数而自动开启。Anima 档案的默认值针对基础版模型；Silvermoon 等 Turbo 衍生模型请使用对应作者的推荐参数，不会仅凭文件名自动切换采样配置。
+
+取值参考 [Anima 官方模型说明](https://huggingface.co/circlestone-labs/Anima)（`er_sde`、30–50 步、CFG 4–5），以及 [ComfyUI 官方 Krea 2 Turbo 模板](https://github.com/Comfy-Org/workflow_templates/blob/main/templates/image_krea2_turbo_t2i.json)（8 步、CFG 1、`euler / simple`）。另对照了 `AnimaBasicV10.json`、`reference-int8-animesharp-workflow.json` 和 `workflow (2).json` 的有效连线与启用状态；其中的 Turbo 参数、风格 LoRA 和已关闭的后处理不能直接套用到基础版 Anima。以上是通用起点，不代表所有题材、LoRA 或模型衍生版本的画质最优值。
+
 | 环节 | 可以控制什么 | 用途 |
 | --- | --- | --- |
 | 普通底图 / 双采样 | 尺寸、步数、CFG、采样器、调度器；双采样分别配置两段与切换步数 | 先确认画面，再比较不同采样组合 |

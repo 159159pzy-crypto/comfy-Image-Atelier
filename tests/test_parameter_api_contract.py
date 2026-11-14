@@ -45,6 +45,9 @@ def test_launcher_submission_keeps_legacy_values_and_mode_defaults(tmp_path, map
                 assert response.status == 201, await response.text()
                 submitted = validate_settings(manager.start.call_args.args[0])
                 assert submitted["steps"] == raw.get("steps", 20)
+                assert submitted["cfg"] == raw.get("cfg", 8)
+                assert submitted["sampler_name"] == raw.get("sampler_name", "euler")
+                assert submitted["scheduler"] == raw.get("scheduler", "simple")
                 assert submitted["dual"] is None
                 assert submitted["krea_variance"]["enabled"] is expected_variance
                 if raw.get("single", {}).get("dlss"):

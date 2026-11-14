@@ -126,7 +126,7 @@ class ModelProfileContractTests(unittest.TestCase):
 
         defaults = model_profile_defaults("krea2")
         defaults["steps"] = -1
-        self.assertEqual(model_profile_defaults("krea2")["steps"], 20)
+        self.assertEqual(model_profile_defaults("krea2")["steps"], 8)
 
     def test_resource_summary_reports_missing_files_and_checks_names_case_insensitively(self):
         krea = get_model_profile("krea2")
@@ -228,8 +228,10 @@ class ModelProfileContractTests(unittest.TestCase):
                 self.assertEqual(settings["vae_name"], "wrong-vae.safetensors")
                 self.assertEqual(settings["clip_type"], "stable_diffusion")
                 self.assertEqual(settings["base_mode"], profile["defaults"]["base_mode"])
-                self.assertEqual(settings["sampler_name"], profile["defaults"]["sampler_name"])
-                self.assertEqual(settings["scheduler"], profile["defaults"]["scheduler"])
+                # Missing sampling fields in a persisted payload keep the
+                # historical values; fresh drafts explicitly supply new ones.
+                self.assertEqual(settings["sampler_name"], "euler")
+                self.assertEqual(settings["scheduler"], "simple")
 
                 # Omitting the selection uses the profile's canonical model.
                 defaults = validate_settings({"model_profile": profile_id})

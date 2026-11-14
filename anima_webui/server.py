@@ -1417,7 +1417,7 @@ def create_app(
             body["pipeline_version"] = supplied.get("pipeline_version", 2)
             # These fields depend on the submitted mode and legacy values.
             # Launcher defaults must not hide their absence before migration.
-            for key in ("steps", "dual", "krea_variance", "upscalers"):
+            for key in ("steps", "cfg", "sampler_name", "scheduler", "dual", "single", "krea_variance", "upscalers"):
                 if key not in supplied:
                     body.pop(key, None)
         body = generation_settings(body)

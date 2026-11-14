@@ -10,10 +10,24 @@ function sharedKreaFromSettings(settings = {}) {
   return { ...sharedKreaDefaults(), ...(saved || { enabled: settings.workbench !== "single" && settings.model_profile === "krea2" }) };
 }
 function randomDualDefaults() {
+  // Historical partial snapshots keep their original second-pass settings.
   return { switch_step: 15, scale: 1, second_cfg: 8, second_sampler_name: "euler", second_scheduler: "simple", upscale_method: "sesqui", model_format: "Wan 2.1", half_precision: true };
 }
-function sharedSamplingDefaults(mode = "normal") {
-  return { steps: mode === "dual_sampler" ? 30 : 20, cfg: 8, sampler_name: "euler", scheduler: "simple", base_denoise: 1, krea_variance: sharedKreaDefaults(), dual: randomDualDefaults(), seedMode: "fixed", seed: "0" };
+function sharedSamplingDefaults(mode = "normal", profile = typeof currentProfile === "function" ? currentProfile() : "anima") {
+  const bound = typeof profileConfig === "function" ? profileConfig(profile) : {};
+  const settings = typeof profileSettingsDefaults === "function" ? profileSettingsDefaults(profile) : {};
+  const sampling = { ...settings, ...bound.defaults };
+  return { steps: sampling.steps, cfg: sampling.cfg, sampler_name: sampling.sampler_name, scheduler: sampling.scheduler,
+    base_denoise: settings.base_denoise ?? 1, krea_variance: { ...sharedKreaDefaults(), ...settings.krea_variance },
+    dual: { ...randomDualDefaults(), ...settings.dual, ...bound.dual_defaults }, seedMode: "fixed", seed: "0" };
+}
+function sharedUpscalerDefaults(profile, settings) {
+  const bound = typeof profileConfig === "function" ? profileConfig(profile) : {};
+  const upscalers = normalizeUpscalers(settings, null, profile, 5);
+  Object.assign(upscalers.post_sampler, bound.post_sampler_defaults);
+  Object.assign(upscalers.latent.sampler, bound.latent_sampler_defaults);
+  Object.assign(upscalers.face_refine, bound.face_refine_defaults);
+  return upscalers;
 }
 function randomDualFromSettings(settings = {}) {
   const explicit = settings.workbench === "single" ? settings.single?.dual : settings.dual;
@@ -25,11 +39,10 @@ function randomDualFromSettings(settings = {}) {
 }
 function randomWorkbenchDefaultSettings(profile = "anima") {
   const settings = JSON.parse(JSON.stringify(profileSettingsDefaults(profile)));
-  const upscalers = normalizeUpscalers(settings.upscalers, null, profile, 5);
+  const upscalers = sharedUpscalerDefaults(profile, settings.upscalers);
   Object.assign(upscalers.latent, { upscale_method: "sesqui", model_format: "Wan 2.1", half_precision: true, scale_by: 1.5 });
-  Object.assign(upscalers.face_refine, { steps: 8, cfg_scale: 1, sampler: "res_2m_ode", scheduler: "beta57", denoise_strength: .3 });
   const mode = settings.base_mode === "dual_sampler" ? "dual_sampler" : "normal";
-  const sampling = sharedSamplingDefaults(mode);
+  const sampling = sharedSamplingDefaults(mode, profile);
   delete sampling.seedMode; delete sampling.seed;
   return { ...settings, ...sampling, pipeline_version: 5, base_mode: mode, model_profile: profile, workbench: "random", upscalers };
 }

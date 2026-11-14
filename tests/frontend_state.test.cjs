@@ -109,6 +109,28 @@ test('profile drafts preserve each source version without borrowing post setting
   assert.equal(ctx.profileDrafts.krea2.upscalers.post_sampler.steps, 25);
   assert.equal(ctx.profileDrafts.krea2.upscalers.post_sampler.denoise, .15);
 });
+
+test('new generation defaults cannot overwrite explicit or missing fields in historical snapshots', () => {
+  const ctx = context();
+  ctx.canonicalArtists = value => value;
+  ctx.defaultLorasForProfile = () => [];
+  vm.runInContext(functionSource('normalizeSettings'), ctx);
+  ctx.defaults = { model_profile: 'anima', steps: 30, cfg: 4, sampler_name: 'er_sde', scheduler: 'simple', base_mode: 'dual_sampler',
+    upscalers: { face_refine: { steps: 16, cfg_scale: 4, sampler: 'er_sde', scheduler: 'simple' } } };
+  for (const profile of ['anima', 'krea2']) {
+    const partial = { pipeline_version: 5, model_profile: profile, base_mode: 'normal', upscalers: { face_refine: { denoise_strength: .42 } } };
+    const before = plain(partial), restored = ctx.normalizeSettings(partial);
+    assert.deepEqual([restored.steps, restored.cfg, restored.sampler_name, restored.scheduler], [20, 8, 'euler', 'simple']);
+    assert.deepEqual([restored.upscalers.face_refine.steps, restored.upscalers.face_refine.cfg_scale, restored.upscalers.face_refine.sampler, restored.upscalers.face_refine.scheduler, restored.upscalers.face_refine.denoise_strength], [8, 1, 'res_2m_ode', 'beta57', .42]);
+    assert.equal(restored.dual, null);
+    assert.deepEqual(partial, before);
+    const explicit = ctx.normalizeSettings({ ...partial, steps: 46, cfg: 6.5, sampler_name: 'heun', scheduler: 'beta',
+      dual: { switch_step: 19, second_cfg: 7 }, upscalers: { face_refine: { steps: 22, cfg_scale: 5, sampler: 'heun', scheduler: 'beta' } } });
+    assert.deepEqual([explicit.steps, explicit.cfg, explicit.sampler_name, explicit.scheduler], [46, 6.5, 'heun', 'beta']);
+    assert.deepEqual(plain(explicit.dual), { switch_step: 19, second_cfg: 7 });
+    assert.equal(explicit.upscalers.face_refine.sampler, 'heun');
+  }
+});
 test('partial redraw requires selecting every non-preservable dimension', () => {
   const ctx = context();
   ctx.ui.confirmVariant = {};

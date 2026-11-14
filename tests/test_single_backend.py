@@ -35,6 +35,14 @@ class SingleComfy(FakeComfy):
         self.block = None
         self.prompt_failure = False
 
+    async def resource_inventory(self):
+        inventory = await super().resource_inventory()
+        # These fixtures also replay historical face pipelines. Their installed
+        # plugin capabilities must not disappear when fresh defaults change.
+        inventory["samplers"].append("res_2m_ode")
+        inventory["schedulers"].append("beta57")
+        return inventory
+
     async def object_info(self):
         return {"PreviewAny": {}, "PromptExpand": {"input": {"required": {
             "rule": [["扩写-通用"]], "llm_service": [["test/model"]],

@@ -940,6 +940,8 @@ async function canonicalizeWorkflowSettings(settings) {
   return Array.isArray(settings.resource_replacements) ? { ...payload.settings, resource_replacements: clone(settings.resource_replacements) } : payload.settings;
 }
 function defaultUpscalers(profile = "anima") {
+  // Compatibility defaults for incomplete saved settings. Fresh workbenches
+  // explicitly overlay the model profile via sharedUpscalerDefaults().
   return {
     pixel_hires: { enabled: false, model_name: profile === "krea2" ? "4x-AnimeSharp.pth" : "4x_foolhardy_Remacri.pth", percent: 50, upscale_method: "lanczos" },
     post_sampler: { enabled: false, steps: profile === "krea2" ? 10 : 16, cfg: profile === "krea2" ? 1 : 4, sampler_name: "er_sde", scheduler: "simple", denoise: profile === "krea2" ? .3 : .2 },
@@ -1156,6 +1158,12 @@ function normalizeSettings(raw) {
       : raw?.second_sampler?.enabled
         ? "dual_sampler"
         : (defaults?.base_mode === "dual_sampler" ? "dual_sampler" : "normal");
+  // New settings are complete. Missing fields belong to old snapshots and
+  // must not inherit a later release's generation defaults.
+  merged.steps = raw?.steps ?? (merged.base_mode === "dual_sampler" ? 30 : 20);
+  merged.cfg = raw?.cfg ?? 8;
+  merged.sampler_name = raw?.sampler_name ?? "euler";
+  merged.scheduler = raw?.scheduler ?? "simple";
   const hasPools = raw && raw.pools && typeof raw.pools === "object";
   merged.pools = hasPools ? clone(raw.pools) : defaultPools();
   for (const section of SECTIONS) {
@@ -1168,6 +1176,7 @@ function normalizeSettings(raw) {
   // 旧设置仅用于读取迁移；提交时 readSettings 只会序列化 upscalers。
   const oldHires = raw?.hires || null;
   const defaultRepair = normalizeUpscalers(normalizeProfileId(defaults?.model_profile || "anima") === merged.model_profile ? defaults?.upscalers : null, null, merged.model_profile);
+  Object.assign(defaultRepair.face_refine, defaultUpscalers(merged.model_profile).face_refine);
   merged.upscalers = normalizeUpscalers(raw?.upscalers, defaultRepair, merged.model_profile, raw?.pipeline_version ?? 2);
   if (oldHires && !raw?.upscalers) {
     merged.upscalers.pixel_hires = { ...defaultUpscalers(merged.model_profile).pixel_hires, ...oldHires };

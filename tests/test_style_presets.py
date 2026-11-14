@@ -108,8 +108,10 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("pipeline_version", settings)
         self.assertNotIn("upscalers", settings)
         self.assertNotIn("width", settings)
-        self.assertEqual(settings["sampler_name"], DEFAULT_SETTINGS["sampler_name"])
-        self.assertEqual(settings["scheduler"], DEFAULT_SETTINGS["scheduler"])
+        # A partial persisted preset keeps its historical fallback values.
+        self.assertEqual(settings["cfg"], 8)
+        self.assertEqual(settings["sampler_name"], "euler")
+        self.assertEqual(settings["scheduler"], "simple")
         self.assertEqual(settings["manual_artist"], "@anmi")
         for removed in ("hires", "detailers", "cfg_zero_star", "second_sampler"):
             self.assertNotIn(removed, settings)

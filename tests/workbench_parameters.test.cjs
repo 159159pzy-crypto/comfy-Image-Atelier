@@ -14,7 +14,12 @@ function setup() {
   const elements = {};
   const ctx = vm.createContext({
     clone: plain, document: { getElementById: id => elements[id] || null },
-    profileSettingsDefaults: () => ({ model_profile: 'anima', cfg: 4, sampler_name: 'er_sde', scheduler: 'simple', upscalers: { latent: { enabled: false, upscale_method: 'bilinear', scale_by: 1.5 } } }),
+    profileConfig: profile => ({
+      defaults: { steps: profile === 'krea2' ? 8 : 30, cfg: profile === 'krea2' ? 1 : 4, sampler_name: profile === 'krea2' ? 'euler' : 'er_sde', scheduler: 'simple' },
+      dual_defaults: { switch_step: profile === 'krea2' ? 4 : 15, scale: 1, second_cfg: profile === 'krea2' ? 1 : 4, second_sampler_name: profile === 'krea2' ? 'euler' : 'er_sde', second_scheduler: 'simple' },
+      face_refine_defaults: { steps: profile === 'krea2' ? 8 : 16, cfg_scale: profile === 'krea2' ? 1 : 4, sampler: profile === 'krea2' ? 'euler' : 'er_sde', scheduler: 'simple', denoise_strength: .3 },
+    }),
+    profileSettingsDefaults: (profile = 'anima') => ({ model_profile: profile, steps: 30, cfg: 4, sampler_name: 'er_sde', scheduler: 'simple', upscalers: { latent: { enabled: false, upscale_method: 'bilinear', scale_by: 1.5 } } }),
     ensureSelectValue: (element, value) => { element.value = value; },
     singleWorkbenchActive: () => false, ui: { base_mode: { value: 'normal' }, steps: { value: '30' }, latent_upscale_method: { value: 'sesqui' }, latent_upscale_scale: {} },
   });
@@ -28,7 +33,7 @@ test('new random defaults match single dual and latent controls without changing
   const { ctx } = setup();
   const before = plain(ctx.profileSettingsDefaults());
   const settings = ctx.randomWorkbenchDefaultSettings('anima');
-  assert.deepEqual(plain(settings.dual), { switch_step: 15, scale: 1, second_cfg: 8, second_sampler_name: 'euler', second_scheduler: 'simple', upscale_method: 'sesqui', model_format: 'Wan 2.1', half_precision: true });
+  assert.deepEqual(plain(settings.dual), { switch_step: 15, scale: 1, second_cfg: 4, second_sampler_name: 'er_sde', second_scheduler: 'simple', upscale_method: 'sesqui', model_format: 'Wan 2.1', half_precision: true });
   assert.equal(settings.upscalers.latent.upscale_method, 'sesqui');
   assert.deepEqual(plain(ctx.profileSettingsDefaults()), before);
 });
@@ -130,8 +135,8 @@ test('ordinary and dual modes use their first-entry defaults and restore indepen
   ctx.ui.steps.value = '20'; ctx.sharedSamplingRestoreDrafts();
   ctx.ui.steps.value = '27'; ctx.ui.cfg.value = '5.5'; ctx.ui.base_denoise.value = '.74'; elements.singleSampleSeed.value = '123';
   ctx.ui.base_mode.value = 'dual_sampler'; ctx.sharedSamplingModeChanged();
-  assert.deepEqual([ctx.ui.steps.value, ctx.ui.cfg.value, elements.singleSampleSeed.value], ['30', '8', '0']);
-  assert.equal(ctx.readRandomDualControls().second_cfg, 8);
+  assert.deepEqual([ctx.ui.steps.value, ctx.ui.cfg.value, elements.singleSampleSeed.value], ['30', '4', '0']);
+  assert.equal(ctx.readRandomDualControls().second_cfg, 4);
   ctx.ui.steps.value = '38'; elements.random_dual_second_cfg.value = '6.5'; elements.singleSeedMode.value = 'random';
   ctx.ui.base_mode.value = 'normal'; ctx.sharedSamplingModeChanged();
   assert.deepEqual([ctx.ui.steps.value, ctx.ui.cfg.value, ctx.ui.base_denoise.value, elements.singleSampleSeed.value], ['27', '5.5', '0.74', '123']);
@@ -172,10 +177,53 @@ test('random first entry honors the model profile base mode while using that mod
   const defaults = ctx.profileSettingsDefaults();
   ctx.profileSettingsDefaults = () => ({ ...defaults, base_mode: 'dual_sampler' });
   const dual = ctx.randomWorkbenchDefaultSettings();
-  assert.equal(dual.base_mode, 'dual_sampler'); assert.equal(dual.steps, 30); assert.equal(dual.cfg, 8);
+  assert.equal(dual.base_mode, 'dual_sampler'); assert.equal(dual.steps, 30); assert.equal(dual.cfg, 4);
   ctx.profileSettingsDefaults = () => ({ ...defaults, base_mode: 'normal' });
   const normal = ctx.randomWorkbenchDefaultSettings();
-  assert.equal(normal.base_mode, 'normal'); assert.equal(normal.steps, 20);
+  assert.equal(normal.base_mode, 'normal'); assert.equal(normal.steps, 30);
+});
+
+test('Krea first dual entry uses its eight-step profile and restores edited modes', () => {
+  const { ctx, elements } = setup();
+  ctx.currentProfile = () => 'krea2';
+  Object.assign(ctx.ui, { steps: { value: '8' }, cfg: { value: '1' }, sampler_name: { value: 'euler' }, scheduler: { value: 'simple' }, base_denoise: { value: '1' }, krea_variance_enabled: { checked: false } });
+  elements.singleSeedMode = { value: 'random' }; elements.singleSampleSeed = { value: '31' };
+  ctx.setControl = (id, value) => { if (id === 'krea_variance_enabled') ctx.ui[id].checked = value; else ctx.ui[id].value = String(value); };
+  ctx.updateRepairControls = () => {}; ctx.schedulePersist = () => {};
+  ctx.sharedSamplingRestoreDrafts();
+  ctx.ui.steps.value = '14';
+  ctx.ui.base_mode.value = 'dual_sampler'; ctx.sharedSamplingModeChanged();
+  assert.deepEqual([ctx.ui.steps.value, ctx.ui.cfg.value, ctx.ui.sampler_name.value], ['8', '1', 'euler']);
+  assert.equal(ctx.readRandomDualControls().switch_step, 4);
+  assert.equal(ctx.readRandomDualControls().second_cfg, 1);
+  assert.ok(ctx.readRandomDualControls().switch_step < Number(ctx.ui.steps.value));
+  ctx.ui.base_mode.value = 'normal'; ctx.sharedSamplingModeChanged();
+  assert.equal(ctx.ui.steps.value, '14');
+  assert.equal(elements.singleSeedMode.value, 'random');
+  assert.equal(elements.singleSampleSeed.value, '31');
+});
+
+test('fresh workbenches share model defaults but saved partial dual and face settings keep legacy values', () => {
+  const { ctx } = setup();
+  ctx.config = { single_defaults: { dual: { switch_step: 15, second_cfg: 8, second_sampler_name: 'euler' } } };
+  vm.runInContext(source('single-workbench.js'), ctx);
+  for (const [profile, steps, cfg, sampler, start, faceSteps] of [['anima', 30, 4, 'er_sde', 15, 16], ['krea2', 8, 1, 'euler', 4, 8]]) {
+    const before = plain(ctx.config);
+    const random = ctx.randomWorkbenchDefaultSettings(profile), single = ctx.singleWorkbenchDefaultSettings(profile);
+    for (const value of [random, single]) {
+      assert.deepEqual([value.steps, value.cfg, value.sampler_name, value.scheduler], [steps, cfg, sampler, 'simple']);
+      assert.deepEqual([value.upscalers.face_refine.steps, value.upscalers.face_refine.cfg_scale, value.upscalers.face_refine.sampler, value.upscalers.face_refine.scheduler, value.upscalers.face_refine.denoise_strength], [faceSteps, cfg, sampler, 'simple', .3]);
+      assert.equal(value.upscalers.face_refine.enabled, false);
+      assert.equal(value.upscalers.latent.enabled, false);
+    }
+    assert.equal(single.base_mode, 'normal'); assert.equal(single.count, 1);
+    assert.deepEqual([single.single.dual.switch_step, single.single.dual.second_cfg, single.single.dual.second_sampler_name], [start, cfg, sampler]);
+    assert.deepEqual(plain(ctx.config), before);
+    assert.deepEqual([ctx.singleWorkbenchDefaultSettings(profile, { legacy: true }).single.dual.switch_step, ctx.singleWorkbenchDefaultSettings(profile, { legacy: true }).single.dual.second_cfg], [15, 8]);
+    assert.equal(ctx.randomDualFromSettings({ dual: { scale: 1.25 }, model_profile: profile }).second_cfg, 8);
+    const old = ctx.normalizeUpscalers({ face_refine: { enabled: true, denoise_strength: .45 } }, null, profile, 5);
+    assert.deepEqual([old.face_refine.sampler, old.face_refine.scheduler, old.face_refine.denoise_strength], ['res_2m_ode', 'beta57', .45]);
+  }
 });
 
 test('legacy algorithms are explicit dropdown choices and never leak into model_format serialization', () => {

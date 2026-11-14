@@ -15,6 +15,7 @@ from .sampling import (
 
 from .model_profiles import (
     DEFAULT_MODEL_PROFILE,
+    LEGACY_SAMPLING_DEFAULTS,
     ModelProfileError,
     MODEL_PROFILES,
     get_model_profile,
@@ -223,6 +224,14 @@ DEFAULT_SETTINGS = {
     },
 }
 
+# Compatibility defaults are deliberately separate from the fresh-draft values.
+# Normalizing a partial history/preset must never silently retune its samplers.
+_LEGACY_DEFAULT_SETTINGS = copy.deepcopy(DEFAULT_SETTINGS)
+_LEGACY_DEFAULT_SETTINGS.update(LEGACY_SAMPLING_DEFAULTS[DEFAULT_MODEL_PROFILE])
+DEFAULT_SETTINGS["dual"] = copy.deepcopy(MODEL_PROFILES[DEFAULT_MODEL_PROFILE]["dual_defaults"])
+DEFAULT_SETTINGS["single"]["dual"].update(MODEL_PROFILES[DEFAULT_MODEL_PROFILE]["dual_defaults"])
+DEFAULT_SETTINGS["upscalers"]["face_refine"].update(MODEL_PROFILES[DEFAULT_MODEL_PROFILE]["face_refine_defaults"])
+
 MAX_SAMPLE_SEED = 1125899906842624
 
 COMPOSER_ID = 60
@@ -340,6 +349,32 @@ def validate_template_nodes(api: dict[str, Any], ui: dict[str, Any]) -> None:
 
 class WorkflowError(ValueError):
     pass
+
+
+def default_settings_for_profile(
+    profile_id: str = DEFAULT_MODEL_PROFILE, workbench: str = "random"
+) -> dict[str, Any]:
+    """Build explicit defaults for a new draft, never for loading a snapshot."""
+    profile = get_model_profile(profile_id)
+    if workbench not in {"random", "single"}:
+        raise WorkflowError("workbench 必须是 random 或 single")
+    settings = copy.deepcopy(DEFAULT_SETTINGS)
+    for key in ("hires", "detailers", "cfg_zero_star", "second_sampler"):
+        settings.pop(key, None)
+    settings.update(profile["defaults"])
+    settings.update({key: profile[key] for key in ("model_name", "clip_name", "vae_name", "clip_type")})
+    settings.update(model_profile=profile["id"], workbench=workbench)
+    settings["dual"] = copy.deepcopy(profile["dual_defaults"])
+    settings["single"]["dual"].update(copy.deepcopy(profile["dual_defaults"]))
+    stages = settings["upscalers"]
+    stages["pixel_hires"]["model_name"] = profile["pixel_hires_model"]
+    stages["post_sampler"] = copy.deepcopy(profile["post_sampler_defaults"])
+    stages["latent"]["sampler"] = copy.deepcopy(profile["latent_sampler_defaults"])
+    stages["face_refine"].update(copy.deepcopy(profile["face_refine_defaults"]))
+    stages["seedvr2"].update(model_name=profile["seedvr2_model"], vae_name=profile["seedvr2_vae"])
+    if workbench == "single":
+        settings.update(count=1, base_mode="normal")
+    return settings
 
 
 def read_json(path: str | Path) -> dict[str, Any]:
@@ -613,7 +648,7 @@ def _validate_upscalers(value: Any, profile_id: str = DEFAULT_MODEL_PROFILE, pip
     unknown = set(value) - allowed
     if unknown:
         raise WorkflowError(f"未知放大修复模块: {', '.join(sorted(unknown))}")
-    merged = copy.deepcopy(DEFAULT_SETTINGS["upscalers"])
+    merged = copy.deepcopy(_LEGACY_DEFAULT_SETTINGS["upscalers"])
     for key, item in value.items():
         if not isinstance(item, dict):
             raise WorkflowError(f"upscalers.{key} 必须是对象")
@@ -694,7 +729,7 @@ def _validate_upscalers(value: Any, profile_id: str = DEFAULT_MODEL_PROFILE, pip
     if not isinstance(seed_sampler, dict):
         raise WorkflowError("upscalers.seedvr2.sampler 必须是对象")
     seed_sampler = {
-        **DEFAULT_SETTINGS["upscalers"]["seedvr2"]["sampler"],
+        **_LEGACY_DEFAULT_SETTINGS["upscalers"]["seedvr2"]["sampler"],
         **seed_sampler,
     }
     seed_sampler = _validate_post_sampler(
@@ -703,7 +738,7 @@ def _validate_upscalers(value: Any, profile_id: str = DEFAULT_MODEL_PROFILE, pip
     seed_sampler.pop("enabled", None)
 
     def validate_tiles(name: str, item: Any) -> dict[str, int]:
-        defaults = DEFAULT_SETTINGS["upscalers"]["seedvr2"][name]
+        defaults = _LEGACY_DEFAULT_SETTINGS["upscalers"]["seedvr2"][name]
         if not isinstance(item, dict):
             raise WorkflowError(f"upscalers.seedvr2.{name} 必须是对象")
         unknown = set(item) - set(defaults)
@@ -760,7 +795,7 @@ def _validate_upscalers(value: Any, profile_id: str = DEFAULT_MODEL_PROFILE, pip
     }
 
     face = merged["face_refine"]
-    face_defaults = DEFAULT_SETTINGS["upscalers"]["face_refine"]
+    face_defaults = _LEGACY_DEFAULT_SETTINGS["upscalers"]["face_refine"]
     if set(face) - set(face_defaults):
         raise WorkflowError("未知 upscalers.face_refine 参数")
     face_values = {**face_defaults, **face}
@@ -899,7 +934,7 @@ def migrate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     result["model_name"] = raw_model_name or profile["model_name"]
     for key in ("steps", "cfg", "sampler_name", "scheduler"):
         if key not in result:
-            result[key] = profile["defaults"][key]
+            result[key] = LEGACY_SAMPLING_DEFAULTS[profile_id][key]
 
     raw_base = result.get("base_mode")
     if raw_base is None:
@@ -928,7 +963,7 @@ def migrate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     if workbench == "single":
         result.setdefault("count", 1)
 
-    upscalers = copy.deepcopy(DEFAULT_SETTINGS["upscalers"])
+    upscalers = copy.deepcopy(_LEGACY_DEFAULT_SETTINGS["upscalers"])
     upscalers["pixel_hires"]["model_name"] = profile["pixel_hires_model"]
     upscalers["post_sampler"] = copy.deepcopy(profile["post_sampler_defaults"])
     if result["pipeline_version"] >= 4:
@@ -979,11 +1014,11 @@ def migrate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
                 if (
                     "hires" not in source
                     and latent_settings.get("scale_by")
-                    == DEFAULT_SETTINGS["upscalers"]["latent"]["scale_by"]
+                    == _LEGACY_DEFAULT_SETTINGS["upscalers"]["latent"]["scale_by"]
                 ):
                     latent_settings["scale_by"] = 1.0
             latent_settings["second_sampler"] = {
-                **copy.deepcopy(DEFAULT_SETTINGS["upscalers"]["latent"]["second_sampler"]),
+                **copy.deepcopy(_LEGACY_DEFAULT_SETTINGS["upscalers"]["latent"]["second_sampler"]),
                 **{
                     key: legacy_second[key]
                     for key in ("enabled", "steps", "cfg", "sampler_name", "scheduler", "denoise")
@@ -993,7 +1028,7 @@ def migrate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     # Loader names use profile defaults only when no explicit selection was
     # persisted. The selected resources are checked against live inventories
     # by BatchManager and can be restored on profile switches by the UI.
-    seed_defaults = copy.deepcopy(DEFAULT_SETTINGS["upscalers"]["seedvr2"])
+    seed_defaults = copy.deepcopy(_LEGACY_DEFAULT_SETTINGS["upscalers"]["seedvr2"])
     seed_defaults.update(
         {
             "model_name": profile["seedvr2_model"],
@@ -1066,7 +1101,7 @@ def validate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         raise WorkflowError(f"未知参数: {', '.join(sorted(unknown))}")
 
     legacy_pools = "pools" not in overrides and any(overrides.get(f"random_{section}") for section in PROMPT_SECTIONS)
-    settings = copy.deepcopy(DEFAULT_SETTINGS)
+    settings = copy.deepcopy(_LEGACY_DEFAULT_SETTINGS)
     for legacy_key in _LEGACY_SETTING_KEYS:
         settings.pop(legacy_key, None)
     settings.update(overrides)

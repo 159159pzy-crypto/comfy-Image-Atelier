@@ -29,6 +29,7 @@ class PromptNormalizationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.pools = PromptPoolStore(root / "pools.json")
         self.comfy = FakeComfy()
         self.comfy.available_models.append(model_profile_defaults("krea2")["model_name"])
+        self.comfy.available_samplers.append(model_profile_defaults("krea2")["sampler_name"])
         self.manager = BatchManager(
             FakeTemplates(), self.history, self.comfy, catalog=SettingsCatalog(),
             prompt_rules=self.rules, prompt_pools=self.pools,

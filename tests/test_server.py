@@ -353,7 +353,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         exact = "anima-base-v1.0.safetensors"
         nested = "Anima/anima-base-v1.0.safetensors"
         async def inventory():
-            return {"models": [exact, nested], "samplers": ["euler"], "schedulers": ["simple"]}
+            return {"models": [exact, nested], "samplers": [DEFAULT_SETTINGS["sampler_name"]], "schedulers": ["simple"]}
         self.comfy.resource_inventory = inventory
         self.comfy.base_models[exact] = "Unknown"
         payload = await (await self.client.get("/api/resources")).json()

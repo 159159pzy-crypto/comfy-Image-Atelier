@@ -1,20 +1,13 @@
 """Optional startup resource mapping supplied by the Windows launcher."""
 from __future__ import annotations
 
-import copy
 from typing import Any
 
-from .workflow import DEFAULT_SETTINGS, WorkflowError, WorkflowTemplates, normalize_lora_path
-
-
-REMOVED_SETTINGS = ("hires", "detailers", "cfg_zero_star", "second_sampler")
+from .workflow import DEFAULT_SETTINGS, WorkflowError, WorkflowTemplates, default_settings_for_profile, normalize_lora_path
 
 
 def _public_defaults() -> dict[str, Any]:
-    defaults = copy.deepcopy(DEFAULT_SETTINGS)
-    for key in REMOVED_SETTINGS:
-        defaults.pop(key, None)
-    return defaults
+    return default_settings_for_profile()
 
 
 def configure_resources(templates: WorkflowTemplates, mapping: dict[str, str] | None) -> dict[str, Any]:

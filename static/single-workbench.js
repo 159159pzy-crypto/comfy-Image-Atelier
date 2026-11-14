@@ -106,7 +106,7 @@ function singleWorkbenchMerge(base, value) {
   }
   return result;
 }
-function singleWorkbenchDefaultSettings(profile = "anima") {
+function singleWorkbenchDefaultSettings(profile = "anima", { legacy = false } = {}) {
   const settings = typeof profileSettingsDefaults === "function" ? singleWorkbenchClone(profileSettingsDefaults(profile)) : {};
   const encode = { tiled: true, tile_size: 512, overlap: 64, temporal_size: 64, temporal_overlap: 8 };
   const processing = { enabled: false, rule: "扩写-通用", custom_rule: false, custom_rule_content: "", user_prompt: "", llm_service: "", ollama_auto_unload: true, seed: 0 };
@@ -121,9 +121,13 @@ function singleWorkbenchDefaultSettings(profile = "anima") {
     latent: { upscale_method: "sesqui", model_format: "Wan 2.1", half_precision: true, pipeline: "secondary" }, face_pipeline: "secondary",
     dlss: { enabled: false, style: "电影", intensity: 1, local_tone: 1, local_struct: 1, output_view: "处理", output_mix: 1, gpu_gen: "Auto" },
   };
-  return { ...settings, ...(typeof sharedSamplingDefaults === "function" ? (() => { const value = sharedSamplingDefaults(); delete value.seedMode; delete value.seed; return value; })() : {}), pipeline_version: 5, upscalers: typeof normalizeUpscalers === "function" ? normalizeUpscalers(settings.upscalers, null, profile, 5) : settings.upscalers, workbench: "single", generation_mode: "txt2img", model_profile: profile, count: 1, base_mode: "normal",
+  const mergedSingle = singleWorkbenchMerge(single, typeof config !== "undefined" ? config.single_defaults || config.defaults?.single : {});
+  const sampling = typeof sharedSamplingDefaults === "function" ? sharedSamplingDefaults("normal", profile) : {};
+  delete sampling.seedMode; delete sampling.seed;
+  if (!legacy) Object.assign(mergedSingle.dual, sampling.dual || profileConfig(profile).dual_defaults);
+  return { ...settings, ...sampling, pipeline_version: 5, upscalers: typeof sharedUpscalerDefaults === "function" ? sharedUpscalerDefaults(profile, settings.upscalers) : typeof normalizeUpscalers === "function" ? normalizeUpscalers(settings.upscalers, null, profile, 5) : settings.upscalers, workbench: "single", generation_mode: "txt2img", model_profile: profile, count: 1, base_mode: "normal",
     clip_name: settings.clip_name || profileConfig(profile).clip_name || "", vae_name: settings.vae_name || profileConfig(profile).vae_name || "", clip_type: settings.clip_type || profileConfig(profile).clip_type || "",
-    single: singleWorkbenchUnifiedDefaults(singleWorkbenchMerge(single, typeof config !== "undefined" ? config.single_defaults || config.defaults?.single : {})) };
+    single: singleWorkbenchUnifiedDefaults(mergedSingle) };
 }
 function singleWorkbenchUnifiedDefaults(single) {
   single.normal_pipeline = single.dual.first_pipeline = single.dual.second_pipeline = "primary";
@@ -260,7 +264,7 @@ function singleWorkbenchApply(raw, { preservePromptProcessing = false } = {}) {
   if (raw.workbench === "single") {
     singleWorkbenchCancelInput({ render: false });
     singleWorkbenchState.mode = "single";
-    const full = singleWorkbenchDefaultSettings(raw.model_profile || currentProfile());
+    const full = singleWorkbenchDefaultSettings(raw.model_profile || currentProfile(), { legacy: true });
     singleWorkbenchState.single = singleWorkbenchMerge(full.single, raw.single || {});
     if (!preservePromptProcessing) {
       if (typeof promptAssistantMigrateLegacy === "function") promptAssistantMigrateLegacy(singleWorkbenchState.single, raw.model_profile || currentProfile());

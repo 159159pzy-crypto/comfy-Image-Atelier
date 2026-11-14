@@ -1,12 +1,10 @@
 """The installer must cover executable product graphs, not every UI-template node."""
-import copy
 import itertools
 import json
 from pathlib import Path
 import unittest
 
-from anima_webui.model_profiles import model_profile_defaults
-from anima_webui.workflow import DEFAULT_SETTINGS, render_workflows
+from anima_webui.workflow import default_settings_for_profile, render_workflows
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,8 +24,8 @@ class RuntimeDependencyContractTests(unittest.TestCase):
                 for variant in ("default", "all-postprocess", "legacy-interpolation", "untiled-img2img"):
                     if variant == "untiled-img2img" and workbench != "single":
                         continue
-                    settings = copy.deepcopy(DEFAULT_SETTINGS)
-                    settings.update(model_profile_defaults(profile), workbench=workbench, pipeline_version=version)
+                    settings = default_settings_for_profile(profile, workbench)
+                    settings["pipeline_version"] = version
                     if variant == "all-postprocess":
                         for stage in settings["upscalers"].values():
                             stage["enabled"] = True
