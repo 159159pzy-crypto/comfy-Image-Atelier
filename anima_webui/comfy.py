@@ -53,6 +53,10 @@ class ComfyAborted(RuntimeError):
     """等待 ComfyUI 结果时收到停止请求。不是错误,由调用方决定如何收尾。"""
 
 
+class ComfyCleanupSkipped(ComfyError):
+    """Lightweight cleanup was not started; the message is safe for the UI."""
+
+
 class ComfyMetadataPendingError(ComfyError):
     """The plugin acknowledged a save; only verification remains retryable."""
 
@@ -682,26 +686,29 @@ class ComfyClient:
         return self._queue_contains(data, prompt_id)
 
     async def queue_idle(self) -> bool:
-        """Confirm that both queues are valid and empty before global cleanup."""
+        """Confirm that both queues are valid and empty before lightweight cleanup."""
         data = await self._json("GET", "/queue")
         self._queue_contains(data, "")  # Validate every queue and entry.
         return not data["queue_running"] and not data["queue_pending"]
 
-    async def free_memory(self) -> None:
-        """Ask ComfyUI's worker to unload models and clear its execution cache.
+    async def cleanup_memory(self) -> None:
+        """Confirm cache cleanup and GC without unloading models or resetting caches.
 
-        An empty 200 acknowledges the request, not completed GPU reclamation.
+        Never fall back to /free: even free_memory=true alone can unload models
+        and reset the executor. A timeout leaves the cleanup outcome unknown.
         """
-        session = await self._get_session()
         try:
-            async with session.post(
-                f"{self.base_url}/free", json={"unload_models": True, "free_memory": True}
-            ) as response:
-                await response.read()
-                if response.status >= 400:
-                    raise ComfyHTTPError(f"释放显存请求失败: HTTP {response.status}", response.status)
-        except (aiohttp.ClientError, asyncio.TimeoutError) as error:
-            raise ComfyTransportError(f"释放显存请求失败: {error}") from error
+            result = await self._json("POST", "/anima/memory/cleanup", json={})
+        except ComfyHTTPError as error:
+            if error.status == 409:
+                raise ComfyCleanupSkipped("ComfyUI 队列忙碌，已跳过清缓存与垃圾回收") from error
+            if error.status in {404, 405, 501}:
+                raise ComfyCleanupSkipped(
+                    "清理扩展尚未就绪，已跳过清缓存与垃圾回收；请更新工作台，并在任务结束后通过启动器重启 ComfyUI"
+                ) from error
+            raise
+        if result.get("status") != "completed":
+            raise ComfyError("ComfyUI 未确认清缓存与垃圾回收完成")
 
     @staticmethod
     def _queue_contains(data: dict[str, Any], prompt_id: str) -> bool:

@@ -1927,7 +1927,7 @@ function updateGenerationAvailability() {
   if (!ui.startButton) return;
   if (typeof scheduleResourceResolution === "function") scheduleResourceResolution();
   const issues = generationClassificationIssues();
-  if (typeof currentBatch !== "undefined" && currentBatch?.memory_release === "pending") issues.push("正在停止任务并释放显存，请稍后再试");
+  if (typeof currentBatch !== "undefined" && currentBatch?.memory_release === "pending") issues.push("正在清缓存与垃圾回收，请稍后再试");
   if (typeof singleWorkbenchInputBlocked === "function" && singleWorkbenchInputBlocked()) issues.push("参考图正在读取或不可用，请等待、重新添加或移除");
   const storage = config.storage_status?.history;
   ui.startButton.disabled = submitInFlight || !ui.connection.classList.contains("online") || issues.length > 0 || Boolean(storage?.read_only);
@@ -2416,7 +2416,7 @@ function renderBatch(batch, queue = currentQueue) {
   ui.batchState.textContent = batch ? labels[batch.status] || batch.status : "等待任务";
   if (stopPending && batch.status === "running") ui.batchState.textContent = "正在请求停止…";
   if (batch?.status === "stopped" && cancelUnconfirmed) ui.batchState.textContent = "本地已停止，ComfyUI 尚未确认";
-  else if (batch?.status === "stopped" && releasePending) ui.batchState.textContent = "任务已停止，正在释放显存…";
+  else if (batch?.status === "stopped" && releasePending) ui.batchState.textContent = "任务已停止，正在清缓存与垃圾回收…";
   ui.progressCount.textContent = `${completed} / ${total}`;
   setProgressValue(ui.progressFill, total ? completed / total : 0, active, batch?.id || "");
   // 单张采样进度(来自 ComfyUI websocket,尽力而为;旧版页面缺控件时跳过)
@@ -2424,7 +2424,7 @@ function renderBatch(batch, queue = currentQueue) {
     const progress = active && !stopping ? batch.progress : null;
     const sampleTrack = ui.sampleFill.parentElement;
     ui.sampleProgress.hidden = !active && !releasePending && !releaseMessage;
-    ui.sampleProgress.textContent = stopping ? "正在取消当前任务，确认 ComfyUI 状态…" : active ? batchProgressLabel(batch) : releasePending ? "正在确认队列空闲并请求释放显存…" : releaseMessage;
+    ui.sampleProgress.textContent = stopping ? "正在取消当前任务，确认 ComfyUI 状态…" : active ? batchProgressLabel(batch) : releasePending ? "正在确认队列空闲并执行清缓存与垃圾回收…" : releaseMessage;
     if (progress && progress.max > 0) {
       sampleTrack.hidden = false;
       setProgressValue(ui.sampleFill, progress.value / progress.max, active, `${batch.id}:${batch.progress_node}`);
@@ -2438,7 +2438,7 @@ function renderBatch(batch, queue = currentQueue) {
   // 运行中仍可加入队列，但分类有效性与连接状态共用同一守卫。
   updateGenerationAvailability();
   if (releasePending) ui.startButton.disabled = true;
-  ui.startButton.textContent = releasePending ? (active ? "正在停止…" : "正在释放显存…") : active ? "加入队列" : "开始生成";
+  ui.startButton.textContent = releasePending ? (active ? "正在停止…" : "正在清理…") : active ? "加入队列" : "开始生成";
   const failurePrefix = batch?.failed_stage_label ? `${batch.failed_stage_label}失败：` : "";
   const cancelMessage = cancelUnconfirmed ? batch?.cancel_warning || "取消请求未确认，远端任务可能继续执行；请在 ComfyUI 中检查" : "";
   const batchMessage = [batch?.error && (failurePrefix && !String(batch.error).startsWith(failurePrefix) ? `${failurePrefix}${batch.error}` : batch.error), cancelMessage].filter(Boolean).join("\n");
@@ -6884,7 +6884,7 @@ async function submitBatch(settings, seeds = null) {
   // 统一的批次提交入口:主表单、复现、变体共用;in-flight 守卫防双击重复入队。
   if (submitInFlight) return false;
   if (typeof currentBatch !== "undefined" && currentBatch?.memory_release === "pending") {
-    toast("正在停止任务并释放显存，请稍后再试");
+    toast("正在清缓存与垃圾回收，请稍后再试");
     return false;
   }
   settings = clone(settings);

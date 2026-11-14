@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from anima_webui.history import HistoryStore
 from anima_webui.runner import BatchConflict, BatchManager
-from anima_webui.comfy import ComfyError
+from anima_webui.comfy import ComfyCleanupSkipped, ComfyError
 from anima_webui.workflow import DEFAULT_SETTINGS
 from test_runner import FakeComfy, FakeTemplates
 
@@ -34,7 +34,7 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.comfy.cancel_prompt = AsyncMock()
         self.comfy.prompt_queued = AsyncMock(return_value=False)
         self.comfy.queue_idle = AsyncMock(return_value=True)
-        self.comfy.free_memory = AsyncMock()
+        self.comfy.cleanup_memory = AsyncMock()
         return self.comfy
 
     async def stoppable_batch(self):
@@ -44,27 +44,27 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await self.submitted()
         return state
 
-    async def test_manual_stop_releases_once_after_confirmed_cancel_and_keeps_history_clean(self):
+    async def test_manual_stop_cleans_once_after_confirmed_cancel_and_keeps_history_clean(self):
         client = self.memory_client()
         order = []
         client.cancel_prompt.side_effect = lambda _: order.append("cancel")
         client.prompt_queued.side_effect = lambda _: order.append("confirm") or False
         client.queue_idle.side_effect = lambda: order.append("idle") or True
-        client.free_memory.side_effect = lambda: order.append("free")
+        client.cleanup_memory.side_effect = lambda: order.append("cleanup")
         state = await self.stoppable_batch()
         await asyncio.gather(self.manager.request_stop(state["id"]),
                              self.manager.request_stop(state["id"]))
         result = await self.manager.wait()
         await self.manager.request_stop(state["id"])
-        self.assertEqual(order, ["cancel", "confirm", "idle", "free"])
+        self.assertEqual(order, ["cancel", "confirm", "idle", "cleanup"])
         self.assertEqual(result["status"], "stopped")
-        self.assertEqual(result["memory_release"], "requested")
-        self.assertEqual(result["memory_release_message"], "已请求释放显存")
+        self.assertEqual(result["memory_release"], "completed")
+        self.assertEqual(result["memory_release_message"], "清缓存与垃圾回收已完成")
         record = await self.history.get_batch(state["id"])
         self.assertEqual(record["status"], "stopped")
         self.assertNotIn("memory_release", record["settings"])
 
-    async def test_stop_before_submission_can_release_previous_models(self):
+    async def test_stop_before_submission_can_clean_without_unloading_models(self):
         client = self.memory_client()
         state = await self.manager.start({**DEFAULT_SETTINGS, "count": 2})
         await self.manager.request_stop(state["id"])
@@ -72,9 +72,9 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.submissions, [])
         client.cancel_prompt.assert_not_awaited()
         client.queue_idle.assert_awaited_once()
-        client.free_memory.assert_awaited_once()
+        client.cleanup_memory.assert_awaited_once()
         self.assertEqual(result["cancel_state"], "not_requested")
-        self.assertEqual(result["memory_release"], "requested")
+        self.assertEqual(result["memory_release"], "completed")
 
     async def test_cleanup_holds_dispatch_and_pending_starts_fail_promptly(self):
         client = self.memory_client()
@@ -85,7 +85,7 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
             entered.set()
             await release.wait()
 
-        client.free_memory.side_effect = cleanup
+        client.cleanup_memory.side_effect = cleanup
         state = await self.stoppable_batch()
         await self.manager.request_stop(state["id"])
         await entered.wait()
@@ -96,7 +96,7 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
             for start in (self.manager.start, self.manager.start_rewrite,
                           self.manager.start_reverse, self.manager.start_prompt_preview):
                 with self.subTest(start=start.__name__):
-                    with self.assertRaisesRegex(BatchConflict, "正在释放显存"):
+                    with self.assertRaisesRegex(BatchConflict, "正在清缓存与垃圾回收"):
                         await asyncio.wait_for(start({}), .2)
             self.assertEqual(self.manager.queue, [])
         finally:
@@ -107,7 +107,7 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(new_state["memory_release"], "not_requested")
         self.assertEqual(new_state["memory_release_message"], "")
         await self.manager.wait()
-        client.free_memory.assert_awaited_once()
+        client.cleanup_memory.assert_awaited_once()
 
     async def test_remote_busy_unconfirmed_or_invalid_queue_never_releases(self):
         for queue_result, cancel_error in ((False, None), (None, None),
@@ -126,7 +126,7 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 result = await self.manager.wait()
                 self.assertEqual(result["status"], "stopped")
                 self.assertEqual(result["memory_release"], "skipped")
-                client.free_memory.assert_not_awaited()
+                client.cleanup_memory.assert_not_awaited()
                 if cancel_error:
                     client.queue_idle.assert_not_awaited()
                     self.assertEqual(result["cancel_state"], "unconfirmed")
@@ -142,7 +142,7 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.Event().wait()
                     raise ComfyError("sensitive transport detail")
 
-                client.free_memory.side_effect = cleanup
+                client.cleanup_memory.side_effect = cleanup
                 state = await self.stoppable_batch()
                 with patch("anima_webui.runner.MEMORY_RELEASE_TIMEOUT", .02):
                     await self.manager.request_stop(state["id"])
@@ -150,9 +150,26 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["status"], "stopped")
                 self.assertEqual(result["error"], "")
                 self.assertEqual(result["memory_release"], "failed")
+                self.assertIn("完成情况未确认", result["memory_release_message"])
                 self.assertNotIn("sensitive", result["memory_release_message"])
                 await self.manager.request_stop(state["id"])
-                client.free_memory.assert_awaited_once()
+                client.cleanup_memory.assert_awaited_once()
+
+    async def test_extension_busy_or_unavailable_is_skipped_without_changing_stop(self):
+        for message in ("ComfyUI 队列忙碌，已跳过清缓存与垃圾回收",
+                        "清理扩展尚未就绪，请通过启动器重启 ComfyUI"):
+            with self.subTest(message=message):
+                client = self.memory_client()
+                client.submissions.clear()
+                client.cleanup_memory.side_effect = ComfyCleanupSkipped(message)
+                state = await self.stoppable_batch()
+                await self.manager.request_stop(state["id"])
+                result = await self.manager.wait()
+                self.assertEqual(result["status"], "stopped")
+                self.assertEqual(result["error"], "")
+                self.assertEqual(result["memory_release"], "skipped")
+                self.assertEqual(result["memory_release_message"], message)
+                client.cleanup_memory.assert_awaited_once()
 
     async def test_queue_check_and_release_share_one_total_timeout(self):
         client = self.memory_client()
@@ -166,7 +183,7 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
             await self.manager.request_stop(state["id"])
             result = await asyncio.wait_for(self.manager.wait(), 1)
         self.assertEqual(result["memory_release"], "skipped")
-        client.free_memory.assert_not_awaited()
+        client.cleanup_memory.assert_not_awaited()
 
     async def test_keep_queue_skips_release_and_next_batch_resets_runtime_fields(self):
         client = self.memory_client()
@@ -181,7 +198,7 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["memory_release"], "not_requested")
         client.queue_idle.assert_not_awaited()
-        client.free_memory.assert_not_awaited()
+        client.cleanup_memory.assert_not_awaited()
 
     async def test_completion_pending_removal_and_shutdown_never_release(self):
         client = self.memory_client()
@@ -197,7 +214,7 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.shutdown()
         self.assertEqual(self.manager.state["status"], "stopped")
         self.assertEqual(self.manager.state["memory_release"], "not_requested")
-        client.free_memory.assert_not_awaited()
+        client.cleanup_memory.assert_not_awaited()
 
     async def test_internal_prompt_cancellation_does_not_request_memory_release(self):
         client = self.memory_client()
@@ -208,7 +225,7 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
             await self.manager._request_stop(state["id"], clear_queue=False)
         result = await self.manager.wait()
         self.assertEqual(result["memory_release"], "not_requested")
-        client.free_memory.assert_not_awaited()
+        client.cleanup_memory.assert_not_awaited()
 
     async def test_public_stop_of_prompt_preview_does_not_release_memory(self):
         client = self.memory_client()
@@ -218,7 +235,7 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
             await self.manager.request_stop(state["id"])
             result = await self.manager.wait()
         self.assertEqual(result["memory_release"], "not_requested")
-        client.free_memory.assert_not_awaited()
+        client.cleanup_memory.assert_not_awaited()
 
     async def test_all_start_endpoints_reject_shutdown_without_side_effects(self):
         await self.manager.shutdown()

@@ -1,9 +1,13 @@
-"""ComfyUI extension providing bounded, read-only Atelier resource discovery."""
+"""ComfyUI extension for Atelier resource discovery and idle memory cleanup."""
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from .inspector import inspect_inventory, inspect_lora_files
+from .memory_cleanup import CleanupUnavailable, cleanup_if_idle
+
+logger = logging.getLogger(__name__)
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
@@ -13,8 +17,24 @@ def register_routes() -> None:
     import folder_paths
     import nodes
     from aiohttp import web
+    from comfy import model_management
     from server import PromptServer
     from .capabilities import inspect_capabilities, probe_native
+
+    @PromptServer.instance.routes.post("/anima/memory/cleanup")
+    async def cleanup_memory(request):
+        try:
+            completed = await asyncio.to_thread(
+                cleanup_if_idle, PromptServer.instance.prompt_queue, model_management.soft_empty_cache,
+            )
+        except CleanupUnavailable:
+            return web.json_response({"error": "当前 ComfyUI 不支持安全清理，请更新并重启 ComfyUI"}, status=501)
+        except Exception:
+            logger.exception("ComfyUI 清缓存和垃圾回收失败")
+            return web.json_response({"error": "清缓存和垃圾回收失败"}, status=500)
+        if not completed:
+            return web.json_response({"error": "ComfyUI 正忙，已跳过清缓存和垃圾回收"}, status=409)
+        return web.json_response({"status": "completed"})
 
     @PromptServer.instance.routes.get("/anima/resources/inspect")
     async def inspect(request):

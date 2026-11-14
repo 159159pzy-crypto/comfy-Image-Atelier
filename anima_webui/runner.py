@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 from typing import Any
 
-from .comfy import ComfyAborted, ComfyError, ComfyResultUnavailable, extract_images, extract_positive_prompt
+from .comfy import ComfyAborted, ComfyCleanupSkipped, ComfyError, ComfyResultUnavailable, extract_images, extract_positive_prompt
 from .catalog import PromptCatalog, resolve_history_selection, split_prompt
 from .history import HistoryStore
 from .prompt_rules import PromptRuleStore
@@ -145,7 +145,7 @@ class BatchManager:
         if self.shutting_down:
             raise BatchConflict("服务正在关闭，无法接受新任务")
         if self.state and self.state.get("memory_release") == "pending":
-            raise BatchConflict("正在释放显存，请稍后再试")
+            raise BatchConflict("正在清缓存与垃圾回收，请稍后再试")
 
     async def begin_idle_shutdown(self) -> None:
         """Reserve an idle manager for a launcher update without a start race."""
@@ -1115,7 +1115,7 @@ class BatchManager:
             self.state["status"] = "stopping"
             if (release_memory and self.state.get("kind", "generation") == "generation"
                     and self.state.get("memory_release", "not_requested") == "not_requested"):
-                self.state.update(memory_release="pending", memory_release_message="任务停止后将请求释放显存")
+                self.state.update(memory_release="pending", memory_release_message="任务停止后将清缓存与垃圾回收")
             if self.state.get("kind") == "prompt_preview":
                 await self.prompt_jobs.update(batch_id, status="stopping")
             else:
@@ -1400,8 +1400,8 @@ class BatchManager:
         """Finish manual-stop cleanup under _start_lock before any new dispatch.
 
         This stays in the runner's finally path, never in a detached task. The
-        lock orders our requests; ComfyUI acknowledges /free before its worker
-        necessarily finishes unloading, so success is deliberately 'requested'.
+        lock orders our requests. The extension also holds ComfyUI's queue lock
+        until the lightweight cleanup finishes; only its response confirms it.
         """
         state = self.state
         if not state or state.get("memory_release") != "pending":
@@ -1411,41 +1411,45 @@ class BatchManager:
             state.update(memory_release=value, memory_release_message=message)
 
         if self.shutting_down or state.get("status") != "stopped":
-            outcome("skipped", "任务未完成停止收尾或服务正在关闭，已跳过释放显存")
+            outcome("skipped", "任务未完成停止收尾或服务正在关闭，已跳过清缓存与垃圾回收")
             return
         if self.queue:
-            outcome("skipped", "还有本地任务等待执行，已跳过释放显存")
+            outcome("skipped", "还有本地任务等待执行，已跳过清缓存与垃圾回收")
             return
         if state.get("prompt_id") and state.get("cancel_state") != "confirmed":
-            outcome("skipped", "ComfyUI 尚未确认任务停止，已跳过释放显存")
+            outcome("skipped", "ComfyUI 尚未确认任务停止，已跳过清缓存与垃圾回收")
             return
         queue_idle = getattr(self.comfy, "queue_idle", None)
-        free_memory = getattr(self.comfy, "free_memory", None)
-        if queue_idle is None or free_memory is None:
-            outcome("skipped", "当前客户端不支持确认空闲并释放显存")
+        cleanup_memory = getattr(self.comfy, "cleanup_memory", None)
+        if queue_idle is None or cleanup_memory is None:
+            outcome("skipped", "当前客户端不支持确认空闲并清缓存与垃圾回收")
             return
         release_started = False
         try:
             async with asyncio.timeout(MEMORY_RELEASE_TIMEOUT):
                 idle = await queue_idle()
                 if idle is not True:
-                    outcome("skipped", "ComfyUI 队列仍有任务，已跳过释放显存" if idle is False
-                            else "无法确认 ComfyUI 队列空闲，已跳过释放显存")
+                    outcome("skipped", "ComfyUI 队列仍有任务，已跳过清缓存与垃圾回收" if idle is False
+                            else "无法确认 ComfyUI 队列空闲，已跳过清缓存与垃圾回收")
                     return
                 release_started = True
-                state["memory_release_message"] = "正在请求释放显存…"
-                await free_memory()
-            outcome("requested", "已请求释放显存")
+                state["memory_release_message"] = "正在清缓存与垃圾回收…"
+                await cleanup_memory()
+            outcome("completed", "清缓存与垃圾回收已完成")
+        except ComfyCleanupSkipped as error:
+            outcome("skipped", str(error))
         except asyncio.CancelledError:
-            outcome("failed" if release_started else "skipped", "显存释放收尾已中断")
+            outcome("failed" if release_started else "skipped",
+                    "清理等待已中断，清缓存与垃圾回收完成情况未确认" if release_started
+                    else "清理收尾已中断，已跳过清缓存与垃圾回收")
             raise
         except Exception:
             # A failed/uncertain cleanup never changes the stopped batch result,
             # retries later, or exposes a transport exception in the UI.
             outcome("failed" if release_started else "skipped",
-                    "任务已停止，释放显存请求失败或超时" if release_started
-                    else "无法确认 ComfyUI 队列空闲，已跳过释放显存")
-            logger.warning("批次 %s 显存释放未确认: %s", state.get("id"), state["memory_release_message"])
+                    "任务已停止，清理请求失败或超时，清缓存与垃圾回收完成情况未确认" if release_started
+                    else "无法确认 ComfyUI 队列空闲，已跳过清缓存与垃圾回收")
+            logger.warning("批次 %s 清缓存与垃圾回收未确认: %s", state.get("id"), state["memory_release_message"])
 
     def _ensure_monitor(self) -> None:
         if self._monitor_task and not self._monitor_task.done():

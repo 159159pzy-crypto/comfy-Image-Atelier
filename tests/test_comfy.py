@@ -80,39 +80,74 @@ class PlainTextResponseTests(unittest.IsolatedAsyncioTestCase):
             await self.client.lora_inventory()
 
 
-class MemoryReleaseTests(unittest.IsolatedAsyncioTestCase):
+class MemoryCleanupTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.queue = {"queue_running": [], "queue_pending": []}
-        self.free_status = 200
+        self.cleanup_status = 200
+        self.cleanup_result = {"status": "completed"}
+        self.cleanup_requests = []
         self.free_requests = []
         app = web.Application()
 
         async def queue(request):
             return web.json_response(self.queue)
 
+        async def cleanup(request):
+            self.cleanup_requests.append(await request.json())
+            if self.cleanup_result is None:
+                return web.Response(status=self.cleanup_status)
+            return web.json_response(self.cleanup_result, status=self.cleanup_status)
+
         async def free(request):
-            self.free_requests.append(await request.json())
-            return web.Response(status=self.free_status)
+            self.free_requests.append(request.path)
+            return web.Response(status=500)
 
         app.router.add_get("/queue", queue)
+        app.router.add_post("/anima/memory/cleanup", cleanup)
         app.router.add_post("/free", free)
         self.server = TestServer(app)
         await self.server.start_server()
         self.client = ComfyClient(f"http://127.0.0.1:{self.server.port}")
 
     async def asyncTearDown(self):
+        self.assertEqual(self.free_requests, [], "lightweight cleanup must never fall back to /free")
         await self.client.close()
         await self.server.close()
 
-    async def test_release_accepts_empty_200_and_requests_both_cleanup_actions(self):
-        await self.client.free_memory()
-        self.assertEqual(self.free_requests, [{"unload_models": True, "free_memory": True}])
+    async def test_cleanup_requires_completion_and_sends_no_destructive_options(self):
+        await self.client.cleanup_memory()
+        await self.client.cleanup_memory()
+        self.assertEqual(self.cleanup_requests, [{}, {}])
 
-    async def test_release_http_failure_is_not_retried(self):
-        self.free_status = 503
-        with self.assertRaisesRegex(ComfyError, "503"):
-            await self.client.free_memory()
-        self.assertEqual(len(self.free_requests), 1)
+    async def test_busy_and_missing_extensions_skip_without_retry_or_free(self):
+        from anima_webui.comfy import ComfyCleanupSkipped
+
+        for status in (404, 405, 409, 501):
+            with self.subTest(status=status):
+                self.cleanup_status = status
+                self.cleanup_result = None  # Standard ComfyUI unknown routes are not JSON.
+                before = len(self.cleanup_requests)
+                with self.assertRaisesRegex(ComfyCleanupSkipped, "忙碌" if status == 409 else "重启 ComfyUI"):
+                    await self.client.cleanup_memory()
+                self.assertEqual(len(self.cleanup_requests), before + 1)
+
+    async def test_cleanup_http_failure_is_not_retried(self):
+        for status in (400, 500, 503):
+            with self.subTest(status=status):
+                self.cleanup_status = status
+                before = len(self.cleanup_requests)
+                with self.assertRaisesRegex(ComfyError, str(status)):
+                    await self.client.cleanup_memory()
+                self.assertEqual(len(self.cleanup_requests), before + 1)
+
+    async def test_cleanup_never_treats_an_acknowledgement_as_completion(self):
+        for result in (None, {}, {"status": "requested"}, {"status": True}, {"status": "skipped"}, []):
+            with self.subTest(result=result):
+                self.cleanup_result = result
+                before = len(self.cleanup_requests)
+                with self.assertRaises(ComfyError):
+                    await self.client.cleanup_memory()
+                self.assertEqual(len(self.cleanup_requests), before + 1)
 
     async def test_idle_check_requires_both_valid_empty_queues(self):
         self.assertTrue(await self.client.queue_idle())
