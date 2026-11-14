@@ -278,7 +278,13 @@ if (args.Contains("--model-packages-only"))
 if (args.Contains("--comfy-release-only"))
 {
     count += await ComfyReleaseUpdateTests.Run(work, manifest);
+    count += ComfyUpdatePresentationTests.Run();
     Console.WriteLine($"{count} ComfyUI release and recovery checks passed."); return;
+}
+if (args.Contains("--comfy-update-probe-tests"))
+{
+    count += await ComfyUpdateProbeTests.Run(work);
+    Console.WriteLine($"{count} ComfyUI isolated probe checks passed; artifacts: {work}"); return;
 }
 if (args.Contains("--node-releases-only"))
 {
@@ -409,6 +415,8 @@ if (!args.Contains("--resume-node-updates"))
     count += await DependencyTransferTests.Run(work);
     count += await DependencyInstallationTests.Run(work);
     count += await ComfyReleaseUpdateTests.Run(work, manifest);
+    count += ComfyUpdatePresentationTests.Run();
+    count += await ComfyUpdateProbeTests.Run(work);
     count += await NodeReleaseTests.Run(work, manifest);
 }
 else Console.WriteLine("Resuming after the previously verified download, launch argument, runtime dependency, ComfyUI update and node release groups.");

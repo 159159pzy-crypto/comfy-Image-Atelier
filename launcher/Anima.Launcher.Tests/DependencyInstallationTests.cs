@@ -8,7 +8,7 @@ internal static class DependencyInstallationTests
 {
     public static async Task<int> Run(string work)
     {
-        var checks = 0;
+        var checks = RunSpaceBudgetTests(work);
         void Check(bool value, string name) { if (!value) throw new Exception(name); checks++; }
         async Task Reject<T>(Func<Task> action, string name) where T : Exception
         {
@@ -232,8 +232,66 @@ internal static class DependencyInstallationTests
         }
 
         var fast = await Prepare("uv-environment");
-        await DependencyInstallation.InstallAsync(fast.Config, fast.Plan, fast.Runtime, downloads, fast.Env,
-            _ => Task.FromResult<string?>(uv), ct, Log, Progress);
+        Dictionary<string, string> EnvironmentFiles() => Directory.GetFiles(fast.Config.ComfyRoot, "*", SearchOption.AllDirectories)
+            .ToDictionary(path => Path.GetRelativePath(fast.Config.ComfyRoot, path), path => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))));
+        var beforePreparation = EnvironmentFiles();
+        var preparationProgress = new List<DependencyProgress>();
+        var mutablePlan = fast.Plan with { Constraints = fast.Plan.Constraints.ToArray(), EnvironmentPackages = fast.Plan.EnvironmentPackages.ToArray(),
+            Packages = fast.Plan.Packages.Select(package => package with { Sources = package.Sources.ToArray() }).ToArray() };
+        var prepared = await DependencyInstallation.PrepareAsync(fast.Config, mutablePlan, fast.Runtime, downloads, fast.Env,
+            ct, Log, value => preparationProgress.Add(value));
+        var afterPreparation = EnvironmentFiles();
+        Check(beforePreparation.Count == afterPreparation.Count && beforePreparation.All(pair => afterPreparation.TryGetValue(pair.Key, out var digest) && digest == pair.Value),
+            "preparation leaves all source configuration and interpreter files byte-for-byte unchanged");
+        Check(prepared.PackageCount == names.Length && preparationProgress.Any(value => value.Phase == "prepared")
+            && !preparationProgress.Any(value => value.Phase == "installing" || value.Status == DependencyProgressStatus.Complete),
+            "preparation reports verified resources without claiming installation or completion");
+        var expectedExpandedBytes = fast.Plan.Packages.Sum(package =>
+        {
+            using var archive = ZipFile.OpenRead(new Uri(package.Url).LocalPath);
+            return archive.Entries.Sum(entry => entry.Length);
+        });
+        Check(prepared.ExpandedBytes == expectedExpandedBytes && allLogs.Any(line => line.Contains("依赖空间预检") && line.Contains("Python 安装")),
+            "preparation budgets actual uncompressed wheel contents and logs target installation space before applying");
+        var preparedIdentity = prepared.PlanIdentity;
+        mutablePlan.Constraints[0] = "caller-mutation==99";
+        mutablePlan.Packages[0] = mutablePlan.Packages[0] with { Version = "99" };
+        Check(prepared.PlanIdentity == preparedIdentity && prepared.PlanIdentity == DependencyInstallation.PlanIdentity(fast.Plan),
+            "a prepared batch freezes the snapshot arrays against later caller mutation");
+        var wrongEnvironment = fast.Config.Clone(); wrongEnvironment.ComfyRoot = root;
+        var prepareInstallerCalls = 0;
+        await Reject<InvalidDataException>(() => DependencyInstallation.ApplyPreparedAsync(wrongEnvironment, prepared, fast.Runtime, fast.Env,
+            _ => { prepareInstallerCalls++; return Task.FromResult<string?>(uv); }, ct, Log, Progress),
+            "a prepared batch cannot be applied to another environment");
+        var cachedWheel = prepared.Wheels[0];
+        var cachedBytes = File.ReadAllBytes(cachedWheel.Path);
+        try
+        {
+            File.WriteAllText(cachedWheel.Path, "changed after preparation");
+            await Reject<InvalidDataException>(() => DependencyInstallation.ApplyPreparedAsync(fast.Config, prepared, fast.Runtime, fast.Env,
+                _ => { prepareInstallerCalls++; return Task.FromResult<string?>(uv); }, ct, Log, Progress),
+                "application verifies every prepared wheel again before invoking an installer");
+        }
+        finally { File.WriteAllBytes(cachedWheel.Path, cachedBytes); }
+        using (var stopped = new CancellationTokenSource())
+        {
+            stopped.Cancel();
+            await Reject<OperationCanceledException>(() => DependencyInstallation.ApplyPreparedAsync(fast.Config, prepared, fast.Runtime, fast.Env,
+                _ => { prepareInstallerCalls++; return Task.FromResult<string?>(uv); }, stopped.Token, Log, Progress),
+                "cancellation before application does not install packages");
+        }
+        var afterRejectedApplications = EnvironmentFiles();
+        Check(prepareInstallerCalls == 0 && beforePreparation.Count == afterRejectedApplications.Count
+            && beforePreparation.All(pair => afterRejectedApplications.TryGetValue(pair.Key, out var digest) && digest == pair.Value),
+            "rejected and cancelled prepared applications leave the environment intact");
+        File.Move(shared1, shared1 + ".temporarily-unavailable");
+        try
+        {
+            await DependencyInstallation.ApplyPreparedAsync(fast.Config, prepared, fast.Runtime, fast.Env,
+                _ => Task.FromResult<string?>(uv), ct, Log, Progress);
+        }
+        finally { File.Move(shared1 + ".temporarily-unavailable", shared1); }
+        Check(true, "application consumes verified cached wheels even when their original source disappeared after preparation");
         var fastInventory = await DependencyPlans.InventoryAsync(fast.Config, ct);
         var fastVersions = DependencyPlans.Versions(fastInventory);
         Check(names.All(name => fastVersions.TryGetValue(name, out var version) && version == "1.0"),
@@ -412,6 +470,42 @@ internal static class DependencyInstallationTests
             && Directory.GetFiles(fallbackPlans, "resolved.json", SearchOption.AllDirectories).Length > originalSnapshots.Count,
             "rechecking a changed baseline creates a separate cache entry and preserves every old frozen snapshot");
 
+        // Exercise the update-specific installer against a real isolated interpreter. A
+        // managed node installer and runtime/model sentinel must never be touched here.
+        var updateConfig = fast.Config.Clone();
+        using (var comfyPort = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0))
+        using (var webPort = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0))
+        {
+            comfyPort.Start(); webPort.Start();
+            updateConfig.ComfyPort = ((System.Net.IPEndPoint)comfyPort.LocalEndpoint).Port;
+            updateConfig.WebPort = ((System.Net.IPEndPoint)webPort.LocalEndpoint).Port;
+        }
+        File.WriteAllText(Path.Combine(updateConfig.ComfyRoot, "requirements.txt"), fast.Plan.RequirementsText);
+        File.WriteAllText(Path.Combine(updateConfig.ComfyRoot, "manager_requirements.txt"), fast.Plan.ManagerRequirementsText);
+        var trapNode = new Repository("update-trap", "https://example.invalid/node.git", new string('b', 40), []);
+        var trapRoot = Path.Combine(updateConfig.ComfyRoot, "custom_nodes", trapNode.Id);
+        Directory.CreateDirectory(trapRoot);
+        var nodeTrap = Path.Combine(trapRoot, "installer-ran");
+        File.WriteAllText(Path.Combine(trapRoot, "install.py"), "from pathlib import Path\nPath(__file__).with_name('installer-ran').write_text('unexpected')\n");
+        File.WriteAllText(Path.Combine(trapRoot, "requirements.txt"), "anima-fixture-shared<2\n");
+        JsonFile.Write(Path.Combine(trapRoot, ".anima-revision.json"), trapNode);
+        File.WriteAllText(Path.Combine(updateConfig.ComfyRoot, ".anima-constraints.txt"), "configuration sentinel\n");
+        var updateRuntime = new RuntimeManifest(1, "update-fixture", "fixture",
+            new("ComfyUI", "https://github.com/Comfy-Org/ComfyUI.git", fast.Plan.ComfyCommit, []),
+            "3.11.9", "", "", "", "https://download.pytorch.org/whl/cu128", [], [trapNode], [], [], new string('c', 40));
+        var beforeUpdateInventory = await DependencyPlans.InventoryAsync(updateConfig, ct);
+        var updatePlan = afterNode with { NodeRequirementsIdentity = ComfyDependencyResolver.NodeRequirementsIdentity(
+            ComfyDependencyResolver.ExistingNodeRequirements(updateConfig), updateRuntime.Sam2Commit) };
+        var updater = new Installer(Path.Combine(root, "update-only-state"), updateRuntime, downloads, Log, null);
+        var updateBatch = await updater.PrepareComfyUpdateDependenciesAsync(updateConfig, updatePlan, ct);
+        await updater.InstallComfyUpdateDependenciesAsync(updateConfig, updateBatch, ct);
+        Check(!File.Exists(nodeTrap) && !File.Exists(Path.Combine(trapRoot, ".anima-dependencies-complete"))
+            && File.ReadAllText(Path.Combine(updateConfig.ComfyRoot, ".anima-constraints.txt")) == "configuration sentinel\n"
+            && !Directory.Exists(Path.Combine(updateConfig.ComfyRoot, "models")) && !File.Exists(Path.Combine(fast.Runtime, "optional-dependencies.json")),
+            "update-only installation bypasses managed node scripts model preparation optional accelerators and root configuration writes");
+        Check((await DependencyPlans.InventoryAsync(updateConfig, ct)).SequenceEqual(beforeUpdateInventory),
+            "update-only installation preserves the existing independent environment package inventory");
+
         await Commands.Run(fast.Config.Python, ["-m", "pip", "install", "--no-index", "--no-deps", "--disable-pip-version-check", shared2],
             fast.Config.ComfyRoot, Log, ct, fast.Env);
         await Reject<InvalidOperationException>(() => DependencyInstallation.InstallAsync(fast.Config, fast.Plan, fast.Runtime, downloads, fast.Env,
@@ -425,6 +519,51 @@ internal static class DependencyInstallationTests
         File.WriteAllLines(Path.Combine(root, "execution.log"), allLogs);
         JsonFile.Write(Path.Combine(root, "evidence.json"), new { checks, networkCalls, uv, fast = fast.Config.Python,
             fallback = fallback.Config.Python, fastInventory, fallbackInventory, phases = allProgress.Select(item => item.Phase).Distinct().ToArray() });
+        return checks;
+    }
+
+    public static int RunSpaceBudgetTests(string work)
+    {
+        var checks = 0;
+        void Check(bool value, string message) { if (!value) throw new Exception(message); checks++; }
+        void Reject<T>(Action action, string message) where T : Exception
+        {
+            try { action(); } catch (T) { checks++; return; }
+            throw new Exception(message);
+        }
+        var runtime = Path.GetFullPath(Path.Combine(work, "space-budget-runtime"));
+        var python = Path.GetFullPath(Path.Combine(work, "space-budget-environment", "Scripts", "python.exe"));
+        var same = DependencyInstallationSpace.Calculate(runtime, python, 1234, 5678, _ => "same-volume");
+        Check(same.Length == 1 && same[0].CacheCopyBytes == 1234 && same[0].CacheExpandedBytes == 5678
+            && same[0].PythonExpandedBytes == 5678 && same[0].RequiredBytes == 1234 + 5678 * 2,
+            "same-volume budgets add cache promotion extraction and Python installation instead of double-promising free space");
+        var reads = 0; var logs = new List<string>();
+        DependencyInstallationSpace.Validate(same, _ => { reads++; return same[0].MinimumFreeBytes; }, logs.Add);
+        Check(reads == 1 && logs.Count == 1 && logs[0].Contains("1234") && logs[0].Contains("5678")
+            && same[0].MinimumFreeBytes == same[0].RequiredBytes + DownloadDiskSpace.SafetyMargin,
+            "exact free-space threshold succeeds with one reserve and one observable check per volume");
+        Reject<InsufficientSpaceException>(() => DependencyInstallationSpace.Validate(same, _ => same[0].MinimumFreeBytes - 1),
+            "one byte below the combined volume budget is rejected before preparation writes");
+        var split = DependencyInstallationSpace.Calculate(runtime, python, 1234, 5678,
+            path => path.Equals(runtime, StringComparison.OrdinalIgnoreCase) ? "cache-volume" : "python-volume");
+        Check(split.Length == 2 && split[0].RequiredBytes == 1234 + 5678 && split[1].RequiredBytes == 5678,
+            "cross-volume preparation accounts for expanded Python files on the destination volume");
+        Reject<InsufficientSpaceException>(() => DependencyInstallationSpace.Validate(split,
+                volume => volume == "cache-volume" ? long.MaxValue : split[1].MinimumFreeBytes - 1),
+            "ample cache capacity does not conceal an insufficient Python destination volume");
+        Reject<InsufficientSpaceException>(() => DependencyInstallationSpace.Validate(split,
+                volume => volume == "python-volume" ? long.MaxValue : split[0].MinimumFreeBytes - 1),
+            "ample Python capacity does not conceal insufficient local-wheel cache staging space");
+        var cached = DependencyInstallationSpace.Calculate(runtime, python, 0, 5678, _ => "same-volume");
+        Check(cached[0].CacheCopyBytes == 0 && cached[0].RequiredBytes == 5678 * 2,
+            "verified cached wheels remove compressed-copy cost while keeping expansion and installation reserve");
+        var empty = DependencyInstallationSpace.Calculate(runtime, python, 0, 0, _ => "same-volume");
+        Check(empty[0].RequiredBytes == 0 && empty[0].MinimumFreeBytes == DownloadDiskSpace.SafetyMargin,
+            "an empty batch does not charge for the existing Python environment");
+        Reject<OverflowException>(() => DependencyInstallationSpace.Calculate(runtime, python, 0, long.MaxValue, _ => "same-volume"),
+            "oversized expanded wheel declarations cannot wrap the disk budget");
+        Reject<ArgumentOutOfRangeException>(() => DependencyInstallationSpace.Calculate(runtime, python, -1, 0, _ => "same-volume"),
+            "negative cached-copy credit cannot reduce a dependency budget");
         return checks;
     }
 

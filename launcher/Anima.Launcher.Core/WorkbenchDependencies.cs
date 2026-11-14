@@ -71,6 +71,9 @@ public static class WorkbenchDependencies
     public static Task<DeclaredDependencyReport> InspectAsync(LauncherConfig config, RuntimeManifest runtime, CancellationToken ct) =>
         Probe<DeclaredDependencyReport>(config, "inspect", new { appRoot = config.AppRoot, files = RequirementFiles(config, runtime) }, ct);
 
+    public static Task<DeclaredDependencyReport> InspectFilesAsync(LauncherConfig config, IEnumerable<string> files, CancellationToken ct) =>
+        Probe<DeclaredDependencyReport>(config, "inspect", new { appRoot = config.AppRoot, files = files.Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray() }, ct);
+
     public static Task<DeclaredDependencyReport> InspectWorkbenchAsync(LauncherConfig config, CancellationToken ct) =>
         Probe<DeclaredDependencyReport>(config, "inspect", new { appRoot = config.AppRoot, files = Array.Empty<string>() }, ct);
 

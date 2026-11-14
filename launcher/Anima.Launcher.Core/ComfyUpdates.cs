@@ -5,7 +5,10 @@ using System.Text.Json;
 
 namespace Anima.Launcher.Core;
 
-public sealed record ComfyConfigurationEntry(string RelativePath, bool Existed, bool IsDirectory);
+public sealed record ComfyConfigurationEntry(string RelativePath, bool Existed, bool IsDirectory)
+{
+    public string Sha256 { get; init; } = "";
+}
 public sealed record ComfyUpdateBackup(string Root, string Python, string PreviousCommit, string TargetCommit,
     string Directory, string[] SourceFiles, string[] TargetFiles, string Status, DateTimeOffset CreatedAt)
 {
@@ -14,12 +17,25 @@ public sealed record ComfyUpdateBackup(string Root, string Python, string Previo
     public string PythonDirectory { get; init; } = "";
     public string ConfigurationJson { get; init; } = "";
     public ComfyConfigurationEntry[] ConfigurationPaths { get; init; } = [];
+    // Missing fields identify historical complete backups. New updates never create one.
+    public int FormatVersion { get; init; }
+    public string RecoveryStrategy { get; init; } = "full";
+    public string PreviousBranch { get; init; } = "";
+    public string RecoveryRef { get; init; } = "";
+    public string Phase { get; init; } = "";
+    public bool DependenciesMayHaveChanged { get; init; }
+    public string[] EnvironmentPackages { get; init; } = [];
+    public Dictionary<string, string?> AppliedConfigurationHashes { get; init; } = new(StringComparer.Ordinal);
+    public string RecoveryError { get; init; } = "";
+    public bool CoreVerified { get; init; }
 }
 
-/// <summary>Manual updates preserve models, custom nodes and user data, and back up Git plus the complete venv.</summary>
-public sealed class ComfyUpdateCoordinator(string stateDir, string git, Action<string>? log = null,
-    Func<string, string, CancellationToken, Task>? fetchCommit = null)
+/// <summary>Manual updates retain a Git recovery reference and small configuration snapshots; historical complete backups remain recoverable.</summary>
+public sealed partial class ComfyUpdateCoordinator(string stateDir, string git, Action<string>? log = null,
+    Func<string, string, CancellationToken, Task>? fetchCommit = null,
+    Func<LauncherConfig, CancellationToken, Task>? inspectStopped = null)
 {
+    public Action<string>? Progress { get; set; }
     private static string Full(string path) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
     private static bool Same(string a, string b)
     {
@@ -98,10 +114,10 @@ public sealed class ComfyUpdateCoordinator(string stateDir, string git, Action<s
         RejectLink(root);
         RejectLink(Path.Combine(root, ".git"));
         if (File.Exists(Path.Combine(root, ".git", "objects", "info", "alternates")))
-            throw new InvalidOperationException("此 Git 仓库共享其他目录的对象，无法完整备份，请先转换为独立克隆。");
+            throw new InvalidOperationException("此 Git 仓库共享其他目录的对象，无法保证本地恢复提交可用，请先转换为独立克隆。");
         if (!Same((await Git(root, ["rev-parse", "--show-toplevel"], ct)).Trim(), root)) throw new InvalidOperationException("目标不是独立 Git 根目录。");
         if ((await Git(root, ["ls-files", "--stage"], ct)).Split('\n').Any(line => line.StartsWith("160000 ", StringComparison.Ordinal)))
-            throw new InvalidOperationException("环境包含 Git 子模块，无法完整回滚，未更新。");
+            throw new InvalidOperationException("环境包含 Git 子模块，暂不支持原地更新，未更新。");
         if (clean && !string.IsNullOrWhiteSpace(await Git(root, ["status", "--porcelain", "--untracked-files=no"], ct)))
             throw new InvalidOperationException("ComfyUI 源码有本地修改，请先保存修改后再更新。");
         await EnsureStoppedAsync(config, ct);
@@ -109,6 +125,7 @@ public sealed class ComfyUpdateCoordinator(string stateDir, string git, Action<s
 
     public async Task EnsureStoppedAsync(LauncherConfig config, CancellationToken ct)
     {
+        if (inspectStopped is not null) { await inspectStopped(config, ct); return; }
         if (await ServiceManager.PortOpen(config.ComfyPort, ct) || await ServiceManager.PortOpen(config.WebPort, ct))
             throw new InvalidOperationException("请先停止此环境的 ComfyUI 和工作台，再更新或回退；外部进程不会被自动停止。");
         var processIds = new List<int>();
@@ -166,143 +183,8 @@ public sealed class ComfyUpdateCoordinator(string stateDir, string git, Action<s
         return commands;
     }
 
-    public async Task<ComfyUpdateBackup> UpdateAsync(LauncherConfig config, ComfyRelease release, RuntimeManifest runtime,
-        ComfyDependencySnapshot dependencies, Func<LauncherConfig, ComfyDependencySnapshot, CancellationToken, Task> installDependencies,
-        Func<LauncherConfig, CancellationToken, Task> validate, CancellationToken ct)
-    {
-        Safety.Commit(release.Commit);
-        if (!dependencies.Resolved || dependencies.ComfyCommit != release.Commit) throw new InvalidOperationException("更新前必须完成目标版本的依赖解析。");
-        if (new NodeUpdateCoordinator(stateDir, git).Previous(config)?.Status is "updating" or "restoring" or "rollback-failed")
-            throw new InvalidOperationException("上次节点更新尚未恢复，请先回退节点更新。");
-        await ValidateEnvironmentAsync(config, ct);
-        var root = Full(config.ComfyRoot);
-        var pythonDirectory = IndependentPythonDirectory(config);
-        var previous = (await Git(root, ["rev-parse", "HEAD"], ct)).Trim();
-        if (previous == release.Commit) throw new InvalidOperationException("此环境已经是所选稳定版本。");
-        var previousBackup = Previous(config);
-        if (previousBackup?.Status is "updating" or "restoring" or "rollback-failed") throw new InvalidOperationException("上次更新未完成，请先点击回退恢复环境。");
-        Exception? fetchError = null;
-        if (fetchCommit is not null) await fetchCommit(root, release.Commit, ct);
-        else foreach (var url in DownloadSources.GitCandidates(config.CustomRepository.Length > 0 ? config.CustomRepository : ComfyReleases.RepositoryUrl, config))
-        {
-            try
-            {
-                log?.Invoke("ComfyUI 稳定版 · 来源：" + url);
-                await Git(root, ["fetch", "--depth", "1", url, release.Commit], ct); fetchError = null; break;
-            }
-            catch (Exception ex) when (!ct.IsCancellationRequested && Installer.IsSourceFailure(ex))
-            { fetchError = ex; log?.Invoke("当前 Git 来源未完成下载，将尝试下一来源：" + ex.Message); }
-        }
-        if (fetchError is not null) throw new IOException("下载稳定版提交失败，原环境保持不变。", fetchError);
-        var fetched = (await Git(root, ["rev-parse", "FETCH_HEAD"], ct)).Trim();
-        if (fetched != release.Commit) throw new InvalidDataException("下载的 Git 提交与固定稳定版本不一致。");
-        if ((await Git(root, ["ls-tree", "-r", release.Commit], ct)).Split('\n').Any(line => line.StartsWith("120000 ", StringComparison.Ordinal) || line.StartsWith("160000 ", StringComparison.Ordinal)))
-            throw new InvalidOperationException("目标版本包含符号链接或子模块，无法完整回滚，未更新。");
-        // Check the remotely read dependency instructions against Git's verified objects.
-        foreach (var (name, expected) in new[] { ("requirements.txt", dependencies.RequirementsText), ("manager_requirements.txt", dependencies.ManagerRequirementsText) })
-            if (NormalizeText(await Git(root, ["show", release.Commit + ":" + name], ct)) != NormalizeText(expected))
-                throw new InvalidDataException("稳定版依赖清单与已验证 Git 提交不一致：" + name);
-        var files = SplitFiles(await Git(root, ["ls-tree", "-r", "--name-only", "-z", previous], ct));
-        var targets = SplitFiles(await Git(root, ["ls-tree", "-r", "--name-only", "-z", release.Commit], ct));
-        foreach (var added in targets.Except(files, StringComparer.Ordinal))
-        {
-            var path = Safety.Under(root, added);
-            CheckParents(root, path);
-            var conflict = File.Exists(path);
-            if (Directory.Exists(path))
-            {
-                _ = DirectoryBytes(path); // Reject linked descendants before enumerating.
-                var tracked = files.ToHashSet(StringComparer.OrdinalIgnoreCase);
-                conflict = !files.Any(file => file.StartsWith(added.TrimEnd('/') + "/", StringComparison.OrdinalIgnoreCase))
-                    || Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories).Any(file =>
-                    !tracked.Contains(Path.GetRelativePath(root, file).Replace('\\', '/')));
-            }
-            if (conflict)
-                throw new IOException("新版源码与已有未跟踪文件冲突，已保留原文件：" + path);
-        }
-        var runtimeRoot = InstallationPlanner.ResolveRuntimeRoot(config, stateDir);
-        if (Same(runtimeRoot, root) || Full(runtimeRoot).StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("更新备份目录必须位于 ComfyUI 目录之外。");
-        var backupRoot = Path.Combine(runtimeRoot, "comfy-backups", DateTime.UtcNow.ToString("yyyyMMddTHHmmssfff") + "-" + previous[..12] + "-" + Guid.NewGuid().ToString("N")[..6]);
-        var configurations = ConfigurationPaths.Select(relative =>
-        {
-            var path = Safety.Under(root, relative);
-            if (File.Exists(path) || Directory.Exists(path)) { CheckParents(root, path); RejectLink(path); }
-            return new ComfyConfigurationEntry(relative, File.Exists(path) || Directory.Exists(path), Directory.Exists(path));
-        }).ToArray();
-        var required = DirectoryBytes(Path.Combine(root, ".git")) + DirectoryBytes(pythonDirectory)
-            + files.Sum(path => File.Exists(Safety.Under(root, path)) ? new FileInfo(Safety.Under(root, path)).Length : 0)
-            + configurations.Where(item => item.Existed).Sum(item => item.IsDirectory ? DirectoryBytes(Safety.Under(root, item.RelativePath)) : new FileInfo(Safety.Under(root, item.RelativePath)).Length);
-        // Rollback stages replacement trees on the environment drive, which may
-        // differ from the user's chosen backup/cache drive.
-        if (string.Equals(Path.GetPathRoot(Full(runtimeRoot)), Path.GetPathRoot(root), StringComparison.OrdinalIgnoreCase))
-            Safety.FreeSpace(runtimeRoot, checked(required * 2 + 512L * 1024 * 1024));
-        else
-        {
-            Safety.FreeSpace(runtimeRoot, checked(required + 512L * 1024 * 1024));
-            Safety.FreeSpace(root, checked(required + 512L * 1024 * 1024));
-        }
-        log?.Invoke($"备份完整 Git 与 Python 环境（{required / 1073741824d:N1} GiB）：{backupRoot}");
-        await Task.Run(() =>
-        {
-            Directory.CreateDirectory(backupRoot);
-            CopyDirectory(Path.Combine(root, ".git"), Path.Combine(backupRoot, "git"), ct);
-            CopyDirectory(pythonDirectory, Path.Combine(backupRoot, "venv"), ct);
-            foreach (var item in configurations.Where(item => item.Existed))
-            {
-                var source = Safety.Under(root, item.RelativePath);
-                var destination = Safety.Under(Path.Combine(backupRoot, "configuration"), item.RelativePath);
-                if (item.IsDirectory) CopyDirectory(source, destination, ct);
-                else { Directory.CreateDirectory(Path.GetDirectoryName(destination)!); File.Copy(source, destination); }
-            }
-            foreach (var file in files)
-            {
-                ct.ThrowIfCancellationRequested();
-                var source = Safety.Under(root, file);
-                CheckParents(root, source);
-                if (!File.Exists(source)) continue;
-                RejectLink(source);
-                var destination = Safety.Under(Path.Combine(backupRoot, "source"), file);
-                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-                File.Copy(source, destination);
-            }
-        }, ct);
-        var backup = new ComfyUpdateBackup(root, config.Python, previous, release.Commit, backupRoot, files, targets, "updating", DateTimeOffset.UtcNow)
-        {
-            RevisionMarker = ReadOptional(Path.Combine(root, ".anima-revision.json")),
-            ConstraintsFile = ReadOptional(Path.Combine(root, ".anima-constraints.txt")),
-            PythonDirectory = pythonDirectory,
-            ConfigurationJson = JsonSerializer.Serialize(config, JsonFile.Options),
-            ConfigurationPaths = configurations,
-        };
-        await EnsureStoppedAsync(config, ct);
-        Save(config, backup);
-        try
-        {
-            await Git(root, ["checkout", "--detach", release.Commit], ct);
-            await installDependencies(config, dependencies, ct);
-            await validate(config, ct);
-            if (backup.RevisionMarker is not null) JsonFile.Write(Path.Combine(root, ".anima-revision.json"), runtime.Comfy with
-                { Commit = release.Commit, Url = config.CustomRepository.Length > 0 ? config.CustomRepository : runtime.Comfy.Url });
-            backup = backup with { Status = "complete" };
-            Save(config, backup);
-            log?.Invoke("ComfyUI 已更新至 " + release.Tag + "，完整旧环境已保留，可手动回退。");
-            return backup;
-        }
-        catch (Exception error)
-        {
-            try { await RestoreAsync(config, backup, CancellationToken.None); }
-            catch (Exception restoreError)
-            {
-                Save(config, backup with { Status = "rollback-failed" });
-                throw new AggregateException("更新失败，自动回退未完成；完整备份已保留，请关闭服务后点击回退。", error, restoreError);
-            }
-            if (error is OperationCanceledException) throw;
-            throw new IOException("更新失败，已恢复原 Git 源码和完整 Python 环境：" + error.Message, error);
-        }
-    }
-
-    public async Task RollbackAsync(LauncherConfig config, CancellationToken ct)
+    public async Task RollbackAsync(LauncherConfig config, CancellationToken ct,
+        Func<LauncherConfig, CancellationToken, Task>? validateRecovery = null)
     {
         var backup = Previous(config) ?? throw new InvalidOperationException("此环境没有可回退的更新备份。");
         if (backup.Status == "rolled-back") throw new InvalidOperationException("此备份已经回退。");
@@ -311,7 +193,21 @@ public sealed class ComfyUpdateCoordinator(string stateDir, string git, Action<s
             throw new InvalidOperationException("节点更新发生在此 ComfyUI 备份之后，请先回退节点更新，再回退 ComfyUI。");
         if (backup.Status == "complete") await ValidateEnvironmentAsync(config, ct);
         await EnsureStoppedAsync(config, ct);
-        await RestoreAsync(config, backup, ct);
+        if (IsLight(backup))
+        {
+            try { await RestoreLightAsync(config, backup, validateRecovery, ct); }
+            catch (Exception error)
+            {
+                var current = Previous(config) ?? backup;
+                if (current.Status != "needs-repair") Save(config, current with { Status = "rollback-failed", RecoveryError = error.Message, CoreVerified = false });
+                throw;
+            }
+        }
+        else
+        {
+            ValidateLegacyFormat(backup);
+            await RestoreAsync(config, backup, ct);
+        }
     }
 
     private async Task RestoreAsync(LauncherConfig config, ComfyUpdateBackup backup, CancellationToken ct)
@@ -447,6 +343,7 @@ public sealed class ComfyUpdateCoordinator(string stateDir, string git, Action<s
     {
         JsonFile.Write(Path.Combine(backup.Directory, "backup.json"), backup);
         JsonFile.Write(Pointer(config), backup);
+        if (backup.Phase.Length > 0) Progress?.Invoke(backup.Phase);
     }
     private static string NormalizeText(string text) => text.Replace("\r\n", "\n").TrimEnd();
     private static string[] SplitFiles(string text) => text.TrimEnd('\r', '\n').Split('\0', StringSplitOptions.RemoveEmptyEntries);

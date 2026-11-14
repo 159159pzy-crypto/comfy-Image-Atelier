@@ -29,6 +29,8 @@ internal sealed partial class LauncherState : IDisposable
     private bool upgradeOffered;
     private string? configWriteError;
     private Func<CancellationToken, Task>? retryAction;
+    private Func<string>? retryCancellationMessage;
+    private Func<bool>? retryAllowed;
     private bool retryable;
     private bool retryIsSetup;
     private LauncherConfig? retryConfig;
@@ -37,7 +39,8 @@ internal sealed partial class LauncherState : IDisposable
     private long progressBytes;
     private string progressName = "";
     private DateTime progressAt = DateTime.UtcNow;
-    public bool CanRetry => !Busy && !retryIsSetup && retryable && retryAction is not null && retryAction.Method.Name != nameof(PreviewInstallAsync);
+    public bool CanRetry => !Busy && !retryIsSetup && retryable && retryAction is not null && retryAction.Method.Name != nameof(PreviewInstallAsync)
+        && (retryAllowed?.Invoke() ?? true);
     public string ProgressText { get; private set; } = "";
     public event Action? TaskStateChanged;
     public event Action<string>? TaskProgressChanged;
@@ -205,7 +208,8 @@ internal sealed partial class LauncherState : IDisposable
 
     // --- Task gating ---
 
-    public async Task Run(Func<CancellationToken, Task> action, bool applyDrafts = true, LauncherConfig? resumeConfig = null, bool resumeFresh = false, bool setupOperation = false)
+    public async Task Run(Func<CancellationToken, Task> action, bool applyDrafts = true, LauncherConfig? resumeConfig = null, bool resumeFresh = false, bool setupOperation = false,
+        Func<string>? cancellationMessage = null, Func<bool>? allowRetry = null)
     {
         if (SetupActive && !setupOperation)
         {
@@ -225,6 +229,8 @@ internal sealed partial class LauncherState : IDisposable
         var dependencyOutcome = DependencyProgressStatus.Complete;
         retryIsSetup = setupOperation;
         retryAction = action;
+        retryCancellationMessage = cancellationMessage;
+        retryAllowed = allowRetry;
         retryConfig = null;
         retryable = false;
         cancelDownloads = false;
@@ -256,7 +262,7 @@ internal sealed partial class LauncherState : IDisposable
         {
             dependencyOutcome = DependencyProgressStatus.Paused;
             retryable = true;
-            var message = cancelDownloads ? "任务已取消，已下载文件保留。需要释放空间时，请打开「查看全部下载」单独删除未完成文件。" : "任务已暂停，点击继续可从已完成步骤恢复。";
+            var message = cancellationMessage?.Invoke() ?? (cancelDownloads ? "任务已取消，已下载文件保留。需要释放空间时，请打开「查看全部下载」单独删除未完成文件。" : "任务已暂停，点击继续可从已完成步骤恢复。");
             SetSetupInterruption(message, true);
             SetStatus(message);
             AppendLog(message);
@@ -267,7 +273,7 @@ internal sealed partial class LauncherState : IDisposable
             retryable = true;
             if (ex.CancellationToken.IsCancellationRequested)
             {
-                const string message = "下载任务已停止，进度已保留。可在对应页面继续，或打开「查看全部下载」处理未完成的资源。";
+                var message = cancellationMessage?.Invoke() ?? "下载任务已停止，进度已保留。可在对应页面继续，或打开「查看全部下载」处理未完成的资源。";
                 SetSetupInterruption(message, true);
                 SetStatus(message);
                 AppendLog(message);
@@ -296,7 +302,7 @@ internal sealed partial class LauncherState : IDisposable
     // does not own settings and must retain edits made while it was paused.
     public Task ResumeTaskAsync() => !CanRetry ? Task.CompletedTask
         : retryAction == (Func<CancellationToken, Task>)DownloadSoftwareUpdateCoreAsync ? DownloadSoftwareUpdateAsync()
-        : Run(retryAction!, retryConfig is null, retryConfig, retryFresh);
+        : Run(retryAction!, retryConfig is null, retryConfig, retryFresh, cancellationMessage: retryCancellationMessage, allowRetry: retryAllowed);
 
     public void PauseTask() => task?.Cancel();
     public void CancelTaskAndDownloads() { cancelDownloads = true; task?.Cancel(); }
@@ -627,6 +633,7 @@ internal sealed partial class LauncherState : IDisposable
     /// <summary>Start (or reuse) ComfyUI only.</summary>
     public async Task StartComfyAsync(CancellationToken ct)
     {
+        RequireComfyRecoveryComplete();
         RequireCompletedInstallation();
         ResolvePaths();
         startingRole = "ComfyUI";
@@ -638,6 +645,7 @@ internal sealed partial class LauncherState : IDisposable
     /// <summary>Start ComfyUI (if needed) and the Studio workbench.</summary>
     public async Task StartWebUIAsync(CancellationToken ct)
     {
+        RequireComfyRecoveryComplete();
         RequireCompletedInstallation();
         ResolvePaths();
         startingRole = "WebUI";
@@ -787,6 +795,7 @@ internal sealed partial class LauncherState : IDisposable
     /// <summary>Start everything, handle port conflicts (bounded retries), open the workbench, hide unless forced.</summary>
     public async Task StartServicesAsync(CancellationToken ct)
     {
+        RequireComfyRecoveryComplete();
         if (FreshInstallRequested || Config.InstallPending)
         {
             GoTo(1);

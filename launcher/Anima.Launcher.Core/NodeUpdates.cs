@@ -270,7 +270,7 @@ public sealed class NodeUpdateCoordinator(string stateDir, string git, Action<st
         ValidateIdentity(config, plan);
         if (!plan.CanApply || plan.Dependencies is null) throw new InvalidOperationException("请先完成节点依赖预检。");
         if (Previous(config)?.Status is "updating" or "restoring" or "rollback-failed") throw new InvalidOperationException("上次节点更新未完成，请先回退。");
-        if (new ComfyUpdateCoordinator(stateDir, git).Previous(config)?.Status is "updating" or "restoring" or "rollback-failed")
+        if (ComfyUpdateCoordinator.RequiresRecovery(new ComfyUpdateCoordinator(stateDir, git).Previous(config)))
             throw new InvalidOperationException("上次 ComfyUI 更新尚未恢复，请先回退本体更新。");
         await new ComfyUpdateCoordinator(stateDir, git).ValidateEnvironmentAsync(config, ct);
         if (await CoreCommit(config, ct) != plan.CoreCommit) throw new InvalidOperationException("ComfyUI 本体已变化，请重新检查节点。");
@@ -415,6 +415,8 @@ public sealed class NodeUpdateCoordinator(string stateDir, string git, Action<st
 
     public async Task RollbackAsync(LauncherConfig config, CancellationToken ct)
     {
+        if (ComfyUpdateCoordinator.RequiresRecovery(new ComfyUpdateCoordinator(stateDir, git).Previous(config)))
+            throw new InvalidOperationException("ComfyUI 更新尚未恢复，请先恢复本体或修复更新依赖，再回退节点。");
         var backup = Previous(config) ?? throw new InvalidOperationException("没有节点更新备份。");
         if (backup.Status == "rolled-back") throw new InvalidOperationException("节点备份已回退。");
         if (backup.Status == "complete") foreach (var entry in backup.Entries) await ValidateNode(config, entry, entry.TargetSha, ct);

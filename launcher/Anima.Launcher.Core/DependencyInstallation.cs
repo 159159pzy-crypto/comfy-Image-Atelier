@@ -7,12 +7,32 @@ using System.Text.RegularExpressions;
 
 namespace Anima.Launcher.Core;
 
+/// <summary>An environment-bound, immutable batch of verified local wheels; preparation never installs it.</summary>
+public sealed class PreparedDependencyInstallation
+{
+    internal PreparedDependencyInstallation(LauncherConfig config, ComfyDependencySnapshot snapshot, string runtimeRoot,
+        IReadOnlyList<PreparedDependencyWheel> wheels)
+    {
+        Root = Path.GetFullPath(config.ComfyRoot); Python = Path.GetFullPath(config.Python);
+        RuntimeRoot = Path.GetFullPath(runtimeRoot); Snapshot = snapshot; Wheels = wheels.ToArray();
+    }
+    internal string Root { get; }
+    internal string Python { get; }
+    internal string RuntimeRoot { get; }
+    internal ComfyDependencySnapshot Snapshot { get; }
+    internal IReadOnlyList<PreparedDependencyWheel> Wheels { get; }
+    public int PackageCount => Wheels.Count;
+    public string PlanIdentity => DependencyInstallation.PlanIdentity(Snapshot);
+    public long ExpandedBytes => Wheels.Sum(wheel => wheel.ExpandedBytes);
+}
+
+internal sealed record PreparedDependencyWheel(DependencyPackage Package, string Path, long Size, string Sha256, long ExpandedBytes);
+
 /// <summary>Install the exact reviewed artifacts without running a second dependency solver.</summary>
 public static class DependencyInstallation
 {
     private sealed record PreparedPlan(string Identity, DependencyPackage[] Packages, string TransportIdentity = "");
     private sealed record BuiltWheel(string Identity, string FileName, long Size, string Sha256);
-    private sealed record LocalWheel(DependencyPackage Package, string Path, long Size, string Sha256);
     public static string PlanIdentity(ComfyDependencySnapshot plan) => Hash(plan.PythonIdentity + "\n" + plan.ComfyCommit + "\n"
         + plan.NodeRequirementsIdentity + "\n" + string.Join("\n", plan.Constraints)
         + "\n" + string.Join("\n", plan.Packages.Select(p => p.Name + "==" + p.Version + "|" + p.Url + "|" + p.Sha256 + "|" + p.Commit + "|" + p.Subdirectory))
@@ -57,11 +77,25 @@ public static class DependencyInstallation
         IDictionary<string, string> environment, Func<CancellationToken, Task<string?>> resolveUv, CancellationToken ct,
         Action<string>? log = null, Action<DependencyProgress>? progress = null)
     {
+        var prepared = await PrepareAsync(config, plan, runtimeRoot, downloads, environment, ct, log, progress);
+        await ApplyPreparedAsync(config, prepared, runtimeRoot, environment, resolveUv, ct, log, progress);
+    }
+
+    public static async Task<PreparedDependencyInstallation> PrepareAsync(LauncherConfig config, ComfyDependencySnapshot plan,
+        string runtimeRoot, Downloads downloads, IDictionary<string, string> environment, CancellationToken ct,
+        Action<string>? log = null, Action<DependencyProgress>? progress = null)
+    {
         if (!plan.Resolved || plan.PlanVersion != 1) throw new InvalidDataException("缺少完整的固定依赖安装计划。");
+        config = config.Clone();
+        // Records contain arrays. Freeze them before the first await, so caller edits cannot
+        // change the artifacts or constraints between review, preparation and application.
+        plan = plan with { Constraints = plan.Constraints.ToArray(), EnvironmentPackages = plan.EnvironmentPackages.ToArray(),
+            Packages = plan.Packages.Select(p => p with { Sources = p.Sources.ToArray() }).ToArray() };
         var reporter = new DependencyProgressReporter(progress, log);
         var watch = Stopwatch.StartNew();
         using var temporary = InstallationTemporaryDirectory.Enter(runtimeRoot);
-        var env = new Dictionary<string, string>(environment) { ["TEMP"] = temporary.Path, ["TMP"] = temporary.Path };
+        var env = new Dictionary<string, string>(environment)
+        { ["TEMP"] = temporary.Path, ["TMP"] = temporary.Path, ["PYTHONDONTWRITEBYTECODE"] = "1", ["PYTHONNOUSERSITE"] = "1" };
         var sourceConfig = config.Clone();
         var transportIdentity = DependencyPlans.TransportIdentity(config);
         var reuseSource = plan.TransportIdentity == transportIdentity;
@@ -71,6 +105,9 @@ public static class DependencyInstallation
         var identity = PlanIdentity(plan);
         var root = Path.Combine(runtimeRoot, "cache", "dependency-artifacts", identity);
         Directory.CreateDirectory(root);
+        var buildConstraints = Path.Combine(root, "prepare-constraints.txt");
+        File.WriteAllLines(buildConstraints, plan.Constraints);
+        env["PIP_CONSTRAINT"] = buildConstraints;
         try
         {
             reporter.Phase("preparing", "正在检查固定依赖计划和可复用文件");
@@ -165,7 +202,7 @@ public static class DependencyInstallation
             }
             JsonFile.Write(saved, new PreparedPlan(identity, packages, transportIdentity));
             reporter.Log($"依赖下载阶段完成：{completed} 个文件，{transferWatch.Elapsed.TotalSeconds:F2} 秒。");
-            var wheels = new List<LocalWheel>();
+            var wheels = new List<PreparedDependencyWheel>();
             foreach (var package in packages)
             {
                 ct.ThrowIfCancellationRequested();
@@ -182,7 +219,74 @@ public static class DependencyInstallation
                     wheels.Add(await BuildWheelAsync(package, source, config, plan, runtimeRoot, temporary.Path, env, indexes, gitSources, reporter, ct));
                 }
             }
+            long cacheCopyBytes = 0;
+            foreach (var wheel in wheels)
+            {
+                var artifact = new Artifact("prepared-" + wheel.Package.Name, wheel.Package.Url, wheel.Size, wheel.Sha256, "")
+                    { FileName = Path.GetFileName(wheel.Path), Version = wheel.Package.Version };
+                if (!await Downloads.Verify(ArtifactCache.PathFor(runtimeRoot, artifact), wheel.Size, wheel.Sha256, ct))
+                    cacheCopyBytes = checked(cacheCopyBytes + wheel.Size);
+            }
+            var expandedBytes = wheels.Sum(wheel => wheel.ExpandedBytes);
+            DependencyInstallationSpace.Validate(DependencyInstallationSpace.Calculate(runtimeRoot, config.Python, cacheCopyBytes, expandedBytes), log: reporter.Log);
+            // A direct local wheel may live in the source checkout. Publish a content-bound
+            // copy to the external runtime cache before the caller switches that checkout.
+            for (var i = 0; i < wheels.Count; i++)
+            {
+                var wheel = wheels[i];
+                var artifact = new Artifact("prepared-" + wheel.Package.Name, wheel.Package.Url, wheel.Size, wheel.Sha256, "")
+                    { FileName = Path.GetFileName(wheel.Path), Version = wheel.Package.Version };
+                var destination = await ArtifactCache.PrepareAsync(runtimeRoot, artifact, ct);
+                using var lease = await DownloadTargetLease.AcquireAsync(destination, ct);
+                if (!await Downloads.Verify(destination, wheel.Size, wheel.Sha256, ct))
+                {
+                    var staging = destination + ".preparing-" + Guid.NewGuid().ToString("N");
+                    try
+                    {
+                        File.Copy(wheel.Path, staging);
+                        if (!await Downloads.Verify(staging, wheel.Size, wheel.Sha256, ct)) throw new InvalidDataException("依赖准备期间文件发生变化：" + wheel.Package.Name);
+                        File.Move(staging, destination, true);
+                    }
+                    finally { if (File.Exists(staging)) File.Delete(staging); }
+                }
+                wheels[i] = wheel with { Path = destination };
+            }
             DependencyPlans.ValidateEnvironment(plan, await DependencyPlans.InventoryAsync(config, ct));
+            reporter.Phase("prepared", "依赖文件已准备并校验，尚未安装");
+            reporter.Log($"固定依赖准备完成：{watch.Elapsed.TotalSeconds:F2} 秒；未安装包。");
+            return new(config, plan, runtimeRoot, wheels);
+        }
+        catch (OperationCanceledException) { reporter.Pause("依赖准备已暂停，已校验文件保留；环境未安装依赖"); throw; }
+        catch (Exception error) { reporter.Fail("依赖准备失败：" + error.Message); throw; }
+    }
+
+    public static async Task ApplyPreparedAsync(LauncherConfig config, PreparedDependencyInstallation prepared, string runtimeRoot,
+        IDictionary<string, string> environment, Func<CancellationToken, Task<string?>> resolveUv, CancellationToken ct,
+        Action<string>? log = null, Action<DependencyProgress>? progress = null)
+    {
+        static bool Same(string left, string right) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(left))
+            .Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+        if (!Same(config.ComfyRoot, prepared.Root) || !Same(config.Python, prepared.Python) || !Same(runtimeRoot, prepared.RuntimeRoot))
+            throw new InvalidDataException("已准备依赖属于其他环境，未安装。");
+        var plan = prepared.Snapshot;
+        var wheels = prepared.Wheels;
+        var root = Path.Combine(runtimeRoot, "cache", "dependency-artifacts", prepared.PlanIdentity);
+        var reporter = new DependencyProgressReporter(progress, log);
+        var watch = Stopwatch.StartNew();
+        using var temporary = InstallationTemporaryDirectory.Enter(runtimeRoot);
+        var env = new Dictionary<string, string>(environment)
+        { ["TEMP"] = temporary.Path, ["TMP"] = temporary.Path, ["PYTHONDONTWRITEBYTECODE"] = "1", ["PYTHONNOUSERSITE"] = "1" };
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+            DependencyPlans.ValidateEnvironment(plan, await DependencyPlans.InventoryAsync(config, ct));
+            reporter.Phase("verifying", "正在重新核对已准备的依赖文件");
+            foreach (var wheel in wheels)
+                if (!await Downloads.Verify(wheel.Path, wheel.Size, wheel.Sha256, ct))
+                    throw new InvalidDataException("已准备依赖缺失或校验失败，请重新准备：" + wheel.Package.Name);
+            // Other activity may consume space after preparation. Recheck the same
+            // volumes before invoking an installer, without counting existing Python.
+            DependencyInstallationSpace.Validate(DependencyInstallationSpace.Calculate(runtimeRoot, config.Python, 0, prepared.ExpandedBytes), log: reporter.Log);
             reporter.Phase("verifying", "正在核对已完成依赖的文件完整性");
             var reusable = await InstalledPackagesAsync(config, plan, wheels, root, env, reporter, recordCompleted: false, ct);
             var pending = wheels.Where(wheel => !reusable.Contains(wheel.Package.Name)).ToArray();
@@ -191,6 +295,7 @@ public static class DependencyInstallation
             File.WriteAllLines(requirements, pending.Select(wheel => wheel.Package.Name + " @ " + new Uri(wheel.Path).AbsoluteUri + " --hash=sha256:" + wheel.Sha256));
             var constraints = Path.Combine(root, "constraints.txt");
             File.WriteAllLines(constraints, plan.Constraints);
+            env["PIP_CONSTRAINT"] = constraints;
             string? uv = null;
             try { if (pending.Length > 0) uv = await resolveUv(ct); }
             catch (Exception error) when (error is not OperationCanceledException)
@@ -229,7 +334,7 @@ public static class DependencyInstallation
     }
 
     private static async Task<HashSet<string>> InstalledPackagesAsync(LauncherConfig config, ComfyDependencySnapshot plan,
-        IReadOnlyCollection<LocalWheel> wheels, string root, IDictionary<string, string> environment,
+        IReadOnlyCollection<PreparedDependencyWheel> wheels, string root, IDictionary<string, string> environment,
         DependencyProgressReporter reporter, bool recordCompleted, CancellationToken ct)
     {
         var receipt = Path.Combine(root, "installed.json");
@@ -426,7 +531,7 @@ print('Dependency origins verified')
             Installer.ConfigureGitEnvironment(env, gitSource);
             NetworkPolicySnapshot.Capture(config).AddEnvironment(env, new Uri(index));
             await Commands.Run(config.Python, ["-m", "pip", "download", "--no-deps", "--disable-pip-version-check", "--timeout", "20", "--retries", "1", "--dest", folder, requirement],
-                config.ComfyRoot, reporter.Log, ct, env);
+                temporary, reporter.Log, ct, env);
             return true;
         }, ct, reporter.Log, config);
         var file = Directory.GetFiles(folder).Single();
@@ -436,7 +541,7 @@ print('Dependency origins verified')
         return file;
     }
 
-    private static async Task<LocalWheel> BuildWheelAsync(DependencyPackage package, string source, LauncherConfig config, ComfyDependencySnapshot plan,
+    private static async Task<PreparedDependencyWheel> BuildWheelAsync(DependencyPackage package, string source, LauncherConfig config, ComfyDependencySnapshot plan,
         string runtime, string temporary, IDictionary<string, string> environment, string[] indexes, string[] gitSources, DependencyProgressReporter reporter, CancellationToken ct)
     {
         var buildEnvironment = CaptureBuildEnvironment(environment);
@@ -462,7 +567,7 @@ print('Dependency origins verified')
             var args = new List<string> { "-m", "pip", "wheel", "--no-deps", "--disable-pip-version-check", "--timeout", "20", "--retries", "1", "--wheel-dir", staging };
             if (package.Name == "sam-2") args.Add("--no-build-isolation");
             args.Add(source);
-            await Commands.Run(config.Python, args, config.ComfyRoot, reporter.Log, ct, env);
+            await Commands.Run(config.Python, args, temporary, reporter.Log, ct, env);
             return true;
         }, ct, reporter.Log, config);
         var built = await InspectWheelAsync(package, Directory.GetFiles(staging, "*.whl").Single(), ct);
@@ -597,10 +702,16 @@ print('Dependency origins verified')
             }
     }
 
-    private static async Task<LocalWheel> InspectWheelAsync(DependencyPackage package, string path, CancellationToken ct)
+    private static async Task<PreparedDependencyWheel> InspectWheelAsync(DependencyPackage package, string path, CancellationToken ct)
     {
+        long expandedBytes = 0;
         using (var zip = ZipFile.OpenRead(path))
         {
+            foreach (var item in zip.Entries)
+            {
+                ct.ThrowIfCancellationRequested();
+                expandedBytes = checked(expandedBytes + item.Length);
+            }
             var entry = zip.Entries.Single(e => e.FullName.EndsWith(".dist-info/METADATA", StringComparison.Ordinal));
             using var reader = new StreamReader(entry.Open());
             var metadata = await reader.ReadToEndAsync(ct);
@@ -609,6 +720,10 @@ print('Dependency origins verified')
             if (ComfyDependencyResolver.NormalizeName(name) != package.Name || version != package.Version) throw new InvalidDataException("wheel 内容与解析版本不同：" + package.Name);
         }
         await using var stream = File.OpenRead(path);
-        return new(package, Path.GetFullPath(path), stream.Length, Convert.ToHexString(await SHA256.HashDataAsync(stream, ct)).ToLowerInvariant());
+        var digest = Convert.ToHexString(await SHA256.HashDataAsync(stream, ct)).ToLowerInvariant();
+        if (package.Kind == "wheel" && HasDigest(package)
+            && (package.Size != stream.Length || !package.Sha256.Equals(digest, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidDataException("wheel 文件与固定计划校验信息不同：" + package.Name);
+        return new(package, Path.GetFullPath(path), stream.Length, digest, expandedBytes);
     }
 }

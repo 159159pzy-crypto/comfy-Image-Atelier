@@ -83,7 +83,7 @@ public sealed class IdleShutdownException(IdleShutdownResult result) : IOExcepti
     public IdleShutdownResult Result { get; } = result;
 }
 
-public sealed class ServiceManager(string stateDir, Action<string> log)
+public sealed partial class ServiceManager(string stateDir, Action<string> log)
 {
     private readonly List<Process> owned = [];
     private readonly List<OwnedProcess> records = [];

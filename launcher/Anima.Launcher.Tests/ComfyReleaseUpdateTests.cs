@@ -119,15 +119,21 @@ internal static class ComfyReleaseUpdateTests
         await Git(source, "config", "user.email", "fixture@example.invalid");
         File.WriteAllText(Path.Combine(source, ".gitignore"), ".venv/\nmodels/\ncustom_nodes/\nuser/\n.anima-*\n");
         File.WriteAllText(Path.Combine(source, "main.py"), "old source\n");
+        File.WriteAllText(Path.Combine(source, "config.yml"), "fixture: old\n");
         File.WriteAllText(Path.Combine(source, "shape"), "old file\n");
         Directory.CreateDirectory(Path.Combine(source, "reverse"));
         File.WriteAllText(Path.Combine(source, "reverse", "item.py"), "old nested source\n");
         File.WriteAllText(Path.Combine(source, "requirements.txt"), "numpy>=1\n");
         File.WriteAllText(Path.Combine(source, "manager_requirements.txt"), "comfyui_manager==4.2.2\n");
+        Directory.CreateDirectory(Path.Combine(source, "comfy"));
+        File.WriteAllText(Path.Combine(source, "comfy", "cli_args.py"), "# verified target parser fixture\n");
+        File.WriteAllText(Path.Combine(source, ".anima-revision.json"), "{\"fixture\":\"tracked marker stays under Git ownership\"}");
         await Git(source, "add", ".");
+        await Git(source, "add", "--force", ".anima-revision.json");
         await Git(source, "commit", "-m", "old fixture");
         var before = await Git(source, "rev-parse", "HEAD");
         File.WriteAllText(Path.Combine(source, "main.py"), "new source\n");
+        File.WriteAllText(Path.Combine(source, "config.yml"), "fixture: new\n");
         File.WriteAllText(Path.Combine(source, "new_module.py"), "new module\n");
         File.Delete(Path.Combine(source, "shape"));
         Directory.CreateDirectory(Path.Combine(source, "shape"));
@@ -159,113 +165,15 @@ internal static class ComfyReleaseUpdateTests
         File.WriteAllText(modelPaths, "original model paths");
         var ports = FreePorts();
         var config = new LauncherConfig { ComfyRoot = environment, Python = python, RuntimeRoot = Path.Combine(directory, "runtime-update"), ComfyPort = ports.Item1, WebPort = ports.Item2 };
-        var coordinator = new ComfyUpdateCoordinator(directory, git, null, async (root, commit, token) => { await Commands.Run(git, ["fetch", source, commit], root, null, token); });
+        var coordinator = new ComfyUpdateCoordinator(directory, git, null, async (root, commit, token) => { await Commands.Run(git, ["fetch", source, commit], root, null, token); },
+            (target, token) => Task.CompletedTask);
         var beforePython = config.Clone(); beforePython.Python = "";
         await coordinator.EnsureStoppedAsync(beforePython, default);
         Check(true, "fresh installation can inspect running processes before its Python path exists");
         Check(ComfyUpdateCoordinator.CommandTargetsEnvironment("python.exe \"" + Path.Combine(environment, "main.py") + "\" --port 44321", config)
             && !ComfyUpdateCoordinator.CommandTargetsEnvironment("python.exe \"" + Path.Combine(source, "main.py") + "\" --port 44321", config),
             "external process detection matches the environment's absolute script independently of its port");
-        var release = new ComfyRelease("v1.2.5", after, null, "https://github.com/Comfy-Org/ComfyUI/releases/tag/v1.2.5");
-        var snapshot = new ComfyDependencySnapshot(after, "numpy>=1\n", "comfyui_manager==4.2.2\n", ["numpy==2.0.0"]) { Resolved = true };
-        await Rejected(() => coordinator.UpdateAsync(config, release, runtime, snapshot, (_, _, _) =>
-        {
-            File.WriteAllText(package, "broken dependency");
-            File.WriteAllText(settings, "migrated settings");
-            File.WriteAllBytes(managerDatabase, [9, 8, 7]);
-            File.WriteAllText(Path.Combine(environment, "user", "new-config.json"), "created during health check");
-            File.WriteAllText(modelPaths, "migrated model paths");
-            File.WriteAllText(Path.Combine(environment, "config.json"), "new root configuration");
-            throw new InvalidOperationException("injected pip failure");
-        }, (_, _) => Task.CompletedTask, default), "a dependency installation failure triggers automatic complete rollback");
-        Check(await Git(environment, "rev-parse", "HEAD") == before && File.ReadAllText(package) == "old dependency"
-            && File.ReadAllText(Path.Combine(environment, "main.py")).Replace("\r\n", "\n") == "old source\n" && !File.Exists(Path.Combine(environment, "new_module.py")),
-            "rollback restores Git HEAD, tracked source, removed files and the complete old venv");
-        Check(File.ReadAllText(Path.Combine(environment, "models", "keep.bin")) == "user model"
-            && File.ReadAllText(Path.Combine(environment, "custom_nodes", "user-plugin", "keep.py")) == "user plugin", "rollback preserves user models and custom nodes");
-        Check(File.ReadAllText(settings) == "original settings" && File.ReadAllBytes(managerDatabase).SequenceEqual(new byte[] { 0, 1, 2, 3 })
-            && File.ReadAllText(modelPaths) == "original model paths" && !File.Exists(Path.Combine(environment, "user", "new-config.json"))
-            && !File.Exists(Path.Combine(environment, "config.json")), "rollback restores user configuration and Manager database bytes and retires newly generated configuration");
-        Check(File.Exists(Path.Combine(environment, "shape")) && File.Exists(Path.Combine(environment, "reverse", "item.py")),
-            "rollback restores both file-to-directory and directory-to-file source transitions");
-        var completed = await coordinator.UpdateAsync(config, release, runtime, snapshot, (_, _, _) =>
-        {
-            File.WriteAllText(package, "new dependency");
-            return Task.CompletedTask;
-        }, (_, _) => Task.CompletedTask, default);
-        Check(completed.Status == "complete" && await Git(environment, "rev-parse", "HEAD") == after && File.ReadAllText(package) == "new dependency", "successful update publishes only after dependency and health callbacks pass");
-        File.AppendAllText(Path.Combine(environment, "main.py"), "user edit after update");
-        await Rejected(() => coordinator.RollbackAsync(config, default), "manual rollback refuses to overwrite tracked source edited after the update");
-        await Git(environment, "checkout", "--", "main.py");
-        await coordinator.RollbackAsync(config, default);
-        Check(await Git(environment, "rev-parse", "HEAD") == before && File.ReadAllText(package) == "old dependency", "manual rollback restores the previous source and Python packages");
-        File.AppendAllText(Path.Combine(environment, "main.py"), "user edit");
-        await Rejected(() => coordinator.ValidateEnvironmentAsync(config, default), "locally modified tracked source blocks updates before mutation");
-        await Git(environment, "checkout", "--", "main.py");
-        var shared = config.Clone(); shared.Python = Path.Combine(directory, "shared-python.exe");
-        await Rejected(() => coordinator.ValidateEnvironmentAsync(shared, default), "a shared interpreter is refused without changing it");
-        using (var listener = new TcpListener(IPAddress.Loopback, config.ComfyPort))
-        {
-            listener.Start();
-            await Rejected(() => coordinator.ValidateEnvironmentAsync(config, default), "an external running service blocks an update without being stopped");
-        }
-        using var cancelled = new CancellationTokenSource();
-        try
-        {
-            await coordinator.UpdateAsync(config, release, runtime, snapshot, (_, _, _) =>
-            {
-                File.WriteAllText(package, "cancelled dependency"); cancelled.Cancel(); cancelled.Token.ThrowIfCancellationRequested(); return Task.CompletedTask;
-            }, (_, _) => Task.CompletedTask, cancelled.Token);
-            throw new Exception("Cancellation expected");
-        }
-        catch (OperationCanceledException) { Check(File.ReadAllText(package) == "old dependency" && await Git(environment, "rev-parse", "HEAD") == before, "cancelling during update completes rollback before reporting cancellation"); }
-        File.WriteAllText(Path.Combine(environment, "new_module.py"), "user untracked file");
-        await Rejected(() => coordinator.UpdateAsync(config, release, runtime, snapshot, (_, _, _) => Task.CompletedTask, (_, _) => Task.CompletedTask, default),
-            "new tracked files cannot overwrite untracked user files during update or rollback");
-        Check(File.ReadAllText(Path.Combine(environment, "new_module.py")) == "user untracked file", "a rejected source collision retains the user's exact file contents");
-        File.Delete(Path.Combine(environment, "new_module.py"));
-
-        Directory.Move(Path.Combine(environment, ".venv"), Path.Combine(environment, "venv"));
-        var alternate = config.Clone(); alternate.Python = Path.Combine(environment, "venv", "Scripts", "python.exe");
-        Check(ComfyUpdateCoordinator.IndependentPythonDirectory(alternate) == Path.Combine(environment, "venv"), "an independent venv directory is supported alongside .venv");
-
-        var portableRoot = Path.Combine(directory, "portable");
-        Directory.CreateDirectory(portableRoot);
-        var portableComfy = Path.Combine(portableRoot, "ComfyUI");
-        await Git(portableRoot, "clone", source, portableComfy);
-        await Git(portableComfy, "checkout", "--detach", before);
-        var embedded = Path.Combine(portableRoot, "python_embeded");
-        Directory.CreateDirectory(embedded);
-        File.WriteAllText(Path.Combine(embedded, "python.exe"), "fixture python");
-        File.WriteAllText(Path.Combine(embedded, "python311._pth"), ".\nimport site\n");
-        var portablePackage = Path.Combine(embedded, "package.txt");
-        File.WriteAllText(portablePackage, "old portable dependency");
-        var portableConfig = new LauncherConfig { ComfyRoot = portableComfy, Python = Path.Combine(embedded, "python.exe"), PythonExplicit = true,
-            RuntimeRoot = Path.Combine(directory, "portable-runtime"), ComfyPort = ports.Item1, WebPort = ports.Item2, Theme = "dark" };
-        await coordinator.UpdateAsync(portableConfig, release, runtime, snapshot, (_, _, _) =>
-        {
-            File.WriteAllText(portablePackage, "new portable dependency"); return Task.CompletedTask;
-        }, (_, _) => Task.CompletedTask, default);
-        portableConfig.Theme = "light";
-        await coordinator.RollbackAsync(portableConfig, default);
-        Check(File.ReadAllText(portablePackage) == "old portable dependency" && await Git(portableComfy, "rev-parse", "HEAD") == before,
-            "portable Python outside ComfyUI is completely backed up and restored");
-        Check(JsonFile.Read<LauncherConfig>(Path.Combine(directory, "launcher.json")).Theme == "dark", "manual rollback restores the complete original configuration snapshot");
-
-        var interrupted = await coordinator.UpdateAsync(portableConfig, release, runtime, snapshot, (_, _, _) =>
-        {
-            File.WriteAllText(portablePackage, "interrupted new dependency"); return Task.CompletedTask;
-        }, (_, _) => Task.CompletedTask, default);
-        var pointer = Directory.EnumerateFiles(Path.Combine(directory, "comfy-updates"), "*.json")
-            .Single(path => JsonFile.Read<ComfyUpdateBackup>(path).Root == portableComfy);
-        JsonFile.Write(pointer, interrupted with { Status = "restoring" });
-        // Simulate termination after retiring both active directories but before
-        // replacement. All paths are confined to this disposable fixture.
-        Directory.Move(Path.Combine(portableComfy, ".git"), Path.Combine(portableComfy, ".anima-interrupted-git"));
-        Directory.Move(embedded, Path.Combine(portableRoot, "interrupted-python"));
-        await coordinator.RollbackAsync(portableConfig, default);
-        Check(await Git(portableComfy, "rev-parse", "HEAD") == before && File.ReadAllText(portablePackage) == "old portable dependency"
-            && coordinator.Previous(portableConfig)!.Status == "rolled-back", "a restarted rollback recovers when interrupted directory swaps left both Git and portable Python absent");
+        passed += await ComfyLightUpdateTests.Run(directory, runtime, git, source, config, before, after);
         return passed;
     }
 

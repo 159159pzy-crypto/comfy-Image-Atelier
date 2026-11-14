@@ -351,6 +351,77 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         await Commands.Run(config.Python, ["-m", "pip", "check"], config.ComfyRoot, log, ct);
     }
 
+    /// <summary>Prepare exactly the reviewed update graph in the external cache, without changing installed packages or root configuration.</summary>
+    public async Task<PreparedDependencyInstallation> PrepareComfyUpdateDependenciesAsync(LauncherConfig config,
+        ComfyDependencySnapshot dependencies, CancellationToken ct)
+    {
+        config.Validate();
+        _ = ComfyUpdateCoordinator.IndependentPythonDirectory(config);
+        await new ComfyUpdateCoordinator(stateDir, git ?? "git.exe").EnsureStoppedAsync(config, ct);
+        await ValidateComfyUpdateInputsAsync(config, dependencies, ct);
+        var runtime = InstallationPlanner.ResolveRuntimeRoot(config, stateDir);
+        ValidateComfyUpdateRuntimeRoot(config, runtime);
+        using var temporary = InstallationTemporaryDirectory.Enter(runtime);
+        Directory.CreateDirectory(stateDir);
+        git = await ResolveGit(config, ct);
+        return await DependencyInstallation.PrepareAsync(config, dependencies, runtime,
+            downloads, Env(config), ct, log, dependencyProgress);
+    }
+
+    /// <summary>Apply prepared core dependencies only; node installers, models and optional accelerators belong to explicit maintenance.</summary>
+    public async Task InstallComfyUpdateDependenciesAsync(LauncherConfig config, PreparedDependencyInstallation prepared, CancellationToken ct)
+    {
+        config.Validate();
+        _ = ComfyUpdateCoordinator.IndependentPythonDirectory(config);
+        await new ComfyUpdateCoordinator(stateDir, git ?? "git.exe").EnsureStoppedAsync(config, ct);
+        var dependencies = prepared.Snapshot;
+        await ValidateComfyUpdateInputsAsync(config, dependencies, ct);
+        static string Normalize(string text) => text.Replace("\r\n", "\n").TrimEnd();
+        if (Normalize(File.ReadAllText(Path.Combine(config.ComfyRoot, "requirements.txt"))) != Normalize(dependencies.RequirementsText)
+            || Normalize(File.ReadAllText(Path.Combine(config.ComfyRoot, "manager_requirements.txt"))) != Normalize(dependencies.ManagerRequirementsText))
+            throw new InvalidDataException("当前源码依赖与已准备更新计划不同，未安装依赖。");
+        var runtime = InstallationPlanner.ResolveRuntimeRoot(config, stateDir);
+        using var temporary = InstallationTemporaryDirectory.Enter(runtime);
+        await DependencyInstallation.ApplyPreparedAsync(config, prepared, runtime, Env(config),
+            async token => uv ??= await Tool("uv", config, token), ct, log, dependencyProgress);
+        // ApplyPrepared verifies the complete reviewed inventory and pip check. The
+        // original declarations above bind that graph to this checkout; importing
+        // Manager or reinterpreting raw URL directives would add unrelated side effects.
+    }
+
+    private async Task ValidateComfyUpdateInputsAsync(LauncherConfig config, ComfyDependencySnapshot dependencies, CancellationToken ct)
+    {
+        if (!dependencies.Resolved || dependencies.PlanVersion != 1)
+            throw new InvalidDataException("更新需要已解析的固定依赖文件计划，请重新准备同一目标版本。");
+        foreach (var package in dependencies.Packages.Where(package => package.Kind == "directory"))
+        {
+            var source = Path.TrimEndingDirectorySeparator(Path.GetFullPath(package.SourceDirectory));
+            var python = Path.GetFullPath(config.Python);
+            if (python.StartsWith(source + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("目录依赖包含当前 Python 环境，无法轻量准备；请将该依赖源码移到独立目录：" + package.Name);
+        }
+        var nodes = ComfyDependencyResolver.ExistingNodeRequirements(config);
+        if (dependencies.NodeRequirementsIdentity != ComfyDependencyResolver.NodeRequirementsIdentity(nodes, manifest.Sam2Commit))
+            throw new InvalidOperationException("节点依赖声明在检查后已变化，请重新检查固定更新计划。");
+        if (dependencies.WorkbenchDependencyContractVersion > 0)
+        {
+            var current = await WorkbenchDependencies.ReadAsync(config, ct);
+            if (current.Identity != dependencies.WorkbenchRequirementsIdentity || current.RequirementsText != dependencies.WorkbenchRequirementsText)
+                throw new InvalidOperationException("工作台依赖声明在检查后已变化，请重新检查固定更新计划。");
+        }
+    }
+
+    private static void ValidateComfyUpdateRuntimeRoot(LauncherConfig config, string runtime)
+    {
+        var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(runtime));
+        foreach (var protectedRoot in new[] { config.ComfyRoot, ComfyUpdateCoordinator.IndependentPythonDirectory(config) })
+        {
+            var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(protectedRoot));
+            if (full.Equals(root, StringComparison.OrdinalIgnoreCase) || full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("更新依赖缓存必须位于 ComfyUI 源码和 Python 环境目录之外。");
+        }
+    }
+
     private async Task InstallCombinedDependencies(LauncherConfig config, string gpuPins, bool requiredManager, CancellationToken ct)
     {
         var startedAt = DateTimeOffset.UtcNow;

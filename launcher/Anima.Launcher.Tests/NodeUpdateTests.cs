@@ -292,7 +292,7 @@ internal static class NodeUpdateTests
         Task CoreUpdate() => coreCoordinator.UpdateAsync(config, release, runtime, coreDependencies,
             (_, _, _) => { File.WriteAllText(package, "core-updated package"); return Task.CompletedTask; }, (_, _) => Task.CompletedTask, default);
 
-        // Node -> core must unwind core -> node because each operation snapshots the complete Python tree.
+        // Node -> core unwinds core source first, confirms its dependencies, then restores the node's full snapshot.
         await coordinator.ApplyAsync(config, loaded, (_, _, _) => { File.WriteAllText(package, "node-updated package"); return Task.CompletedTask; }, (_, _) => Task.CompletedTask, default);
         await CoreUpdate();
         await Rejected(() => coordinator.RollbackAsync(config, default), "node rollback refuses to replace Python underneath a newer ComfyUI version");
@@ -300,24 +300,58 @@ internal static class NodeUpdateTests
             "out-of-order node rollback leaves the newer core and Python intact");
         await coreCoordinator.RollbackAsync(config, default);
         Check(await Git(environment, "rev-parse", "HEAD") == core && await Git(node, "rev-parse", "HEAD") == target
-            && File.ReadAllText(package) == "node-updated package", "rolling back the later core update restores its preceding node/Python combination");
+            && File.ReadAllText(package) == "core-updated package" && coreCoordinator.Previous(config)?.Status == "needs-repair",
+            "rolling back the later light core update restores source while retaining installed Python and requiring dependency review");
+        Check(coreCoordinator.Previous(config)?.RecoveryStrategy == "light"
+            && !Directory.Exists(Path.Combine(coreCoordinator.Previous(config)!.Directory, "python"))
+            && File.ReadAllText(Path.Combine(coordinator.Previous(config)!.Directory, "python", "package.txt")) == "original package tree",
+            "core recovery is lightweight while the earlier node update still retains its complete Python snapshot");
+        await Rejected(() => coordinator.RollbackAsync(config, default),
+            "node rollback rejects an unresolved core dependency transaction even after the original core HEAD is restored");
+        Check(await Git(node, "rev-parse", "HEAD") == target && File.ReadAllText(package) == "core-updated package"
+            && coordinator.Previous(config)?.Status == "complete" && coreCoordinator.Previous(config)?.Status == "needs-repair",
+            "blocked node rollback preserves its full backup, active node, Python files and pending core recovery");
+        await Rejected(() => coreCoordinator.CompleteDependencyRepairAsync(config,
+                (_, _) => throw new InvalidOperationException("injected restored dependency validation failure"), default),
+            "a failed restored dependency check cannot authorize the earlier node rollback");
+        await Rejected(() => coordinator.RollbackAsync(config, default),
+            "node rollback remains blocked after an unsuccessful core dependency repair confirmation");
+        // Emulate the explicit update-dependency repair before its separate validation/confirmation step.
+        File.WriteAllText(package, "node-updated package");
+        var repairedCoreChecked = false;
+        await coreCoordinator.CompleteDependencyRepairAsync(config, async (_, _) =>
+        {
+            repairedCoreChecked = await Git(environment, "rev-parse", "HEAD") == core
+                && await Git(node, "rev-parse", "HEAD") == target && File.ReadAllText(package) == "node-updated package";
+            if (!repairedCoreChecked) throw new InvalidOperationException("fixture restored dependency state is invalid");
+        }, default);
+        Check(repairedCoreChecked && coreCoordinator.Previous(config) is { Status: "rolled-back", CoreVerified: true },
+            "successful repair validation completes the original core recovery before node rollback is allowed");
         await coordinator.RollbackAsync(config, default);
         Check(await Git(node, "rev-parse", "HEAD") == before && File.ReadAllText(package) == "original package tree",
-            "the earlier node update can then be safely rolled back");
+            "the earlier node update can then restore its complete original Python snapshot");
 
-        // Core -> node must unwind node -> core for the same dependency compatibility reason.
+        // Core -> node restores the node's full Python snapshot before light core recovery and explicit repair.
         await CoreUpdate();
         var newerCorePlan = loaded with { CoreCommit = nextCore, Dependencies = loaded.Dependencies! with { ComfyCommit = nextCore } };
         await coordinator.ApplyAsync(config, newerCorePlan, (_, _, _) => { File.WriteAllText(package, "node-on-new-core package"); return Task.CompletedTask; }, (_, _) => Task.CompletedTask, default);
-        await Rejected(() => coreCoordinator.RollbackAsync(config, default), "core rollback refuses to restore an older Python snapshot while a newer node update is active");
+        await Rejected(() => coreCoordinator.RollbackAsync(config, default), "core rollback refuses to switch source underneath a newer active node update");
         Check(await Git(node, "rev-parse", "HEAD") == target && File.ReadAllText(package) == "node-on-new-core package",
             "out-of-order core rollback leaves the newer nodes and Python intact");
         await coordinator.RollbackAsync(config, default);
         Check(await Git(environment, "rev-parse", "HEAD") == nextCore && await Git(node, "rev-parse", "HEAD") == before
             && File.ReadAllText(package) == "core-updated package", "rolling back the later node update restores its preceding core/Python combination");
         await coreCoordinator.RollbackAsync(config, default);
-        Check(await Git(environment, "rev-parse", "HEAD") == core && File.ReadAllText(package) == "original package tree"
-            && File.ReadAllBytes(model).SequenceEqual(new byte[] { 2, 4, 6, 8 }), "the earlier core update can then be safely rolled back without touching models");
+        Check(await Git(environment, "rev-parse", "HEAD") == core && File.ReadAllText(package) == "core-updated package"
+            && coreCoordinator.Previous(config)?.Status == "needs-repair"
+            && File.ReadAllBytes(model).SequenceEqual(new byte[] { 2, 4, 6, 8 }),
+            "the earlier light core update restores source and preserves models without claiming to roll back Python");
+        File.WriteAllText(package, "original package tree");
+        await coreCoordinator.CompleteDependencyRepairAsync(config, (_, _) => Task.CompletedTask, default);
+        Check(coreCoordinator.Previous(config) is { Status: "rolled-back", CoreVerified: true }
+            && File.ReadAllText(package) == "original package tree" && File.ReadAllBytes(torch).SequenceEqual(new byte[] { 8, 6, 7, 5, 3, 0, 9 })
+            && RuntimeDependencies.InstalledPackages(config.Python).GetValueOrDefault("torch") == "2.11.0+cu128",
+            "explicit dependency repair completes the earlier core recovery while preserving the exact GPU version");
         return passed;
     }
 

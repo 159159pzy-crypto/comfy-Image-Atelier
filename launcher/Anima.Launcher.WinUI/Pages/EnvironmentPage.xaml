@@ -59,18 +59,29 @@
             <Border Style="{StaticResource StudioPanelStyle}">
                 <ContentControl x:Name="ComfyMaintenancePanel" HorizontalContentAlignment="Stretch" IsTabStop="False">
                 <StackPanel Spacing="12">
-                    <TextBlock Text="ComfyUI 稳定版本与依赖" FontSize="18" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
+                    <TextBlock Text="ComfyUI 稳定版更新" FontSize="18" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
                     <TextBlock x:Name="CurrentEnvironmentText" Style="{StaticResource StudioBodyStyle}" FontSize="12" IsTextSelectionEnabled="True" />
-                    <TextBlock x:Name="ComfyVersionStatus" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" />
-                    <TextBlock x:Name="OptionalDependencyStatusText" Style="{StaticResource StudioBodyStyle}" FontSize="12" IsTextSelectionEnabled="True" />
+                    <Border Background="{ThemeResource StudioMutedBrush}" CornerRadius="12" Padding="14">
+                        <StackPanel Spacing="6">
+                            <TextBlock x:Name="ComfyCurrentVersionText" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="ComfyCurrentVersion" />
+                            <TextBlock x:Name="ComfyTargetVersionText" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="ComfyTargetVersion" />
+                            <HyperlinkButton x:Name="ComfyReleaseNotesButton" Content="查看官方发布说明" Click="ComfyReleaseNotes_Click" HorizontalAlignment="Left" AutomationProperties.AutomationId="ComfyReleaseNotes" />
+                        </StackPanel>
+                    </Border>
+                    <TextBlock x:Name="ComfyVersionStatus" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="ComfyUpdateStatus" />
+                    <TextBlock Text="仅保存原版本、必要配置和依赖清单，不复制完整 Python 或 Git。恢复源码后如需修复依赖，会提供明确入口。" Style="{StaticResource StudioBodyStyle}" FontSize="12" />
                     <Grid ColumnSpacing="8" RowSpacing="8" HorizontalAlignment="Left">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                         <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
-                        <Button Content="检查稳定版本" Click="CheckComfy_Click" Margin="0,0,8,8" />
-                        <Button Grid.Column="1" x:Name="UpdateComfyButton" Content="备份并更新 ComfyUI" Click="UpdateComfy_Click" />
-                        <Button Grid.Row="1" x:Name="RollbackComfyButton" Content="回退上次 ComfyUI 更新" Click="RollbackComfy_Click" />
-                        <Button Grid.Row="1" Grid.Column="1" Content="修复 Manager 与可选依赖" Click="RepairComfy_Click" />
+                        <Button x:Name="CheckComfyButton" Content="检查更新" Click="CheckComfy_Click" AutomationProperties.AutomationId="CheckComfyUpdate" />
+                        <Button Grid.Column="1" x:Name="UpdateComfyButton" Content="更新 ComfyUI" Click="UpdateComfy_Click" AutomationProperties.AutomationId="ApplyComfyUpdate" />
+                        <Button Grid.Row="1" x:Name="RollbackComfyButton" Content="恢复上次版本" Click="RollbackComfy_Click" AutomationProperties.AutomationId="RestoreComfyUpdate" />
+                        <Button Grid.Row="1" Grid.Column="1" x:Name="RepairUpdateDependenciesButton" Content="修复更新依赖" Click="RepairUpdateDependencies_Click" AutomationProperties.AutomationId="RepairComfyUpdateDependencies" />
                     </Grid>
+                    <Button x:Name="StartUpdatedWorkbenchButton" Content="启动工作台" Click="StartUpdatedWorkbench_Click" Visibility="Collapsed" HorizontalAlignment="Left" AutomationProperties.AutomationId="StartUpdatedWorkbench" />
+                    <HyperlinkButton Content="查看更新日志" Click="DependencyLogs_Click" HorizontalAlignment="Left" />
+                    <TextBlock x:Name="OptionalDependencyStatusText" Style="{StaticResource StudioBodyStyle}" FontSize="12" IsTextSelectionEnabled="True" />
+                    <HyperlinkButton x:Name="AdvancedComfyMaintenanceButton" Content="Manager 与可选组件维护" Click="RepairComfy_Click" HorizontalAlignment="Left" />
                 </StackPanel>
                 </ContentControl>
             </Border>
