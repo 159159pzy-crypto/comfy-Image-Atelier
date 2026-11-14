@@ -42,7 +42,7 @@ def needs_main_encode(settings: dict[str, Any]) -> bool:
 def required_node_classes(settings: dict[str, Any]) -> set[str]:
     """Return repair-stage requirements, in addition to existing base checks."""
     stages = settings["upscalers"]
-    required: set[str] = {"PrimitiveInt", "ComfyMathExpression"}
+    required: set[str] = {"PrimitiveInt", "ComfyMathExpression", "VRAM_Debug"}
     if stages["pixel_hires"]["enabled"]:
         required.update({"UpscaleModelLoader", "ImageUpscaleWithModel"})
         if pixel_hires_resizes(settings):
@@ -155,6 +155,29 @@ def build_pipeline(api: dict[str, Any], ui_template: dict[str, Any], settings: d
             latent_stage = stage
         return list(latent)
 
+    active_stages = [stage for stage in stage_order(version)
+                     if stage in {"base", "export"} or stages[stage]["enabled"]]
+    next_stages = dict(zip(active_stages, active_stages[1:]))
+
+    def finish_stage(stage: str) -> None:
+        """Clean after the last operation, including an already-needed decode.
+
+        Keep latent-to-latent paths intact. Every cleanup remains on the image
+        dependency chain, so the existing execution nonce also invalidates it.
+        Model and conditioning branches retain their normal cache behavior.
+        """
+        nonlocal image, latent
+        node_id = f"v3:cleanup:{stage}"
+        options = {"empty_cache": True, "gc_collect": True, "unload_all_models": False}
+        if image is None and next_stages[stage] in {"latent", "post_sampler"}:
+            assert latent is not None
+            latent = add(node_id, "VRAM_Debug", stage, **options, any_input=list(latent))
+        else:
+            add(node_id, "VRAM_Debug", stage, **options, image_pass=ensure_image())
+            image = [node_id, 1]
+        api[node_id]["_meta"]["title"] = f"{STAGE_LABELS[stage]} · 清缓存与垃圾回收"
+
+    finish_stage("base")
     if stages["pixel_hires"]["enabled"]:
         config = stages["pixel_hires"]
         model = add("v3:pixel:model", "UpscaleModelLoader", "pixel_hires",
@@ -165,6 +188,7 @@ def build_pipeline(api: dict[str, Any], ui_template: dict[str, Any], settings: d
         if pixel_hires_resizes(settings):
             image = add("v3:pixel:resize", "ImageScaleBy", "pixel_hires", image=image,
                         upscale_method=config["upscale_method"], scale_by=config["percent"] / 100)
+        finish_stage("pixel_hires")
     def nvidia_stage() -> None:
         nonlocal image, latent
         config = stages["nvidia"]
@@ -221,10 +245,12 @@ def build_pipeline(api: dict[str, Any], ui_template: dict[str, Any], settings: d
     for stage in stage_order(version):
         if stage in operations and stages[stage]["enabled"]:
             operations[stage]()
+            finish_stage(stage)
     if stages["dlss"]["enabled"]:
         image = add("v3:dlss", "DLSS5NeuralRender", "dlss", images=ensure_image(),
                     **{k: v for k, v in stages["dlss"].items() if k != "enabled"})
         latent = None
+        finish_stage("dlss")
     add(V2_OUTPUT_ID, "SaveImage", "export", images=ensure_image(), filename_prefix=filename_prefix)
     _simplify_base(api, settings, prompt_seed)
     # A declared input changes ComfyUI's ancestry cache key without changing
@@ -240,7 +266,7 @@ def build_pipeline(api: dict[str, Any], ui_template: dict[str, Any], settings: d
     api = _prune_graph(api, V2_OUTPUT_ID)
     ui = export_ui_workflow(api, ui_template, pipeline_version=version)
     ui.setdefault("extra", {})["pipeline"] = {
-        "version": version, "stages": [key for key in stage_order(version) if key in {"base", "export"} or stages[key]["enabled"]],
+        "version": version, "stages": active_stages,
         "execution_nonce": execution_nonce,
         "api_prompt": copy.deepcopy(api),
     }
@@ -250,6 +276,7 @@ def build_pipeline(api: dict[str, Any], ui_template: dict[str, Any], settings: d
 # Widget order is part of ComfyUI's editable-workflow format, unlike the API
 # input dictionary. Explicit contracts avoid exporting stale template values.
 _WIDGETS = {
+    "VRAM_Debug": ["empty_cache", "gc_collect", "unload_all_models"],
     "PrimitiveInt": ["value", "@fixed"], "ComfyMathExpression": ["expression"],
     "UNETLoader": ["unet_name", "weight_dtype"], "CLIPLoader": ["clip_name", "type", "device"],
     "VAELoader": ["vae_name"], "CLIPTextEncode": ["text"], "LoadImage": ["image", "upload"],
@@ -271,6 +298,7 @@ _WIDGETS = {
         "noise_distribution", "granularity"],
 }
 _OUTPUTS = {
+    "VRAM_Debug": ["*", "IMAGE", "MODEL", "INT", "INT"],
     "PrimitiveInt": ["INT"], "ComfyMathExpression": ["FLOAT", "INT", "BOOLEAN"],
     "UNETLoader": ["MODEL"], "CLIPLoader": ["CLIP"], "VAELoader": ["VAE"],
     "Lora Loader (LoraManager)": ["MODEL", "CLIP", "STRING", "STRING"],
@@ -283,6 +311,12 @@ _OUTPUTS = {
     "SeedVR2Preprocess": ["IMAGE"], "SeedVR2PostProcessing": ["IMAGE"],
     "RTXVideoSuperResolution": ["IMAGE", "FLOAT", "INT", "INT"], "DLSS5NeuralRender": ["IMAGE"],
     "LoadImage": ["IMAGE", "MASK"], "SaveImage": [],
+}
+_INPUT_SOCKETS = {
+    "VRAM_Debug": [("any_input", "*"), ("image_pass", "IMAGE"), ("model_pass", "MODEL")],
+}
+_OUTPUT_NAMES = {
+    "VRAM_Debug": ["any_output", "image_pass", "model_pass", "freemem_before", "freemem_after"],
 }
 
 
@@ -326,16 +360,32 @@ def export_ui_workflow(api: dict[str, Any], template: dict[str, Any], *, pipelin
         output_types = _OUTPUTS.get(kind)
         if output_types is None:
             output_types = [out.get("type", "*") for out in example.get("outputs", [])]
-        outputs = [{"name": output_type, "type": output_type, "links": []} for output_type in output_types]
+        output_names = _OUTPUT_NAMES.get(kind, output_types)
+        outputs = [{"name": name, "type": output_type, "links": []}
+                   for name, output_type in zip(output_names, output_types)]
         stage_index = stage_order(pipeline_version).index(properties["pipeline_stage"])
         nodes[key] = {"id": ids[key], "type": kind, "title": source.get("_meta", {}).get("title", kind),
                       "pos": [stage_index * 440 + (index % 2) * 40, (index // 2) * 240],
                       "size": [360, max(100, 55 + 26 * len(values))], "flags": {}, "order": index, "mode": 0,
                       "inputs": [], "outputs": outputs, "properties": properties, "widgets_values": values}
+    def link_type(origin: str, slot: int) -> str:
+        # The wildcard pass-through has a real LATENT/IMAGE source. Preserve
+        # that wire type without changing the node's declared wildcard socket.
+        source = api[origin]
+        if source["class_type"] == "VRAM_Debug" and slot == 0:
+            value = source["inputs"].get("any_input")
+            if _link(value):
+                return link_type(*value)
+        outputs = nodes[origin]["outputs"]
+        return outputs[slot]["type"] if slot < len(outputs) else "*"
+
     links = []
     for key, source in api.items():
         kind = source["class_type"]
         example_inputs = {item["name"]: item for item in examples.get(kind, {}).get("inputs", [])}
+        if kind in _INPUT_SOCKETS:
+            example_inputs = {name: {"name": name, "type": socket_type}
+                              for name, socket_type in _INPUT_SOCKETS[kind]}
         # Keep normal sockets even when optional/unconnected; ComfyUI matches
         # their positional slots when configuring the imported node.
         ordered_names = [name for name, spec in example_inputs.items() if "widget" not in spec]
@@ -349,10 +399,11 @@ def export_ui_workflow(api: dict[str, Any], template: dict[str, Any], *, pipelin
                 while len(nodes[origin]["outputs"]) <= slot:
                     nodes[origin]["outputs"].append({"name": "*", "type": "*", "links": []})
                 output = nodes[origin]["outputs"][slot]
-                spec["type"] = output["type"]
+                wire_type = link_type(origin, slot)
+                spec["type"] = wire_type
                 link_id = len(links) + 1
                 spec["link"] = link_id
-                links.append([link_id, ids[origin], slot, ids[key], len(nodes[key]["inputs"]), output["type"]])
+                links.append([link_id, ids[origin], slot, ids[key], len(nodes[key]["inputs"]), wire_type])
                 output["links"].append(link_id)
             nodes[key]["inputs"].append(spec)
     return {"version": 0.4, "last_node_id": len(nodes), "last_link_id": len(links),

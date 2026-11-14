@@ -24,7 +24,7 @@ class InspectedComfy(FakeComfy):
         }
         graph = json.loads((APP_DIR / "templates/workflow_api_v2.json").read_text(encoding="utf-8"))
         self.inventory["node_types"] = sorted({node["class_type"] for node in graph.values()} | {
-            "PrimitiveInt", "ComfyMathExpression", "ImageUpscaleWithModel", "UpscaleModelLoader", "KSampler", "LatentUpscaleBy", "SaveImage", "ImageScaleBy"})
+            "PrimitiveInt", "ComfyMathExpression", "ImageUpscaleWithModel", "UpscaleModelLoader", "KSampler", "LatentUpscaleBy", "SaveImage", "ImageScaleBy", "VRAM_Debug"})
         self.probes = [
             self.item("models", "custom-anima.safetensors", ["anima.model"]),
             self.item("models", "seedvr2_7b_sharp_int8_convrot.safetensors", ["seedvr2.model"]),

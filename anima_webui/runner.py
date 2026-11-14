@@ -570,7 +570,9 @@ class BatchManager:
             advertised = set(resources["node_types"])
             missing = {item["name"] for item in issues if item["type"].endswith("_node")}
             for node_name in sorted(required_node_classes(settings) - advertised - missing):
-                issues.append({"type": "pipeline_node", "name": node_name, "label": "当前处理链节点"})
+                label = ("清缓存和垃圾回收节点（请安装或更新 ComfyUI-KJNodes 后重启 ComfyUI）"
+                         if node_name == "VRAM_Debug" else "当前处理链节点")
+                issues.append({"type": "pipeline_node", "name": node_name, "label": label})
         if single:
             from .single_workbench import single_resource_issues
             issues.extend(single_resource_issues(settings, resources))

@@ -133,7 +133,7 @@ def assert_graph(api):
     visit("v2:output")
     assert seen == set(api), "inactive or unrelated outputs survived pruning"
     assert sum(node["class_type"] == "SaveImage" for node in api.values()) == 1
-    assert not any(node["class_type"] in {"PreviewAny", "MaskPreview", "PromptExpand", "VRAM_Debug"}
+    assert not any(node["class_type"] in {"PreviewAny", "MaskPreview", "PromptExpand"}
                    for node in api.values())
 
 
@@ -154,11 +154,14 @@ def test_both_profiles_and_workbenches_use_same_chain(templates, workbench, prof
     base_id = "691:1240" if base == "normal" else "701:1246"
     for name in ("model", "positive", "negative"):
         assert graph["v3:post"]["inputs"][name] == graph[base_id]["inputs"][name]
-    assert graph["v2:output"]["inputs"]["images"] == ["v3:dlss", 0]
-    assert graph["v3:dlss"]["inputs"]["images"] == ["v3:face", 0]
-    assert graph["v3:post"]["inputs"]["latent_image"] == ["v3:latent", 0]
-    assert graph["v3:seed:resize"]["inputs"]["image"] == ["v3:vsr", 0]
-    assert graph["v3:vsr"]["inputs"]["images"] == ["v3:pixel:upscale", 0]
+    assert graph["v2:output"]["inputs"]["images"] == ["v3:cleanup:dlss", 1]
+    assert graph["v3:cleanup:dlss"]["inputs"]["image_pass"] == ["v3:dlss", 0]
+    assert graph["v3:dlss"]["inputs"]["images"] == ["v3:cleanup:face_refine", 1]
+    assert graph["v3:post"]["inputs"]["latent_image"] == ["v3:cleanup:latent", 0]
+    assert graph["v3:cleanup:latent"]["inputs"]["any_input"] == ["v3:latent", 0]
+    assert graph["v3:seed:resize"]["inputs"]["image"] == ["v3:cleanup:nvidia", 1]
+    assert graph["v3:vsr"]["inputs"]["images"] == ["v3:cleanup:pixel_hires", 1]
+    assert graph["v3:cleanup:pixel_hires"]["inputs"]["image_pass"] == ["v3:pixel:upscale", 0]
     assert graph["v3:seed:finish"]["inputs"]["original_resized_images"] == ["v3:seed:resize", 0]
 
 
@@ -180,7 +183,8 @@ def test_pixel_native_output_is_only_shrunk_without_post_sampling(templates):
     refined = submit(templates, enabled=("pixel_hires", "post_sampler"))["prompt"]
     assert "v3:pixel:resize" not in refined
     encoded = [node for node in refined.values() if node["class_type"].startswith("VAEEncode")]
-    assert encoded[0]["inputs"]["pixels"] == ["v3:pixel:upscale", 0]
+    assert encoded[0]["inputs"]["pixels"] == ["v3:cleanup:pixel_hires", 1]
+    assert refined["v3:cleanup:pixel_hires"]["inputs"]["image_pass"] == ["v3:pixel:upscale", 0]
 
 
 def test_post_sampling_inherits_final_dual_stack_and_zero_negative(templates):

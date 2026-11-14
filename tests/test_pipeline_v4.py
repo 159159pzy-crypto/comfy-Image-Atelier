@@ -9,6 +9,7 @@ import pytest
 from anima_webui.pipeline_v3 import STAGE_ORDER, STAGE_ORDER_V4, needs_main_encode, required_node_classes
 from anima_webui.single_workbench import single_resource_issues
 from anima_webui.workflow import WorkflowTemplates, validate_settings
+from test_pipeline_memory_cleanup import without_cleanup
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,7 +57,8 @@ def test_v4_every_combination_follows_reference_order_and_has_one_connected_sink
     if "latent" in enabled:
         assert graph["v4:latent:sample"]["inputs"]["latent_image"] == ["v3:latent", 0]
         if "post_sampler" in enabled:
-            assert graph["v3:post"]["inputs"]["latent_image"] == ["v4:latent:sample", 0]
+            assert graph["v3:post"]["inputs"]["latent_image"] == ["v3:cleanup:latent", 0]
+            assert graph["v3:cleanup:latent"]["inputs"]["any_input"] == ["v4:latent:sample", 0]
     metadata = result["extra_data"]["extra_pnginfo"]["workflow"]["extra"]["pipeline"]
     assert metadata["version"] == 4
     assert metadata["stages"] == ["base", *enabled, "export"]
@@ -75,9 +77,9 @@ def test_v4_both_latent_and_post_sampling_inherit_final_base_resources(templates
         assert graph[node]["inputs"]["seed"] == 12345
         for key in ("model", "positive", "negative"):
             assert graph[node]["inputs"][key] == final[key]
-    assert graph["v3:seed:resize"]["inputs"]["image"] == ["v3:face", 0]
-    assert graph["v3:vsr"]["inputs"]["images"] == ["v3:seed:finish", 0]
-    assert graph["v3:dlss"]["inputs"]["images"] == ["v3:vsr", 0]
+    assert graph["v3:seed:resize"]["inputs"]["image"] == ["v3:cleanup:face_refine", 1]
+    assert graph["v3:vsr"]["inputs"]["images"] == ["v3:cleanup:seedvr2", 1]
+    assert graph["v3:dlss"]["inputs"]["images"] == ["v3:cleanup:nvidia", 1]
     ui = result["extra_data"]["extra_pnginfo"]["workflow"]
     nodes = {node["properties"]["pipeline_api_id"]: node for node in ui["nodes"]}
     expected = [12345, "fixed", 16, 4, "er_sde", "simple", .2] if profile == "anima" else [12345, "fixed", 10, 1, "er_sde", "simple", .3]
@@ -124,8 +126,10 @@ def test_v4_img2img_preparation_then_latent_and_post_stay_in_one_latent_chain(te
     assert sum(node["class_type"].startswith("VAEEncode") for node in graph.values()) == 1
     assert sum(node["class_type"].startswith("VAEDecode") for node in graph.values()) == 1
     assert graph["691:1240"]["inputs"]["latent_image"] == ["single:encode", 0]
-    assert graph["v3:latent"]["inputs"]["latent"] == ["691:1240", 0]
-    assert graph["v3:post"]["inputs"]["latent_image"] == ["v4:latent:sample", 0]
+    assert graph["v3:latent"]["inputs"]["latent"] == ["v3:cleanup:base", 0]
+    assert graph["v3:cleanup:base"]["inputs"]["any_input"] == ["691:1240", 0]
+    assert graph["v3:post"]["inputs"]["latent_image"] == ["v3:cleanup:latent", 0]
+    assert graph["v3:cleanup:latent"]["inputs"]["any_input"] == ["v4:latent:sample", 0]
     assert graph["v4:latent:sample"]["inputs"]["seed"] == graph["v3:post"]["inputs"]["seed"] == 0
 
 
@@ -138,8 +142,9 @@ def test_v4_latent_sampler_is_required_and_validated_even_without_post_sampling(
     assert any("潜空间" in issue["label"] and issue["name"].startswith("cfg=") for issue in issues)
 
 
-# Captured immediately before adding v4: old API graph and editable UI output
-# must both stay unchanged for every supported model/workbench/base combination.
+# v2 API and UI remain frozen. For v3, hashes captured before automatic cleanup
+# cover the API after removing only cleanup passthroughs; its UI now includes
+# the intentionally added nodes, whose socket contract is tested separately.
 FROZEN_GRAPHS = [
     "d2f5040b0c3fc90447309e0ebc4051d5a933f75b9395f2f79b9a9f06b65cd33c",
     "6c429e67227a8a0bc608c847b48921b1f6ea93db01f5c5f1217ca2e16fade402",
@@ -149,24 +154,25 @@ FROZEN_GRAPHS = [
     "c979a8342f21c03f2babddfb6f920111a7a225d5bbb8ccd6753d3b227e71cd31",
     "07aea7aba8c9ae8123b66522b28ffa5e2aeedac037db66b81da0ff31808c45bf",
     "2528326389be3f14250ef3c3489b8de3863d9d5955abdcabd14041846a24d367",
-    "3ab354be72386a34a430f5b87fd2dd589286852bf9bcabd8dd75b7b33ee5b82c",
-    "480f033559f94de631d8bd8d6e8e1aa919c480dda46aa1fd5edc8868f0a01c27",
-    "1e13fd171888dfdb9b0f73995b8f2e82b663fd6817ccd3cfb3a59594d5d04fcc",
-    "fb54eebe8ed09a81c7f46c0ec09090ecbad9b00f97a431f71f1d4982b1dbd746",
-    "7d530bf719309765053fc8016e11fe549f8b151383a5976aa630e3accb24c2c7",
-    "234326df5ca19d9e3bf81f517fed10ad8f45ec2364ca8d28cdf07eb0c7377c40",
-    "0fdc48e380ae57e36071f3a76fc7431c40071337446031edd199f339136e6edc",
-    "2592bb94b43f0776eb36ff47849b5dabfa65a87b5462610a424ad39aab53ff71",
+    "15cf761149b435ecd33306dd5626019e0a187ee247682609b9c6b916059756c9",
+    "4464cf87cefb4d7219920bb9b86795fec7ad1c52bd0d576adea8d5aa7916f18a",
+    "00f63df438f3bb57b288b20f65ad5061c50017080040b58b4b479fa109687720",
+    "07d5804bf021422e3563eb2e322761f54d25999afc470c8646d6f4a529f23b33",
+    "c12bd83c9a837f7b280dc0de48825833c446c154c073407a995e6fb00f0a5e2a",
+    "345ea69c8eeeae574e9c0b9a1badb28bfbe4b6c674bb665ab42ee6c2d9d60e19",
+    "51c61cf0be6b9000183c9bf9320cf50360c1e6209ab3956740245379064d3e20",
+    "4a2ae5b51b142f2724bc1ce590fb11079f675a01dd6fd90233ac3a212c43ed04",
 ]
 
 
 @pytest.mark.parametrize("case,expected", list(zip(itertools.product((2, 3), ("anima", "krea2"), ("random", "single"), ("normal", "dual_sampler")), FROZEN_GRAPHS)))
-def test_v2_v3_api_and_ui_are_frozen_across_profiles_and_base_modes(templates, case, expected):
+def test_v2_graph_stays_frozen_and_v3_only_adds_cleanup_across_profiles_and_base_modes(templates, case, expected):
     version, profile, workbench, base_mode = case
     settings = {"pipeline_version": version, "model_profile": profile, "workbench": workbench, "base_mode": base_mode,
                 "upscalers": {stage: {"enabled": True} for stage in STAGES}}
     result = templates.submission(settings, 12345, 67890, "Frozen/output", "client", 1, execution_nonce=123456)
-    content = [result["prompt"], result["extra_data"]["extra_pnginfo"]["workflow"]]
+    content = ([result["prompt"], result["extra_data"]["extra_pnginfo"]["workflow"]]
+               if version == 2 else without_cleanup(result["prompt"]))
     actual = hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode()).hexdigest()
     assert actual == expected
     if version == 3:

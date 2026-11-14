@@ -12,6 +12,7 @@ from .formats import MAX_GRAPH_DEPTH, MAX_GRAPH_NODES, MAX_METADATA_BYTES, Metad
 SAMPLERS = {"KSampler", "KSamplerAdvanced", "KSampler (Efficient)", "SamplerCustom", "SamplerCustomAdvanced"}
 OUTPUTS = {"SaveImage", "Image Save", "SDPromptSaver", "SaveImageWithMetadata"}
 IMAGE_INPUTS = ("images", "image", "samples", "samples_from", "latent_image", "pixels")
+VRAM_PASSTHROUGH_INPUTS = {0: "any_input", 1: "image_pass", 2: "model_pass"}
 
 
 def parse_comfyui(graph: dict[str, Any]) -> dict[str, Any]:
@@ -43,6 +44,8 @@ def parse_comfyui(graph: dict[str, Any]) -> dict[str, Any]:
         if linked is None:
             return value if isinstance(value, (str, int, float, bool)) else None
         values, kind, visited = node(linked, seen)
+        if kind == "VRAM_Debug":
+            return scalar(values.get(VRAM_PASSTHROUGH_INPUTS.get(value[1])), visited, target=target)
         if kind == "SDParameterGenerator":
             field = target if target in values else "seed" if target == "noise_seed" else target
             return scalar(values.get(field), visited, target=field)
@@ -64,6 +67,8 @@ def parse_comfyui(graph: dict[str, Any]) -> dict[str, Any]:
         if linked is None:
             return {}
         values, kind, visited = node(linked, seen)
+        if kind == "VRAM_Debug":
+            return conditioning(values.get(VRAM_PASSTHROUGH_INPUTS.get(value[1])), role, visited)
         if kind == "CLIPTextEncodeSDXL":
             output = {}
             for label, key in (("CLIP G", "text_g"), ("CLIP L", "text_l")):
@@ -110,6 +115,8 @@ def parse_comfyui(graph: dict[str, Any]) -> dict[str, Any]:
         if linked is None:
             return {}
         values, kind, visited = node(linked, seen)
+        if kind == "VRAM_Debug":
+            return model_values(values.get(VRAM_PASSTHROUGH_INPUTS.get(value[1])), visited)
         output: dict[str, Any] = {}
         if "model" in values:
             output.update(model_values(values["model"], visited))
@@ -146,9 +153,17 @@ def parse_comfyui(graph: dict[str, Any]) -> dict[str, Any]:
     candidate_bytes = 0
     oversized = False
 
-    def visit(identity: str, root: str, seen: frozenset[str]) -> None:
+    def visit(identity: str, root: str, seen: frozenset[str], output_slot: int | None = None) -> None:
         nonlocal candidate_bytes, oversized
         values, kind, visited = node(identity, seen)
+        if kind == "VRAM_Debug":
+            # Only the selected output's input is on this image branch. The
+            # two free-memory counters are observations, never graph aliases.
+            value = values.get(VRAM_PASSTHROUGH_INPUTS.get(output_slot))
+            linked = reference(value)
+            if linked:
+                visit(linked, root, visited, value[1])
+            return
         if kind in SAMPLERS:
             sampling = dict(values)
             guider = reference(values.get("guider"))
@@ -178,9 +193,10 @@ def parse_comfyui(graph: dict[str, Any]) -> dict[str, Any]:
                         raise MetadataError("ComfyUI 候选提示词总量超过限制")
                     candidates.append(item)
         for key in IMAGE_INPUTS:
-            linked = reference(values.get(key))
+            value = values.get(key)
+            linked = reference(value)
             if linked:
-                visit(linked, root, visited)
+                visit(linked, root, visited, value[1])
 
     for root in roots:
         try:

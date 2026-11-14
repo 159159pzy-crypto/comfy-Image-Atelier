@@ -207,6 +207,61 @@ def test_comfyui_connected_graph_ignores_decoys_and_preserves_colon_ids(tmp_path
     assert "size" not in parsed["parameters"]
 
 
+@pytest.mark.parametrize("slot,field", [(0, "any_input"), (1, "image_pass")])
+def test_comfyui_cleanup_follows_only_selected_image_or_latent_port(tmp_path, slot, field):
+    data = {**graph(seed=123), **graph("decoy prompt", "decoy negative", 456, "b")}
+    data.pop("outb")
+    data["cleanup"] = {"class_type": "VRAM_Debug", "inputs": {
+        "any_input": ["decodeb", 0], "image_pass": ["decodeb", 0], "model_pass": ["modelb", 0],
+        field: ["decode", 0], "empty_cache": True, "gc_collect": True, "unload_all_models": False}}
+    data["out"]["inputs"]["images"] = ["cleanup", slot]
+    parsed = assert_prompt(tmp_path, image_bytes({"prompt": data}), format_contains="ComfyUI")
+    assert parsed["parameters"]["seed"] == "123"
+    assert parsed["parameters"]["model"] == "bird"
+
+
+def test_comfyui_cleanup_preserves_scalar_conditioning_and_model_ports(tmp_path):
+    data = graph(seed=["seed_cleanup", 0])
+    data["seed_cleanup"] = {"class_type": "VRAM_Debug", "inputs": {"any_input": ["seed", 0]}}
+    data["seed"] = {"class_type": "PrimitiveInt", "inputs": {"value": MAX_SAMPLE_SEED}}
+    data["positive_cleanup"] = {"class_type": "VRAM_Debug", "inputs": {
+        "any_input": ["single:positive", 0], "image_pass": ["unused", 0]}}
+    data["model_cleanup"] = {"class_type": "VRAM_Debug", "inputs": {
+        "any_input": ["unused", 0], "model_pass": ["model", 0]}}
+    data["unused"] = {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "wrong model"}}
+    data["sampler"]["inputs"].update(positive=["positive_cleanup", 0], model=["model_cleanup", 2])
+    parsed = assert_prompt(tmp_path, image_bytes({"prompt": data}), format_contains="ComfyUI")
+    assert parsed["parameters"]["seed"] == str(MAX_SAMPLE_SEED)
+    assert parsed["parameters"]["model"] == "bird"
+
+
+@pytest.mark.parametrize("slot", [3, 4])
+@pytest.mark.parametrize("target", ["images", "seed", "positive", "model"])
+def test_comfyui_cleanup_memory_counters_never_alias_data_ports(slot, target):
+    data = graph()
+    data["cleanup"] = {"class_type": "VRAM_Debug", "inputs": {
+        "any_input": ["single:positive", 0], "image_pass": ["decode", 0], "model_pass": ["model", 0]}}
+    if target == "images":
+        data["out"]["inputs"]["images"] = ["cleanup", slot]
+    else:
+        data["sampler"]["inputs"][target] = ["cleanup", slot]
+    parsed = parse_comfyui(data)
+    if target in {"images", "positive"}:
+        assert parsed["candidates"] == []
+    else:
+        assert len(parsed["candidates"]) == 1
+        assert target not in parsed["candidates"][0]["parameters"]
+
+
+def test_comfyui_cleanup_cycle_stays_bounded():
+    data = graph()
+    data["cleanup"] = {"class_type": "VRAM_Debug", "inputs": {"any_input": ["cleanup", 0]}}
+    data["out"]["inputs"]["images"] = ["cleanup", 0]
+    parsed = parse_comfyui(data)
+    assert parsed["candidates"] == []
+    assert parsed["warnings"]
+
+
 def test_comfyui_multiple_outputs_require_selection_with_matching_params(tmp_path):
     data = {**graph(seed=10), **graph("a red bird", "noise", 20, "b")}
     result = PromptImageStore(tmp_path).add(image_bytes({"prompt": data}))["metadata"]

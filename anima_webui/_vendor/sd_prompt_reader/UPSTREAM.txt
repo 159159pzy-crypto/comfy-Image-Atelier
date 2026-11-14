@@ -22,5 +22,7 @@ Local changes:
   fields, and structured generation parameters without mutating source data.
 - Decode Draw Things XMP by namespace/local name instead of child positions.
 - Keep missing values absent and reject malformed records independently.
+- Follow KJNodes VRAM_Debug passthrough ports independently; memory counters
+  do not alias image, model, conditioning, or scalar inputs.
 
 Native Anima metadata and storage are implemented outside this package.
