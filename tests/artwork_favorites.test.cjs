@@ -292,3 +292,56 @@ test('pointer release commits the reordered DOM even after the dragged row chang
   for (const handler of [...document.events.get('pointerup')]) handler({ pointerId: 1 }); await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(h.requests[0], { folder_ids: ['b', 'c', 'a'] }); assert.equal(h.state.drag, null); assert.equal(document.events.get('pointerup').length, 0);
 });
+
+test('batch deletion refreshes folder counts and broadcasts once while pruning every affected cache', async () => {
+  let singleInvalidations = 0;
+  const h = harness({ singleGalleryInvalidate: () => singleInvalidations++, imagePreview: { preloaded: new Map([['1', {}], ['2', {}], ['3', {}]]) } });
+  const first = record(1, ['folder']), second = record(2, ['folder'], 'single'), kept = record(3, ['folder']);
+  for (const item of [first, second, kept]) { h.ctx.artworkRememberRecord(item); h.state.selected.set(String(item.id), item); }
+  h.ctx.historyItems = [first, second, kept]; h.ctx.historyCache.set(3, { items: [first, second, kept] });
+  h.ctx.singleGalleryState = { items: [second, kept], total: 2, lastCompleted: second, viewerRecord: second, imageError: second, failedImages: new Set(['2', '3']) };
+  h.ctx.request = async url => { h.requests.push(url); return { folders: [{ id: 'folder', count: 1 }] }; };
+  const warnings = await h.ctx.artworkRecordsRemoved([1, 2]);
+  assert.deepEqual(plain(warnings), []);
+  assert.deepEqual(h.requests, ['/api/artwork-folders']); assert.equal(h.writes.length, 1);
+  assert.equal(h.state.folders[0].count, 1); assert.equal(singleInvalidations, 1);
+  assert.deepEqual([...h.state.selected.keys()], ['3']); assert.deepEqual([...h.state.records.keys()], ['3']);
+  assert.deepEqual([...h.state.memberships.keys()], ['3']);
+  assert.deepEqual(h.ctx.historyItems.map(item => item.id), [3]); assert.deepEqual(h.ctx.historyCache.get(3).items.map(item => item.id), [3]);
+  assert.equal(h.ctx.singleGalleryState.lastCompleted.id, 3); assert.equal(h.ctx.singleGalleryState.viewerRecord, null);
+  assert.equal(h.ctx.singleGalleryState.imageError, null); assert.deepEqual([...h.ctx.singleGalleryState.failedImages], ['3']);
+  assert.deepEqual([...h.ctx.imagePreview.preloaded.keys()], ['3']);
+  assert.equal(h.ctx.artworkRememberRecord(first), null); assert.equal(h.ctx.artworkRememberRecord(second), null);
+});
+
+test('batch cleanup survives failed count refresh and ignores a folder list read started before deletion', async () => {
+  const oldRead = deferred(), h = harness(); let reads = 0;
+  h.ctx.artworkRememberRecord(record(1)); h.state.selected.set('1', record(1));
+  h.ctx.request = () => { reads++; if (reads === 1) return oldRead.promise; throw new Error('收藏服务离线'); };
+  const loading = h.ctx.artworkLoadFolders();
+  const warnings = await h.ctx.artworkRecordsRemoved([1]);
+  oldRead.resolve({ folders: [{ id: 'folder', count: 99 }] }); await loading;
+  assert.match(warnings.join('；'), /收藏服务离线/); assert.equal(h.state.folders.length, 0);
+  assert.equal(h.state.selected.size, 0); assert.equal(h.ctx.artworkRememberRecord(record(1)), null);
+  assert.equal(h.writes.length, 1);
+});
+
+test('batch delete toolbar action appears before clear and is unavailable without writable selected works', () => {
+  const document = fakeDocument();
+  document.getElementById = id => {
+    const visit = node => node.id === id ? node : node.children.map(visit).find(Boolean);
+    return visit(document.body) || null;
+  };
+  const toolbar = document.createElement('div'); toolbar.id = 'artworkToolbar'; document.body.append(toolbar);
+  let opens = 0; const h = harness({ document, openHistoryBatchDelete: () => opens++ });
+  h.ctx.artworkLayoutToolbar = () => {}; h.state.ready = true;
+  h.ctx.artworkBuildToolbar(); h.ctx.artworkRenderToolbar();
+  const button = document.getElementById('artworkBatchDelete'), clear = document.getElementById('artworkClear');
+  assert.equal(button.hidden, true);
+  h.ctx.artworkSetSelecting(true); assert.equal(button.hidden, false); assert.equal(button.disabled, true);
+  h.ctx.artworkActivateCard(record(1)); assert.equal(button.disabled, false);
+  assert.equal(button.parentElement.children.indexOf(button) + 1, button.parentElement.children.indexOf(clear));
+  button.handlers.get('click')(); assert.equal(opens, 1);
+  h.state.busy = true; h.ctx.artworkRenderToolbar(); assert.equal(button.disabled, true);
+  h.state.busy = false; h.ctx.historyDetailWritable = () => false; h.ctx.artworkRenderToolbar(); assert.equal(button.disabled, true);
+});

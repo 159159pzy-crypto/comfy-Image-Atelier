@@ -44,6 +44,7 @@
 .history-delete-choice:disabled { cursor: not-allowed; opacity: .5; }
 .history-delete-dialog[aria-busy="true"] .history-delete-choice:disabled { cursor: progress; }
 .history-delete-dialog .history-results { margin: 16px 0 0; color: var(--text-secondary); }
+.history-delete-dialog .history-results:not(:empty) { max-height: 30dvh; overflow-y: auto; overscroll-behavior: contain; }
 .history-delete-dialog .history-results.is-error { color: var(--danger); }
 .history-delete-dialog .history-results:empty { display: none; }
 .history-delete-actions { display: flex; justify-content: flex-end; margin-top: 22px; }

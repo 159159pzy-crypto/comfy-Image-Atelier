@@ -115,3 +115,73 @@ test('a superseded element decode cannot commit a record or overwrite the newest
   assert.equal(h.ctx.selectedRecord.id, 3); assert.equal(h.image.src, '/api/images/3');
   assert.equal(h.ctx.imagePreview.committedSrc, '/api/images/3');
 });
+
+function deletionNavigationSetup() {
+  const h = setup(), current = h.ctx.selectedRecord;
+  h.ctx.singleGalleryState = { viewerOpen: true, viewerRecord: current, lastCompleted: current, items: [current, record(2)], total: 2,
+    epoch: 1, request: 1, selectionRequest: 1, navigationIntent: 1, navigationCursor: null, failedImages: new Set() };
+  h.ctx.imagePreview.context = { kind: 'single', record: current, onRecordCommit: item => {
+    h.displayed.push(item.id); h.ctx.selectedRecord = item; h.ctx.singleGalleryState.viewerRecord = item;
+  } };
+  h.ctx.imagePreview.preloaded = new Map();
+  h.ctx.artworkFavoritesState = { missingRecords: new Set(), selected: new Map(), records: new Map(), memberships: new Map() };
+  h.ctx.artworkRenderCards = () => {};
+  for (const name of ['currentPreviewRecord', 'setCurrentPreviewRecord', 'restorePreviewCommittedImage']) install(h.ctx, app, name);
+  install(h.ctx, single, 'singleGalleryInvalidate');
+  install(h.ctx, fs.readFileSync(path.join(__dirname, '../static/artwork-favorites.js'), 'utf8'), 'artworkForgetMissing');
+  return h;
+}
+
+test('external batch deletion cancels a pending single cursor and settles its surviving committed image', async () => {
+  const h = deletionNavigationSetup(), pending = deferred(), state = h.ctx.singleGalleryState;
+  state.items = [h.ctx.selectedRecord]; state.hasMore = true;
+  h.ctx.singleGalleryLoad = () => pending.promise;
+  h.ctx.singleGallerySelect = async item => { h.displayed.push(item.id); return true; };
+  install(h.ctx, single, 'singleGalleryNavigate');
+  const operation = h.ctx.singleGalleryNavigate(1); await flush();
+  const request = h.ctx.imagePreview.navigationRequest, selection = state.selectionRequest;
+  assert.equal(h.ctx.imagePreview.phase, 'switching'); assert.ok(state.navigationCursor);
+  h.ctx.artworkForgetMissing([2]); await flush();
+  assert.ok(h.ctx.imagePreview.navigationRequest > request); assert.ok(state.selectionRequest > selection);
+  assert.equal(state.navigationCursor, null); assert.equal(h.ctx.imagePreview.navigationCursor, null);
+  assert.equal(h.ctx.imagePreview.phase, 'open'); assert.equal(h.image.src, '/api/images/1');
+  assert.equal(h.image.style.opacity, '1');
+  pending.resolve(); await operation;
+  assert.deepEqual(h.displayed, []); assert.equal(h.ctx.selectedRecord.id, 1); assert.equal(h.ctx.imagePreview.phase, 'open');
+});
+
+test('external batch deletion during single image decode cannot reintroduce the deleted neighbor', async () => {
+  const h = deletionNavigationSetup(), oldDecode = deferred();
+  h.ctx.preloadRecord = async () => ({}); h.ctx.playPreviewAnimation = async () => true;
+  h.ctx.liveImagePreviewFrame = () => ({}); h.ctx.previewMotion = (_, value) => value;
+  h.ctx.imagePreviewFrame = () => ({ transform: 'none' }); h.ctx.imagePreviewReducedMotion = () => true;
+  h.ctx.previewPositionLabel = () => ''; h.ctx.preloadPreviewNeighbors = () => {};
+  h.image.decode = () => h.image.src.endsWith('/2') ? oldDecode.promise : Promise.resolve();
+  install(h.ctx, app, 'switchPreviewImage');
+  h.ctx.imagePreview.phase = 'switching'; h.ctx.imagePreview.navigationRequest = 1;
+  const operation = h.ctx.switchPreviewImage(record(2), 1); await flush();
+  assert.equal(h.image.src, '/api/images/2'); assert.equal(h.ctx.selectedRecord.id, 1);
+  h.ctx.artworkForgetMissing([2]); await flush();
+  oldDecode.resolve(); assert.equal(await operation, false);
+  assert.deepEqual(h.displayed, []); assert.equal(h.ctx.selectedRecord.id, 1);
+  assert.equal(h.ctx.singleGalleryState.viewerRecord.id, 1);
+  assert.equal(h.ctx.imagePreview.context.record.id, 1); assert.equal(h.image.src, '/api/images/1');
+  assert.equal(h.ctx.imagePreview.phase, 'open'); assert.equal(h.image.style.opacity, '1');
+});
+
+test('deletion recovery cannot settle an obsolete owner or overwrite a navigation started while restore decodes', async () => {
+  for (const change of ['new-navigation', 'new-context', 'closing', 'closed']) {
+    const h = deletionNavigationSetup(), restoreDecode = deferred();
+    h.image.src = '/api/images/2'; h.image.style.opacity = '0';
+    h.image.decode = () => restoreDecode.promise;
+    h.ctx.imagePreview.phase = 'switching';
+    h.ctx.artworkForgetMissing([2]);
+    if (change === 'new-navigation') h.ctx.imagePreview.navigationRequest++;
+    if (change === 'new-context') h.ctx.imagePreview.context = { kind: 'single', record: record(3) };
+    const phase = ['closing', 'closed'].includes(change) ? change : 'switching';
+    h.ctx.imagePreview.phase = phase; h.image.src = '/api/images/3'; h.image.style.opacity = '.4';
+    restoreDecode.resolve(); await flush();
+    assert.equal(h.ctx.imagePreview.phase, phase, change);
+    assert.equal(h.image.src, '/api/images/3', change); assert.equal(h.image.style.opacity, '.4', change);
+  }
+});

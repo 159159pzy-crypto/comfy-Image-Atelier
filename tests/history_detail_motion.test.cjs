@@ -61,6 +61,7 @@ function harness() {
   const host = node('dialog', 'detailDialog'); host.open = true; document.body.append(host);
   const title = node('h2', 'historyDetailTitle'), detail = node('section', 'historyDetailView'); host.append(title, detail);
   const deleteDialog = node('dialog', 'historyDeleteDialog'); deleteDialog.open = false; document.body.append(deleteDialog);
+  deleteDialog.append(node('h2', 'historyDeleteTitle'));
   for (const id of ['historyDeleteRecord', 'historyDeleteFile', 'closeHistoryDelete', 'cancelHistoryDelete', 'historyDeleteResults', 'historyDeleteSummary']) deleteDialog.append(node('button', id));
   elements.get('historyDeleteRecord').dataset.historyDeleteMode = 'record'; elements.get('historyDeleteFile').dataset.historyDeleteMode = 'file';
   const archive = node('div', 'randomArchive'); document.body.append(archive);

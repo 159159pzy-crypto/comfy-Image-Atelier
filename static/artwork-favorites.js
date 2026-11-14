@@ -1,5 +1,5 @@
 /* Artwork memberships are shared by both workbenches; selection belongs to the
- * home archive. No image files or generation settings are changed here. */
+ * home archive. Destructive actions use the shared history confirmation dialog. */
 const artworkFavoritesState = {
   ready: false, loaded: false, loading: false, loadToken: 0, revision: 0,
   folders: [], records: new Map(), memberships: new Map(), selected: new Map(), targets: new Set(), missingRecords: new Set(),
@@ -144,9 +144,10 @@ function artworkBuildToolbar() {
   const summary = artworkNode("span", "artwork-selection-summary"); summary.id = "artworkSelectionSummary"; summary.setAttribute("role", "status");
   const add = artworkButton("加入收藏夹", "artwork-action artwork-action-primary", () => artworkBatchMembership("add")); add.id = "artworkBatchAdd";
   const remove = artworkButton("移出此夹", "artwork-action", () => artworkBatchMembership("remove")); remove.id = "artworkBatchRemove";
+  const destroy = artworkButton("删除", "artwork-action artwork-action-danger", () => openHistoryBatchDelete()); destroy.id = "artworkBatchDelete";
   const clear = artworkButton("清空", "artwork-action", () => { if (!artworkFavoritesState.busy) { artworkFavoritesState.selected.clear(); artworkRenderCards(); artworkRenderToolbar(); } }); clear.id = "artworkClear";
   const select = artworkButton("选择", "artwork-action", () => artworkSetSelecting(!artworkFavoritesState.selecting)); select.id = "artworkSelect";
-  actions.append(summary, add, remove, clear, select);
+  actions.append(summary, add, remove, destroy, clear, select);
   const layout = artworkNode("div", "artwork-toolbar-layout"); layout.id = "artworkToolbarLayout";
   layout.append(browser, actions); root.append(layout);
 }
@@ -270,8 +271,11 @@ function artworkRenderToolbar() {
   const summary = artworkElement("artworkSelectionSummary");
   summary.textContent = `已选 ${state.selected.size} 张${hiddenCount ? ` · ${hiddenCount} 张在其他页面或来源` : ""}`; summary.hidden = !state.selecting;
   const add = artworkElement("artworkBatchAdd"); add.hidden = !state.selecting; add.disabled = state.busy || !state.selected.size || !state.targets.size || !artworkWritable();
-  add.textContent = state.busy ? "正在保存…" : state.targets.size ? `加入 ${state.targets.size} 个收藏夹` : "加入收藏夹";
+  const deleting = typeof historyDetailState !== "undefined" && historyDetailState.busy && historyDetailState.batch;
+  add.textContent = state.busy && !deleting ? "正在保存…" : state.targets.size ? `加入 ${state.targets.size} 个收藏夹` : "加入收藏夹";
   const remove = artworkElement("artworkBatchRemove"); remove.hidden = !state.selecting || !active; remove.disabled = state.busy || !state.selected.size || !artworkWritable();
+  const destroy = artworkElement("artworkBatchDelete"); destroy.hidden = !state.selecting; destroy.disabled = state.busy || !state.selected.size || !artworkWritable();
+  destroy.textContent = deleting ? "正在删除…" : "删除";
   const clear = artworkElement("artworkClear"); clear.hidden = !state.selecting; clear.disabled = state.busy || !state.selected.size;
   const select = artworkElement("artworkSelect"); select.textContent = state.selecting ? "取消" : "选择"; select.disabled = state.busy || !artworkWritable();
   artworkElement("artworkManage").disabled = state.busy || !artworkWritable();
@@ -658,6 +662,14 @@ function artworkRecordRemoved(id) {
   if (state.popover?.recordId === key) closeArtworkPopovers({ restoreFocus: false });
   artworkRenderToolbar(); void artworkLoadFolders();
 }
+async function artworkRecordsRemoved(ids) {
+  const state = artworkFavoritesState;
+  ++state.revision; ++state.loadToken; state.loading = false;
+  artworkForgetMissing(ids); artworkRenderToolbar();
+  try { localStorage.setItem(ARTWORK_FAVORITES_EVENT, `${Date.now()}:${state.revision}`); } catch { /* The server remains authoritative. */ }
+  await artworkLoadFolders();
+  return state.loadError ? [`作品已删除，收藏夹计数刷新失败：${state.loadError}`] : [];
+}
 function artworkForgetMissing(ids) {
   const state = artworkFavoritesState, missing = new Set(ids.map(String));
   if (!missing.size) return;
@@ -666,11 +678,32 @@ function artworkForgetMissing(ids) {
   if (typeof historyItems !== "undefined") historyItems = historyItems.filter(keep);
   if (typeof historyCache !== "undefined") for (const page of historyCache.values()) page.items = (page.items || []).filter(keep);
   if (typeof singleGalleryState !== "undefined") {
+    if (typeof singleGalleryInvalidate === "function") singleGalleryInvalidate();
     const before = singleGalleryState.items.length;
     singleGalleryState.items = singleGalleryState.items.filter(keep);
     if (Number.isFinite(singleGalleryState.total)) singleGalleryState.total = Math.max(0, singleGalleryState.total - (before - singleGalleryState.items.length));
     if (!keep(singleGalleryState.lastCompleted)) singleGalleryState.lastCompleted = singleGalleryState.items[0] || null;
     if (!keep(singleGalleryState.viewerRecord)) singleGalleryState.viewerRecord = null;
+    for (const id of missing) singleGalleryState.failedImages?.delete(id);
+    if (!keep(singleGalleryState.imageError)) singleGalleryState.imageError = null;
+  }
+  if (typeof imagePreview !== "undefined") {
+    for (const id of missing) imagePreview.preloaded?.delete(id);
+    if (imagePreview.context?.kind === "single") {
+      const context = imagePreview.context, requestId = ++imagePreview.navigationRequest;
+      imagePreview.navigationCursor = null;
+      // A cursor read or decode started before deletion must neither commit a
+      // missing neighbor nor leave the surviving bitmap stuck in its fade.
+      if (["switching", "opening"].includes(imagePreview.phase) && keep(typeof selectedRecord === "undefined" ? null : selectedRecord)
+        && typeof restorePreviewCommittedImage === "function") {
+        void Promise.resolve(restorePreviewCommittedImage(requestId, context)).then(() => {
+          if (requestId !== imagePreview.navigationRequest || context !== imagePreview.context || ["closing", "closed"].includes(imagePreview.phase)) return;
+          imagePreview.phase = "open";
+          if (typeof singleGalleryState !== "undefined") singleGalleryState.retryDirection = null;
+          ui.imagePreviewDialog.classList.remove("is-navigating"); updatePreviewNavigation();
+        });
+      }
+    }
   }
   if (state.popover?.recordId && missing.has(state.popover.recordId)) closeArtworkPopovers({ restoreFocus: false });
   if (typeof selectedRecord !== "undefined" && selectedRecord && missing.has(String(selectedRecord.id))) {

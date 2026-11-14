@@ -1,6 +1,6 @@
 /* History filtering and the ordinary image detail/delete surface. */
 const historyDetailState = {
-  ready: false, busy: false, record: null, owner: null, session: 0, fileOutcome: null,
+  ready: false, busy: false, record: null, owner: null, session: 0, fileOutcome: null, batch: null,
   homeQuery: { source: "", folderId: "" },
 };
 const historyDetailElement = id => document.getElementById(id);
@@ -57,12 +57,16 @@ function historyDetailVisible() {
 }
 function closeHistoryDelete({ restoreFocus = true, immediate = false, force = false } = {}) {
   const state = historyDetailState, dialog = historyDetailElement("historyDeleteDialog");
-  if (!force && (state.busy || !state.record)) return false;
-  const record = state.record, owner = state.owner, session = ++state.session;
-  state.record = state.owner = state.fileOutcome = null;
+  if (!force && (state.busy || (!state.record && !state.batch))) return false;
+  const record = state.record, owner = state.owner, batch = state.batch, session = ++state.session;
+  state.record = state.owner = state.fileOutcome = state.batch = null;
   renderHistoryDelete();
   if (!dialog?.open) return false;
   const onComplete = () => {
+    if (batch) {
+      if (restoreFocus && session === state.session && !dialog.open) historyDetailFocus(historyDetailElement("artworkBatchDelete")) || historyDetailFocus(historyDetailElement("artworkSelect"));
+      return;
+    }
     if (!restoreFocus || session !== state.session || dialog.open || !historyDetailElement("detailDialog")?.open
       || detailContext !== owner || String(selectedRecord?.id) !== String(record?.id)) return;
     historyDetailFocus(document.querySelector('[data-detail-action="more"]')) || historyDetailFocus(historyDetailElement("historyDetailTitle"));
@@ -80,7 +84,7 @@ function revealHistoryWorkbench() {
 function openHistoryDelete(record) {
   if (!record || historyDetailState.busy || !historyDetailWritable()) return;
   const state = historyDetailState;
-  ++state.session; state.record = record; state.owner = detailContext; state.fileOutcome = null;
+  ++state.session; state.record = record; state.owner = detailContext; state.fileOutcome = null; state.batch = null;
   if (typeof invalidateHistoryTransfer === "function") invalidateHistoryTransfer();
   if (typeof closeArtworkPopovers === "function") closeArtworkPopovers({ restoreFocus: false, immediate: true });
   if (typeof closeDetailActionPanels === "function") closeDetailActionPanels({ immediate: true });
@@ -91,12 +95,30 @@ function openHistoryDelete(record) {
   motionDialog(historyDetailElement("historyDeleteDialog"), true, { restoreFocus: false });
   historyDetailFocus(historyDetailElement("cancelHistoryDelete"));
 }
+function openHistoryBatchDelete() {
+  const state = historyDetailState, selection = artworkFavoritesState;
+  if (state.busy || selection.busy || !selection.selecting || !selection.selected.size || !historyDetailWritable()) return;
+  ++state.session; state.record = state.owner = state.fileOutcome = null;
+  state.batch = { records: [...selection.selected.values()], fileOutcomes: new Map(), results: new Map() };
+  closeArtworkPopovers({ restoreFocus: false, immediate: true });
+  const results = historyDetailElement("historyDeleteResults");
+  results.textContent = ""; results.classList.remove("is-error");
+  renderHistoryDelete();
+  motionDialog(historyDetailElement("historyDeleteDialog"), true, { restoreFocus: false });
+  historyDetailFocus(historyDetailElement("cancelHistoryDelete"));
+}
 function renderHistoryDelete() {
   const state = historyDetailState;
   // Keep the filename visible while a closing animation finishes.
   if (state.record) historyDetailElement("historyDeleteSummary").textContent = state.record.filename || `作品 #${state.record.id}`;
+  if (state.record || state.batch) historyDetailElement("historyDeleteTitle").textContent = state.batch ? "批量删除作品" : "删除作品";
+  if (state.batch) {
+    const visible = new Set((typeof historyItems === "undefined" ? [] : historyItems).map(record => String(record.id)));
+    const hidden = state.batch.records.filter(record => !visible.has(String(record.id))).length;
+    historyDetailElement("historyDeleteSummary").textContent = `已选 ${state.batch.records.length} 张作品${hidden ? `，其中 ${hidden} 张在其他页面或来源` : ""}。请选择删除方式。`;
+  }
   for (const id of ["historyDeleteRecord", "historyDeleteFile"]) {
-    historyDetailElement(id).disabled = !state.record || state.busy || !historyDetailWritable();
+    historyDetailElement(id).disabled = !(state.record || state.batch?.records.length) || state.busy || !historyDetailWritable();
   }
   for (const id of ["closeHistoryDelete", "cancelHistoryDelete"]) historyDetailElement(id).disabled = state.busy;
   historyDetailElement("historyDeleteDialog").setAttribute("aria-busy", String(state.busy));
@@ -111,20 +133,23 @@ function containHistoryDeleteFocus(event) {
     event.preventDefault(); historyDetailFocus(event.shiftKey ? buttons.at(-1) : buttons[0]);
   }
 }
-function removeHistoryViewRecord(view, record) {
-  const key = String(record.id), cached = [...view.cache.values()], elements = view.elements;
-  const matches = (!view.query.source || (record.workbench || record.settings?.workbench || "random") === view.query.source)
-    && (!view.query.folderId || (record.folder_ids || []).includes(view.query.folderId));
-  const present = view.items.some(item => String(item.id) === key);
+function removeHistoryViewRecord(view, record) { removeHistoryViewRecords(view, [record]); }
+function removeHistoryViewRecords(view, records) {
+  const unique = new Map(records.map(record => [String(record.id), record]));
+  const cached = [...view.cache.values()], elements = view.elements;
+  const present = new Set(view.items.map(item => String(item.id)));
+  const removedCount = [...unique].filter(([id, record]) => present.has(id) || (
+    (!view.query.source || (record.workbench || record.settings?.workbench || "random") === view.query.source)
+    && (!view.query.folderId || (record.folder_ids || []).includes(view.query.folderId)))).length;
   const total = Number(view.cache.get(view.page)?.total ?? view.total);
-  view.items = view.items.filter(item => String(item.id) !== key);
-  for (const page of cached) page.items = (page.items || []).filter(item => String(item.id) !== key);
-  for (const node of [...(elements?.gallery?.children || [])]) if (node.dataset.recordId === key) {
+  view.items = view.items.filter(item => !unique.has(String(item.id)));
+  for (const page of cached) page.items = (page.items || []).filter(item => !unique.has(String(item.id)));
+  for (const node of [...(elements?.gallery?.children || [])]) if (unique.has(node.dataset.recordId)) {
     if (typeof ArtworkThumbnails !== "undefined") ArtworkThumbnails.remove(node);
     node.remove();
   }
-  if (Number.isFinite(total) && (present || matches)) {
-    view.total = Math.max(0, total - 1); view.pages = Math.max(1, Math.ceil(view.total / 24)); view.page = Math.min(view.page, view.pages);
+  if (Number.isFinite(total) && removedCount) {
+    view.total = Math.max(0, total - removedCount); view.pages = Math.max(1, Math.ceil(view.total / 24)); view.page = Math.min(view.page, view.pages);
     if (elements?.historyCount) elements.historyCount.textContent = `${view.total} 张图片`;
     if (elements?.pageLabel) elements.pageLabel.textContent = `${view.page} / ${view.pages}`;
     if (elements?.prevPage) elements.prevPage.disabled = view.page <= 1;
@@ -159,6 +184,22 @@ async function applyHistoryDeleted(record, owner, { beforeDetailUpdate } = {}) {
   }
   return warnings;
 }
+async function applyHistoryBatchDeleted(records) {
+  if (!records.length) return [];
+  const view = historyViewState(), warnings = [];
+  removeHistoryViewRecords(view, records);
+  if (typeof artworkRecordsRemoved === "function") {
+    try { warnings.push(...await artworkRecordsRemoved(records.map(record => record.id))); }
+    catch (error) { warnings.push(`作品已删除，收藏状态刷新失败：${error.message}`); }
+  }
+  historyDirty = true;
+  try {
+    if (typeof singleWorkbenchActive === "function" && singleWorkbenchActive()) {
+      if (typeof singleGalleryRefresh === "function" && !await singleGalleryRefresh()) warnings.push("作品已删除，单图列表刷新失败，可稍后刷新");
+    } else if (!await loadHistory(view.page, view)) warnings.push("作品已删除，作品列表刷新失败，可稍后刷新");
+  } catch (error) { warnings.push(`作品已删除，列表刷新失败：${error.message}`); }
+  return warnings;
+}
 function historyDeleteSuccessMessage(mode, result = {}) {
   if (result.code === "already_missing") return "作品记录已不存在，列表已更新";
   if (result.file_deleted) return "记录及原图已删除";
@@ -176,6 +217,7 @@ function historyDeleteFailureMessage(error) {
   return `${message}。`;
 }
 async function confirmHistoryDelete(mode) {
+  if (historyDetailState.batch) return confirmHistoryBatchDelete(mode);
   const state = historyDetailState, record = state.record, owner = state.owner, session = state.session;
   if (!["record", "file"].includes(mode) || !record || state.busy || !historyDetailWritable()) return;
   if (detailContext !== owner || String(selectedRecord?.id) !== String(record.id)) {
@@ -221,6 +263,69 @@ async function confirmHistoryDelete(mode) {
     if (current()) historyDetailFocus(button);
   }
 }
+function historyBatchDeleteMessage(batch) {
+  const results = [...batch.results.values()];
+  const count = key => results.filter(result => result[key]).length;
+  const missing = results.filter(result => result.code === "already_missing").length;
+  const messages = [`已删除 ${count("record_deleted")} 张作品记录`];
+  if (missing) messages.push(`${missing} 张记录已不存在`);
+  if (count("file_deleted")) messages.push(`已删除 ${count("file_deleted")} 张原图`);
+  if (count("file_missing")) messages.push(`${count("file_missing")} 张原图原已不存在`);
+  if (batch.records.length) messages.push(`${batch.records.length} 张未完成，已保留选择供重试`);
+  return messages.join("，");
+}
+async function confirmHistoryBatchDelete(mode) {
+  const state = historyDetailState, batch = state.batch, selection = artworkFavoritesState, session = state.session;
+  if (!["record", "file"].includes(mode) || !batch?.records.length || state.busy || selection.busy || !historyDetailWritable()) return;
+  const current = () => state.session === session && state.batch === batch;
+  const records = [...batch.records], results = historyDetailElement("historyDeleteResults");
+  const button = historyDetailElement(mode === "file" ? "historyDeleteFile" : "historyDeleteRecord");
+  state.busy = selection.busy = true; button.setAttribute("aria-busy", "true");
+  results.textContent = `正在删除 ${records.length} 张作品…`; results.classList.remove("is-error");
+  renderHistoryDelete(); artworkRenderToolbar(); historyDetailFocus(results);
+  let finishSelection = false;
+  try {
+    const response = await request("/api/history/delete", { method: "POST", body: JSON.stringify({ image_ids: records.map(record => Number(record.id)), mode }) });
+    const returned = new Map((response.results || []).map(result => [String(result.id), result]));
+    const successful = [], failures = [], warnings = [], explanations = [];
+    for (const record of records) {
+      const id = String(record.id), result = { ...(returned.get(id) || { id: record.id, error: "未收到此作品的删除结果" }) };
+      if (result.file_deleted) batch.fileOutcomes.set(id, "deleted");
+      else if (result.file_missing && batch.fileOutcomes.get(id) !== "deleted") batch.fileOutcomes.set(id, "missing");
+      if (batch.fileOutcomes.get(id) === "deleted") { result.file_deleted = true; result.file_missing = false; }
+      else if (batch.fileOutcomes.get(id) === "missing") result.file_missing = true;
+      batch.results.set(id, result);
+      if (result.warning) warnings.push(result.warning);
+      if (result.record_deleted || result.code === "already_missing") {
+        successful.push(record); selection.selected.delete(id);
+      } else {
+        failures.push(record);
+        explanations.push(`${record.filename || `作品 #${record.id}`}：${historyDeleteFailureMessage({ payload: { results: [result] } })}`);
+      }
+    }
+    batch.records = failures;
+    try { warnings.push(...await applyHistoryBatchDeleted(successful)); }
+    catch (error) { warnings.push(`删除结果已确认，但界面刷新失败：${error.message}`); }
+    const message = [historyBatchDeleteMessage(batch), ...new Set(warnings)].join("。 ");
+    if (!failures.length) {
+      finishSelection = current();
+      if (current()) closeHistoryDelete({ immediate: true, restoreFocus: false, force: true });
+      toast(message);
+    } else if (current()) {
+      results.textContent = [message, ...explanations].join("\n"); results.classList.add("is-error");
+    } else toast([message, ...explanations].join("\n"));
+  } catch (error) {
+    const message = `未能确认删除结果：${error.message}。已保留待处理选择，可重试。`;
+    if (current()) { results.textContent = message; results.classList.add("is-error"); }
+    else toast(message);
+  } finally {
+    state.busy = selection.busy = false; button.removeAttribute("aria-busy");
+    renderHistoryDelete();
+    if (finishSelection) artworkSetSelecting(false); else artworkRenderToolbar();
+    if (current()) historyDetailFocus(button);
+    void artworkSyncExternal();
+  }
+}
 function initializeHistoryDetail() {
   if (historyDetailState.ready) return;
   historyDetailState.ready = true;
@@ -253,9 +358,9 @@ function initializeHistoryDetail() {
     outsidePointer = false;
   });
   dialog.addEventListener("close", () => {
-    if (dialog.open || !historyDetailState.record) return;
+    if (dialog.open || (!historyDetailState.record && !historyDetailState.batch)) return;
     ++historyDetailState.session;
-    historyDetailState.record = historyDetailState.owner = historyDetailState.fileOutcome = null;
+    historyDetailState.record = historyDetailState.owner = historyDetailState.fileOutcome = historyDetailState.batch = null;
     renderHistoryDelete();
   });
   const group = historyDetailElement("historyWorkbenchFilter"), sources = [...group.querySelectorAll("[data-history-source]")];

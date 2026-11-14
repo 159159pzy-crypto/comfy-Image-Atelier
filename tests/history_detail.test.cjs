@@ -367,3 +367,184 @@ test('request errors retain structured deletion outcomes for the confirmation UI
   install(ctx, app, 'request');
   await assert.rejects(ctx.request('/api/history/1?mode=file', { method: 'DELETE' }), error => error.status === 409 && error.payload === payload);
 });
+
+function batchSetup(records = [record(1), record(2)], extra = {}) {
+  const h = setup(extra);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../static/artwork-favorites.js'), 'utf8'), h.ctx);
+  h.artwork = vm.runInContext('artworkFavoritesState', h.ctx);
+  h.get('detailDialog').open = false;
+  h.ctx.artworkSetSelecting(true);
+  for (const item of records) h.ctx.artworkActivateCard(item);
+  h.removed = [];
+  h.ctx.applyHistoryBatchDeleted = async items => {
+    h.removed.push(...items.map(item => item.id));
+    for (const item of items) h.artwork.selected.delete(String(item.id));
+    return [];
+  };
+  return h;
+}
+
+test('batch confirmation snapshots cross-page and cross-source choices without submitting on open or cancel', () => {
+  const first = record(1), second = { ...record(2), workbench: 'single' };
+  const h = batchSetup([first, second], { historyItems: [second] });
+  h.ctx.openHistoryBatchDelete();
+  assert.deepEqual(plain(h.state.batch.records.map(item => item.id)), [1, 2]);
+  assert.match(h.get('historyDeleteSummary').textContent, /2.*1/);
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.get('historyDeleteDialog').open, true);
+  assert.equal(h.document.activeElement, h.get('cancelHistoryDelete'));
+  h.ctx.historyItems = [record(3)];
+  assert.deepEqual(plain(h.state.batch.records.map(item => item.id)), [1, 2]);
+  h.ctx.closeHistoryDelete();
+  assert.equal(h.get('historyDeleteDialog').open, false);
+  assert.deepEqual([...h.artwork.selected.keys()], ['1', '2']);
+  assert.equal(h.artwork.selecting, true);
+  assert.equal(h.document.activeElement, h.get('artworkBatchDelete'));
+});
+
+test('empty and protected batches cannot open or submit a deletion', async () => {
+  for (const h of [batchSetup([]), batchSetup([record(1)], { config: { storage_status: { history: { read_only: true } } } })]) {
+    h.ctx.openHistoryBatchDelete();
+    await h.ctx.confirmHistoryDelete('record');
+    assert.equal(h.get('historyDeleteDialog').open, false);
+    assert.equal(h.calls.length, 0);
+  }
+  const h = batchSetup(); h.ctx.openHistoryBatchDelete();
+  h.ctx.config.storage_status = { history: { read_only: true } };
+  await h.ctx.confirmHistoryDelete('file');
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.artwork.selected.size, 2);
+});
+
+test('batch actions submit one explicit mode and block duplicate requests and dismissal while pending', async () => {
+  for (const mode of ['record', 'file']) {
+    const h = batchSetup(), pending = deferred();
+    h.ctx.request = (url, options) => { h.calls.push({ url, options }); return pending.promise; };
+    h.ctx.openHistoryBatchDelete();
+    await h.ctx.confirmHistoryDelete(); await h.ctx.confirmHistoryDelete('invalid');
+    assert.equal(h.calls.length, 0);
+    const operation = h.ctx.confirmHistoryDelete(mode);
+    await h.ctx.confirmHistoryDelete(mode); h.ctx.closeHistoryDelete();
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.calls[0].url, '/api/history/delete');
+    assert.equal(h.calls[0].options.method, 'POST');
+    assert.deepEqual(JSON.parse(h.calls[0].options.body), { image_ids: [1, 2], mode });
+    assert.equal(h.state.busy, true); assert.equal(h.artwork.busy, true);
+    assert.equal(h.get('historyDeleteDialog').open, true);
+    for (const id of ['historyDeleteRecord', 'historyDeleteFile', 'closeHistoryDelete', 'cancelHistoryDelete']) assert.equal(h.get(id).disabled, true, id);
+    pending.resolve({ results: [{ id: 1, record_deleted: true }, { id: 2, record_deleted: true }], deleted_count: 2, success_count: 2, failed_count: 0 });
+    await operation;
+    assert.deepEqual(h.removed, [1, 2]);
+    assert.equal(h.get('historyDeleteDialog').open, false);
+    assert.equal(h.state.busy, false); assert.equal(h.artwork.busy, false);
+    assert.equal(h.artwork.selecting, false); assert.equal(h.artwork.selected.size, 0);
+  }
+});
+
+test('mixed batch results remove successes and missing records while retrying only failed IDs', async () => {
+  const h = batchSetup([record(1), record(2), record(3)]);
+  let attempts = 0;
+  h.ctx.request = async (url, options) => {
+    h.calls.push({ url, options }); attempts++;
+    return attempts === 1
+      ? { results: [{ id: 1, record_deleted: true }, { id: 2, code: 'already_missing' }, { id: 3, code: 'image_delete_failed', error: '原图被占用' }], deleted_count: 1, success_count: 2, failed_count: 1 }
+      : { results: [{ id: 3, record_deleted: true }], deleted_count: 1, success_count: 1, failed_count: 0 };
+  };
+  h.ctx.openHistoryBatchDelete(); await h.ctx.confirmHistoryDelete('file');
+  assert.deepEqual(h.removed, [1, 2]);
+  assert.deepEqual([...h.artwork.selected.keys()], ['3']);
+  assert.deepEqual(plain(h.state.batch.records.map(item => item.id)), [3]);
+  assert.equal(h.get('historyDeleteDialog').open, true);
+  assert.match(h.get('historyDeleteResults').textContent, /3\.png/);
+  assert.match(h.get('historyDeleteResults').textContent, /原图被占用/);
+  await h.ctx.confirmHistoryDelete('record');
+  assert.deepEqual(JSON.parse(h.calls[1].options.body), { image_ids: [3], mode: 'record' });
+  assert.equal(h.artwork.selected.size, 0); assert.equal(h.get('historyDeleteDialog').open, false);
+});
+
+test('unreported batch results remain retryable instead of being counted as successes', async () => {
+  const h = batchSetup(); h.ctx.openHistoryBatchDelete();
+  h.ctx.request = async () => ({ results: [{ id: 1, record_deleted: true }], deleted_count: 1, success_count: 1, failed_count: 0 });
+  await h.ctx.confirmHistoryDelete('record');
+  assert.deepEqual(h.removed, [1]);
+  assert.deepEqual([...h.artwork.selected.keys()], ['2']);
+  assert.deepEqual(plain(h.state.batch.records.map(item => item.id)), [2]);
+  assert.equal(h.get('historyDeleteDialog').open, true);
+  assert.match(h.get('historyDeleteResults').textContent, /2\.png/);
+});
+
+test('network failures keep the exact selection and allow an already-missing retry to reconcile it', async () => {
+  const h = batchSetup(); h.ctx.openHistoryBatchDelete();
+  h.ctx.request = async () => { throw new Error('网络中断'); };
+  await h.ctx.confirmHistoryDelete('record');
+  assert.deepEqual([...h.artwork.selected.keys()], ['1', '2']);
+  assert.equal(h.artwork.selecting, true); assert.equal(h.get('historyDeleteDialog').open, true);
+  assert.equal(h.state.busy, false); assert.equal(h.artwork.busy, false);
+  assert.match(h.get('historyDeleteResults').textContent, /网络中断/);
+  h.ctx.request = async () => ({ results: [{ id: 1, code: 'already_missing' }, { id: 2, code: 'already_missing' }], deleted_count: 0, success_count: 2, failed_count: 0 });
+  await h.ctx.confirmHistoryDelete('record');
+  assert.deepEqual(h.removed, [1, 2]);
+  assert.equal(h.artwork.selecting, false); assert.equal(h.get('historyDeleteDialog').open, false);
+});
+
+test('a record-only batch retry remembers originals removed before a database failure', async () => {
+  const h = batchSetup([record(7)]); h.ctx.openHistoryBatchDelete();
+  h.ctx.request = async () => ({ results: [{ id: 7, record_deleted: false, file_deleted: true, code: 'database_error', error: '提交失败' }], deleted_count: 0, success_count: 0, failed_count: 1, file_deleted_count: 1 });
+  await h.ctx.confirmHistoryDelete('file');
+  assert.match(h.get('historyDeleteResults').textContent, /原(?:图|文件)已删除/);
+  assert.deepEqual([...h.artwork.selected.keys()], ['7']);
+  h.ctx.request = async () => ({ results: [{ id: 7, record_deleted: true, file_deleted: false }], deleted_count: 1, success_count: 1, failed_count: 0, file_deleted_count: 0 });
+  await h.ctx.confirmHistoryDelete('record');
+  assert.match(h.notices.at(-1), /原图.*删除|删除.*原图/);
+  assert.doesNotMatch(h.notices.at(-1), /原图保留/);
+});
+
+test('a successful batch still exits selection when its UI refresh throws', async () => {
+  const h = batchSetup(); h.ctx.openHistoryBatchDelete();
+  h.ctx.request = async () => ({ results: [{ id: 1, record_deleted: true }, { id: 2, record_deleted: true }], deleted_count: 2, success_count: 2, failed_count: 0 });
+  h.ctx.applyHistoryBatchDeleted = async () => { throw new Error('刷新离线'); };
+  await h.ctx.confirmHistoryDelete('record');
+  assert.equal(h.get('historyDeleteDialog').open, false); assert.equal(h.artwork.selecting, false);
+  assert.equal(h.artwork.selected.size, 0); assert.equal(h.artwork.busy, false);
+  assert.match(h.notices.at(-1), /刷新离线/);
+  assert.doesNotMatch(h.notices.at(-1), /删除失败/);
+});
+
+test('a stale batch response cleans up successes without closing a newer detail', async () => {
+  const h = batchSetup(), pending = deferred(); h.ctx.openHistoryBatchDelete();
+  h.ctx.request = () => pending.promise;
+  const operation = h.ctx.confirmHistoryDelete('record');
+  h.ctx.closeHistoryDelete({ force: true, restoreFocus: false, immediate: true });
+  const newer = record(99); h.ctx.selectedRecord = newer; h.ctx.detailContext = { origin: 'single' };
+  h.get('detailDialog').open = true;
+  pending.resolve({ results: [{ id: 1, record_deleted: true }, { id: 2, record_deleted: true }], deleted_count: 2, success_count: 2, failed_count: 0 });
+  await operation;
+  assert.deepEqual(h.removed, [1, 2]); assert.equal(h.ctx.selectedRecord, newer);
+  assert.equal(h.get('detailDialog').open, true); assert.equal(h.get('historyDeleteDialog').open, false);
+  assert.equal(h.state.busy, false); assert.equal(h.artwork.busy, false);
+});
+
+test('batch view removal invalidates once and moves an emptied last page to the preceding page', () => {
+  const first = record(25), second = record(26), h = setup({ historyItems: [first, second], historyPage: 2, historyPages: 2 });
+  const removed = [];
+  h.ctx.ui.gallery.children = [first, second].map(item => ({ dataset: { recordId: String(item.id) }, remove: () => removed.push(item.id) }));
+  h.ctx.historyCache.set(2, { page: 2, total: 26, items: [first, second] });
+  const view = h.ctx.historyViewState(), previousRequest = view.requestId;
+  h.ctx.removeHistoryViewRecords(view, [first, second]);
+  assert.deepEqual(removed, [25, 26]); assert.equal(view.items.length, 0);
+  assert.equal(view.total, 24); assert.equal(view.page, 1); assert.equal(view.pages, 1);
+  assert.equal(view.cache.size, 0); assert.equal(view.requestId, previousRequest + 1);
+  assert.equal(h.ctx.ui.historyCount.textContent, '24 张图片');
+});
+
+test('committed batch updates folder state and reloads its archive only once even when refresh fails', async () => {
+  const items = [record(1), record(2), record(3)], folderCalls = [], loads = [];
+  const h = setup({ historyItems: items, artworkRecordsRemoved: async ids => { folderCalls.push([...ids]); return ['收藏计数离线']; },
+    loadHistory: async page => { loads.push(page); throw new Error('列表离线'); } });
+  h.ctx.historyViewState().total = 3;
+  const warnings = await h.ctx.applyHistoryBatchDeleted(items);
+  assert.deepEqual(folderCalls, [[1, 2, 3]]); assert.deepEqual(loads, [1]);
+  assert.equal(h.ctx.historyItems.length, 0); assert.equal(h.ctx.historyViewState().total, 0);
+  assert.equal(h.ctx.historyRequest, 1); assert.equal(h.ctx.historyDirty, true);
+  assert.match(warnings.join('；'), /收藏计数离线/); assert.match(warnings.join('；'), /列表离线/);
+});

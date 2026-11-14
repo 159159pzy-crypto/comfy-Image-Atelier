@@ -1925,15 +1925,18 @@ def create_app(
         state = await manager.start(settings, seeds=seeds, regeneration=regeneration, resource_resolution=resolution)
         return web.json_response(state, status=201)
 
-    async def delete_artwork(request: web.Request, image_id: int, mode: Any) -> dict[str, Any]:
+    async def delete_artwork(request: web.Request, image_ids: int | list[int], mode: Any, *, batch: bool = False) -> dict[str, Any]:
         if not isinstance(mode, str) or mode not in {"record", "file"}:
             raise WorkflowError("删除方式必须为 record 或 file")
+        if batch:
+            history.ensure_writable()
         stats = None
         if mode == "file":
             _require_local_file_request(request)
             stats = await client.status()
-        deletion = asyncio.create_task(artwork_deletion.delete(
-            image_id, mode, stats=stats, comfy_url=getattr(client, "base_url", ""),
+        operation = artwork_deletion.delete_many if batch else artwork_deletion.delete
+        deletion = asyncio.create_task(operation(
+            image_ids, mode, stats=stats, comfy_url=getattr(client, "base_url", ""),
         ))
         try:
             return await asyncio.shield(deletion)
@@ -1950,6 +1953,14 @@ def create_app(
             if not deletion.cancelled():
                 deletion.exception()
             raise
+
+    async def delete_history_batch(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        if set(body) != {"image_ids", "mode"} or request.query:
+            raise WorkflowError("批量删除只接受 image_ids 和 mode，不接受文件路径")
+        image_ids = history.artwork_image_ids(body["image_ids"])
+        payload = await delete_artwork(request, image_ids, body["mode"], batch=True)
+        return web.json_response(payload)
 
     async def delete_history(request: web.Request) -> web.Response:
         image_id = _image_id(request.match_info["image_id"])
@@ -2142,6 +2153,7 @@ def create_app(
     app.router.add_post("/api/batches/{batch_id}/stop", stop_batch)
     app.router.add_delete("/api/batches/queue/{queue_id}", remove_queued_batch)
     app.router.add_get("/api/history", list_history)
+    app.router.add_post("/api/history/delete", delete_history_batch)
     app.router.add_get(
         r"/api/history/{image_id:\d+}/regeneration-options",
         regeneration_options,
