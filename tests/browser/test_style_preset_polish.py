@@ -279,10 +279,23 @@ class StylePresetPolishTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await zoom_context.close()
         cdp = await self.context.new_cdp_session(self.page)
-        for feature in ("prefers-reduced-transparency", "prefers-contrast"):
-            await cdp.send("Emulation.setEmulatedMedia", {"features": [{"name": feature, "value": "more" if feature == "prefers-contrast" else "reduce"}]})
-            self.assertEqual(await self.page.locator("#stylePresetManager").evaluate("el=>getComputedStyle(el).backdropFilter"), "none")
-        await cdp.detach()
+        try:
+            for feature, value in (("prefers-reduced-transparency", "reduce"), ("prefers-contrast", "more")):
+                with self.subTest(feature=feature):
+                    await cdp.send("Emulation.setEmulatedMedia", {"features": [{"name": feature, "value": value}]})
+                    # The CDP reply can precede the renderer's media/style update.
+                    # Wait for the real preference and rendered material, not a delay.
+                    await self.page.wait_for_function("query => matchMedia(query).matches", arg=f"({feature}: {value})")
+                    await self.expect(self.page.locator("#stylePresetManager")).to_have_css("backdrop-filter", "none")
+                    await self.page.wait_for_function("""() => getComputedStyle(
+                        document.querySelector('#stylePresetManager'), '::backdrop').backdropFilter === 'none'""")
+                    materials = await self.page.locator("#stylePresetManager").evaluate("""el => ({
+                        dialog: getComputedStyle(el).backdropFilter,
+                        backdrop: getComputedStyle(el, '::backdrop').backdropFilter
+                    })""")
+                    self.assertEqual(materials, {"dialog": "none", "backdrop": "none"})
+        finally:
+            await cdp.detach()
         (ARTIFACTS / "layout-matrix.json").write_text(json.dumps({"typography": typography, "layouts": matrix}, ensure_ascii=False, indent=2), encoding="utf-8")
 
     async def test_recorded_motion_and_large_library_performance(self):

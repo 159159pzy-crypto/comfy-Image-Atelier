@@ -61,14 +61,22 @@ class PresetScrollTests(unittest.IsolatedAsyncioTestCase):
         _ARTIFACTS.mkdir(parents=True, exist_ok=True)
         api = importlib.import_module("playwright.async_api")
         launch = api.BrowserType.launch
+        new_context = api.Browser.new_context
 
         async def visible_scrollbars(browser_type, **kwargs):
             kwargs["ignore_default_args"] = ["--hide-scrollbars"]
-            if "overlay" in self._testMethodName:
-                kwargs["args"] = ["--enable-features=OverlayScrollbar"]
             return await launch(browser_type, **kwargs)
 
-        with mock.patch.object(api.BrowserType, "launch", visible_scrollbars):
+        async def scrollbar_context(browser, **kwargs):
+            if "overlay" in self._testMethodName:
+                # Mobile emulation exercises real zero-layout-width scrollbars
+                # without relying on the platform-specific desktop feature flag.
+                # Keep the same wide viewport to isolate scrollbar geometry.
+                kwargs.update(is_mobile=True, has_touch=True)
+            return await new_context(browser, **kwargs)
+
+        with mock.patch.object(api.BrowserType, "launch", visible_scrollbars), \
+                mock.patch.object(api.Browser, "new_context", scrollbar_context):
             await _fixture.WorkbenchRaceTests.asyncSetUp(self)
         self.cdp = await self.context.new_cdp_session(self.page)
         self.addAsyncCleanup(self.cdp.detach)
