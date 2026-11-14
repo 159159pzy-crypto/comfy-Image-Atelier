@@ -119,7 +119,7 @@ def make_thumbnail(body: bytes) -> bytes:
 
 
 class ThumbnailStore:
-    """Capacity LRU with independent cached reads and two cold generation jobs.
+    """Capacity LRU with eight cached reads and four cold generation jobs.
 
     File access times persist LRU order without a second on-disk database.
     Caller cancellation never cancels shared work; close drains all workers.
@@ -133,7 +133,7 @@ class ThumbnailStore:
         self.client = client
         self.history = history
         self.max_bytes = max_bytes
-        self._slots = asyncio.Semaphore(2)
+        self._slots = asyncio.Semaphore(4)
         self._read_slots = asyncio.Semaphore(8)
         self._pending: dict[str, _Pending] = {}
         self._disk_lock = threading.RLock()

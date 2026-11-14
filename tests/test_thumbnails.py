@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -177,9 +178,9 @@ class ThumbnailStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((self.directory / restarted._key(record(2))).exists())
         self.assertTrue((self.directory / restarted._key(record(3))).exists())
 
-    async def test_cached_request_bypasses_two_blocked_cold_generations(self):
+    async def test_cached_request_bypasses_four_blocked_cold_generations(self):
         warm = await self.store.get(record(99))
-        release, both_started = threading.Event(), threading.Event()
+        release, all_started = threading.Event(), threading.Event()
         lock = threading.Lock()
         started = 0
 
@@ -187,22 +188,64 @@ class ThumbnailStoreTests(unittest.IsolatedAsyncioTestCase):
             nonlocal started
             with lock:
                 started += 1
-                if started == 2:
-                    both_started.set()
+                if started == 4:
+                    all_started.set()
             if not release.wait(5):
                 raise TimeoutError("Test conversion was not released")
             return make_thumbnail(body)
 
         with mock.patch("anima_webui.thumbnails.make_thumbnail", side_effect=blocked_convert):
-            cold = [asyncio.create_task(self.store.get(record(index))) for index in (1, 2)]
+            cold = [asyncio.create_task(self.store.get(record(index))) for index in range(1, 5)]
             try:
-                self.assertTrue(await asyncio.to_thread(both_started.wait, 3))
+                self.assertTrue(await asyncio.to_thread(all_started.wait, 3))
                 result = await asyncio.wait_for(self.store.get(record(99)), 1)
                 self.assertEqual(result.body, warm.body)
                 self.assertFalse(any(task.done() for task in cold))
             finally:
                 release.set()
                 await asyncio.gather(*cold, return_exceptions=True)
+
+    async def test_cached_reads_remain_bounded_to_eight(self):
+        # Keep the test independent of the machine's default executor size.
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=12))
+        for index in range(1, 11):
+            await self.store.get(record(index))
+        release, eight_started = threading.Event(), threading.Event()
+        counter_lock = threading.Lock()
+        original_read = self.store._read
+        active = peak = started = 0
+
+        def blocked_read(key):
+            nonlocal active, peak, started
+            with counter_lock:
+                active += 1
+                started += 1
+                peak = max(peak, active)
+                if started == 8:
+                    eight_started.set()
+            try:
+                if not release.wait(5):
+                    raise TimeoutError("Test cache read was not released")
+                return original_read(key)
+            finally:
+                with counter_lock:
+                    active -= 1
+
+        with mock.patch.object(self.store, "_read", side_effect=blocked_read):
+            requests = [asyncio.create_task(self.store.get(record(index))) for index in range(1, 11)]
+            try:
+                self.assertTrue(await asyncio.to_thread(eight_started.wait, 3))
+                self.assertEqual(started, 8)
+                self.assertFalse(any(task.done() for task in requests))
+                release.set()
+                results = await asyncio.gather(*requests)
+                self.assertTrue(all(result.body for result in results))
+                self.assertEqual(started, 10)
+                self.assertEqual(peak, 8)
+                self.assertEqual(self.client.calls, 10, "warm reads must not download originals again")
+            finally:
+                release.set()
+                await asyncio.gather(*requests, return_exceptions=True)
 
     async def test_slow_first_validation_does_not_hold_global_disk_lock(self):
         await self.store.get(record(1))
@@ -360,9 +403,9 @@ class ThumbnailStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.store._failed_discards)
         self.assertTrue((self.directory / self.store._key(record(2))).exists())
 
-    async def test_fetch_decode_limit_remains_two_when_a_caller_disconnects(self):
+    async def test_fetch_decode_limit_remains_four_when_a_caller_disconnects(self):
         release = threading.Event()
-        two_started = threading.Event()
+        four_started = threading.Event()
         counter_lock = threading.Lock()
         started = 0
 
@@ -370,8 +413,8 @@ class ThumbnailStoreTests(unittest.IsolatedAsyncioTestCase):
             nonlocal started
             with counter_lock:
                 started += 1
-                if started == 2:
-                    two_started.set()
+                if started == 4:
+                    four_started.set()
             if not release.wait(5):
                 raise TimeoutError("Test conversion was not released")
             return make_thumbnail(body)
@@ -379,12 +422,13 @@ class ThumbnailStoreTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch("anima_webui.thumbnails.make_thumbnail", side_effect=blocked_convert):
             requests = [asyncio.create_task(self.store.get(record(index))) for index in range(1, 6)]
             try:
-                self.assertTrue(await asyncio.to_thread(two_started.wait, 3))
-                self.assertEqual(self.client.calls, 2, "downloads must wait for a decoding slot too")
+                self.assertTrue(await asyncio.to_thread(four_started.wait, 3))
+                self.assertEqual(self.client.calls, 4, "downloads must wait for a decoding slot too")
                 requests[0].cancel()
                 with self.assertRaises(asyncio.CancelledError):
                     await requests[0]
-                self.assertEqual(self.client.calls, 2)
+                await asyncio.sleep(0)
+                self.assertEqual(self.client.calls, 4, "a disconnected caller must not free a running slot")
                 release.set()
                 await asyncio.gather(*requests[1:])
                 self.assertEqual(self.client.calls, 5)

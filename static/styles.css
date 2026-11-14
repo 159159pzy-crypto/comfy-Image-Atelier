@@ -722,7 +722,10 @@ input:disabled, select:disabled { opacity: .5; cursor: not-allowed; }
   transform: translate(-50%, -50%);
   font-size: 10px;
   pointer-events: none;
+  max-width: calc(100% - 24px);
+  text-align: center;
 }
+.image-failure.is-retrying { color: var(--text-secondary); border-color: var(--separator-strong); }
 .image-card .image-card-open { width: 100%; padding: 0; color: inherit; text-align: left; background: none; border: 0; }
 .image-card img { display: block; width: 100%; aspect-ratio: 3 / 4; object-fit: cover; background: var(--surface-muted); border-radius: calc(var(--r-md) - 6px); opacity: .28; transition: transform var(--motion-slow) var(--spring), opacity var(--motion-fast) ease, filter var(--motion-fast) ease; }
 .image-card img.image-loaded { opacity: 1; }
