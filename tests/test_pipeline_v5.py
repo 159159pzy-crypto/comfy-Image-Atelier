@@ -144,7 +144,7 @@ def test_loading_versionless_preset_backs_up_source_and_disables_optional_groups
     path.write_text(json.dumps({"version": 2, "items": [{"id": "old", "name": "Legacy", "settings": source}]}), encoding="utf-8")
     before = path.read_bytes()
     saved = StylePresetStore(path).items[0]
-    assert path.with_name(path.name + ".v3.bak").read_bytes() == before
+    assert path.with_name(path.name + ".v4.bak").read_bytes() == before
     assert saved["source"]["pipeline_version"] == 2
     assert not any(saved["include"].values())
     assert "upscalers" not in saved["settings"]

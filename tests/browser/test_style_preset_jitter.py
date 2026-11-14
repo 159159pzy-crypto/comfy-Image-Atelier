@@ -159,7 +159,7 @@ class StylePresetJitterTests(unittest.IsolatedAsyncioTestCase):
                                    "scrollTop": samples[0]["scrollTop"], "maximumGridYDrift": max(abs(s["grid"]["y"]-samples[0]["grid"]["y"]) for s in samples)})
         (ARTIFACTS / "frame-geometry.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    async def test_recorded_favorite_commits_one_reorder_and_keeps_filtered_item_until_success(self):
+    async def test_recorded_favorite_keeps_position_and_filtered_item_until_success(self):
         await self.seed(14)
         await self.page.emulate_media(reduced_motion="no-preference")
         await self.page.evaluate("document.documentElement.dataset.theme='dark'")
@@ -175,6 +175,9 @@ class StylePresetJitterTests(unittest.IsolatedAsyncioTestCase):
         target = self.page.locator('.spm-star[aria-pressed="true"]').first
         item_id = await target.evaluate("el=>el.closest('.spm-card').dataset.presetId")
         target = self.page.locator(f'[data-preset-id="{item_id}"] .spm-star')
+        await target.scroll_into_view_if_needed()
+        await target.focus()
+        await self.settle()
         put = self.hold("PUT", f"/api/style-presets/{item_id}")
         reads = [self.hold("GET", "/api/style-presets", profile="anima") for _ in range(2)]
         await self.begin_frames()
@@ -194,15 +197,12 @@ class StylePresetJitterTests(unittest.IsolatedAsyncioTestCase):
             await self.release(gate)
         await self.idle()
         samples = await self.end_frames()
-        self.assert_stable(samples, cards=False)
+        self.assert_stable(samples)
         orders = []
         for sample in samples:
             if not orders or orders[-1] != sample["order"]:
                 orders.append(sample["order"])
-        self.assertEqual(len(orders), 2, "one commit must produce exactly one DOM reorder")
-        expected = [item["id"] for item in sorted(self.store.list("anima")["items"], key=lambda item: not item["favorite"])]
-        self.assertEqual(orders[-1], expected)
-        self.assertEqual(orders[-1].index(item_id), 2, "unfavorite lands at the head of the nonfavorite section")
+        self.assertEqual(len(orders), 1, "favorite commits must not reorder the management page")
         await self.expect(target).to_be_focused()
         await self.page.get_by_role("button", name="列表", exact=True).click()
         await self.page.get_by_role("button", name="紧凑卡片", exact=True).click()
@@ -240,6 +240,9 @@ class StylePresetJitterTests(unittest.IsolatedAsyncioTestCase):
             await route.fulfill(status=503, json={"error": "测试：收藏写入失败"})
 
         await self.page.route(f"**/api/style-presets/{item_id}", fail_write)
+        await target.scroll_into_view_if_needed()
+        await target.focus()
+        await self.settle()
         await self.begin_frames()
         await target.click()
         await asyncio.wait_for(entered.wait(), 10)

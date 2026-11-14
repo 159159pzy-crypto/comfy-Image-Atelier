@@ -54,7 +54,7 @@ function harness(withMotion = false) {
   const ui = { cards: new Map(), viewButtons: new Map([['cards', button('')], ['list', button('')]]) };
   for (const key of ['grid', 'scroll', 'subtitle', 'results', 'search', 'selectToggle', 'notice', 'readNotice', 'readStatus', 'retryRead', 'batchbar']) ui[key] = h('div');
   ui.batchbar.hidden = true; ui.scroll.append(ui.grid); document.body.append(ui.scroll, ui.batchbar, ui.search, ui.readNotice); ui.readNotice.append(ui.readStatus, ui.retryRead);
-  const state = { items: [], groups: [], query: '', tags: [], collection: 'all', sort: 'favorite', profile: 'anima', view: 'cards', selected: new Set(), selecting: false,
+  const state = { items: [], groups: [], query: '', tags: [], collection: 'all', sort: 'updated', profile: 'anima', view: 'cards', selected: new Set(), selecting: false,
     applying: new Map(), applyErrors: new Map(), pendingFavorites: new Map(), batchWrites: new Map(), busy: new Set(), loading: false, readError: '', managerVisible: true, epoch: 1, read: 0 };
   const edited = [];
   const ctx = vm.createContext({ document, state, ui, h, button, icon: name => h('span', '', name), filterItems, normalizedInclude,
@@ -87,7 +87,7 @@ test('refresh, search, metadata changes and view switching preserve card and ima
 
 test('reordering retains focused controls; deleting the focused record moves to its neighbor', () => {
   const h = harness(); h.state.items = [item('a'), item('b'), item('c')]; h.ctx.renderGrid();
-  const entry = h.ui.cards.get('a'); entry.primary.focus(); h.state.items[0].favorite = true; h.ctx.renderGrid();
+  const entry = h.ui.cards.get('a'); entry.primary.focus(); h.state.items[0].updated_at = 'z'; h.ctx.renderGrid();
   assert.equal(h.ui.grid.firstElementChild, entry.card); assert.equal(h.document.activeElement, entry.primary);
   h.state.items = h.state.items.filter(value => value.id !== 'a'); h.ctx.renderGrid();
   assert.equal(h.document.activeElement, h.ui.cards.get('c').primary);
@@ -137,13 +137,13 @@ test('late apply completion settles current busy state without reporting errors 
 
 test('rapid and repeated reorder motion starts at the presented position and preserves velocity', () => {
   const h = harness(true); h.state.items = [item('a'), item('b')]; h.ctx.renderGrid();
-  const entry = h.ui.cards.get('a'); h.state.items[0].favorite = true; h.ctx.renderGrid({ animate: true }); h.step(); h.step();
+  const entry = h.ui.cards.get('a'); h.state.items[0].updated_at = 'z'; h.ctx.renderGrid({ animate: true }); h.step(); h.step();
   const before = entry.card.getBoundingClientRect(), motion = h.ctx.StudioMotion.snapshot(entry.card, 'spm-reorder');
   assert.equal(motion.active, true);
-  h.state.items[0].favorite = false; h.ctx.renderGrid({ animate: true });
+  h.state.items[0].updated_at = 'a'; h.ctx.renderGrid({ animate: true });
   const after = entry.card.getBoundingClientRect(), reversed = h.ctx.StudioMotion.snapshot(entry.card, 'spm-reorder');
   assert.ok(Math.abs(before.left - after.left) < .001); assert.equal(reversed.velocity.x, motion.velocity.x); h.drain();
-  h.state.items[0].favorite = true; h.ctx.renderGrid({ animate: true });
+  h.state.items[0].updated_at = 'z'; h.ctx.renderGrid({ animate: true });
   assert.equal(h.ctx.StudioMotion.snapshot(entry.card, 'spm-reorder').active, true, 'settled owners must animate a second reorder'); h.drain();
   assert.equal(entry.card.style.transform, undefined);
 });
@@ -191,8 +191,9 @@ function favoriteHarness() {
   return { ...h, requests, renders, order };
 }
 
-test('favorite gives immediate star feedback but moves once using the acknowledged timestamp', async () => {
+test('favorite gives immediate star feedback and keeps the committed card in place', async () => {
   const h = favoriteHarness(), original = h.state.items[0], entry = h.ui.cards.get('a'), before = h.order();
+  entry.star.focus(); h.ui.scroll.scrollTop = 120;
   const pending = h.ctx.toggleFavorite(original, { detail: 1 });
   await h.ctx.toggleFavorite(original, { detail: 1 });
   assert.equal(h.requests.length, 1, 'a pending write is single flight');
@@ -200,11 +201,12 @@ test('favorite gives immediate star feedback but moves once using the acknowledg
   assert.equal(entry.star.getAttribute('aria-pressed'), 'false'); assert.equal(entry.star.getAttribute('aria-busy'), 'true');
   assert.equal(entry.star.disabled, false, 'busy stars keep native focus'); assert.equal(entry.star.getAttribute('aria-disabled'), 'true');
   assert.deepEqual(h.order(), before); assert.equal(h.renders.some(options => options?.animate), false);
-  const saved = { ...original, favorite: false, updated_at: '9' };
+  const saved = { ...original, favorite: false, favorite_at: null };
   h.requests[0].resolve(saved); await pending;
   assert.equal(h.state.items[0], saved);
-  assert.deepEqual(h.order(), ['b', 'a', 'd', 'c'], 'the record goes straight to the first nonfavorite position');
-  assert.equal(h.renders.filter(options => options?.animate).length, 1);
+  assert.deepEqual(h.order(), before, 'unfavorite must not reorder the library');
+  assert.equal(h.ctx.StudioMotion.snapshot(entry.card, 'spm-reorder')?.active ?? false, false);
+  assert.equal(h.document.activeElement, entry.star); assert.equal(h.ui.scroll.scrollTop, 120);
   assert.equal(h.ui.cards.get('a'), entry); assert.equal(entry.star.disabled, false); assert.equal(entry.star.getAttribute('aria-busy'), 'false');
   h.drain();
 });
@@ -221,26 +223,26 @@ test('favorite-only results stay put while saving and on failure', async () => {
 test('a read cannot reorder a pending favorite before its write response', async () => {
   const h = favoriteHarness(), original = h.state.items[0], before = h.order();
   const pending = h.ctx.toggleFavorite(original, { detail: 1 }), read = h.ctx.refresh();
-  const saved = { ...original, favorite: false, updated_at: '9' };
-  h.requests[1].resolve({ items: [saved, ...h.state.items.slice(1).map(value => ({ ...value, name: value.name + ' refreshed' }))], groups: [] }); await read;
-  assert.equal(h.state.items[0], original); assert.deepEqual(h.order(), before);
-  assert.equal(h.state.items[1].name, 'b refreshed', 'unrelated records still refresh');
+  const saved = { ...original, favorite: false, favorite_at: null };
+  h.requests[1].resolve({ items: [...h.state.items.slice(1).map(value => ({ ...value, name: value.name + ' refreshed' })), saved], groups: [] }); await read;
+  assert.equal(h.state.items.find(value => value.id === 'a'), original); assert.deepEqual(h.order(), before);
+  assert.equal(h.state.items.find(value => value.id === 'b').name, 'b refreshed', 'unrelated records still refresh');
   assert.equal(h.ui.cards.get('a').star.getAttribute('aria-pressed'), 'false');
   h.requests[0].resolve(saved); await pending; h.drain();
-  assert.deepEqual(h.order(), ['b', 'a', 'd', 'c']);
+  assert.deepEqual(h.order(), before);
 });
 
 test('success and failure invalidate reads started during a favorite write', async () => {
   for (const fail of [false, true]) {
     const h = favoriteHarness(), original = h.state.items[0], before = h.order();
     const pending = h.ctx.toggleFavorite(original, { detail: 1 }), read = h.ctx.refresh();
-    const oldRead = h.requests[1], saved = { ...original, favorite: false, updated_at: '9' };
+    const oldRead = h.requests[1], saved = { ...original, favorite: false, favorite_at: null };
     if (fail) h.requests[0].reject(new Error('write failed')); else h.requests[0].resolve(saved);
     await pending;
     assert.equal(oldRead.options.signal.aborted, true);
     oldRead.resolve({ items: [fail ? saved : original, ...h.state.items.slice(1)], groups: [] }); await read;
     assert.equal(h.state.items[0].favorite, fail); assert.equal(h.state.loading, false);
-    assert.deepEqual(h.order(), fail ? before : ['b', 'a', 'd', 'c']); h.drain();
+    assert.deepEqual(h.order(), before); h.drain();
   }
 });
 
@@ -249,10 +251,10 @@ test('an old favorite response cannot replace or unlock a newer operation', asyn
   const first = h.ctx.toggleFavorite(original, { detail: 1 });
   h.state.epoch++; h.state.pendingFavorites.clear(); h.state.busy.clear();
   const second = h.ctx.toggleFavorite(original, { detail: 1 }), newer = h.state.pendingFavorites.get(original.id);
-  h.requests[0].resolve({ ...original, favorite: false, name: 'old session', updated_at: '8' }); await first;
+  h.requests[0].resolve({ ...original, favorite: false, name: 'old session', favorite_at: null }); await first;
   assert.equal(h.state.items[0], original); assert.equal(h.state.pendingFavorites.get(original.id), newer);
   assert.equal(h.ui.cards.get('a').star.getAttribute('aria-disabled'), 'true');
-  h.requests[1].resolve({ ...original, favorite: false, updated_at: '9' }); await second; h.drain();
+  h.requests[1].resolve({ ...original, favorite: false, favorite_at: null }); await second; h.drain();
   assert.equal(h.ui.cards.get('a').star.getAttribute('aria-disabled'), 'false'); assert.equal(h.state.pendingFavorites.size, 0);
 });
 

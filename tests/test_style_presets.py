@@ -48,7 +48,7 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
     async def test_atomic_save_leaves_valid_json_without_temp_files(self):
         await self.store.create({"name": "Atomic", "settings": snapshot(), "favorite": False})
         payload = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["version"], 3)
+        self.assertEqual(payload["version"], 4)
         self.assertEqual(payload["items"][0]["name"], "Atomic")
         for removed in ("hires", "detailers", "cfg_zero_star", "second_sampler"):
             self.assertNotIn(removed, payload["items"][0]["settings"])
@@ -98,7 +98,7 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.items[0]["settings"]["model_profile"], "anima")
         self.assertTrue(any("Broken Steps" in warning for warning in store.load_warnings))
         self.assertTrue(any("已迁移" in warning for warning in store.load_warnings))
-        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["version"], 3)
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["version"], 4)
 
     def test_partial_capture_has_core_defaults_without_unselected_groups_or_pipeline(self):
         settings = preset_settings({"width": 1024, "manual_artist": "anmi"})

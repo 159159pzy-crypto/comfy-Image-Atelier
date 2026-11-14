@@ -111,6 +111,48 @@ class StylePresetApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200, await response.text())
         self.assertTrue(all(not item["groups"] and item["favorite"] for item in self.app[STYLE_PRESETS_KEY].items))
 
+    async def test_favorite_times_and_order_match_put_batch_get_and_reload(self):
+        store = self.app[STYLE_PRESETS_KEY]
+        timestamps = [f"2026-11-{day:02d}T00:00:00+00:00" for day in range(1, 8)]
+        items = []
+        for index, name in enumerate(("Oldest", "Middle", "Newest")):
+            with patch.object(store, "_now", return_value=timestamps[index]):
+                items.append(await self.create_preset(name=name))
+        first, second, third = items
+        with patch.object(store, "_now", return_value=timestamps[3]):
+            response = await self.client.put(f"/api/style-presets/{first['id']}", json={
+                "model_profile": "anima", "favorite": True, "favorite_at": "forged", "updated_at": "forged",
+                "name": first["name"], "groups": first["groups"], "tags": first["tags"], "cover_id": first["cover_id"],
+            })
+        self.assertEqual(response.status, 200, await response.text())
+        saved = await response.json()
+        self.assertEqual(saved["favorite_at"], timestamps[3])
+        self.assertEqual(saved["updated_at"], first["updated_at"])
+        batch = {"model_profile": "anima", "ids": [second["id"]], "action": "favorite", "value": True}
+        with patch.object(store, "_now", return_value=timestamps[4]):
+            response = await self.client.post("/api/style-presets/batch", json=batch)
+        self.assertEqual(response.status, 200, await response.text())
+        listing = await response.json()
+        self.assertEqual([item["id"] for item in listing["items"]], [second["id"], first["id"], third["id"]])
+        self.assertEqual(listing["items"][0]["favorite_at"], timestamps[4])
+        self.assertEqual(listing["items"][0]["updated_at"], second["updated_at"])
+        self.assertEqual(await (await self.client.get("/api/style-presets?model_profile=anima")).json(), listing)
+        with patch.object(store, "_now", return_value=timestamps[5]):
+            response = await self.client.put(f"/api/style-presets/{first['id']}", json={"favorite": False})
+        self.assertEqual(response.status, 200)
+        self.assertIsNone((await response.json())["favorite_at"])
+        with patch.object(store, "_now", return_value=timestamps[6]):
+            response = await self.client.post("/api/style-presets/batch", json={**batch, "value": False})
+        self.assertEqual(response.status, 200)
+        listing = await response.json()
+        self.assertEqual([item["id"] for item in listing["items"]], [third["id"], second["id"], first["id"]])
+        self.assertTrue(all(item["favorite_at"] is None for item in listing["items"]))
+        for original in items:
+            saved = next(item for item in listing["items"] if item["id"] == original["id"])
+            self.assertEqual(saved["updated_at"], original["updated_at"])
+        store.reload()
+        self.assertEqual(await (await self.client.get("/api/style-presets?model_profile=anima")).json(), listing)
+
     async def test_failed_cover_reference_write_keeps_original(self):
         cover = await (await self.upload()).json()
         item = await self.create_preset(cover_id=cover["id"])

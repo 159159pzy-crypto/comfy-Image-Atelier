@@ -203,8 +203,8 @@ def test_real_legacy_presets_migrate_only_in_temporary_copy(tmp_path):
     assert all(not any(item["include"].values()) for item in store.items)
     assert all("upscalers" not in item["settings"] and "width" not in item["settings"] for item in store.items)
     if json.loads(original)["version"] < 3:
-        assert destination.with_name(destination.name + ".v3.bak").read_bytes() == original
-    assert json.loads(destination.read_text(encoding="utf-8"))["version"] == 3
+        assert destination.with_name(destination.name + ".v4.bak").read_bytes() == original
+    assert json.loads(destination.read_text(encoding="utf-8"))["version"] == 4
     assert StylePresetStore(destination).items == store.items
 
 

@@ -31,7 +31,32 @@ test('search combines words, multi-tag AND, favorite group, resources and second
   assert.deepEqual(filterItems(items, { query: 'cinema 人像分组', collection: 'group:g1', tags: ['soft', 'portrait'] }, groups).map(x => x.id), ['a']);
   assert.deepEqual(filterItems(items, { query: 'clear.vae', collection: 'all', tags: [] }, groups).map(x => x.id), ['b']);
   assert.deepEqual(filterItems(items, { collection: 'ungrouped' }, groups).map(x => x.id), ['c']);
-  assert.deepEqual(filterItems(items, { sort: 'favorite' }, groups).map(x => x.id), ['a', 'c', 'b']);
+  assert.deepEqual(filterItems(items, { sort: 'updated' }, groups).map(x => x.id), ['b', 'a', 'c']);
+});
+
+test('every library sort ignores favorite changes and homepage response order', () => {
+  const items = [
+    { id: 'a', name: 'Style 2', favorite: false, created_at: '2026-11-10', updated_at: '2026-11-12' },
+    { id: 'b', name: 'Style 3', favorite: true, created_at: '2026-11-12', updated_at: '2026-11-11' },
+    { id: 'c', name: 'Style 1', favorite: false, created_at: '2026-11-11', updated_at: '2026-11-10' },
+  ];
+  for (const [sort, expected] of [[undefined, ['a', 'b', 'c']], ['updated', ['a', 'b', 'c']], ['created', ['b', 'c', 'a']], ['name', ['c', 'a', 'b']]]) {
+    assert.deepEqual(filterItems(items, { sort }).map(item => item.id), expected);
+    const saved = [...items].reverse().map(item => ({ ...item, favorite: !item.favorite, favorite_at: item.favorite ? null : '2026-11-15' }));
+    assert.deepEqual(filterItems(saved, { sort }).map(item => item.id), expected);
+  }
+  assert.deepEqual(items.map(item => item.id), ['a', 'b', 'c'], 'sorting must not mutate the supplied records');
+});
+
+test('equal library sort values use IDs rather than the incoming favorite order', () => {
+  const items = ['c', 'a', 'b'].map(id => ({ id, name: 'Style', favorite: id === 'c', created_at: '2026-11-10', updated_at: '2026-11-10' }));
+  for (const sort of ['updated', 'created', 'name']) {
+    for (const records of [items, [...items].reverse()]) {
+      assert.deepEqual(filterItems(records, { sort }).map(item => item.id), ['a', 'b', 'c']);
+    }
+  }
+  const numericNames = [{ ...items[0], id: 'b', name: 'Style 01' }, { ...items[0], id: 'a', name: 'Style 1' }];
+  assert.deepEqual(filterItems(numericNames, { sort: 'name' }).map(item => item.id), ['a', 'b']);
 });
 
 test('crop keeps a 4:3 pixel rectangle inside portrait and landscape images at any pan/zoom', () => {

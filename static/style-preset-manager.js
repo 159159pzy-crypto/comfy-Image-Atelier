@@ -36,10 +36,12 @@
       return terms.every(term => haystack.includes(term));
     });
     return filtered.sort((a, b) => {
-      if (view.sort === "name") return a.name.localeCompare(b.name, "zh-CN", { numeric: true });
-      if (view.sort === "created") return String(b.created_at).localeCompare(String(a.created_at));
-      if (view.sort === "favorite" && !!a.favorite !== !!b.favorite) return Number(b.favorite) - Number(a.favorite);
-      return String(b.updated_at).localeCompare(String(a.updated_at)) || a.name.localeCompare(b.name, "zh-CN");
+      // The API puts favorites first for the homepage. Never inherit that order
+      // in the library, even when two records have the same sort value.
+      const byId = a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+      if (view.sort === "name") return a.name.localeCompare(b.name, "zh-CN", { numeric: true }) || byId;
+      if (view.sort === "created") return String(b.created_at).localeCompare(String(a.created_at)) || byId;
+      return String(b.updated_at).localeCompare(String(a.updated_at)) || a.name.localeCompare(b.name, "zh-CN") || byId;
     });
   }
   function editorPayload(session) {
@@ -87,7 +89,7 @@
   if (typeof module !== "undefined" && module.exports) module.exports = helpers;
   if (typeof document === "undefined") return;
 
-  const state = { epoch: 0, profile: "", items: [], groups: [], query: "", collection: "all", tags: [], sort: "favorite",
+  const state = { epoch: 0, profile: "", items: [], groups: [], query: "", collection: "all", tags: [], sort: "updated",
     selected: new Set(), selecting: false, read: 0, abort: null, busy: new Set(), pendingFavorites: new Map(), batchWrites: new Map(), editor: null, small: null, confirmation: null, loading: false, readError: "", view: savedView(), applying: new Map(), applyErrors: new Map(), filtersOpen: false, managerVisible: false };
   const ui = {};
   const profile = () => typeof currentProfile === "function" ? currentProfile() : "anima";
@@ -206,7 +208,7 @@
     ui.search = h("input"); ui.search.id = "stylePresetSearch"; ui.search.type = "search"; ui.search.placeholder = "查找名称、标签、模型或 LoRA"; ui.search.setAttribute("aria-label", "查找风格预设");
     ui.search.addEventListener("input", () => { state.query = ui.search.value; renderGrid(); }); search.append(icon("search"), ui.search);
     ui.sort = h("select"); ui.sort.id = "stylePresetSort"; ui.sort.setAttribute("aria-label", "预设排序");
-    for (const [value, text] of [["favorite", "收藏优先"], ["updated", "最近更新"], ["created", "最近创建"], ["name", "名称"]]) ui.sort.append(new Option(text, value));
+    for (const [value, text] of [["updated", "最近更新"], ["created", "最近创建"], ["name", "名称"]]) ui.sort.append(new Option(text, value));
     ui.sort.addEventListener("change", () => { state.sort = ui.sort.value; renderGrid(); });
     ui.selectToggle = button("选择", "button ghost compact", () => { state.selecting = !state.selecting; state.selected.clear(); renderGrid(); }); ui.selectToggle.id = "stylePresetSelect";
     ui.filterToggle = button("筛选", "button ghost compact spm-mobile-filters", () => { state.filtersOpen = !state.filtersOpen; syncMobileFilters(); });
@@ -442,7 +444,7 @@
     entry.actions.hidden = state.selecting; entry.selected.hidden = !state.selecting; setText(entry.selected, selected ? "✓" : "");
     entry.star.setAttribute("aria-label", `${favorite ? "取消收藏" : "收藏"} ${item.name}`); entry.star.setAttribute("aria-pressed", String(favorite));
     // Keep a saving star focusable; disabling the native button blurs it before
-    // the acknowledged reorder can restore its focus. The handler is guarded.
+    // the committed refresh can restore its focus. The handler is guarded.
     entry.star.disabled = !writable();
     entry.star.setAttribute("aria-disabled", String(state.busy.has(item.id) || !writable()));
     entry.star.setAttribute("aria-busy", String(state.busy.has(item.id)));
@@ -553,8 +555,8 @@
       const saved = await request(`/api/style-presets/${encodeURIComponent(item.id)}`, { method: "PUT", body: JSON.stringify({ model_profile: forProfile, favorite: !old }) });
       operation.committed = true;
       if (isCurrent()) {
-        // Invalidate reads started during the PUT, before merging its final
-        // timestamp and sorting once. Older snapshots must not move it back.
+        // Invalidate reads started during the PUT before merging the committed
+        // record. Older snapshots must not restore its previous favorite state.
         state.read++; state.abort?.abort(); state.loading = false;
         state.items = state.items.map(current => current.id === item.id ? saved : current);
         render({ animate: !!event?.detail });

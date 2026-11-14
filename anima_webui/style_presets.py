@@ -25,10 +25,10 @@ PRESET_SETTING_KEYS = tuple(DEFAULT_SETTINGS)
 MAX_PRESETS = 256
 MAX_GROUPS = 128
 MAX_TAGS = 64
-STORE_VERSION = 3
+STORE_VERSION = 4
 _COVER_ID = re.compile(r"^[a-f0-9]{64}$")
 _ITEM_KEYS = {"id", "name", "favorite", "model_profile", "settings", "include", "source",
-              "groups", "tags", "cover_id", "created_at", "updated_at"}
+              "groups", "tags", "cover_id", "created_at", "updated_at", "favorite_at"}
 
 
 def _profile(value: Any) -> str:
@@ -135,12 +135,29 @@ class StylePresetStore(StorageProtection):
         updated = payload.get("updated_at") or created
         if not isinstance(created, str) or not isinstance(updated, str):
             raise WorkflowError("风格预设时间格式无效")
+        favorite_at = payload.get("favorite_at")
+        if favorite_at is not None and not isinstance(favorite_at, str):
+            raise WorkflowError("风格预设收藏时间格式无效")
+        # Older files used the last update for favorite ordering. Preserve that
+        # order when introducing a separate, server-owned favorite timestamp.
+        favorite_at = (favorite_at or updated) if favorite else None
         return {
             "id": preset_id, "name": _name(payload.get("name")), "favorite": favorite,
             "model_profile": profile, "settings": settings, "include": flags, "source": origin,
             "groups": groups, "tags": _strings(payload.get("tags", []), "预设标签", MAX_TAGS, fold=True),
-            "cover_id": cover, "created_at": created, "updated_at": updated,
+            "cover_id": cover, "created_at": created, "updated_at": updated, "favorite_at": favorite_at,
         }
+
+    @staticmethod
+    def _set_mutation_times(item: dict[str, Any], previous: dict[str, Any] | None, now: str) -> None:
+        ordering_fields = {"favorite", "favorite_at", "updated_at"}
+        content_changed = previous is None or any(
+            value != previous.get(key) for key, value in item.items() if key not in ordering_fields
+        )
+        item["updated_at"] = now if content_changed else previous["updated_at"]
+        item["favorite_at"] = (
+            previous["favorite_at"] if previous and previous["favorite"] else now
+        ) if item["favorite"] else None
 
     def reload(self) -> None:
         self.load_warnings = []
@@ -161,15 +178,15 @@ class StylePresetStore(StorageProtection):
             if not isinstance(payload, dict) or type(payload.get("version", 1)) is not int:
                 raise WorkflowError("风格预设文件版本无效")
             version = payload.get("version", 1)
-            if version not in {1, 2, 3}:
+            if version not in {1, 2, 3, 4}:
                 raise WorkflowError("风格预设文件版本无效")
-            if version == 3:
+            if version >= 3:
                 complete = payload.get("cover_references_complete", True)
                 if not isinstance(complete, bool):
                     raise WorkflowError("风格预设封面引用完整性标记无效")
                 self.cover_references_complete = complete
             values = payload.get("items", [])
-            raw_groups = payload.get("groups", []) if version == 3 else []
+            raw_groups = payload.get("groups", []) if version >= 3 else []
             if not isinstance(values, list) or not isinstance(raw_groups, list):
                 raise WorkflowError("风格预设 items/groups 必须是数组")
             cleaned = False
@@ -216,11 +233,11 @@ class StylePresetStore(StorageProtection):
             self._recover_load_failure(error)
             self.items, self.groups = [], []
             return
-        if version < 3 or cleaned:
+        if version < STORE_VERSION or cleaned:
             try:
                 backup = backup_for_migration(self.path, STORE_VERSION)
                 if backup is not None:
-                    self.load_warnings.append(f"风格预设已迁移为可选携带模式，原文件备份为 {backup.name}")
+                    self.load_warnings.append(f"风格预设数据格式已迁移升级，原文件备份为 {backup.name}")
                 self._write_text(self._serialized())
             except OSError as error:
                 self._protect_storage(f"风格预设已在内存迁移，但迁移备份或写回失败({error})")
@@ -228,8 +245,9 @@ class StylePresetStore(StorageProtection):
     def list(self, model_profile: str | None = None) -> dict[str, Any]:
         profile = _profile(model_profile) if model_profile is not None and str(model_profile).strip() else None
         items = [item for item in self.items if profile is None or item["model_profile"] == profile]
-        items = sorted(items, key=lambda item: item["updated_at"], reverse=True)
-        items.sort(key=lambda item: not item["favorite"])
+        items = sorted(items, key=lambda item: (
+            item["favorite"], item["favorite_at"] if item["favorite"] else item["updated_at"], item["updated_at"],
+        ), reverse=True)
         return {"items": copy.deepcopy(items), "count": len(items), "model_profile": profile,
                 "groups": copy.deepcopy([group for group in self.groups if profile is None or group["model_profile"] == profile])}
 
@@ -294,9 +312,11 @@ class StylePresetStore(StorageProtection):
         captured = self._capture(payload)
         self._ensure_unique_name(payload.get("name"), model_profile=captured["model_profile"])
         now = self._now()
-        item = self._normalize_item({**captured, "id": f"preset_{uuid.uuid4().hex[:16]}", "created_at": now, "updated_at": now})
+        item = self._normalize_item({**captured, "id": f"preset_{uuid.uuid4().hex[:16]}",
+                                     "created_at": now, "updated_at": now, "favorite_at": None})
         if item["groups"]:
             item["favorite"] = True
+        self._set_mutation_times(item, None, now)
         self.items.append(item)
         await self._save()
         return copy.deepcopy(item)
@@ -318,11 +338,13 @@ class StylePresetStore(StorageProtection):
             flags = normalize_include(payload.get("include", current["include"]))
             if any(flags[key] and not current["include"][key] for key in flags):
                 raise WorkflowError("新增携带项需要提供当前 settings")
-        merged = {**current, **changes, "id": preset_id, "created_at": current["created_at"], "updated_at": self._now()}
+        merged = {**current, **changes, "id": preset_id, "created_at": current["created_at"],
+                  "updated_at": current["updated_at"], "favorite_at": current["favorite_at"]}
         self._ensure_unique_name(merged["name"], excluding_id=preset_id, model_profile=current["model_profile"])
         item = self._normalize_item(merged)
         if "groups" in payload and set(item["groups"]) - set(current["groups"]):
             item["favorite"] = True
+        self._set_mutation_times(item, current, self._now())
         self.items[next(index for index, entry in enumerate(self.items) if entry["id"] == preset_id)] = item
         await self._save()
         return copy.deepcopy(item)
@@ -410,6 +432,7 @@ class StylePresetStore(StorageProtection):
             raise WorkflowError("不支持的预设批量操作")
         now = self._now()
         for item in selected:
+            previous = copy.deepcopy(item)
             if action == "favorite":
                 item["favorite"] = value
             else:
@@ -428,7 +451,7 @@ class StylePresetStore(StorageProtection):
                                 else self._group_ids(combined, profile))
                 if action == "groups" and set(item[action]) - set(old):
                     item["favorite"] = True
-            item["updated_at"] = now
+            self._set_mutation_times(item, previous, now)
         changes = {item["id"]: item for item in selected}
         self.items = [changes.get(item["id"], item) for item in self.items]
         await self._save()
