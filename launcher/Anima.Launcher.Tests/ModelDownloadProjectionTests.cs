@@ -79,6 +79,23 @@ internal static class ModelDownloadProjectionTests
         snapshot = ModelDownloadProjection.ForModel(environment, package, packageDestination, [packageOwner], files)!;
         Check(snapshot.CanRetry && !snapshot.CanResume && !snapshot.CanPause, "needs-review model exposes retry without presenting a running pause action");
 
+        var featureOwner = Owner(environment, DownloadTaskStatus.Running, DateTimeOffset.UtcNow.AddHours(2));
+        featureOwner.Kind = "install";
+        featureOwner.Payload = System.Text.Json.JsonSerializer.SerializeToElement(new { purpose = FeaturePreparation.Purpose });
+        featureOwner.Phase = "FeatureValidation";
+        featureOwner.CompletedModelIds.Add(model.Id);
+        var featureFile = File(featureOwner, destination, model.Size, model.Sha256, model.Size, DownloadTaskStatus.Completed);
+        snapshot = ModelDownloadProjection.ForModel(environment, model, destination, [featureOwner], [featureFile])!;
+        Check(snapshot.IsFeaturePreparation && !snapshot.IsCompleted && snapshot.Percent == 99.9 && snapshot.Phase == "FeatureValidation",
+            "full-feature row waits for plugin and runtime validation even when its model file is already verified");
+        featureOwner.Status = DownloadTaskStatus.Failed; featureOwner.Error = "selected plugin failed to import";
+        snapshot = ModelDownloadProjection.ForModel(environment, model, destination, [featureOwner], [featureFile])!;
+        Check(snapshot.CanRetry && !snapshot.IsCompleted && snapshot.Error == featureOwner.Error,
+            "full-feature failure remains actionable after its model file completed");
+        featureOwner.Status = DownloadTaskStatus.Completed;
+        snapshot = ModelDownloadProjection.ForModel(environment, model, destination, [featureOwner], [featureFile])!;
+        Check(snapshot.IsCompleted && snapshot.IsFeaturePreparation, "full-feature row completes with its verified installation owner");
+
         var missing = new ModelStatus(model, "缺失", null, destination);
         var row = new ModelRow(missing) { Selected = true };
         var rowDownload = new ModelDownloadSnapshot(active.Id, model.Id, DownloadTaskStatus.Running, "Downloading", 40, 100, 20, "", true, false, false, [file.Id]);

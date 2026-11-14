@@ -17,6 +17,8 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
     }
     private static readonly Regex Sam2Line = new(@"^(?:sam[-_.]?2(?:\[[^\]]*\])?\s*@\s*)?git\+https://github\.com/facebookresearch/sam2(?:\.git)?(?:@[\w./\-]+)?\s*$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private bool featureScoped;
+    private bool includeWorkbenchDependencies = true;
+    private bool featureDependencyCheckpoint;
     public List<SetupRuntimeIssue> OptionalFailures { get; } = [];
     private string? git;
     private string? uv;
@@ -326,6 +328,8 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
 
     public async Task RepairDependencies(LauncherConfig config, ComfyDependencySnapshot? dependencies, CancellationToken ct)
     {
+        featureDependencyCheckpoint = false;
+        includeWorkbenchDependencies = true;
         installationDependenciesPath = null;
         config.Validate();
         _ = ComfyUpdateCoordinator.IndependentPythonDirectory(config);
@@ -372,6 +376,15 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         }
         if (activeDependencies is null && RuntimeDependencies.NodeCommit(config.ComfyRoot) is { } commit)
             activeDependencies = new(commit, File.ReadAllText(requirements), File.Exists(manager) ? File.ReadAllText(manager) : "", []);
+        if (featureDependencyCheckpoint)
+        {
+            activeDependencies ??= FeatureDependencyCheckpoint.SourceArchiveSnapshot(File.ReadAllText(requirements), File.Exists(manager) ? File.ReadAllText(manager) : "");
+            if (activeDependencies.Resolved)
+            {
+                FeatureDependencyCheckpoint.ValidateInputs(activeDependencies, config, nodes, manifest.Sam2Commit);
+                DependencyPlans.ValidateEnvironment(activeDependencies, await DependencyPlans.InventoryAsync(config, ct));
+            }
+        }
         // Resolve the complete graph with only the GPU ABI frozen. An old full core-only
         // lock must not prevent a compatible node from selecting a different numpy, etc.
         File.WriteAllLines(Path.Combine(config.ComfyRoot, ".anima-constraints.txt"), ConstraintsFor(false, manifest, gpuPins));
@@ -383,7 +396,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             {
                 activeDependencies = await ComfyDependencyResolver.ResolveAsync(config, activeDependencies,
                     Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "cache"), ct, log, nodes, Env(config), manifest.Sam2Commit,
-                    dependencyProgress: IntermediateProgress);
+                    dependencyProgress: IntermediateProgress, includeWorkbench: includeWorkbenchDependencies);
                 EnsureConstraints(config, gpuPins);
                 if (installationDependenciesPath is not null) JsonFile.Write(installationDependenciesPath, activeDependencies);
             }
@@ -397,10 +410,17 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
                 var args = new List<string> { "-r", requirements };
                 if (File.Exists(manager)) { args.Add("-r"); args.Add(manager); }
                 foreach (var node in nodes) { args.Add("-r"); args.Add(node); }
+                if (includeWorkbenchDependencies)
+                {
+                    var contract = await WorkbenchDependencies.ReadAsync(config, ct);
+                    args.Add("-r");
+                    args.Add(WorkbenchDependencies.WriteRequirements(contract, Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "cache")));
+                }
                 await Pip(config, args, ct);
             }
             reporter.Phase("verifying", "正在验证 Manager 与环境依赖");
             if (File.Exists(manager)) await RuntimeDependencies.ValidateManager(config, ct);
+            if (includeWorkbenchDependencies) await WorkbenchDependencies.ValidateAsync(config, ct);
             reporter.Complete("ComfyUI 依赖已安装并通过校验");
         });
     }
@@ -554,6 +574,8 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
     }
     public async Task<LauncherConfig> Install(InstallationPlan plan, CancellationToken ct)
     {
+        featureDependencyCheckpoint = FeaturePreparation.IsFeaturePlan(plan);
+        includeWorkbenchDependencies = plan.WorkbenchDependencyContractVersion > 0;
         installationDependenciesPath = null;
         featureScoped = plan.ResourcePolicyVersion > 0;
         OptionalFailures.Clear();
@@ -565,7 +587,17 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         activeDependencies = plan.Dependencies;
         var config = plan.CreateConfig();
         var fresh = plan.Fresh;
-        if (fresh && activeDependencies is not null)
+        if (featureDependencyCheckpoint)
+        {
+            installationDependenciesPath = FeatureDependencyCheckpoint.Open(plan, stateDir);
+            if (File.Exists(installationDependenciesPath))
+            {
+                activeDependencies = JsonFile.Read<ComfyDependencySnapshot>(installationDependenciesPath);
+                if (!activeDependencies.Resolved || activeDependencies.PlanVersion != 1)
+                    throw new InvalidDataException("功能准备的固定依赖记录不完整，已保留原文件，请重新检查。");
+            }
+        }
+        else if (fresh && activeDependencies is not null)
         {
             installationDependenciesPath = Path.Combine(stateDir, "install-dependency-plans",
                 Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(config.ComfyRoot).ToUpperInvariant()))).ToLowerInvariant(),
@@ -649,7 +681,35 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         var skip = Path.Combine(custom, "skip_download_model");
         var hadSkip = File.Exists(skip);
         if (!hadSkip) File.WriteAllText(skip, "Model downloads are managed by Comfy Image Atelier.\n");
-        if (featureScoped)
+        if (featureDependencyCheckpoint)
+        {
+            // Every explicitly requested feature is required here. Resolve the whole
+            // selected graph once; replaying earlier optional groups could undo later pins.
+            foreach (var node in nodePlans)
+                await Stage(config, "nodes", "安装节点 " + node.Repository.Id, async () =>
+                {
+                    if (node.PreserveExisting) log("保留已有节点源码 " + node.Repository.Id);
+                    else await Clone(node.Repository, node.Directory, config, ct);
+                });
+            await InstallCombinedDependencies(config, importedPins, ComfyLaunchArguments.ManagerEnabled(config.ComfyArguments), ct);
+            await WithInstallationCheckpoint(config, async () =>
+            {
+                await CompleteNodeInstallers(config, nodePlans, ct);
+                await SesquiRuntimePreparation.PrepareAsync(config, manifest, runtimeDirectory, downloads, log, progress, ct);
+                if (manifest.Nodes.Any(node => node.Id == PromptAssistantCompatibility.NodeId)
+                    && PromptAssistantCompatibility.ResolveDirectory(config.ComfyRoot) is { } assistant)
+                    await PromptAssistantCompatibility.CheckOrApply(config, stateDir, assistant, true, ct);
+                if (manifest.Nodes.Any(node => node.Id == ForbiddenVisionCompatibility.NodeId)
+                    && ForbiddenVisionCompatibility.ResolveDirectory(config.ComfyRoot) is { } face)
+                    await ForbiddenVisionCompatibility.CheckOrApply(config, stateDir, face, true, ct);
+                if (plan.Features.Any(feature => feature is "nvidia" or "dlss"))
+                {
+                    var native = await NvidiaRuntimePreparation.PrepareAsync(config, runtimeDirectory, downloads, log, progress, ct, plan.Features);
+                    if (!native.Ready) throw new InvalidOperationException(native.Detail);
+                }
+            });
+        }
+        else if (featureScoped)
         {
             var selectedRuntime = manifest;
             var coreFeatures = fresh ? new[] { "sesqui" } : Array.Empty<string>();

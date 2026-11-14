@@ -13,9 +13,9 @@ internal static class SetupModelSelectionTests
         { try { await action(); } catch (InvalidDataException) { Check(true, label); return; } throw new Exception("Expected InvalidDataException: " + label); }
 
         var choices = SetupModelSelection.Choices(models, profiles, "anima");
-        Check(choices.Length == 14 && choices.Count(choice => choice.ModelIds.Length == 2) == 3
+        Check(choices.Length == 16 && choices.Count(choice => choice.ModelIds.Length == 2) == 4
             && choices.Single(choice => choice.Id == "face-refine").ModelIds.Length == 2 && choices.Any(choice => choice.Id == "seedvr2"),
-            "onboarding offers Krea, the complete face model set and eight taggers with SeedVR2 and native runtimes optional");
+            "onboarding offers both SeedVR2 variants, profile pixel model, Krea, faces, eight taggers and native runtimes");
         Check(choices.Single(choice => choice.Recommended).Id == "tagger-pixai-tagger-v0.9-timm",
             "tagger recommendation is metadata, not an automatic selection");
         Check(profiles.RequiredModels(models, "anima").Length == 3
@@ -28,6 +28,47 @@ internal static class SetupModelSelectionTests
         Check(SetupModelSelection.Choices(models, profiles, "krea2").All(choice => choice.Id != "krea2")
             && SetupModelSelection.Resolve(models, profiles, "krea2", []).Length == 3,
             "current Krea profile remains required and cannot be deselected as an optional feature");
+        var kreaChoices = SetupModelSelection.Choices(models, profiles, "krea2");
+        var importedKreaChoices = SetupModelSelection.Choices(models, profiles, "krea2", includeBase: true);
+        Check(importedKreaChoices.All(choice => choice.Id != "krea2")
+            && SetupModelSelection.SetChoiceSelected(importedKreaChoices,
+                importedKreaChoices.Single(choice => choice.Id == "base").ModelIds, "base", false).Length == 0,
+            "imported Krea exposes one base choice that can be unchecked without a duplicate retaining it");
+        Check(choices.Single(choice => choice.Id == "pixel_hires").ModelIds.SequenceEqual(["pixel-remacri"])
+            && kreaChoices.Single(choice => choice.Id == "pixel_hires").ModelIds.SequenceEqual(["pixel-animesharp"])
+            && kreaChoices.Any(choice => choice.Id == "sesqui") && choices.All(choice => choice.Id != "sesqui"),
+            "pixel selection follows the existing profile and fresh Krea can opt into Sesqui");
+        var seed3 = choices.Single(choice => choice.Id == "seedvr2");
+        var seed7 = choices.Single(choice => choice.Id == "seedvr2-7b");
+        Check(!seed3.Recommended && !seed7.Recommended && !choices.Single(choice => choice.Id == "pixel_hires").Recommended
+            && profiles.Profiles.All(profile => profile.Seedvr2Model == "seedvr2_3b_int8_convrot.safetensors"),
+            "new downloads remain opt-in without replacing the existing 3B profile default");
+        var bothSeeds = SetupModelSelection.SetChoiceSelected(choices, seed3.ModelIds, seed7.Id, true);
+        Check(bothSeeds.ToHashSet().SetEquals(["seedvr2-model", "seedvr2-7b-sharp", "seedvr2-vae"])
+            && SetupModelSelection.Resolve(models, profiles, "anima", bothSeeds).Count(model => model.Id == "seedvr2-vae") == 1,
+            "two SeedVR2 choices share one VAE download");
+        var only3 = SetupModelSelection.SetChoiceSelected(choices, bothSeeds, seed7.Id, false);
+        var only7 = SetupModelSelection.SetChoiceSelected(choices, bothSeeds, seed3.Id, false);
+        Check(only3.ToHashSet().SetEquals(seed3.ModelIds) && only7.ToHashSet().SetEquals(seed7.ModelIds)
+            && SetupModelSelection.SetChoiceSelected(choices, only7, seed7.Id, false).Length == 0,
+            "unchecking either SeedVR2 choice retains the shared VAE until the final choice is unchecked");
+        Check(SetupModelSelection.IncludeDependencies(["seedvr2-7b-sharp", "pixel-remacri"])
+                .ToHashSet().SetEquals(["seedvr2-7b-sharp", "seedvr2-vae", "pixel-remacri"])
+            && SetupFeatures.Resolve(false, ["seedvr2-7b-sharp", "pixel-remacri", "pixel-animesharp"])
+                .SequenceEqual(["pixel_hires", "seedvr2"]),
+            "new model selections add their shared VAE and resolve the matching functional checks");
+        Check(SetupModelSelection.ExpandSkippedOptionalIds(models, profiles, "anima", ["seedvr2-7b-sharp"], selectedModelIds: bothSeeds)
+                .SequenceEqual(["seedvr2-7b-sharp"])
+            && SetupModelSelection.ExpandSkippedOptionalIds(models, profiles, "anima", ["seedvr2-model"], selectedModelIds: bothSeeds)
+                .SequenceEqual(["seedvr2-model"])
+            && SetupModelSelection.ExpandSkippedOptionalIds(models, profiles, "anima", ["seedvr2-vae"], selectedModelIds: bothSeeds)
+                .ToHashSet().SetEquals(bothSeeds)
+            && SetupModelSelection.ExpandSkippedOptionalIds(models, profiles, "anima", ["seedvr2-7b-sharp"], selectedModelIds: only7)
+                .ToHashSet().SetEquals(seed7.ModelIds),
+            "UNet failure skips only its selected variant while shared VAE failure affects both variants");
+        var priorCatalog = models with { Models = models.Models.Where(model => model.Id != "seedvr2-7b-sharp").ToArray() };
+        Check(SetupModelSelection.Choices(priorCatalog, profiles, "anima").All(choice => choice.Id != "seedvr2-7b"),
+            "an older frozen catalog does not advertise a VAE-only 7B choice");
         var face = choices.Single(choice => choice.Id == "face-refine");
         Check(!face.Recommended && face.Size == 64847490 && face.ModelIds.All(id => models.Models.Single(model => model.Id == id).CanDownload)
             && SetupModelSelection.Resolve(models, profiles, "anima", face.ModelIds).Length == 5
@@ -43,7 +84,8 @@ internal static class SetupModelSelectionTests
             && SetupModelSelection.ExpandSkippedOptionalIds(models, profiles, "anima", ["tagger-pixai-tagger-v0.9-timm"])
                 .SequenceEqual(["tagger-pixai-tagger-v0.9-timm"]),
             "face failures skip the whole feature while independent tagger choices stay independent");
-        Check(SetupModelSelection.ExpandSkippedOptionalIds(models, profiles, "krea2", ["krea2-turbo", "qwen3vl-krea2", "qwen-vae", "seedvr2-model", "seedvr2-vae"]).Length == 2,
+        Check(SetupModelSelection.ExpandSkippedOptionalIds(models, profiles, "krea2", ["krea2-turbo", "qwen3vl-krea2", "qwen-vae", "seedvr2-model", "seedvr2-vae"],
+                selectedModelIds: seed3.ModelIds).ToHashSet().SetEquals(seed3.ModelIds),
             "skip expansion preserves the active base download and can skip optional SeedVR2");
         Check(SetupModelSelection.ExpandSkippedOptionalIds(models, profiles, "anima", ["anima-base-v1"], allowBase: true).Contains("qwen-text"),
             "import can skip its optional recommended base download and configure existing models");
@@ -80,7 +122,10 @@ internal static class SetupModelSelectionTests
         var fresh = InstallationPlanner.Create(new LauncherConfig { InstallRoot = Path.Combine(directory, "not-installed") },
             fixtureRuntime, directory, true, tiny, profiles, [tagger.Id]);
         var freshPrepared = await InstallationPlanner.PreparePlanAsync(fresh, tiny, profiles, "not-needed-before-install.py", default);
-        Check(freshPrepared.ModelPathsDeferred && freshPrepared.ModelInventory.Length == 17
+        var previewCount = profiles.RequiredModels(tiny, "anima").Select(model => model.Id)
+            .Concat(SetupModelSelection.Choices(tiny, profiles, "anima").SelectMany(choice => choice.ModelIds))
+            .Where(id => !SetupFeatures.IsCapability(id)).Distinct().Count();
+        Check(freshPrepared.ModelPathsDeferred && freshPrepared.ModelInventory.Length == previewCount
             && freshPrepared.ModelInventory.Single(item => item.Model.Id == tagger.Id).Destination.Length == 0,
             "fresh setup previews all model choices before Python exists without guessing package targets");
         await Fails(() => InstallationPlanner.PreparePlanAsync(fresh, tiny, profiles, "not-installed.py", default, true),
@@ -97,6 +142,7 @@ internal static class SetupModelSelectionTests
             ["diffusion_models"] = [Path.Combine(external, "diffusion")],
             ["text_encoders"] = [Path.Combine(external, "text")],
             ["vae"] = [Path.Combine(external, "vae")],
+            ["upscale_models"] = [Path.Combine(external, "upscale")],
             ["wd_taggers"] = [Path.Combine(external, "taggers")],
             ["forbidden_vision"] = [Path.Combine(external, "faces")],
         });
@@ -107,7 +153,7 @@ internal static class SetupModelSelectionTests
         var requiredOnly = InstallationPlanner.Create(config, fixtureRuntime, directory, false, tiny, profiles,
             ["anima-base-v1", "qwen-text", "qwen-vae", "seedvr2-model", "seedvr2-vae"]);
         var requiredPreview = await InstallationPlanner.ResolveModelDestinationsAsync(requiredOnly, probe, tiny, profiles, default);
-        Check(requiredPreview.ModelInventory.Length == 17 && requiredPreview.ModelIds.Length == 5
+        Check(requiredPreview.ModelInventory.Length == previewCount && requiredPreview.ModelIds.Length == 5
             && requiredPreview.Downloads.Length == 5 && requiredPreview.EstimatedDownloadBytes == 5 * bytes.Length
             && requiredPreview.ModelInventory.Single(item => item.Model.Id == "seedvr2-model").Destination.StartsWith(external)
             && requiredPreview.ModelInventory.Single(item => item.Model.Id == tagger.Id).Destination.StartsWith(external),

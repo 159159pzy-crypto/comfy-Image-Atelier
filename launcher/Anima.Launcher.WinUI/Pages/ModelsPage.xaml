@@ -51,17 +51,30 @@
                                     </MenuFlyout>
                                 </Button.Flyout>
                             </Button>
+                            <Button x:Name="DownloadButton" Content="仅下载模型" Click="Download_Click" />
                         </StackPanel>
-                        <Button x:Name="DownloadButton" Grid.Column="1" Content="下载所选模型" Click="Download_Click" Style="{StaticResource StudioPrimaryButtonStyle}" />
+                        <Button x:Name="PrepareFeaturesButton" Grid.Column="1" Content="一键准备完整功能" Click="PrepareFeatures_Click" Style="{StaticResource StudioPrimaryButtonStyle}" AutomationProperties.AutomationId="PrepareCompleteFeatures" />
                     </Grid>
                     </ContentControl>
+                    <TextBlock Text="完整功能准备会先列出模型、插件和运行文件，确认后统一补齐；仅下载模型保留原有独立文件下载方式。" Style="{StaticResource StudioBodyStyle}" FontSize="11" />
+                    <StackPanel x:Name="FeatureProgressPanel" Spacing="8" Visibility="Collapsed">
+                        <TextBlock x:Name="FeatureStatusText" Style="{StaticResource StudioBodyStyle}" />
+                        <ProgressBar x:Name="FeatureProgressBar" Minimum="0" Maximum="100" Height="4" />
+                        <TextBlock x:Name="FeatureTransferText" Style="{StaticResource StudioBodyStyle}" FontSize="11" />
+                        <TextBlock x:Name="FeatureErrorText" TextWrapping="Wrap" Foreground="{ThemeResource StudioDangerBrush}" MaxLines="6" IsTextSelectionEnabled="True" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button x:Name="PauseFeatureButton" Content="暂停准备" Click="PauseFeature_Click" />
+                            <Button x:Name="ResumeFeatureButton" Content="继续准备" Click="ResumeFeature_Click" />
+                            <HyperlinkButton Content="查看任务详情" Click="FeatureDetails_Click" />
+                        </StackPanel>
+                    </StackPanel>
                     <TextBlock x:Name="EmptyNote" Text="还没有扫描模型。先导入或安装 ComfyUI，再点击「重新扫描」。" Style="{StaticResource StudioBodyStyle}" Margin="8,14" />
                     <Grid ColumnSpacing="8">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                         <TextBlock x:Name="DownloadSummary" Style="{StaticResource StudioBodyStyle}" VerticalAlignment="Center" FontSize="11" />
                         <HyperlinkButton Grid.Column="1" Content="查看全部下载" Click="AllDownloads_Click" AutomationProperties.AutomationId="ModelsAllDownloads" />
                     </Grid>
-                    <TextBlock Text="本地反推为可选功能，推荐 PixAI 0.9；只下载勾选的模型。每个模型包全部校验后才可识别，暂停或取消可保留进度续传。" Style="{StaticResource StudioBodyStyle}" FontSize="11" />
+                    <TextBlock Text="本地反推为可选功能，推荐 PixAI 0.9。首次使用可选功能请使用完整功能准备；已有插件时可仅下载勾选模型。暂停或取消会保留进度。" Style="{StaticResource StudioBodyStyle}" FontSize="11" />
                     <ListView x:Name="ModelList" ItemsSource="{x:Bind ModelView.View, Mode=OneWay}"
                         SelectionMode="Single" MaxHeight="420" MinHeight="120"
                         ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled">

@@ -54,6 +54,7 @@ internal static class SetupImportTests
         Directory.CreateDirectory(Path.Combine(comfy, "comfy"));
         Directory.CreateDirectory(Path.Combine(comfy, "utils"));
         File.WriteAllText(Path.Combine(comfy, "main.py"), "# isolated ComfyUI fixture\n");
+        File.WriteAllText(Path.Combine(comfy, "requirements.txt"), "# isolated import fixture\n");
         File.WriteAllText(Path.Combine(comfy, "comfy", "__init__.py"), "");
         File.WriteAllText(Path.Combine(comfy, "comfy", "options.py"), "def enable_args_parsing():\n    pass\n");
         File.WriteAllText(Path.Combine(comfy, "utils", "__init__.py"), "");

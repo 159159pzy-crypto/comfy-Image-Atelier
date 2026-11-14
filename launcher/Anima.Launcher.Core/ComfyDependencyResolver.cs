@@ -108,9 +108,19 @@ public static class ComfyDependencyResolver
     public static async Task<ComfyDependencySnapshot> ResolveAsync(LauncherConfig config, ComfyDependencySnapshot snapshot,
         string cacheRoot, CancellationToken ct, Action<string>? log = null, IEnumerable<string>? nodeRequirements = null,
         IDictionary<string, string>? environment = null, string? sam2Commit = null, IReadOnlyDictionary<string, string>? logicalPaths = null,
-        Action<DependencyProgress>? dependencyProgress = null)
+        Action<DependencyProgress>? dependencyProgress = null, bool? includeWorkbench = null)
     {
         Safety.Commit(snapshot.ComfyCommit);
+        if (snapshot.ComfySourceKind is not ("git" or "requirements")) throw new InvalidDataException("依赖快照的 ComfyUI 来源类型无效。");
+        // Existing resolved plans without this field retain their exact reviewed inputs.
+        // New installation plans explicitly select this policy, including before resolution.
+        var checkWorkbench = includeWorkbench ?? (!snapshot.Resolved || snapshot.WorkbenchDependencyContractVersion > 0);
+        var workbench = checkWorkbench ? await WorkbenchDependencies.ReadAsync(config, ct) : new WorkbenchDependencyContract("", "");
+        if (snapshot.Resolved && snapshot.WorkbenchDependencyContractVersion > 0 && checkWorkbench
+            && (snapshot.WorkbenchRequirementsIdentity != workbench.Identity || snapshot.WorkbenchRequirementsText != workbench.RequirementsText))
+            throw new InvalidOperationException("工作台依赖声明在检查后已变化，请重新检查依赖计划；原计划保持不变。");
+        bool SameWorkbench(ComfyDependencySnapshot value) => value.WorkbenchDependencyContractVersion == (checkWorkbench ? 1 : 0)
+            && value.WorkbenchRequirementsIdentity == workbench.Identity && value.WorkbenchRequirementsText == workbench.RequirementsText;
         var reporter = new DependencyProgressReporter(dependencyProgress, log);
         reporter.Phase("resolving", "正在检查已安装依赖与固定版本");
         var inventory = await Commands.Run(config.Python, ["-B", "-c", "import sys,importlib.metadata as m; print(sys.version.split()[0]); print(chr(10).join(sorted(d.metadata['Name']+'=='+d.version for d in m.distributions() if d.metadata['Name'])))"], config.ComfyRoot, null, ct, timeout: TimeSpan.FromSeconds(30));
@@ -119,7 +129,7 @@ public static class ComfyDependencyResolver
         var identity = Path.GetFullPath(config.Python).ToUpperInvariant() + "\n" + lines[0] + "\n" + string.Join("\n", gpu.Order());
         var additional = (nodeRequirements ?? []).Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray();
         var nodeIdentity = NodeRequirementsIdentity(additional, sam2Commit, logicalPaths);
-        if (snapshot.Resolved && snapshot.NodeRequirementsIdentity == nodeIdentity)
+        if (snapshot.Resolved && snapshot.NodeRequirementsIdentity == nodeIdentity && SameWorkbench(snapshot))
         {
             if (snapshot.PythonIdentity != identity) throw new InvalidOperationException("Python 或 GPU 版本已变化，请重新检查依赖计划。");
             DependencyPlans.ValidateEnvironment(snapshot, lines.Skip(1));
@@ -127,7 +137,9 @@ public static class ComfyDependencyResolver
             return snapshot;
         }
         var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity + "\n" + snapshot.ComfyCommit + "\n" + snapshot.RequirementsText + "\n" + snapshot.ManagerRequirementsText
-            + (nodeIdentity.Length == 0 ? "" : "\n" + nodeIdentity)))).ToLowerInvariant();
+            + (snapshot.ComfySourceKind == "git" ? "" : "\nCOMFY_SOURCE=" + snapshot.ComfySourceKind)
+            + (nodeIdentity.Length == 0 ? "" : "\n" + nodeIdentity)
+            + (checkWorkbench ? "\nWORKBENCH_CONTRACT_V1=" + workbench.Identity + "\n" + workbench.RequirementsText : "")))).ToLowerInvariant();
         var root = Path.Combine(cacheRoot, "dependency-plans", key);
         var saved = Path.Combine(root, "resolved.json");
         // Older installers placed both plans and pip downloads one extra level down. Reuse
@@ -137,8 +149,8 @@ public static class ComfyDependencyResolver
         if (File.Exists(existingPath))
         {
             var existing = JsonFile.Read<ComfyDependencySnapshot>(existingPath);
-            if (!existing.Resolved || existing.PythonIdentity != identity || existing.ComfyCommit != snapshot.ComfyCommit
-                || existing.NodeRequirementsIdentity != nodeIdentity)
+            if (!existing.Resolved || existing.PythonIdentity != identity || existing.ComfyCommit != snapshot.ComfyCommit || existing.ComfySourceKind != snapshot.ComfySourceKind
+                || existing.NodeRequirementsIdentity != nodeIdentity || !SameWorkbench(existing))
                 throw new InvalidDataException("已有依赖快照身份不匹配，已保留原文件。");
             try
             {
@@ -156,7 +168,7 @@ public static class ComfyDependencyResolver
                 if (File.Exists(saved))
                 {
                     var reviewed = JsonFile.Read<ComfyDependencySnapshot>(saved);
-                    if (reviewed.PythonIdentity != identity || reviewed.NodeRequirementsIdentity != nodeIdentity || reviewed.ComfyCommit != snapshot.ComfyCommit)
+                    if (reviewed.PythonIdentity != identity || reviewed.NodeRequirementsIdentity != nodeIdentity || reviewed.ComfyCommit != snapshot.ComfyCommit || reviewed.ComfySourceKind != snapshot.ComfySourceKind || !SameWorkbench(reviewed))
                         throw new InvalidDataException("新检查的依赖快照身份不符。");
                     DependencyPlans.ValidateEnvironment(reviewed, lines.Skip(1));
                     reporter.Complete("已复用当前环境的依赖计划");
@@ -170,6 +182,7 @@ public static class ComfyDependencyResolver
         var constraints = Path.Combine(root, "gpu-constraints.txt");
         File.WriteAllText(requirements, snapshot.RequirementsText);
         File.WriteAllText(manager, snapshot.ManagerRequirementsText);
+        var workbenchRequirements = checkWorkbench ? WorkbenchDependencies.WriteRequirements(workbench, cacheRoot) : null;
         File.WriteAllLines(constraints, gpu.Length > 0 ? gpu : snapshot.Constraints.Where(line => Regex.IsMatch(line, @"^(torch|torchvision|torchaudio)==", RegexOptions.IgnoreCase)));
         string? sam2Directory = null;
         if (sam2Commit is not null && RequirementFiles(additional).Any(file => Installer.PinSam2(File.ReadAllText(file), sam2Commit) is not null))
@@ -183,7 +196,7 @@ public static class ComfyDependencyResolver
         using var temporary = InstallationTemporaryDirectory.Enter(Path.GetDirectoryName(Path.GetFullPath(cacheRoot))!);
         var offline = environment?.TryGetValue("PIP_NO_INDEX", out var noIndex) == true && noIndex == "1";
         var indexes = offline ? DownloadSources.PipIndexes(config) : await DependencyPackageSources.SelectIndexesAsync(config,
-            new[] { requirements, manager }.Concat(additionalFiles), ct, reporter.Log);
+            new[] { requirements, manager }.Concat(additionalFiles).Concat(workbenchRequirements is null ? [] : new[] { workbenchRequirements }), ct, reporter.Log);
         var result = await WithPackageSourcesAsync(indexes,
             needsGit ? DownloadSources.GitCandidates("https://github.com/", config) : new[] { "https://github.com/" }, async (index, gitSource) =>
         {
@@ -199,6 +212,7 @@ public static class ComfyDependencyResolver
                 "--index-url", index, "-r", requirements, "-r", manager };
             if (additionalFiles.Where((file, i) => file != additional[i]).Any()) arguments.Add("--no-build-isolation");
             foreach (var file in additionalFiles) { arguments.Add("-r"); arguments.Add(file); }
+            if (workbenchRequirements is not null) { arguments.Add("-r"); arguments.Add(workbenchRequirements); }
             await Commands.Run(config.Python, arguments, config.ComfyRoot, reporter.Log, ct, env);
             using var report = JsonDocument.Parse(File.ReadAllText(reportPath));
             var pins = MergeConstraints(lines.Skip(1), report.RootElement);
@@ -206,7 +220,8 @@ public static class ComfyDependencyResolver
             var packages = await DependencyPlans.ReadReportAsync(report.RootElement, ct, sam2Directory, sam2Commit);
             var resolved = snapshot with { Constraints = pins, Resolved = true, PythonIdentity = identity, NodeRequirementsIdentity = nodeIdentity,
                 PlanVersion = 1, PackageIndex = index, GitSource = gitSource, EnvironmentPackages = lines.Skip(1).ToArray(), Packages = packages,
-                TransportIdentity = DependencyPlans.TransportIdentity(config) };
+                TransportIdentity = DependencyPlans.TransportIdentity(config), WorkbenchDependencyContractVersion = checkWorkbench ? 1 : 0,
+                WorkbenchRequirementsText = workbench.RequirementsText, WorkbenchRequirementsIdentity = workbench.Identity };
             JsonFile.Write(saved, resolved);
             return resolved;
         }, ct, log, config);

@@ -9,7 +9,7 @@ internal static class ModelLibraryTests
 {
     public static async Task RunAsync(ModelManifest manifest, string work, Action<bool, string> check)
     {
-        var optionalIds = new[] { "krea2-turbo", "qwen3vl-krea2", "seedvr2-model", "seedvr2-vae" };
+        var optionalIds = new[] { "krea2-turbo", "qwen3vl-krea2", "seedvr2-model", "seedvr2-7b-sharp", "seedvr2-vae", "pixel-remacri", "pixel-animesharp" };
         var optional = optionalIds.Select(id => manifest.Models.Single(model => model.Id == id)).ToArray();
         check(optional.All(model => model.CanDownload && Regex.IsMatch(model.Revision, "^[a-f0-9]{40}$")
             && model.Urls.All(url => url.Contains("/resolve/" + model.Revision + "/", StringComparison.Ordinal))
@@ -21,6 +21,10 @@ internal static class ModelLibraryTests
             && optional.Where(model => model.Id.StartsWith("seedvr2-", StringComparison.Ordinal)).All(model =>
                 model.License == "Apache-2.0" && model.LicenseUrl.Length > 0),
             "Krea community license and SeedVR2 Apache license remain explicit in the catalog");
+        check(optional.Where(model => model.Category == "upscale_models").Count() == 2
+            && optional.Where(model => model.Category == "upscale_models").All(model => model.License == "CC-BY-NC-SA-4.0")
+            && optional.Single(model => model.Id == "seedvr2-7b-sharp").Size == 8334897976,
+            "pixel models retain their upstream noncommercial license and 7B uses the verified full download size");
 
         var directory = Path.Combine(work, "model-library");
         Directory.CreateDirectory(directory);
@@ -66,7 +70,8 @@ internal static class ModelLibraryTests
             _ => item,
         }).ToList();
         ModelListProjection.Refresh(rows, groups, updated);
-        check(rows.Single(row => row.Selected).Status.Model.Id == "seedvr2-vae",
+        check(rows.Where(row => row.Selected).Select(row => row.Status.Model.Id).ToHashSet()
+                .SetEquals(optionalIds.Except(["krea2-turbo", "qwen3vl-krea2", "seedvr2-model"])),
             "rescan deselects completed, abnormal existing and unresolved downloads while retaining remaining choices");
         check(rows.All(row => !row.Selected || row.CanSelect), "rescan never leaves an unselectable model checked");
 

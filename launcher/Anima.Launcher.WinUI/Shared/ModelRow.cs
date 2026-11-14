@@ -17,11 +17,11 @@ internal sealed class ModelRow(ModelStatus status) : INotifyPropertyChanged
         DownloadTaskStatus.Completed => Status.Missing ? Status.State : "已就绪",
         DownloadTaskStatus.Paused => "待继续",
         DownloadTaskStatus.Pausing => "正在保存断点",
-        DownloadTaskStatus.Failed => "下载失败",
+        DownloadTaskStatus.Failed => download.IsFeaturePreparation ? "功能准备失败" : "下载失败",
         DownloadTaskStatus.NeedsReview => "需要处理",
         DownloadTaskStatus.Canceled => "已取消 · 文件保留",
         DownloadTaskStatus.Queued => "排队中",
-        _ => download.Phase switch { "Verifying" => "校验中", "Publishing" => "正在准备模型", "RetryWaiting" or "WaitingRetry" => "等待重试", _ => "下载中" },
+        _ => download.Phase switch { "FeatureValidation" => "正在验证功能", "Installing" => "正在准备依赖", "Verifying" => "校验中", "Publishing" => "正在准备模型", "RetryWaiting" or "WaitingRetry" => "等待重试", _ => "下载中" },
     } : Status.State + (!Status.Model.CanDownload ? " / 手动" : "");
     public string SizeText => $"{Status.Model.Size / 1048576d:N0} MiB";
     public string PathText => Status.FoundPath ?? Status.Destination;
@@ -34,7 +34,7 @@ internal sealed class ModelRow(ModelStatus status) : INotifyPropertyChanged
     public bool HasDownloadError => Download is { Status: DownloadTaskStatus.Failed or DownloadTaskStatus.NeedsReview, Error.Length: > 0 };
     public string DownloadError => Download?.Error ?? "";
     public double DownloadPercent => Download?.Percent ?? 0;
-    public string TransferText => Download is not { } d ? "" : $"{d.Received / 1048576d:N1} / {d.Total / 1048576d:N1} MiB"
+    public string TransferText => Download is not { } d ? "" : (d.IsFeaturePreparation ? "完整功能准备 · " : "") + $"{d.Received / 1048576d:N1} / {d.Total / 1048576d:N1} MiB"
         + (d.Speed > 0 && d.Status == DownloadTaskStatus.Running ? $" · {d.Speed / 1048576d:N1} MiB/s" : "");
     public bool HasDownloadAction => Download is { CanPause: true } or { CanResume: true } or { CanRetry: true };
     public bool CanDownloadAction => HasDownloadAction && !actionsBlocked;

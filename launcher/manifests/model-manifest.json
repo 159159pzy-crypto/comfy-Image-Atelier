@@ -131,6 +131,23 @@
       "revision": "df48879708206a403d2a61acd55578c2e80fd233"
     },
     {
+      "id": "seedvr2-7b-sharp",
+      "name": "SeedVR2 7B Sharp INT8",
+      "group": "SeedVR2 修复放大（可选）",
+      "category": "diffusion_models",
+      "relativePath": "seedvr2_7b_sharp_int8_convrot.safetensors",
+      "aliases": [],
+      "size": 8334897976,
+      "sha256": "db48be2f1cc7e36b01a2aa529810f5d9c6a971edd29be225cf1b0eb18d51c366",
+      "urls": [
+        "https://huggingface.co/Comfy-Org/SeedVR2/resolve/df48879708206a403d2a61acd55578c2e80fd233/diffusion_models/seedvr2_7b_sharp_int8_convrot.safetensors"
+      ],
+      "sourceUrl": "https://huggingface.co/Comfy-Org/SeedVR2/blob/df48879708206a403d2a61acd55578c2e80fd233/diffusion_models/seedvr2_7b_sharp_int8_convrot.safetensors",
+      "license": "Apache-2.0",
+      "licenseUrl": "https://huggingface.co/Comfy-Org/SeedVR2/blob/df48879708206a403d2a61acd55578c2e80fd233/README.md",
+      "revision": "df48879708206a403d2a61acd55578c2e80fd233"
+    },
+    {
       "aliases": ["seedvr2_ema_vae_fp16.safetensors"],
       "size": 501324814,
       "sha256": "20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1",
@@ -151,6 +168,40 @@
       "category": "vae",
       "relativePath": "ema_vae_fp16.safetensors",
       "revision": "df48879708206a403d2a61acd55578c2e80fd233"
+    },
+    {
+      "id": "pixel-remacri",
+      "name": "4x Remacri（Anima 像素高清）",
+      "group": "像素高清（可选）",
+      "category": "upscale_models",
+      "relativePath": "4x_foolhardy_Remacri.pth",
+      "aliases": [],
+      "size": 67025055,
+      "sha256": "e1a73bd89c2da1ae494774746398689048b5a892bd9653e146713f9df8bca86a",
+      "urls": [
+        "https://huggingface.co/FacehugmanIII/4x_foolhardy_Remacri/resolve/cc321d560d74ac924feac463373b8fc4f59fee31/4x_foolhardy_Remacri.pth"
+      ],
+      "sourceUrl": "https://huggingface.co/FacehugmanIII/4x_foolhardy_Remacri/blob/cc321d560d74ac924feac463373b8fc4f59fee31/4x_foolhardy_Remacri.pth",
+      "license": "CC-BY-NC-SA-4.0",
+      "licenseUrl": "https://github.com/OpenModelDB/open-model-database/blob/233259dbb522ad8841331a8995fef884c9bf7ef9/data/models/4x-Remacri.json",
+      "revision": "cc321d560d74ac924feac463373b8fc4f59fee31"
+    },
+    {
+      "id": "pixel-animesharp",
+      "name": "4x AnimeSharp（Krea 2 像素高清）",
+      "group": "像素高清（可选）",
+      "category": "upscale_models",
+      "relativePath": "4x-AnimeSharp.pth",
+      "aliases": [],
+      "size": 67010245,
+      "sha256": "e7a7de2dafd7331c1992862bbbcd9e9712a9f9f8e6303f0aaa59b4341d359bab",
+      "urls": [
+        "https://huggingface.co/Kim2091/AnimeSharp/resolve/7696d95ced82b0c1f2a41f6ac73336133f0a90e1/4x-AnimeSharp.pth"
+      ],
+      "sourceUrl": "https://huggingface.co/Kim2091/AnimeSharp/blob/7696d95ced82b0c1f2a41f6ac73336133f0a90e1/4x-AnimeSharp.pth",
+      "license": "CC-BY-NC-SA-4.0",
+      "licenseUrl": "https://huggingface.co/Kim2091/AnimeSharp/blob/7696d95ced82b0c1f2a41f6ac73336133f0a90e1/README.md",
+      "revision": "7696d95ced82b0c1f2a41f6ac73336133f0a90e1"
     },
     {
       "id": "forbidden-vision-detect",

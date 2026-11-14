@@ -6,6 +6,7 @@ namespace Anima.Launcher.Core;
 public sealed record SetupImportReview(bool NeedsRepair, string[] MissingCoreModules)
 {
     public string[] PreparationIssues { get; init; } = [];
+    public DeclaredDependencyIssue[] DependencyIssues { get; init; } = [];
 
     public static async Task<SetupImportReview> InspectAsync(LauncherConfig config, RuntimeManifest manifest, CancellationToken ct, string? stateDir = null)
     {
@@ -23,6 +24,8 @@ print(json.dumps([name for name in ('aiohttp', 'yaml', 'torch') if importlib.uti
         var nodes = await Inventory.Nodes(config.ComfyRoot, manifest, null, ct);
         ct.ThrowIfCancellationRequested();
         var preparation = new List<string>();
+        var dependencies = await WorkbenchDependencies.InspectAsync(config, manifest, ct);
+        preparation.AddRange(dependencies.Issues.Select(issue => "依赖" + (issue.State == "unknown" ? "尚未验证" : "需要补齐") + "：" + issue.Message + "（" + issue.Source + "）"));
         var runtimeRoot = InstallationPlanner.ResolveRuntimeRoot(config,
             stateDir ?? Path.Combine(Path.GetTempPath(), "AnimaLauncher", "import-review"));
         preparation.AddRange(await SesquiRuntimePreparation.FilesIssuesAsync(config, manifest, ct));
@@ -77,6 +80,6 @@ print(json.dumps([name for name in ('aiohttp', 'yaml', 'torch') if importlib.uti
                     + string.Join("；", preparation) + ex.Message, ex);
             }
         }
-        return new(needsRepair, missing) { PreparationIssues = preparation.ToArray() };
+        return new(needsRepair, missing) { PreparationIssues = preparation.ToArray(), DependencyIssues = dependencies.Issues };
     }
 }

@@ -7,9 +7,14 @@ namespace Anima.Launcher.Core;
 public sealed record ComfyRelease(string Tag, string Commit, DateTimeOffset? PublishedAt, string ReleaseUrl);
 public sealed record ComfyDependencySnapshot(string ComfyCommit, string RequirementsText, string ManagerRequirementsText, string[] Constraints)
 {
+    public string ComfySourceKind { get; init; } = "git";
     public bool Resolved { get; init; }
     public string PythonIdentity { get; init; } = "";
     public string NodeRequirementsIdentity { get; init; } = "";
+    // Missing in historical plans: those keep their original dependency scope on resume.
+    public int WorkbenchDependencyContractVersion { get; init; }
+    public string WorkbenchRequirementsText { get; init; } = "";
+    public string WorkbenchRequirementsIdentity { get; init; } = "";
     public int PlanVersion { get; init; }
     public string PackageIndex { get; init; } = "";
     public string GitSource { get; init; } = "";

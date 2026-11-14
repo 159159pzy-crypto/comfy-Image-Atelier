@@ -64,16 +64,44 @@ public static class SetupModelSelection
                 choices.Add(new(id, label, description, selected, selected.Sum(modelId => byId[modelId].Size), recommended));
         }
         if (includeBase) Add("base", "推荐基础模型", "可使用已有兼容模型；仅勾选时下载本档案的推荐三件套。", profiles.RequiredModels(models, profile).Select(model => model.Id));
-        Add("seedvr2", "SeedVR2 修复放大", "仅使用此功能时需要；已有兼容模型可在工作台选择。", SeedModelIds);
-        Add("krea2", "Krea 2 图像生成", "Krea 2 Turbo 与文本编码器，共用基础 Qwen VAE。", ["krea2-turbo", "qwen3vl-krea2", "qwen-vae"]);
+        Add("seedvr2", "SeedVR2 3B INT8 修复放大", "保留当前默认模型；已有兼容模型可在工作台选择。", SeedModelIds);
+        if (byId.ContainsKey("seedvr2-7b-sharp"))
+            Add("seedvr2-7b", "SeedVR2 7B Sharp INT8", "可选的 7B Sharp 模型，与 3B 共用 VAE；安装后可在工作台选择。", ["seedvr2-7b-sharp", "seedvr2-vae"]);
+        Add("pixel_hires", "像素高清默认模型", "准备当前档案的像素放大模型；保持像素高清默认关闭。", [profile == "krea2" ? "pixel-animesharp" : "pixel-remacri"]);
+        if (profile != "krea2") Add("krea2", "Krea 2 图像生成", "Krea 2 Turbo 与文本编码器，共用基础 Qwen VAE。", ["krea2-turbo", "qwen3vl-krea2", "qwen-vae"]);
         Add("face-refine", "脸部细化默认模型", "集成脸部细化使用的人脸检测与分割模型。", ["forbidden-vision-detect", "forbidden-vision-segment"]);
         foreach (var model in models.Models.Where(model => model.Category == "wd_taggers").OrderByDescending(model => model.Recommended))
             Add(model.Id, "本地反推 · " + model.Name, "从图片提取标签；各反推模型可独立选择。", [model.Id], model.Recommended);
-        if (includeBase) choices.Add(new("sesqui", "Sesqui 潜变量处理", "用于双采样中间处理或 Sesqui 潜空间放大。", [SetupFeatures.Prefix + "sesqui"], SesquiRuntimePreparation.Weight.Size));
+        if (includeBase || profile == "krea2") choices.Add(new("sesqui", "Sesqui 潜变量处理", "用于双采样中间处理或 Sesqui 潜空间放大。", [SetupFeatures.Prefix + "sesqui"], SesquiRuntimePreparation.Weight.Size));
         choices.Add(new("nvidia", "N 卡 VSR", "独立准备 VSR 节点与 VFX 运行库，支持情况在检查时确认。", [SetupFeatures.Prefix + "nvidia"], 0));
         choices.Add(new("dlss", "DLSS", "独立准备 DLSS 节点与当前显卡对应运行库。", [SetupFeatures.Prefix + "dlss"], 0));
         choices.Add(new("prompt-assistant", "提示词助手", "需要重写或视觉反推时安装对应节点。", [SetupFeatures.Prefix + "prompt-assistant"], 0));
         return choices.ToImmutable();
+    }
+
+    public static string[] SetChoiceSelected(IEnumerable<SetupModelChoice> choices, IEnumerable<string> selectedModelIds,
+        string choiceId, bool selected)
+    {
+        var available = choices.ToArray();
+        var choice = available.Single(item => item.Id == choiceId);
+        var ids = selectedModelIds.ToHashSet(StringComparer.Ordinal);
+        if (selected) ids.UnionWith(choice.ModelIds);
+        else
+        {
+            var retained = available.Where(item => item.Id != choiceId && item.ModelIds.All(ids.Contains))
+                .SelectMany(item => item.ModelIds).ToArray();
+            ids.ExceptWith(choice.ModelIds);
+            ids.UnionWith(retained);
+        }
+        return ids.Order(StringComparer.Ordinal).ToArray();
+    }
+
+    /// <summary>Expand a new selection, never a frozen download plan.</summary>
+    public static string[] IncludeDependencies(IEnumerable<string> modelIds)
+    {
+        var ids = modelIds.ToHashSet(StringComparer.Ordinal);
+        if (ids.Overlaps(["seedvr2-model", "seedvr2-7b-sharp"])) ids.Add("seedvr2-vae");
+        return ids.Order(StringComparer.Ordinal).ToArray();
     }
 
     public static ModelItem[] Resolve(ModelManifest models, ModelProfilesManifest profiles, string profile,
@@ -86,26 +114,27 @@ public static class SetupModelSelection
         return required.Concat(selected).DistinctBy(model => model.Id).ToArray();
     }
 
-    /// <summary>Skipping a failed feature skips its complete optional model set, never a required model.</summary>
+    /// <summary>Skip failed choices while retaining resources needed by other selected choices.</summary>
     public static string[] ExpandSkippedOptionalIds(ModelManifest models, ModelProfilesManifest profiles, string profile,
-        IEnumerable<string> failedModelIds, bool allowBase = false)
+        IEnumerable<string> failedModelIds, bool allowBase = false, IEnumerable<string>? selectedModelIds = null)
     {
         var required = (allowBase ? [] : MandatoryModels(models, profiles, profile).Select(model => model.Id)).ToHashSet(StringComparer.Ordinal);
-        var skipped = failedModelIds.Where(id => !required.Contains(id)).ToHashSet(StringComparer.Ordinal);
+        var failed = failedModelIds.Where(id => !required.Contains(id)).ToHashSet(StringComparer.Ordinal);
         var choices = Choices(models, profiles, profile, includeBase: allowBase);
-        foreach (var id in skipped.Where(SetupFeatures.IsCapability).ToArray())
+        foreach (var id in failed.Where(SetupFeatures.IsCapability).ToArray())
         {
             var feature = id[SetupFeatures.Prefix.Length..];
-            foreach (var choice in choices.Where(choice => choice.Id == feature || feature == "tagger" && choice.ModelIds.Any(RuntimeCapabilities.IsTaggerModel)))
-                skipped.UnionWith(choice.ModelIds);
+            foreach (var choice in choices.Where(choice => choice.Id == feature
+                || SetupFeatures.Resolve(false, choice.ModelIds).Contains(feature)))
+                failed.UnionWith(choice.ModelIds);
         }
-        int previousCount;
-        do
-        {
-            previousCount = skipped.Count;
-            foreach (var choice in choices)
-                if (choice.ModelIds.Any(skipped.Contains)) skipped.UnionWith(choice.ModelIds);
-        } while (skipped.Count != previousCount);
+        var selected = (selectedModelIds ?? choices.Where(choice => choice.ModelIds.Any(failed.Contains))
+            .SelectMany(choice => choice.ModelIds)).ToHashSet(StringComparer.Ordinal);
+        var skipped = failed.Concat(choices.Where(choice => choice.ModelIds.All(selected.Contains) && choice.ModelIds.Any(failed.Contains))
+            .SelectMany(choice => choice.ModelIds)).ToHashSet(StringComparer.Ordinal);
+        var retained = choices.Where(choice => choice.ModelIds.All(selected.Contains) && !choice.ModelIds.Any(failed.Contains))
+            .SelectMany(choice => choice.ModelIds).Concat(required);
+        skipped.ExceptWith(retained);
         return skipped.Order(StringComparer.Ordinal).ToArray();
     }
 

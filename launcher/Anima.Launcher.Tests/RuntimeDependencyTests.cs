@@ -216,6 +216,7 @@ internal static class RuntimeDependencyTests
         // Exercise real pip resolution offline with tiny local wheels. No package is installed.
         var repository = File.Exists(Path.Combine(Environment.CurrentDirectory, "launcher", "manifests", "launcher-manifest.json"))
             ? Environment.CurrentDirectory : Directory.GetParent(work)!.Parent!.Parent!.FullName;
+        count += await WorkbenchDependencyTests.Run(work, repository);
         var python = Path.Combine(repository, ".venv", "Scripts", "python.exe");
         if (File.Exists(python))
         {
@@ -248,8 +249,34 @@ internal static class RuntimeDependencyTests
                 "joint core Manager and node resolution revises a core-only pin while keeping all requirements satisfiable");
             Check(combined.NodeRequirementsIdentity.Length == 64 && combined.NodeRequirementsIdentity != coreOnly.NodeRequirementsIdentity,
                 "resolved dependency plan binds the selected node requirements");
+            var app = Path.Combine(fixture, "selected-workbench"); Directory.CreateDirectory(app);
+            File.WriteAllText(Path.Combine(app, "pyproject.toml"), "[project]\ndependencies=['anima-fixture-shared<2']\n");
+            var withWorkbench = fixtureConfig.Clone(); withWorkbench.AppRoot = app;
+            var workbench = await ComfyDependencyResolver.ResolveAsync(withWorkbench, snapshot, cache, default, environment: env);
+            Check(workbench.WorkbenchDependencyContractVersion == 1 && workbench.WorkbenchRequirementsIdentity.Length == 64
+                && workbench.Constraints.Contains("anima-fixture-shared==1.0"),
+                "workbench requirements participate in joint resolution and receive their own cache identity");
+            Check(DependencyInstallation.PlanIdentity(workbench) != DependencyInstallation.PlanIdentity(workbench with { WorkbenchRequirementsIdentity = new string('c', 64) }),
+                "artifact completion receipts also bind the reviewed workbench dependency contract");
+            var historical = await ComfyDependencyResolver.ResolveAsync(withWorkbench, snapshot, cache, default, environment: env, includeWorkbench: false);
+            Check(historical.WorkbenchDependencyContractVersion == 0 && historical.Constraints.Contains("anima-fixture-shared==2.0"),
+                "an unresolved historical installation explicitly preserves its original dependency scope");
+            File.WriteAllText(Path.Combine(app, "pyproject.toml"), "[project]\ndependencies=['anima-fixture-shared>=2']\n");
+            try
+            {
+                await ComfyDependencyResolver.ResolveAsync(withWorkbench, workbench, cache, default, environment: env);
+                throw new Exception("Expected reviewed workbench contract change rejection");
+            }
+            catch (InvalidOperationException error)
+            { Check(error.Message.Contains("工作台依赖"), "a changed workbench contract cannot silently alter a frozen dependency plan"); }
+            var changedWorkbench = await ComfyDependencyResolver.ResolveAsync(withWorkbench, snapshot, cache, default, environment: env);
+            Check(changedWorkbench.WorkbenchRequirementsIdentity != workbench.WorkbenchRequirementsIdentity
+                && changedWorkbench.Constraints.Contains("anima-fixture-shared==2.0"),
+                "a fresh review after workbench changes obtains a distinct compatible dependency plan");
+            Check(ReferenceEquals(historical, await ComfyDependencyResolver.ResolveAsync(withWorkbench, historical, cache, default, environment: env)),
+                "a resolved legacy plan does not acquire workbench requirements when resumed");
             var saved = Directory.GetFiles(Path.Combine(cache, "dependency-plans"), "resolved.json", SearchOption.AllDirectories)
-                .Single(path => JsonFile.Read<ComfyDependencySnapshot>(path).NodeRequirementsIdentity == "");
+                .Single(path => JsonFile.Read<ComfyDependencySnapshot>(path) is { NodeRequirementsIdentity: "", WorkbenchDependencyContractVersion: 1, WorkbenchRequirementsIdentity: "" });
             var relative = Path.GetRelativePath(cache, saved);
             var legacy = Path.Combine(cache, "dependencies", relative);
             Directory.CreateDirectory(Path.GetDirectoryName(legacy)!);

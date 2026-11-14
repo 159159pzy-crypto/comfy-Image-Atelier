@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 import xml.etree.ElementTree as ET
+from zipfile import ZipFile
 
 
 def export(assets: Path, output: Path) -> None:
@@ -43,10 +44,19 @@ def export(assets: Path, output: Path) -> None:
                        "License: " + entry["license"] + "\nProject: " + entry["project"] + "\n")
         for path in sorted(paths):
             notices.append("\n--- " + path.name + " ---\n" + path.read_text(encoding="utf-8-sig", errors="replace"))
+    vendor = Path(__file__).resolve().parents[1] / "vendor"
+    parser_notice = (vendor / "packaging-UPSTREAM.txt").read_text(encoding="utf-8")
+    inventory.append({"package": "packaging/26.0", "license": "Apache-2.0 OR BSD-2-Clause",
+                      "project": "https://github.com/pypa/packaging", "authors": "Python Packaging Authority",
+                      "notice_files": ["packaging-UPSTREAM.txt", "LICENSE", "LICENSE.APACHE", "LICENSE.BSD"]})
+    notices.append("\n" + "=" * 72 + "\n" + parser_notice)
+    with ZipFile(vendor / "packaging-26.0.zip") as archive:
+        for name in ("LICENSE", "LICENSE.APACHE", "LICENSE.BSD"):
+            notices.append("\n--- packaging/" + name + " ---\n" + archive.read("licenses/" + name).decode("utf-8"))
     output.mkdir(parents=True, exist_ok=True)
     introduction = (
         "Comfy Image Atelier - third-party notices\n"
-        "This inventory covers restored launcher packages and runtime packs, including build-only dependencies.\n"
+        "This inventory covers restored launcher packages, runtime packs and the private Python requirement parser, including build-only dependencies.\n"
         "Not every listed package is redistributed. Original notices are reproduced below.\n"
         "ComfyUI, Python packages, custom nodes and models are downloaded separately and retain their own licenses.\n"
         "H.NotifyIcon license source: https://github.com/HavenDV/H.NotifyIcon/blob/f7dc5cbb9b7a598236148af30b50d675d85c32c2/LICENSE.md\n"

@@ -188,6 +188,8 @@ internal sealed partial class LauncherState
                 if (Busy) { SetStatus("请等待当前环境操作结束后继续安装。"); return; }
                 var plan = owner.Payload?.Deserialize<InstallationPlan>(JsonFile.Options)
                     ?? throw new InvalidDataException("安装任务缺少已确认的固定计划。");
+                if (FeaturePreparation.IsFeaturePlan(plan) && SetupActive)
+                { SetStatus("请先完成或退出当前安装向导，再继续完整功能准备。"); return; }
                 foreach (var active in DownloadTasks.Owners.Where(o => o.Kind == "models" && o.Status == DownloadTaskStatus.Running
                     && SamePath(o.EnvironmentRoot, owner.EnvironmentRoot)))
                     await DownloadTasks.PauseOwnerAsync(active.Id);
@@ -286,12 +288,15 @@ internal sealed partial class LauncherState
             var revision = JsonFile.Read<JsonElement>(receipt);
             if (revision.TryGetProperty("commit", out var commit)) installedCommit = commit.GetString();
         }
-        var recovery = DownloadOwnerRecovery.Prepare(owner, plan, Setup, Program.Models, Program.ModelProfiles, installedCommit);
+        var recovery = DownloadOwnerRecovery.Prepare(owner, plan, FeaturePreparation.IsFeaturePlan(plan) ? null : Setup,
+            Program.Models, Program.ModelProfiles, installedCommit);
         Config = WithSavedDownloadSettings(recovery.Configuration);
         plan = recovery.Plan;
         activeInstallationPlan = plan;
         FreshInstallRequested = plan.Fresh;
-        if (owner.Kind == "setup")
+        if (FeaturePreparation.IsFeaturePlan(plan))
+            await ExecuteFeaturePreparationAsync(plan, ct);
+        else if (owner.Kind == "setup")
         {
             Setup = recovery.Setup;
             SetupPlan = plan;

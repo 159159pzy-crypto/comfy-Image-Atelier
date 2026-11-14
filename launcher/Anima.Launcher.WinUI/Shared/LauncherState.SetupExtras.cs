@@ -15,9 +15,8 @@ internal sealed partial class LauncherState
     public async Task SelectSetupModelsAsync(SetupModelChoice choice, bool selected)
     {
         if (Busy || Setup.Step != SetupStep.Review) return;
-        var ids = (Setup.OptionalModelIds ?? []).ToHashSet(StringComparer.Ordinal);
-        if (selected) ids.UnionWith(choice.ModelIds); else ids.ExceptWith(choice.ModelIds);
-        Setup.OptionalModelIds = ids.Order(StringComparer.Ordinal).ToArray();
+        var choices = SetupModelSelection.Choices(Program.Models, Program.ModelProfiles, Setup.Draft.SelectedProfile, includeBase: !Setup.Fresh);
+        Setup.OptionalModelIds = SetupModelSelection.SetChoiceSelected(choices, Setup.OptionalModelIds ?? [], choice.Id, selected);
         InvalidateSetupReview();
         PersistSetup();
         await CheckSetupAsync();
@@ -85,7 +84,7 @@ internal sealed partial class LauncherState
     {
         Setup.ModelsPending = false;
         Setup.Draft = Config.Clone();
-        Setup.Step = Setup.AssistantStatus == AssistantSetupStatus.Pending ? SetupStep.Assistant : SetupStep.Complete;
+        Setup.Step = SetupRouting.AfterModels(Setup);
         SetupAssistantReady = false;
         setupRetryAvailable = false;
         SetupError = "";
@@ -99,12 +98,13 @@ internal sealed partial class LauncherState
         if (!SetupCanSkipOptional) return;
         Setup.SkippedOptionalModelIds = SetupModelSelection.ExpandSkippedOptionalIds(OperationModels, OperationProfiles,
             Config.SelectedProfile, Setup.SkippedOptionalModelIds.Concat(setupFailedOptionalModelIds),
-            allowBase: (activeInstallationPlan ?? Setup.ReviewedPlan) is { ResourcePolicyVersion: > 0, Fresh: false });
+            allowBase: (activeInstallationPlan ?? Setup.ReviewedPlan) is { ResourcePolicyVersion: > 0, Fresh: false },
+            selectedModelIds: Setup.OptionalModelIds);
         Setup.OptionalModelIds = Setup.OptionalModelIds.Except(Setup.SkippedOptionalModelIds).ToArray();
         Setup.FailedFeatureIds = [];
         setupEnvironmentFailures.Clear();
         AdvanceAfterSetupModels();
-        SetupNotice = "已跳过未完成的可选模型，可稍后在模型资源页继续下载。";
+        SetupNotice = "已跳过未完成的可选功能，可稍后在模型资源页一键准备完整功能。";
         NotifySetup();
     }
 
@@ -116,7 +116,18 @@ internal sealed partial class LauncherState
         await Run(async ct =>
         {
             await StartComfyAsync(ct);
+            var nodes = await ServiceManager.Json(Config.ComfyUrl + "/object_info", ct)
+                ?? throw new IOException("无法读取提示词助手安装状态，请确认 ComfyUI 已启动。");
+            Setup.AssistantAvailable = nodes.TryGetProperty("PromptExpand", out _) && nodes.TryGetProperty("ImageCaptionNode", out _);
+            if (Setup.AssistantAvailable == false)
+            {
+                AdvanceAfterSetupModels();
+                SetupNotice = "提示词助手尚未安装或未成功加载，已跳过配置。可在模型资源页准备提示词助手功能。";
+                NotifySetup();
+                return;
+            }
             SetupAssistantReady = true;
+            PersistSetup();
         }, applyDrafts: false, setupOperation: true);
     }
 

@@ -144,6 +144,13 @@ var testArtifacts = Environment.GetEnvironmentVariable("ANIMA_LAUNCHER_TEST_ROOT
 var work = Path.Combine(string.IsNullOrWhiteSpace(testArtifacts) ? Path.Combine(root, "output", "launcher-tests") : Path.GetFullPath(testArtifacts), Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(work);
 var count = 0;
+if (args.Contains("--feature-preparation-only"))
+{
+    count += await FeaturePreparationTests.Run(work, manifest, models,
+        JsonFile.Read<ModelProfilesManifest>(Path.Combine(manifestDir, "model-profiles.json")));
+    count += ModelDownloadProjectionTests.Run(work);
+    Console.WriteLine($"{count} feature preparation checks passed; artifacts: {work}"); return;
+}
 if (args.Contains("--installation-readiness-only"))
 {
     count += await InstallationReadinessTests.Run(work, manifest);
@@ -413,6 +420,8 @@ if (args.Contains("--tagger-only"))
     return;
 }
 count += await OnboardingTests.Run(work, manifest);
+count += await FeaturePreparationTests.Run(work, manifest, models,
+    JsonFile.Read<ModelProfilesManifest>(Path.Combine(manifestDir, "model-profiles.json")));
 count += await SetupCompletionTests.Run(work);
 count += await ResourcePolicyTests.Run(work, manifest);
 count += await InstallationReadinessTests.Run(work, manifest);

@@ -101,6 +101,8 @@ internal static class InstallationReadinessTests
             ("anima-base-v1", "diffusion_models", "anima-base-v1.0.safetensors"),
             ("qwen-text", "text_encoders", "qwen.safetensors"), ("qwen-vae", "vae", "qwen_vae.safetensors"),
             ("seedvr2-model", "diffusion_models", "seedvr2.safetensors"), ("seedvr2-vae", "vae", "seedvr2_vae.safetensors"),
+            ("seedvr2-7b-sharp", "diffusion_models", "seedvr2_7b_sharp_int8_convrot.safetensors"),
+            ("pixel-remacri", "upscale_models", "4x_foolhardy_Remacri.pth"),
             ("krea2-turbo", "diffusion_models", "krea.safetensors"), ("qwen3vl-krea2", "text_encoders", "krea_clip.safetensors"),
             ("forbidden-vision-detect", "forbidden_vision", "face.pt") };
         var bytes = Encoding.UTF8.GetBytes("verified fixture");
@@ -154,6 +156,61 @@ internal static class InstallationReadinessTests
             handler.AnimaAvailable = false;
             var unconfigured = await checker.CheckAsync(config, minimalRuntime, models, profiles, [], default);
             Check(unconfigured.RequiredReady && unconfigured.ConfigurationIssues.Any(issue => issue.Feature == "base"), "missing compatible base model allows configuration without pretending generation is ready");
+            Check(!(await checker.CheckAsync(config, minimalRuntime, models, profiles, [], default, requiredFeatures: ["base"])).RequiredReady,
+                "fresh mandatory base resources cannot be downgraded to configuration-only issues");
+            handler.AnimaAvailable = true;
+            handler.ExtraIssues = [new { module = "base_dual", field = "nodes.SesquiLatentUpscale", code = "missing_node", message = "缺少 Sesqui 节点" }];
+            var requiredSesqui = await checker.CheckAsync(config, minimalRuntime, models, profiles, [], default, features: ["sesqui"], requiredFeatures: ["sesqui"]);
+            Check(!requiredSesqui.RequiredReady && requiredSesqui.ConfigurationIssues.Length == 0, "new default Sesqui failure blocks installation instead of becoming model configuration");
+            var optionalSesqui = await checker.CheckAsync(config, minimalRuntime, models, profiles, [], default, features: ["sesqui"]);
+            Check(optionalSesqui.RequiredReady && optionalSesqui.OptionalIssues.Any(item => item.ModelId == "capability:sesqui"), "imported optional Sesqui failure remains an explicit skippable feature");
+            handler.ExtraIssues = [new { module = "base_dual", field = "capabilities.sesqui.Wan 2.1", code = "missing_runtime", message = "缺少 Sesqui 权重" }];
+            Check(!(await checker.CheckAsync(config, minimalRuntime, models, profiles, [], default, features: ["sesqui"], requiredFeatures: ["sesqui"])).RequiredReady, "missing mandatory Sesqui runtime files cannot complete installation");
+            handler.ExtraIssues = [new { module = "base", field = "nodes.UNETLoader", code = "missing_node", message = "缺少核心节点" }];
+            Check(!(await checker.CheckAsync(config, minimalRuntime, models, profiles, [], default)).RequiredReady, "missing core node is not misreported as a configurable base model");
+            handler.ExtraIssues = [];
+            handler.SettingsRequests.Clear();
+            var bothSeed = await checker.CheckAsync(config, minimalRuntime, models, profiles,
+                ["seedvr2-model", "seedvr2-7b-sharp", "seedvr2-vae"], default);
+            Check(bothSeed.Ready && handler.SettingsRequests.Select(settings => settings.GetProperty("upscalers").GetProperty("seedvr2").GetProperty("model_name").GetString())
+                .ToHashSet().SetEquals(["seedvr2.safetensors", "seedvr2_7b_sharp_int8_convrot.safetensors"]), "each selected SeedVR2 variant is verified without changing profile defaults");
+            handler.SubstituteSeed = true;
+            var substituted = await checker.CheckAsync(config, minimalRuntime, models, profiles, ["seedvr2-7b-sharp", "seedvr2-vae"], default);
+            Check(!substituted.Ready && substituted.OptionalIssues.Any(issue => issue.ModelId == "seedvr2-7b-sharp"), "a compatible 3B substitution cannot certify a selected 7B download");
+            handler.SubstituteSeed = false;
+            var vaeFile = Path.Combine(config.ComfyRoot, "models", "vae", "seedvr2_vae.safetensors");
+            var aliasFile = Path.Combine(config.ComfyRoot, "models", "vae", "SeedVR2", "seedvr2_ema_vae_fp16.safetensors");
+            Directory.CreateDirectory(Path.GetDirectoryName(aliasFile)!);
+            File.Move(vaeFile, aliasFile);
+            handler.VaeChoice = "SeedVR2/seedvr2_ema_vae_fp16.safetensors";
+            var aliasModels = models with { Models = models.Models.Select(model => model.Id == "seedvr2-vae"
+                ? model with { Aliases = ["seedvr2_ema_vae_fp16.safetensors"] } : model).ToArray() };
+            Check((await checker.CheckAsync(config, minimalRuntime, aliasModels, profiles, ["seedvr2-7b-sharp", "seedvr2-vae"], default)).Ready
+                && handler.LastSettings.GetProperty("upscalers").GetProperty("seedvr2").GetProperty("vae_name").GetString() == handler.VaeChoice,
+                "7B readiness binds and verifies the existing VAE alias in its real subfolder");
+            handler.ExtraIssues = [new { module = "seedvr2", field = "upscalers.seedvr2.vae_name", code = "incompatible_model", message = "共享 VAE 不可用" }];
+            var badVae = await checker.CheckAsync(config, minimalRuntime, aliasModels, profiles, ["seedvr2-model", "seedvr2-7b-sharp", "seedvr2-vae"], default);
+            Check(!badVae.Ready && badVae.OptionalIssues.Select(issue => issue.ModelId).ToHashSet().IsSupersetOf(["seedvr2-model", "seedvr2-7b-sharp"]),
+                "a failed shared VAE prevents both selected SeedVR2 variants from being marked ready");
+            handler.ExtraIssues = [];
+            File.Move(aliasFile, vaeFile);
+            handler.VaeChoice = "seedvr2_vae.safetensors";
+            handler.SettingsRequests.Clear();
+            Check((await checker.CheckAsync(config, minimalRuntime, models, profiles, ["krea2-turbo", "qwen3vl-krea2", "qwen-vae"], default)).Ready
+                && handler.LastSettings.GetProperty("model_profile").GetString() == "krea2"
+                && handler.LastSettings.GetProperty("model_name").GetString() == "krea.safetensors"
+                && config.SelectedProfile == "anima", "optional Krea verifies its own profile without requiring or changing the active Anima profile");
+            Check((await checker.CheckAsync(config, minimalRuntime, models, profiles, ["pixel-remacri"], default, features: ["pixel_hires"])).Ready
+                && handler.LastSettings.GetProperty("upscalers").GetProperty("pixel_hires").GetProperty("model_name").GetString() == "4x_foolhardy_Remacri.pth", "pixel high-resolution checks the selected upscale model explicitly");
+            handler.HideAssistant = true;
+            var noAssistant = await checker.CheckAsync(config, minimalRuntime, models, profiles, [], default);
+            Check(noAssistant.Ready && !noAssistant.PromptAssistantAvailable, "an unselected absent prompt assistant does not prevent completion");
+            var receipt = new SetupRecord { AssistantStatus = AssistantSetupStatus.Pending, AssistantAvailable = noAssistant.PromptAssistantAvailable };
+            Check(SetupRouting.AfterModels(receipt) == SetupStep.Complete, "uninstalled prompt assistant skips provider configuration");
+            receipt.AssistantAvailable = true;
+            Check(SetupRouting.AfterModels(receipt) == SetupStep.Assistant, "an existing prompt assistant keeps its configuration entry");
+            receipt.AssistantStatus = AssistantSetupStatus.Skipped;
+            Check(SetupRouting.AfterModels(receipt) == SetupStep.Complete, "an explicitly skipped provider step is preserved");
         }
         using (var values = JsonDocument.Parse("{\"seedvr2_models\":[\"a/seedvr2.safetensors\",\"b/seedvr2.safetensors\"]}"))
             Check(!SetupRuntimeReadiness.ContainsResource(values.RootElement, "seedvr2_models", "seedvr2.safetensors"), "ambiguous model basename is never treated as a usable binding");
@@ -204,23 +261,30 @@ internal static class InstallationReadinessTests
         public string[] Warnings = [];
         public int ExpressionCount = 1;
         public JsonElement LastSettings;
+        public List<JsonElement> SettingsRequests = [];
+        public object[] ExtraIssues = [];
+        public bool SubstituteSeed, HideAssistant;
+        public string VaeChoice = "seedvr2_vae.safetensors";
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             if (request.RequestUri!.AbsolutePath == "/api/resources/resolve")
             {
                 using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
                 LastSettings = body.RootElement.GetProperty("settings").Clone();
+                SettingsRequests.Add(LastSettings);
             }
             object value = request.RequestUri!.AbsolutePath switch
             {
                 "/system_stats" => new { system = new { argv = new[] { Path.Combine(config.ComfyRoot, "main.py") } } },
                 "/api/launcher-health" => new { app_dir = config.AppRoot, data_dir = config.DataDir, comfy_url = config.ComfyUrl },
                 "/api/status" => new { online = Online },
-                "/api/resources/resolve" => new { version = 1, ready = AnimaAvailable, issues = AnimaAvailable ? Array.Empty<object>() : new object[] { new { module = "base", field = "model_name", code = "missing", message = "选择兼容主模型" } }, replacements = Array.Empty<object>(), effective_settings = new { } },
+                "/api/resources/resolve" => new { version = 1, ready = AnimaAvailable, issues = (AnimaAvailable ? Array.Empty<object>() : new object[] { new { module = "base", field = "model_name", code = "missing", message = "选择兼容主模型" } }).Concat(ExtraIssues), replacements = Array.Empty<object>(), effective_settings = SubstituteSeed
+                    ? JsonSerializer.SerializeToElement(new { upscalers = new { seedvr2 = new { model_name = "seedvr2.safetensors", vae_name = "seedvr2_vae.safetensors" } } }) : LastSettings },
                 "/api/resources" => new { model_profiles = new { anima = new { available = new { model = AnimaAvailable, clip = true, vae = true } } }, seedvr2_models = new[] { "seedvr2.safetensors" }, seedvr2_vaes = new[] { "seedvr2_vae.safetensors" } },
                 "/api/config" => new { catalog = new { available = CatalogReady, discovery = new { status = DiscoveryStatus, message = "fixture" }, counts = new { character = 1, clothing = 2, pose = 3, background = 4, expression = ExpressionCount } }, warnings = Warnings },
-                "/internal/folder_paths" => new Dictionary<string, string[]> { ["diffusion_models"] = [Path.Combine(config.ComfyRoot, "models", "diffusion_models")], ["text_encoders"] = [Path.Combine(config.ComfyRoot, "models", "text_encoders")], ["vae"] = [Path.Combine(config.ComfyRoot, "models", "vae")] },
+                "/internal/folder_paths" => new Dictionary<string, string[]> { ["diffusion_models"] = [Path.Combine(config.ComfyRoot, "models", "diffusion_models")], ["text_encoders"] = [Path.Combine(config.ComfyRoot, "models", "text_encoders")], ["vae"] = [Path.Combine(config.ComfyRoot, "models", "vae")], ["upscale_models"] = [Path.Combine(config.ComfyRoot, "models", "upscale_models")] },
                 "/object_info" => new Dictionary<string, object> {
+                    ["VAELoader"] = Node(new() { ["vae_name"] = new[] { new[] { VaeChoice } } }),
                     ["SesquiLatentUpscale"] = Node(new() { ["latent"] = new[] { "LATENT" }, ["scale"] = new[] { "FLOAT" }, ["half_precision"] = new[] { "BOOLEAN" }, ["model_format"] = new[] { new[] { "Wan 2.1" } } }),
                     ["CLIPLoader"] = Node(new() { ["type"] = new[] { new[] { "stable_diffusion" } } }),
                     ["PromptExpand"] = Node(new() { ["template_only"] = new[] { "BOOLEAN" } }),
@@ -231,6 +295,8 @@ internal static class InstallationReadinessTests
                     ["ImageCaptionNode"] = Node(new() { ["image"] = new[] { "IMAGE" }, ["vlm_service"] = new[] { "STRING" }, ["custom_rule"] = new[] { "BOOLEAN" }, ["custom_rule_content"] = new[] { "STRING" } }) },
                 _ => throw new Exception("Unexpected readiness request: " + request.RequestUri),
             };
+            if (HideAssistant && request.RequestUri!.AbsolutePath == "/object_info" && value is Dictionary<string, object> catalog)
+            { catalog.Remove("PromptExpand"); catalog.Remove("ImageCaptionNode"); }
             return Json(value);
         }
         private static object Node(Dictionary<string, object> fields) => new { input = new { required = fields } };

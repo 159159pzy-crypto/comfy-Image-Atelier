@@ -112,9 +112,11 @@ internal sealed partial class LauncherState
         {
             RefreshModelDownloadRows(live: true);
             if (row.Download is not { } state) return;
-            var owners = DownloadTasks.EnsureResourceOwners(state.OwnerId);
-            var owner = owners.Single(o => o.Models.Any(m => m.Model.Id == row.Status.Model.Id));
-            if (state.CanPause) await DownloadTasks.PauseOwnerAsync(owner.Id);
+            var source = DownloadTasks.Owners.Single(owner => owner.Id == state.OwnerId);
+            var owner = FeaturePreparation.IsFeatureOwner(source) ? source
+                : DownloadTasks.EnsureResourceOwners(state.OwnerId).Single(o => o.Models.Any(m => m.Model.Id == row.Status.Model.Id));
+            if (state.CanPause && FeaturePreparation.IsFeatureOwner(owner)) await PauseInstallationDownloadAsync(owner.Id);
+            else if (state.CanPause) await DownloadTasks.PauseOwnerAsync(owner.Id);
             else if (state.CanResume || state.CanRetry) await ResumeDownloadOwnerAsync(owner.Id);
         }
         catch (Exception ex) { AppendLog(ex.Message); SetStatus("模型操作未完成：" + ex.Message); }

@@ -38,6 +38,13 @@ public sealed record InstallationPlan(
     string ConfigurationJson, string ComfyRoot, string RuntimeRoot, string SelectedProfile, bool Fresh,
     long EnvironmentBytes, long RuntimeBytes, long EstimatedDownloadBytes, ImmutableArray<string> Stages)
 {
+    // Missing in historical receipts: old owners retain their original behavior.
+    public string Purpose { get; init; } = "environment";
+    public string[] RequestedChoices { get; init; } = [];
+    public string DependencyCheckpointId { get; init; } = "";
+    // Read-only findings shown in the confirmation; not a replacement for final validation.
+    public string[] DependencyReviewIssues { get; init; } = [];
+    public int WorkbenchDependencyContractVersion { get; init; }
     public RuntimeManifest? ResolvedRuntime { get; init; }
     // Absent in historical receipts: those retain their original frozen contract.
     public int ResourcePolicyVersion { get; init; }
@@ -265,7 +272,7 @@ public static class InstallationPlanner
             : new[] { "检查现有环境", "补齐缺失节点", "验证依赖", "检查所选模型" }).ToImmutableArray();
         return new(JsonSerializer.Serialize(snapshot, JsonFile.Options), snapshot.ComfyRoot, snapshot.RuntimeRoot,
             snapshot.SelectedProfile, fresh, environmentReserve + environmentDownloads, runtimeReserve + runtimeDownloads, networkDownloads, stages)
-        { ResourcePolicyVersion = SetupFeatures.PolicyVersion, Features = features, ResolvedRuntime = fresh ? null : manifest, EnvironmentReserveBytes = environmentReserve, RuntimeReserveBytes = runtimeReserve, Downloads = artifacts.ToImmutableArray(),
+        { WorkbenchDependencyContractVersion = 1, ResourcePolicyVersion = SetupFeatures.PolicyVersion, Features = features, ResolvedRuntime = fresh ? null : manifest, EnvironmentReserveBytes = environmentReserve, RuntimeReserveBytes = runtimeReserve, Downloads = artifacts.ToImmutableArray(),
             ModelIds = required.Select(model => model.Id).ToImmutableArray(), MandatoryModelIds = mandatory.Select(model => model.Id).ToImmutableArray(), FrozenModels = required,
             FrozenProfile = profiles?.Get(snapshot.SelectedProfile), DeferredModelBytes = deferredBytes, ModelPathsDeferred = deferredBytes > 0,
             RuntimeArtifactsIdentity = RuntimeArtifactPlanning.Identity };

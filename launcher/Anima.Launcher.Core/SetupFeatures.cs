@@ -21,6 +21,7 @@ public static class SetupFeatures
                 result.Add(feature);
             }
             else if (id.StartsWith("seedvr2-", StringComparison.Ordinal)) result.Add("seedvr2");
+            else if (id is "pixel-remacri" or "pixel-animesharp") result.Add("pixel_hires");
             else if (RuntimeCapabilities.IsFaceModel(id)) result.Add("face-refine");
             else if (RuntimeCapabilities.IsTaggerModel(id)) result.Add("tagger");
             else if (id is "krea2-turbo" or "qwen3vl-krea2") result.Add("krea2");

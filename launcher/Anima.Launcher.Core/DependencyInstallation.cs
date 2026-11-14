@@ -15,7 +15,9 @@ public static class DependencyInstallation
     private sealed record LocalWheel(DependencyPackage Package, string Path, long Size, string Sha256);
     public static string PlanIdentity(ComfyDependencySnapshot plan) => Hash(plan.PythonIdentity + "\n" + plan.ComfyCommit + "\n"
         + plan.NodeRequirementsIdentity + "\n" + string.Join("\n", plan.Constraints)
-        + "\n" + string.Join("\n", plan.Packages.Select(p => p.Name + "==" + p.Version + "|" + p.Url + "|" + p.Sha256 + "|" + p.Commit + "|" + p.Subdirectory)));
+        + "\n" + string.Join("\n", plan.Packages.Select(p => p.Name + "==" + p.Version + "|" + p.Url + "|" + p.Sha256 + "|" + p.Commit + "|" + p.Subdirectory))
+        + (plan.WorkbenchDependencyContractVersion > 0 ? "\nWORKBENCH_CONTRACT_V1=" + plan.WorkbenchRequirementsIdentity + "\n" + plan.WorkbenchRequirementsText : "")
+        + (plan.ComfySourceKind == "git" ? "" : "\nCOMFY_SOURCE=" + plan.ComfySourceKind));
     private static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     private static readonly string[] BuildEnvironmentNames =
     [

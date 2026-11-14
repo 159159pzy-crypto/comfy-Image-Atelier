@@ -7,6 +7,7 @@ public sealed record SetupRuntimeIssue(string Feature, string Message, string Mo
 public sealed record SetupRuntimeReadinessReport(SetupRuntimeIssue[] RequiredIssues, SetupRuntimeIssue[] OptionalIssues)
 {
     public SetupRuntimeIssue[] ConfigurationIssues { get; init; } = [];
+    public bool PromptAssistantAvailable { get; init; }
     public bool RequiredReady => RequiredIssues.Length == 0;
     public bool Ready => RequiredReady && OptionalIssues.Length == 0;
 }
@@ -24,13 +25,21 @@ public sealed class SetupRuntimeReadiness : IDisposable
 
     public async Task<SetupRuntimeReadinessReport> CheckAsync(LauncherConfig config, RuntimeManifest runtime,
         ModelManifest models, ModelProfilesManifest profiles, IEnumerable<string> selectedModelIds,
-        CancellationToken ct, Action<string>? log = null, string? runtimeRoot = null, IEnumerable<string>? features = null)
+        CancellationToken ct, Action<string>? log = null, string? runtimeRoot = null, IEnumerable<string>? features = null,
+        IEnumerable<string>? requiredFeatures = null)
     {
         var required = new List<SetupRuntimeIssue>();
         var optional = new List<SetupRuntimeIssue>();
         var configurationIssues = new List<SetupRuntimeIssue>();
         var selected = selectedModelIds.Where(id => !SetupFeatures.IsCapability(id)).Distinct(StringComparer.Ordinal).ToArray();
         var effectiveFeatures = (features ?? SetupFeatures.Resolve(false, selectedModelIds, config.SelectedProfile)).ToHashSet(StringComparer.Ordinal);
+        var mandatoryFeatures = (requiredFeatures ?? []).ToHashSet(StringComparer.Ordinal);
+        var selectedModels = models.Models.Where(model => selected.Contains(model.Id)).ToArray();
+        void FeatureIssue(string feature, string message, string modelId)
+        {
+            var item = new SetupRuntimeIssue(feature, message, modelId);
+            if (mandatoryFeatures.Contains(feature)) required.Add(item); else optional.Add(item);
+        }
         async Task<JsonElement?> Read(string endpoint, string feature)
         {
             try { return await ReadAsync(endpoint, ct); }
@@ -49,55 +58,100 @@ public sealed class SetupRuntimeReadiness : IDisposable
             required.Add(new("工作台连接", "工作台尚未连接本次 ComfyUI。"));
         var configuration = await Read(config.WebUrl + "/api/config", "随机数据");
         if (configuration is not null) ValidateCatalog(configuration.Value, required);
-        if (effectiveFeatures.Overlaps(["prompt-assistant", "tagger", "krea2"]))
+        var nodes = await Read(config.ComfyUrl + "/object_info", "节点");
+        if (effectiveFeatures.Overlaps(["prompt-assistant", "tagger", "krea2", "seedvr2", "pixel_hires"]))
         {
-            var nodes = await Read(config.ComfyUrl + "/object_info", "节点");
             if (nodes is not null)
                 foreach (var node in SetupFeatures.SelectRuntime(runtime, effectiveFeatures).Nodes
                     .Where(node => SetupFeatures.NodeFeature(node.Id) is "prompt-assistant" or "tagger" or "krea2"))
                     foreach (var name in node.RequiredClasses.Concat(node.Id == "ComfyUI-WD-Timm-Tagger" ? new[] { "WDTimmTagger" } : []))
                         if (!nodes.Value.TryGetProperty(name, out _))
-                            optional.Add(new("可选节点", "所选功能缺少节点：" + name, SetupFeatures.Prefix + SetupFeatures.NodeFeature(node.Id)));
+                            FeatureIssue(SetupFeatures.NodeFeature(node.Id)!, "所选功能缺少节点：" + name, SetupFeatures.Prefix + SetupFeatures.NodeFeature(node.Id));
         }
         // Runtime compatibility belongs to the same resolver used before generation.
         // A missing model does not prevent entering the workbench to configure it.
         try
         {
-            var stages = new Dictionary<string, object>();
-            foreach (var (stage, feature) in new[] { ("pixel_hires", "pixel_hires"), ("latent", "latent"),
-                ("post_sampler", "post_sampler"), ("face_refine", "face-refine"), ("seedvr2", "seedvr2"),
-                ("nvidia", "nvidia"), ("dlss", "dlss") })
-                stages[stage] = new { enabled = effectiveFeatures.Contains(feature) };
-            using var response = await http.PostAsJsonAsync(config.WebUrl + "/api/resources/resolve", new
+            // Every selected variant is checked explicitly. A usable 3B must not
+            // make an unrecognized 7B download appear ready (or vice versa).
+            var variants = new List<Dictionary<string, ModelItem>> { new() };
+            foreach (var group in new[] {
+                (Field: "upscalers.seedvr2.model_name", Models: selectedModels.Where(m => m.Id.StartsWith("seedvr2-", StringComparison.Ordinal) && m.Category == "diffusion_models").ToArray()),
+                (Field: "upscalers.pixel_hires.model_name", Models: selectedModels.Where(m => m.Category == "upscale_models").ToArray()) })
+                if (group.Models.Length > 0)
+                    variants = variants.SelectMany(variant => group.Models.Select(model => new Dictionary<string, ModelItem>(variant) { [group.Field] = model })).ToList();
+            var selectedVae = selectedModels.FirstOrDefault(m => m.Id == "seedvr2-vae");
+            var selectedProfiles = profiles.Profiles.Where(profile => selectedModels.Any(model =>
+                model.Category == "diffusion_models" && model.RelativePath == profile.ModelName
+                || model.Category == "text_encoders" && model.RelativePath == profile.ClipName)).ToArray();
+            if (selectedProfiles.Length == 0) selectedProfiles = [profiles.Get(config.SelectedProfile)];
+            foreach (var validationProfile in selectedProfiles)
+            foreach (var selectedVariant in variants)
             {
-                settings = new { pipeline_version = 5, model_profile = config.SelectedProfile,
-                    base_mode = effectiveFeatures.Contains("sesqui") ? "dual_sampler" : "normal", loras = Array.Empty<object>(), upscalers = stages }
-            }, ct);
-            response.EnsureSuccessStatusCode();
-            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
-            var result = document.RootElement;
-            if (!result.TryGetProperty("version", out var version) || version.GetInt32() != 1
-                || !result.TryGetProperty("issues", out var issues) || issues.ValueKind != JsonValueKind.Array)
-                throw new InvalidDataException("工作台资源检查接口不兼容，请更新工作台后重试。");
-            foreach (var issue in issues.EnumerateArray())
-            {
-                var module = issue.TryGetProperty("module", out var moduleValue) ? moduleValue.GetString() ?? "base" : "base";
-                var message = issue.TryGetProperty("message", out var messageValue) ? messageValue.GetString() ?? "资源待配置" : "资源待配置";
-                var feature = module == "face_refine" ? "face-refine" : module;
-                var modelId = feature switch
+                var variant = new Dictionary<string, ModelItem>(selectedVariant);
+                foreach (var binding in new[] { (Field: "model_name", Name: validationProfile.ModelName, Category: "diffusion_models"),
+                    (Field: "clip_name", Name: validationProfile.ClipName, Category: "text_encoders"),
+                    (Field: "vae_name", Name: validationProfile.VaeName, Category: "vae") })
+                    if (selectedModels.FirstOrDefault(model => model.Category == binding.Category && model.RelativePath == binding.Name) is { } model)
+                        variant[binding.Field] = model;
+                if (selectedVae is not null) variant["upscalers.seedvr2.vae_name"] = selectedVae;
+                var expected = variant.ToDictionary(item => item.Key, item => ResolveModelName(nodes, item.Value));
+                var stages = new Dictionary<string, object>();
+                foreach (var (stage, feature) in new[] { ("pixel_hires", "pixel_hires"), ("latent", "latent"),
+                    ("post_sampler", "post_sampler"), ("face_refine", "face-refine"), ("seedvr2", "seedvr2"),
+                    ("nvidia", "nvidia"), ("dlss", "dlss") })
+                    stages[stage] = new Dictionary<string, object> { ["enabled"] = effectiveFeatures.Contains(feature) };
+                foreach (var binding in expected.Where(binding => binding.Key.StartsWith("upscalers.", StringComparison.Ordinal)))
                 {
-                    "seedvr2" => selected.FirstOrDefault(id => id.StartsWith("seedvr2-", StringComparison.Ordinal)) ?? "",
-                    "face-refine" => selected.FirstOrDefault(RuntimeCapabilities.IsFaceModel) ?? "",
-                    "nvidia" or "dlss" => SetupFeatures.Prefix + feature,
-                    _ => ""
+                    var parts = binding.Key.Split('.');
+                    ((Dictionary<string, object>)stages[parts[1]])[parts[2]] = binding.Value;
+                }
+                var settings = new Dictionary<string, object>
+                {
+                    ["pipeline_version"] = 5, ["model_profile"] = validationProfile.Id,
+                    ["base_mode"] = effectiveFeatures.Contains("sesqui") ? "dual_sampler" : "normal",
+                    ["loras"] = Array.Empty<object>(), ["upscalers"] = stages
                 };
-                var item = new SetupRuntimeIssue(module, message, modelId);
-                if (modelId.Length > 0 && effectiveFeatures.Contains(feature)) optional.Add(item);
-                else configurationIssues.Add(item);
+                foreach (var binding in expected.Where(binding => !binding.Key.Contains('.'))) settings[binding.Key] = binding.Value;
+                using var response = await http.PostAsJsonAsync(config.WebUrl + "/api/resources/resolve", new { settings }, ct);
+                response.EnsureSuccessStatusCode();
+                using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+                var result = document.RootElement;
+                if (!result.TryGetProperty("version", out var version) || version.GetInt32() != 1
+                    || !result.TryGetProperty("issues", out var issues) || issues.ValueKind != JsonValueKind.Array)
+                    throw new InvalidDataException("工作台资源检查接口不兼容，请更新工作台后重试。");
+                foreach (var issue in issues.EnumerateArray())
+                {
+                    var module = issue.TryGetProperty("module", out var moduleValue) ? moduleValue.GetString() ?? "base" : "base";
+                    var message = issue.TryGetProperty("message", out var messageValue) ? messageValue.GetString() ?? "资源待配置" : "资源待配置";
+                    var code = issue.TryGetProperty("code", out var codeValue) ? codeValue.GetString() ?? "" : "";
+                    var feature = module switch { "face_refine" => "face-refine", "base_dual" => "sesqui", _ => module };
+                    var modelId = feature switch
+                    {
+                        "seedvr2" => variant.GetValueOrDefault("upscalers.seedvr2.model_name")?.Id ?? selectedVae?.Id ?? SetupFeatures.Prefix + "seedvr2",
+                        "pixel_hires" => variant.GetValueOrDefault("upscalers.pixel_hires.model_name")?.Id ?? SetupFeatures.Prefix + "pixel_hires",
+                        "face-refine" => selected.FirstOrDefault(RuntimeCapabilities.IsFaceModel) ?? "",
+                        "nvidia" or "dlss" or "sesqui" => SetupFeatures.Prefix + feature,
+                        _ => ""
+                    };
+                    var item = new SetupRuntimeIssue(module, message, modelId);
+                    if (mandatoryFeatures.Contains(feature)) required.Add(item);
+                    else if (effectiveFeatures.Contains(feature)) FeatureIssue(feature, message, modelId);
+                    else if (module == "base" && code is "missing" or "missing_model" or "unknown_compatibility" or "incompatible_model" or "ambiguous_model" or "ambiguous_path") configurationIssues.Add(item);
+                    else required.Add(item);
+                }
+                foreach (var binding in expected)
+                {
+                    var feature = !binding.Key.Contains('.') ? "base" : binding.Key.Contains(".seedvr2.", StringComparison.Ordinal) ? "seedvr2" : "pixel_hires";
+                    if (feature != "base" && !effectiveFeatures.Contains(feature)) continue;
+                    var resolved = result.TryGetProperty("effective_settings", out var effective) ? ReadSetting(effective, binding.Key) : null;
+                    if (!string.Equals(resolved?.Replace('\\', '/'), binding.Value.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase))
+                        FeatureIssue(feature, "所选模型尚未被运行环境正确识别：" + binding.Value, variant[binding.Key].Id);
+                }
+                if (result.TryGetProperty("replacements", out var replacements) && replacements.ValueKind == JsonValueKind.Array)
+                    foreach (var item in replacements.EnumerateArray())
+                        log?.Invoke("已使用兼容资源：" + item.GetProperty("from").GetString() + " → " + item.GetProperty("to").GetString());
             }
-            if (result.TryGetProperty("replacements", out var replacements) && replacements.ValueKind == JsonValueKind.Array)
-                foreach (var item in replacements.EnumerateArray())
-                    log?.Invoke("已使用兼容资源：" + item.GetProperty("from").GetString() + " → " + item.GetProperty("to").GetString());
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex) { required.Add(new("资源检查", "无法检查实际兼容资源：" + ex.Message)); }
@@ -143,7 +197,48 @@ public sealed class SetupRuntimeReadiness : IDisposable
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex) { configurationIssues.Add(new("模型分类", ex.Message)); }
         }
-        return new(required.Distinct().ToArray(), optional.Distinct().ToArray()) { ConfigurationIssues = configurationIssues.Distinct().ToArray() };
+        return new(required.Distinct().ToArray(), optional.Distinct().ToArray())
+        {
+            ConfigurationIssues = configurationIssues.Distinct().ToArray(),
+            PromptAssistantAvailable = nodes is { } catalog && catalog.TryGetProperty("PromptExpand", out _)
+                && catalog.TryGetProperty("ImageCaptionNode", out _)
+        };
+    }
+
+    private static string? ReadSetting(JsonElement value, string path)
+    {
+        foreach (var part in path.Split('.'))
+            if (value.ValueKind != JsonValueKind.Object || !value.TryGetProperty(part, out value)) return null;
+        return value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+    }
+
+    private static string ResolveModelName(JsonElement? nodes, ModelItem model)
+    {
+        var (nodeName, inputName) = model.Category switch
+        {
+            "vae" => ("VAELoader", "vae_name"),
+            "text_encoders" => ("CLIPLoader", "clip_name"),
+            "upscale_models" => ("UpscaleModelLoader", "model_name"),
+            _ => ("UNETLoader", "unet_name")
+        };
+        if (nodes is not { } info || !info.TryGetProperty(nodeName, out var node)
+            || !node.TryGetProperty("input", out var input) || !input.TryGetProperty("required", out var fields)
+            || !fields.TryGetProperty(inputName, out var schema) || schema.ValueKind != JsonValueKind.Array || schema.GetArrayLength() == 0)
+            return model.RelativePath;
+        var choices = schema[0];
+        if (choices.ValueKind != JsonValueKind.Array && !(schema.GetArrayLength() > 1 && schema[1].ValueKind == JsonValueKind.Object && schema[1].TryGetProperty("options", out choices)))
+            return model.RelativePath;
+        if (choices.ValueKind != JsonValueKind.Array) return model.RelativePath;
+        var values = choices.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String).Select(item => item.GetString()!.Replace('\\', '/')).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        foreach (var name in new[] { model.RelativePath }.Concat(model.Aliases))
+        {
+            var exact = values.FirstOrDefault(value => value.Equals(name.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase));
+            if (exact is not null) return exact;
+            var matches = values.Where(value => Path.GetFileName(value).Equals(Path.GetFileName(name), StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (matches.Length == 1) return matches[0];
+            if (matches.Length > 1) return model.RelativePath;
+        }
+        return model.RelativePath;
     }
 
     internal static void ValidateProfile(JsonElement resources, string id, List<SetupRuntimeIssue> issues)

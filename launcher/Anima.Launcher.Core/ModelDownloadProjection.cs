@@ -3,6 +3,7 @@ namespace Anima.Launcher.Core;
 public sealed record ModelDownloadSnapshot(string OwnerId, string ModelId, DownloadTaskStatus Status, string Phase,
     long Received, long Total, double Speed, string Error, bool CanPause, bool CanResume, bool CanRetry, string[] TaskIds)
 {
+    public bool IsFeaturePreparation { get; init; }
     public bool IsCompleted => Status == DownloadTaskStatus.Completed;
     public double Percent => IsCompleted ? 100 : Math.Min(99.9, 100d * Received / Math.Max(1, Total));
 }
@@ -16,7 +17,7 @@ public static class ModelDownloadProjection
         if (string.IsNullOrWhiteSpace(environmentRoot) || string.IsNullOrWhiteSpace(destination)) return null;
         var allOwners = owners.ToArray();
         var byId = allOwners.ToDictionary(owner => owner.Id, StringComparer.Ordinal);
-        var candidates = allOwners.Where(owner => owner.Kind == "models" && SamePath(owner.EnvironmentRoot, environmentRoot))
+        var candidates = allOwners.Where(owner => (owner.Kind == "models" || FeaturePreparation.IsFeatureOwner(owner)) && SamePath(owner.EnvironmentRoot, environmentRoot))
             .SelectMany(owner => owner.Models.Where(intent => SameResource(intent, model, destination)).Select(intent =>
             {
                 var effective = owner.ResourceOwnerIds.TryGetValue(model.Id, out var childId) && byId.TryGetValue(childId, out var child)
@@ -29,13 +30,14 @@ public static class ModelDownloadProjection
             .ThenByDescending(item => item.Owner.Id, StringComparer.Ordinal).ToArray();
         if (candidates.Length == 0) return null;
         var (owner, intent) = candidates[0];
+        var featurePreparation = FeaturePreparation.IsFeatureOwner(owner);
         var files = tasks.Where(task => task.OwnerIds.Contains(owner.Id) && MatchesFile(intent, task))
             .GroupBy(task => DownloadTaskIdentity.Artifact(task.Destination, task.Size, task.Sha256), StringComparer.Ordinal)
             .Select(group => group.OrderByDescending(task => task.UpdatedAt).First()).ToArray();
         var status = owner.Status;
-        if (owner.Status == DownloadTaskStatus.Completed || owner.CompletedModelIds.Contains(model.Id)) status = DownloadTaskStatus.Completed;
+        if (owner.Status == DownloadTaskStatus.Completed || !featurePreparation && owner.CompletedModelIds.Contains(model.Id)) status = DownloadTaskStatus.Completed;
         else if (owner.CancellationRequested || owner.Status == DownloadTaskStatus.Canceled) status = DownloadTaskStatus.Canceled;
-        else if (owner.Models.Length > 1)
+        else if (!featurePreparation && owner.Models.Length > 1)
         {
             // Unconverted legacy batches may contain completed, canceled and failed resources together.
             if (files.Any(file => file.CancellationRequested || file.Status == DownloadTaskStatus.Canceled)) status = DownloadTaskStatus.Canceled;
@@ -45,13 +47,14 @@ public static class ModelDownloadProjection
         var running = status is DownloadTaskStatus.Running or DownloadTaskStatus.Queued;
         var received = status == DownloadTaskStatus.Completed ? model.Size : Math.Min(model.Size, files.Sum(file => Math.Clamp(file.Received, 0, file.Size)));
         var speed = running ? files.Where(file => file.Status == DownloadTaskStatus.Running).Sum(file => Math.Max(0, file.Speed ?? 0)) : 0;
-        var phase = status == DownloadTaskStatus.Running
+        var phase = featurePreparation && status == DownloadTaskStatus.Running && owner.Phase is "Installing" or "FeatureValidation"
+            ? owner.Phase : status == DownloadTaskStatus.Running
             ? files.FirstOrDefault(file => file.Status == DownloadTaskStatus.Running)?.Phase ?? owner.Phase : status.ToString();
         var error = status == DownloadTaskStatus.Completed ? "" : owner.Models.Length == 1 && owner.Error.Length > 0 ? owner.Error
             : files.FirstOrDefault(file => file.Status != DownloadTaskStatus.Completed && file.Error.Length > 0)?.Error ?? owner.Error;
         return new(owner.Id, model.Id, status, phase, received, model.Size, speed, error,
             running, status == DownloadTaskStatus.Paused, status is DownloadTaskStatus.Failed or DownloadTaskStatus.NeedsReview,
-            files.Select(file => file.Id).ToArray());
+            files.Select(file => file.Id).ToArray()) { IsFeaturePreparation = featurePreparation };
     }
 
     public static bool MatchesFile(ModelDownloadIntent intent, DownloadTaskRecord task)

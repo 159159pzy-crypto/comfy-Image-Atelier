@@ -215,6 +215,7 @@ internal static class SoftwareUpdateServiceTests
     private static void WriteWorkbench(string directory, bool failStatus)
     {
         Directory.CreateDirectory(Path.Combine(directory, "anima_webui"));
+        File.WriteAllText(Path.Combine(directory, "pyproject.toml"), "[project]\ndependencies=[]\n");
         File.WriteAllText(Path.Combine(directory, "anima_webui", "server.py"), "# launcher-shutdown fixture\n");
         File.WriteAllText(Path.Combine(directory, "status-mode.txt"), failStatus ? "fail" : "offline");
         File.WriteAllText(Path.Combine(directory, "run.py"), """

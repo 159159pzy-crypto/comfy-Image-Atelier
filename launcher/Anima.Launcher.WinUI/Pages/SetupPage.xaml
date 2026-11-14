@@ -47,7 +47,7 @@
                                 <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                                 <StackPanel Spacing="8">
                                     <TextBlock Text="第一次使用" FontSize="20" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
-                                    <TextBlock Text="选择「安装完整环境」。自动准备 ComfyUI、独立运行环境、必要节点、Anima 基础模型和 SeedVR2 修复模型。" Style="{StaticResource StudioBodyStyle}" />
+                                    <TextBlock Text="选择「安装完整环境」。自动准备 ComfyUI、独立运行环境、必要节点、Anima 基础模型和双采样使用的 Sesqui。SeedVR2 等增强功能可按需选装。" Style="{StaticResource StudioBodyStyle}" />
                                     <TextBlock Text="需要联网和足够磁盘空间；下载量会在开始前确认。" Style="{StaticResource StudioBodyStyle}" />
                                 </StackPanel>
                                 <StackPanel x:Name="ImportChoice" Grid.Column="1" Spacing="8">

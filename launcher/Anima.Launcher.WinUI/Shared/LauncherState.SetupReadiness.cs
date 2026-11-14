@@ -30,7 +30,10 @@ internal sealed partial class LauncherState
                 .Select(feature => SetupFeatures.Prefix + feature)).Except(Setup.SkippedOptionalModelIds), Config.SelectedProfile)
             : null;
         var report = await readiness.CheckAsync(Config, Program.Runtime, OperationModels, OperationProfiles, selectedIds, ct, AppendLog,
-            InstallationPlanner.ResolveRuntimeRoot(Config, Program.StateDir), features);
+            InstallationPlanner.ResolveRuntimeRoot(Config, Program.StateDir), features,
+            plan is { Fresh: true, ResourcePolicyVersion: > 0 }
+                ? (plan.SelectedProfile == "anima" ? ["base", "sesqui"] : ["base"]) : []);
+        Setup.AssistantAvailable = report.PromptAssistantAvailable;
         if (report.RequiredIssues.Length > 0)
             throw new InvalidOperationException("运行检查未通过：\n" + string.Join("\n", report.RequiredIssues.Select(issue => issue.Message)));
         foreach (var issue in report.OptionalIssues)

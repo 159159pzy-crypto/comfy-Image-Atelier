@@ -290,6 +290,8 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
         var before = owned.Count;
         try
         {
+            var dependenciesChecked = !await PortOpen(config.WebPort, ct);
+            if (dependenciesChecked) await WorkbenchDependencies.ValidateAsync(config, ct);
             await StartComfy(config, manifest, ct);
             await ModelMetadata.SynchronizePendingAsync(config, ct, log);
             var resourceFile = Path.Combine(stateDir, "resource-paths.json");
@@ -301,6 +303,9 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
             }
             else
             {
+                // A reused service does not need another package scan; a new process does,
+                // including legacy installations whose frozen plan predates this contract.
+                if (!dependenciesChecked) await WorkbenchDependencies.ValidateAsync(config, ct);
                 // Per-run token lets the launcher ask this instance to stop during a version
                 // switch. Only payloads that implement the endpoint get the argument —
                 // rolling back to an older snapshot must not crash its argparse.
@@ -346,6 +351,7 @@ public sealed class ServiceManager(string stateDir, Action<string> log)
         ct.ThrowIfCancellationRequested();
         if (!await PortOpen(config.WebPort, ct))
         {
+            await WorkbenchDependencies.ValidateAsync(config, ct);
             var nodes = Inventory.ResolveNodeDirectories(config.ComfyRoot, manifest);
             var token = SupportsShutdownEndpoint(config.AppRoot) ? Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant() : null;
             var args = WebUiArguments(config, Path.Combine(stateDir, "resource-paths.json"), nodes);

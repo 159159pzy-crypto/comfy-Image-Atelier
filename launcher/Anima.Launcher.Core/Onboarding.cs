@@ -23,6 +23,7 @@ public sealed class SetupRecord
     public InstallationPlan? ReviewedPlan { get; set; }
     public InstallationPlan? SupplementalPlan { get; set; }
     public AssistantSetupStatus AssistantStatus { get; set; }
+    public bool? AssistantAvailable { get; set; }
     // Old installations selected the ComfyUI folder itself. Keep that identity
     // when the user temporarily clears the path while editing a recovery draft.
     public bool DirectComfyRoot { get; set; }
@@ -30,6 +31,9 @@ public sealed class SetupRecord
 
 public static class SetupRouting
 {
+    public static SetupStep AfterModels(SetupRecord saved) =>
+        saved.AssistantStatus == AssistantSetupStatus.Pending && saved.AssistantAvailable != false
+            ? SetupStep.Assistant : SetupStep.Complete;
     public static bool OpenWizardFromEnvironmentPage(LauncherConfig current, bool setupActive) =>
         setupActive || string.IsNullOrWhiteSpace(current.ComfyRoot) || current.InstallPending;
     /// <summary>
@@ -51,7 +55,7 @@ public static class SetupRouting
             if (!configured || !TargetsMatch(current, saved.Draft, saved.Fresh) || !HasLaunchFiles(current))
                 return SetupStep.Location;
             if (saved.ModelsPending) return SetupStep.Installing;
-            return saved.AssistantStatus == AssistantSetupStatus.Pending ? SetupStep.Assistant : SetupStep.Complete;
+            return AfterModels(saved);
         }
         if (saved.InstallStarted) return SetupStep.Installing;
         return saved.Step switch

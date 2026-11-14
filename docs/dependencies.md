@@ -1,6 +1,10 @@
 # 依赖说明
 
-1.5.1 安装修复新增 [SesquiLSR](https://github.com/LoganBooker/SesquiLSR)、[Forbidden Vision](https://github.com/luxdelux7/ComfyUI-Forbidden-Vision)、[RES4LYF](https://github.com/ClownsharkBatwing/RES4LYF)、[NVIDIA RTX VSR Pro](https://github.com/whmc76/ComfyUI-NVIDIA-RTX-VSR-Pro) 和 [DLSS5-Comfyui](https://github.com/storyAura/DLSS5-Comfyui)。清单及实际工作流的契约测试覆盖原生节点、自定义节点和扩展采样参数；不存在于实际提交工作流的模板注释节点不作为必装依据。SeedVR2 使用 ComfyUI 原生节点，Anima 三件套及两个 SeedVR2 权重必装；Forbidden Vision 三个默认权重按需成组下载。
+安装器支持 [SesquiLSR](https://github.com/LoganBooker/SesquiLSR)、[Forbidden Vision](https://github.com/luxdelux7/ComfyUI-Forbidden-Vision)、[RES4LYF](https://github.com/ClownsharkBatwing/RES4LYF)、[NVIDIA RTX VSR Pro](https://github.com/whmc76/ComfyUI-NVIDIA-RTX-VSR-Pro) 和 [DLSS5-Comfyui](https://github.com/storyAura/DLSS5-Comfyui)。依赖以工作台实际提交的图为准；原始工作流专用的自动补全、订阅管理和图像选择器不作为本项目必装项。新建 Anima 环境默认准备基础三件套与 Sesqui；SeedVR2、脸部细化等增强功能按需选装。当前集成脸部节点使用检测与分割模型，独立神经校正器不列入默认组。
+
+SeedVR2 使用 ComfyUI 原生节点，提供 3B INT8 与 7B Sharp INT8 两个选装变体，VAE 按内容去重并兼容上游另名。像素高清的 Remacri 和 AnimeSharp 也由模型清单管理。模型大小、SHA-256、固定来源提交、署名及许可见 `launcher/manifests/model-manifest.json`；官方下载校验与实际功能就绪分开判断。完整功能准备会补齐插件与运行库，单独下载模型不会隐式安装插件。
+
+工作台运行需求直接读取实际 `AppRoot/pyproject.toml`，参与联合解析、缓存身份和安装后校验。导入预检通过 `importlib.metadata` 检查版本、环境条件、递归需求及约束；不加载 GPU 或插件模块。启动器内嵌私有 packaging 26.0，仅用于解析，不安装到用户环境；上游来源与许可证保存在 `launcher/vendor/packaging-UPSTREAM.txt` 和随包第三方说明中。
 
 `launcher/manifests/nvidia-runtime.json` 保存官方 NVIDIA VFX wheel、VC++ 运行库、7-Zip 和 DLSS 原生文件的来源、大小及 SHA-256；Python 3.10/3.11 使用对应 ABI，3.12 及以上使用已验证的 abi3 wheel。声明 `nvidia-vfx` 的节点依赖经临时需求文件改写为固定官方 wheel，不修改节点的原始依赖文件，不启用全局附加索引。支持硬件在安装阶段完成原生运行文件准备和实际 GPU 调用验证。兼容补丁及验证脚本嵌入单 EXE，模型与 GPU 运行资产不随 EXE 再分发。
 

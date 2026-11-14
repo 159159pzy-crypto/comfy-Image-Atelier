@@ -1,0 +1,6 @@
+packaging 26.0
+Source: https://github.com/pypa/packaging/tree/26.0
+License: Apache-2.0 OR BSD-2-Clause; complete upstream license texts are in the archive.
+Purpose: private, read-only requirement parsing; never installed into a user environment.
+Vendored from the installed distribution, with every included file verified against its RECORD SHA-256.
+Archive SHA-256: e5b1dfcdf8311b0c161ddda81ed7c1db9216ed42d4740a5460b42a03075cf56c
