@@ -18,6 +18,10 @@
 
 1.1.0 把 aiohttp 下限及托管锁定版本提升至 **3.14.5**，包含 3.14.4 的资源耗尽、初始请求超时及 Secure Cookie 修复，以及后续 WebSocket 兼容修复；参见 [上游更新日志](https://docs.aiohttp.org/en/stable/changes.html) 和 [资源耗尽公告](https://github.com/aio-libs/aiohttp/security/advisories/GHSA-2g87-pp6c-29x5)。Pillow 下限与托管图片处理基线统一为 **12.3**，multidict 保持 **6.9.1**。源码升级需要重新安装依赖；若既有 ComfyUI 环境有冲突，请使用独立工作台虚拟环境，不要忽略依赖冲突。旧版 ZIP 不会因源码清单变更自动更新。
 
+2026-11-15 将托管审计基线的 Soup Sieve 从 **2.9.2** 升级至 **4.1.1**，覆盖 CVE-2026-126190、CVE-2026-126191、CVE-2026-126192、CVE-2026-126193 的选择器匹配、正则回溯和递归问题，参见 [上游安全公告](https://github.com/facelessuser/soupsieve/security/advisories/GHSA-mmhr-3c5m-f64f) 和 [4.1.1 发布说明](https://github.com/facelessuser/soupsieve/releases/tag/4.1.1)。该版本要求 Python 3.11.5 及以上，兼容托管 Python 3.11.9。未增加审计例外；此基线变更不会自动更新已有 ComfyUI 环境中的依赖。
+
+Soup Sieve 从 3.0 起默认使用更严格的选择器规则，旧的复杂 `:has()` 表达式可能需要调用方适配；参见 [上游 API 说明](https://facelessuser.github.io/soupsieve/api/#soupseivenostrict)。本项目不全局放宽该规则，第三方节点升级仍需按其实际选择器验证。
+
 包内 `THIRD-PARTY-NOTICES.txt` 与 `third-party-packages.json` 列出启动器、运行时和构建依赖的版本及许可，并说明并非所有列出的包都被再分发。模型、ComfyUI 和额外节点不在启动器 ZIP 中，使用时遵循各自许可。
 
 1.3.1 将托管 filelock 升级至 **4.2.1**、setuptools 升级至 **84.1.0**，处理发布审计中发现的锁文件与 Windows wheel 安装路径问题。参见 [filelock 4.2.1 发布说明](https://github.com/tox-dev/filelock/releases/tag/4.2.1) 和 [setuptools 安全公告](https://github.com/advisories/GHSA-xmj3-9gf7-h52w)。未增加审计例外；旧环境的已安装依赖不会因替换启动器 EXE 自动升级。

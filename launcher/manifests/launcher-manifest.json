@@ -375,7 +375,7 @@
     "simpleeval==1.0.8",
     "six==1.17.0",
     "smmap==5.0.3",
-    "soupsieve==2.9.2",
+    "soupsieve==4.1.1",
     "spandrel==0.4.2",
     "SQLAlchemy==2.0.54",
     "sympy==1.14.0",
