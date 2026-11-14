@@ -169,6 +169,11 @@ class PresetScrollTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(result["top"] + 1, result["fadeTop"], result)
             self.assertGreaterEqual(result["bottom"] + 1, result["fadeBottom"], result)
         await self.page.locator("#presetList").focus()
+        await self.expect(self.page.locator("#presetList")).to_be_focused()
+        # Reduced motion still has a .01ms transition: the first focus frame
+        # can expose the default medium (3px) outline before the authored 2px.
+        await self.expect(self.page.locator("#presetScroll")).to_have_css("outline-style", "solid")
+        await self.expect(self.page.locator("#presetScroll")).to_have_css("outline-width", "2px")
         outline = await self.page.locator("#presetScroll").evaluate("el=>{const s=getComputedStyle(el);return {style:s.outlineStyle,width:parseFloat(s.outlineWidth)}}")
         self.assertEqual(outline, {"style": "solid", "width": 2})
         preferences = []
