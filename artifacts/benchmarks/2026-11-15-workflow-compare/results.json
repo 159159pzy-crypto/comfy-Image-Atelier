@@ -1,0 +1,64 @@
+{
+  "a": {
+    "prompt_id": "4e0e94b4-d98e-43e0-a596-219466f804d6",
+    "status": "success",
+    "seconds": 37.601,
+    "cached_nodes": [],
+    "image": "F:\\comfyuishengtu\\artifacts\\benchmarks\\2026-11-15-workflow-compare\\outputs\\a\\4e0e94b4_000.png",
+    "size": [
+      768,
+      1024
+    ],
+    "rgb_sha256": "1ea9d73d7c5f793b8a8d3263afbd7622ee1e029dd4bf6b59bf7cad47f7c567b1"
+  },
+  "b": {
+    "prompt_id": "1e0be7eb-dff1-4642-a347-35ef1d0fd9e0",
+    "status": "success",
+    "seconds": 35.084,
+    "cached_nodes": [],
+    "image": "F:\\comfyuishengtu\\artifacts\\benchmarks\\2026-11-15-workflow-compare\\outputs\\b\\1e0be7eb_000.png",
+    "size": [
+      768,
+      1024
+    ],
+    "rgb_sha256": "1ea9d73d7c5f793b8a8d3263afbd7622ee1e029dd4bf6b59bf7cad47f7c567b1"
+  },
+  "comparison": {
+    "pixels_identical": true,
+    "mean_absolute_difference_per_channel": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "max_difference_per_channel": [
+      0,
+      0,
+      0
+    ]
+  },
+  "method": {
+    "runs_per_arm": 1,
+    "run_order": [
+      "a",
+      "b"
+    ],
+    "timing": "ComfyUI execution_start to execution_success, including load/encode/sample/decode/save; excludes service startup and UI round trips",
+    "model_and_executor_cache_cleared_before_each_run": true,
+    "sampling_log_elapsed_seconds_rounded": {
+      "a": 30,
+      "b": 30
+    },
+    "source_graphs": {
+      "a": "a_attachment_matched.json",
+      "b": "b_project_matched.json"
+    },
+    "shared_parameters_file": "parameters.json"
+  },
+  "limitations": [
+    "Silvermoon Turbo is absent from the live model catalog; both arms instead use Anima base with matched 30-step CFG4 normal sampling settings.",
+    "A reconstructs the enabled core generation path; inactive modules, manual confirmation and notifications are not tested.",
+    "B is the unchanged real project builder prompt. comfy-cli falsely rejects the LoRA Manager custom text widget; native ComfyUI validation accepted the prompt with node_errors={}.",
+    "One run per arm, in fixed order. Filesystem and kernel warmup may affect timing despite cleared model/executor caches. The 2.517-second difference does not establish a stable speed improvement.",
+    "Neither graph uses PatchTritonVAE; this is not a Triton on/off benchmark."
+  ]
+}

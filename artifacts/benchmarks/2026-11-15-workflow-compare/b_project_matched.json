@@ -1,0 +1,221 @@
+{
+  "72": {
+    "inputs": {
+      "__lm_autocomplete_meta_text": {
+        "version": 1,
+        "textWidgetName": "text"
+      },
+      "text": "",
+      "loras": {
+        "__value__": []
+      },
+      "model": [
+        "167:56",
+        0
+      ],
+      "clip": [
+        "167:57",
+        0
+      ]
+    },
+    "class_type": "Lora Loader (LoraManager)",
+    "_meta": {
+      "title": "Lora堆_1",
+      "pipeline_stage": "base"
+    }
+  },
+  "167:56": {
+    "inputs": {
+      "unet_name": "anima-base-v1.0.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器",
+      "pipeline_stage": "base"
+    }
+  },
+  "167:57": {
+    "inputs": {
+      "clip_name": "qwen_3_06b_base.safetensors",
+      "type": "stable_diffusion",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP",
+      "pipeline_stage": "base"
+    }
+  },
+  "167:58": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE",
+      "pipeline_stage": "base"
+    }
+  },
+  "691:1240": {
+    "inputs": {
+      "seed": [
+        "v3:run:gate",
+        1
+      ],
+      "steps": 30,
+      "cfg": 4.0,
+      "sampler_name": "er_sde",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "positive": [
+        "single:primary:positive",
+        0
+      ],
+      "latent_image": [
+        "691:53",
+        0
+      ],
+      "model": [
+        "72",
+        0
+      ],
+      "negative": [
+        "single:primary:negative",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器",
+      "pipeline_stage": "base"
+    }
+  },
+  "691:53": {
+    "inputs": {
+      "width": 768,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "空Latent图像",
+      "pipeline_stage": "base"
+    }
+  },
+  "v2:output": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "v3:cleanup:base",
+        1
+      ],
+      "filename_prefix": "benchmarks/2026-11-15-workflow-compare/b_project_matched"
+    },
+    "_meta": {
+      "title": "导出保存 · SaveImage",
+      "pipeline_stage": "export"
+    }
+  },
+  "single:primary:positive": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "72",
+        1
+      ],
+      "text": "masterpiece, best quality, scenery, a small wooden cabin beside a clear mountain lake, pine forest, distant snow capped mountains, morning sunlight, peaceful atmosphere, detailed environment, no humans"
+    },
+    "_meta": {
+      "pipeline_stage": "base"
+    }
+  },
+  "single:primary:negative": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "72",
+        1
+      ],
+      "text": "worst quality, low quality, blurry, jpeg artifacts, text, watermark"
+    },
+    "_meta": {
+      "pipeline_stage": "base"
+    }
+  },
+  "v3:decode:1": {
+    "class_type": "VAEDecodeTiled",
+    "inputs": {
+      "samples": [
+        "691:1240",
+        0
+      ],
+      "vae": [
+        "167:58",
+        0
+      ],
+      "tile_size": 512,
+      "overlap": 64,
+      "temporal_size": 64,
+      "temporal_overlap": 8
+    },
+    "_meta": {
+      "title": "底图 · VAEDecodeTiled",
+      "pipeline_stage": "base"
+    }
+  },
+  "v3:cleanup:base": {
+    "class_type": "VRAM_Debug",
+    "inputs": {
+      "empty_cache": true,
+      "gc_collect": true,
+      "unload_all_models": false,
+      "image_pass": [
+        "v3:decode:1",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "底图 · 清缓存与垃圾回收",
+      "pipeline_stage": "base"
+    }
+  },
+  "v3:run:seed": {
+    "class_type": "PrimitiveInt",
+    "inputs": {
+      "value": 20261115
+    },
+    "_meta": {
+      "title": "底图 · PrimitiveInt",
+      "pipeline_stage": "base"
+    }
+  },
+  "v3:run:nonce": {
+    "class_type": "PrimitiveInt",
+    "inputs": {
+      "value": 2026111501
+    },
+    "_meta": {
+      "title": "底图 · PrimitiveInt",
+      "pipeline_stage": "base"
+    }
+  },
+  "v3:run:gate": {
+    "class_type": "ComfyMathExpression",
+    "inputs": {
+      "expression": "a",
+      "values.a": [
+        "v3:run:seed",
+        0
+      ],
+      "values.b": [
+        "v3:run:nonce",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "底图 · ComfyMathExpression",
+      "pipeline_stage": "base"
+    }
+  }
+}

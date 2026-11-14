@@ -1,0 +1,1984 @@
+{
+  "prompt": {
+    "72": {
+      "inputs": {
+        "__lm_autocomplete_meta_text": {
+          "version": 1,
+          "textWidgetName": "text"
+        },
+        "text": "",
+        "loras": {
+          "__value__": []
+        },
+        "model": [
+          "167:56",
+          0
+        ],
+        "clip": [
+          "167:57",
+          0
+        ]
+      },
+      "class_type": "Lora Loader (LoraManager)",
+      "_meta": {
+        "title": "Lora堆_1",
+        "pipeline_stage": "base"
+      }
+    },
+    "167:56": {
+      "inputs": {
+        "unet_name": "anima-base-v1.0.safetensors",
+        "weight_dtype": "default"
+      },
+      "class_type": "UNETLoader",
+      "_meta": {
+        "title": "UNet加载器",
+        "pipeline_stage": "base"
+      }
+    },
+    "167:57": {
+      "inputs": {
+        "clip_name": "qwen_3_06b_base.safetensors",
+        "type": "stable_diffusion",
+        "device": "default"
+      },
+      "class_type": "CLIPLoader",
+      "_meta": {
+        "title": "加载CLIP",
+        "pipeline_stage": "base"
+      }
+    },
+    "167:58": {
+      "inputs": {
+        "vae_name": "qwen_image_vae.safetensors"
+      },
+      "class_type": "VAELoader",
+      "_meta": {
+        "title": "加载VAE",
+        "pipeline_stage": "base"
+      }
+    },
+    "691:1240": {
+      "inputs": {
+        "seed": [
+          "v3:run:gate",
+          1
+        ],
+        "steps": 30,
+        "cfg": 4.0,
+        "sampler_name": "er_sde",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "positive": [
+          "single:primary:positive",
+          0
+        ],
+        "latent_image": [
+          "691:53",
+          0
+        ],
+        "model": [
+          "72",
+          0
+        ],
+        "negative": [
+          "single:primary:negative",
+          0
+        ]
+      },
+      "class_type": "KSampler",
+      "_meta": {
+        "title": "K采样器",
+        "pipeline_stage": "base"
+      }
+    },
+    "691:53": {
+      "inputs": {
+        "width": 768,
+        "height": 1024,
+        "batch_size": 1
+      },
+      "class_type": "EmptyLatentImage",
+      "_meta": {
+        "title": "空Latent图像",
+        "pipeline_stage": "base"
+      }
+    },
+    "v2:output": {
+      "class_type": "SaveImage",
+      "inputs": {
+        "images": [
+          "v3:cleanup:base",
+          1
+        ],
+        "filename_prefix": "benchmarks/2026-11-15-workflow-compare/b_project_matched"
+      },
+      "_meta": {
+        "title": "导出保存 · SaveImage",
+        "pipeline_stage": "export"
+      }
+    },
+    "single:primary:positive": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "clip": [
+          "72",
+          1
+        ],
+        "text": "masterpiece, best quality, scenery, a small wooden cabin beside a clear mountain lake, pine forest, distant snow capped mountains, morning sunlight, peaceful atmosphere, detailed environment, no humans"
+      },
+      "_meta": {
+        "pipeline_stage": "base"
+      }
+    },
+    "single:primary:negative": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "clip": [
+          "72",
+          1
+        ],
+        "text": "worst quality, low quality, blurry, jpeg artifacts, text, watermark"
+      },
+      "_meta": {
+        "pipeline_stage": "base"
+      }
+    },
+    "v3:decode:1": {
+      "class_type": "VAEDecodeTiled",
+      "inputs": {
+        "samples": [
+          "691:1240",
+          0
+        ],
+        "vae": [
+          "167:58",
+          0
+        ],
+        "tile_size": 512,
+        "overlap": 64,
+        "temporal_size": 64,
+        "temporal_overlap": 8
+      },
+      "_meta": {
+        "title": "底图 · VAEDecodeTiled",
+        "pipeline_stage": "base"
+      }
+    },
+    "v3:cleanup:base": {
+      "class_type": "VRAM_Debug",
+      "inputs": {
+        "empty_cache": true,
+        "gc_collect": true,
+        "unload_all_models": false,
+        "image_pass": [
+          "v3:decode:1",
+          0
+        ]
+      },
+      "_meta": {
+        "title": "底图 · 清缓存与垃圾回收",
+        "pipeline_stage": "base"
+      }
+    },
+    "v3:run:seed": {
+      "class_type": "PrimitiveInt",
+      "inputs": {
+        "value": 20261115
+      },
+      "_meta": {
+        "title": "底图 · PrimitiveInt",
+        "pipeline_stage": "base"
+      }
+    },
+    "v3:run:nonce": {
+      "class_type": "PrimitiveInt",
+      "inputs": {
+        "value": 2026111501
+      },
+      "_meta": {
+        "title": "底图 · PrimitiveInt",
+        "pipeline_stage": "base"
+      }
+    },
+    "v3:run:gate": {
+      "class_type": "ComfyMathExpression",
+      "inputs": {
+        "expression": "a",
+        "values.a": [
+          "v3:run:seed",
+          0
+        ],
+        "values.b": [
+          "v3:run:nonce",
+          0
+        ]
+      },
+      "_meta": {
+        "title": "底图 · ComfyMathExpression",
+        "pipeline_stage": "base"
+      }
+    }
+  },
+  "client_id": "codex-workflow-comparison-20261115",
+  "extra_data": {
+    "extra_pnginfo": {
+      "workflow": {
+        "version": 0.4,
+        "last_node_id": 14,
+        "last_link_id": 15,
+        "nodes": [
+          {
+            "id": 1,
+            "type": "Lora Loader (LoraManager)",
+            "title": "Lora堆_1",
+            "pos": [
+              0,
+              0
+            ],
+            "size": [
+              360,
+              133
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "name": "model",
+                "type": "MODEL",
+                "link": 1
+              },
+              {
+                "name": "clip",
+                "shape": 7,
+                "type": "CLIP",
+                "link": 2
+              },
+              {
+                "name": "lora_stack",
+                "shape": 7,
+                "type": "LORA_STACK",
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "name": "MODEL",
+                "type": "MODEL",
+                "links": [
+                  3
+                ]
+              },
+              {
+                "name": "CLIP",
+                "type": "CLIP",
+                "links": [
+                  9,
+                  10
+                ]
+              },
+              {
+                "name": "STRING",
+                "type": "STRING",
+                "links": []
+              },
+              {
+                "name": "STRING",
+                "type": "STRING",
+                "links": []
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "Lora Loader (LoraManager)",
+              "cnr_id": "comfyui-lora-manager",
+              "ver": "0ec7eaf6060a14ef6d0bdf57b40e03371a281d4c",
+              "aux_id": "willmiao/ComfyUI-Lora-Manager",
+              "__lm_widget_ids": [
+                "__lm_autocomplete_meta_text",
+                "text",
+                "loras"
+              ],
+              "pipeline_api_id": "72",
+              "pipeline_stage": "base"
+            },
+            "widgets_values": [
+              {
+                "version": 1,
+                "textWidgetName": "text"
+              },
+              "",
+              []
+            ]
+          },
+          {
+            "id": 2,
+            "type": "UNETLoader",
+            "title": "UNet加载器",
+            "pos": [
+              40,
+              0
+            ],
+            "size": [
+              360,
+              107
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [
+              {
+                "name": "MODEL",
+                "type": "MODEL",
+                "links": [
+                  1
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "UNETLoader",
+              "cnr_id": "comfy-core",
+              "ver": "0.25.0",
+              "models": [
+                {
+                  "name": "krea2_turbo_int8_convrot.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/diffusion_models/krea2_turbo_int8_convrot.safetensors",
+                  "directory": "diffusion_models"
+                }
+              ],
+              "pipeline_api_id": "167:56",
+              "pipeline_stage": "base"
+            },
+            "widgets_values": [
+              "anima-base-v1.0.safetensors",
+              "default"
+            ]
+          },
+          {
+            "id": 3,
+            "type": "CLIPLoader",
+            "title": "加载CLIP",
+            "pos": [
+              0,
+              240
+            ],
+            "size": [
+              360,
+              133
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [
+              {
+                "name": "CLIP",
+                "type": "CLIP",
+                "links": [
+                  2
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CLIPLoader",
+              "cnr_id": "comfy-core",
+              "ver": "0.25.0",
+              "models": [
+                {
+                  "name": "qwen3vl_4b_fp8_scaled.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
+                  "directory": "text_encoders"
+                }
+              ],
+              "pipeline_api_id": "167:57",
+              "pipeline_stage": "base"
+            },
+            "widgets_values": [
+              "qwen_3_06b_base.safetensors",
+              "stable_diffusion",
+              "default"
+            ]
+          },
+          {
+            "id": 4,
+            "type": "VAELoader",
+            "title": "加载VAE",
+            "pos": [
+              40,
+              240
+            ],
+            "size": [
+              360,
+              100
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [
+              {
+                "name": "VAE",
+                "type": "VAE",
+                "links": [
+                  12
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "VAELoader",
+              "cnr_id": "comfy-core",
+              "ver": "0.25.0",
+              "models": [
+                {
+                  "name": "qwen_image_vae.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/vae/qwen_image_vae.safetensors",
+                  "directory": "vae"
+                }
+              ],
+              "pipeline_api_id": "167:58",
+              "pipeline_stage": "base"
+            },
+            "widgets_values": [
+              "qwen_image_vae.safetensors"
+            ]
+          },
+          {
+            "id": 5,
+            "type": "KSampler",
+            "title": "K采样器",
+            "pos": [
+              0,
+              480
+            ],
+            "size": [
+              360,
+              237
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "模型",
+                "name": "model",
+                "type": "MODEL",
+                "link": 3
+              },
+              {
+                "localized_name": "正面条件",
+                "name": "positive",
+                "type": "CONDITIONING",
+                "link": 4
+              },
+              {
+                "localized_name": "负面条件",
+                "name": "negative",
+                "type": "CONDITIONING",
+                "link": 5
+              },
+              {
+                "localized_name": "Latent图像",
+                "name": "latent_image",
+                "type": "LATENT",
+                "link": 6
+              },
+              {
+                "localized_name": "种子",
+                "name": "seed",
+                "type": "INT",
+                "widget": {
+                  "name": "seed"
+                },
+                "link": 7
+              }
+            ],
+            "outputs": [
+              {
+                "name": "LATENT",
+                "type": "LATENT",
+                "links": [
+                  11
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "KSampler",
+              "cnr_id": "comfy-core",
+              "ver": "0.33.1",
+              "pipeline_api_id": "691:1240",
+              "pipeline_stage": "base"
+            },
+            "widgets_values": [
+              0,
+              "fixed",
+              30,
+              4.0,
+              "er_sde",
+              "simple",
+              1.0
+            ]
+          },
+          {
+            "id": 6,
+            "type": "EmptyLatentImage",
+            "title": "空Latent图像",
+            "pos": [
+              40,
+              480
+            ],
+            "size": [
+              360,
+              133
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [
+              {
+                "name": "LATENT",
+                "type": "LATENT",
+                "links": [
+                  6
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "EmptyLatentImage",
+              "cnr_id": "comfy-core",
+              "ver": "0.25.0",
+              "pipeline_api_id": "691:53",
+              "pipeline_stage": "base"
+            },
+            "widgets_values": [
+              768,
+              1024,
+              1
+            ]
+          },
+          {
+            "id": 7,
+            "type": "SaveImage",
+            "title": "导出保存 · SaveImage",
+            "pos": [
+              3520,
+              720
+            ],
+            "size": [
+              360,
+              100
+            ],
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "inputs": [
+              {
+                "name": "images",
+                "type": "IMAGE",
+                "link": 8
+              }
+            ],
+            "outputs": [],
+            "properties": {
+              "Node name for S&R": "SaveImage",
+              "pipeline_api_id": "v2:output",
+              "pipeline_stage": "export"
+            },
+            "widgets_values": [
+              "benchmarks/2026-11-15-workflow-compare/b_project_matched"
+            ]
+          },
+          {
+            "id": 8,
+            "type": "CLIPTextEncode",
+            "title": "CLIPTextEncode",
+            "pos": [
+              40,
+              720
+            ],
+            "size": [
+              360,
+              100
+            ],
+            "flags": {},
+            "order": 7,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "clip",
+                "name": "clip",
+                "type": "CLIP",
+                "link": 9
+              }
+            ],
+            "outputs": [
+              {
+                "name": "CONDITIONING",
+                "type": "CONDITIONING",
+                "links": [
+                  4
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CLIPTextEncode",
+              "cnr_id": "comfy-core",
+              "ver": "0.25.0",
+              "pipeline_api_id": "single:primary:positive",
+              "pipeline_stage": "base"
+            },
+            "widgets_values": [
+              "masterpiece, best quality, scenery, a small wooden cabin beside a clear mountain lake, pine forest, distant snow capped mountains, morning sunlight, peaceful atmosphere, detailed environment, no humans"
+            ]
+          },
+          {
+            "id": 9,
+            "type": "CLIPTextEncode",
+            "title": "CLIPTextEncode",
+            "pos": [
+              0,
+              960
+            ],
+            "size": [
+              360,
+              100
+            ],
+            "flags": {},
+            "order": 8,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "clip",
+                "name": "clip",
+                "type": "CLIP",
+                "link": 10
+              }
+            ],
+            "outputs": [
+              {
+                "name": "CONDITIONING",
+                "type": "CONDITIONING",
+                "links": [
+                  5
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CLIPTextEncode",
+              "cnr_id": "comfy-core",
+              "ver": "0.25.0",
+              "pipeline_api_id": "single:primary:negative",
+              "pipeline_stage": "base"
+            },
+            "widgets_values": [
+              "worst quality, low quality, blurry, jpeg artifacts, text, watermark"
+            ]
+          },
+          {
+            "id": 10,
+            "type": "VAEDecodeTiled",
+            "title": "底图 · VAEDecodeTiled",
+            "pos": [
+              40,
+              960
+            ],
+            "size": [
+              360,
+              159
+            ],
+            "flags": {},
+            "order": 9,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "Latent",
+                "name": "samples",
+                "type": "LATENT",
+                "link": 11
+              },
+              {
+                "localized_name": "vae",
+                "name": "vae",
+                "type": "VAE",
+                "link": 12
+              }
+            ],
+            "outputs": [
+              {
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "links": [
+                  13
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "VAEDecodeTiled",
+              "cnr_id": "comfy-core",
+              "ver": "0.28.0",
+              "pipeline_api_id": "v3:decode:1",
+              "pipeline_stage": "base"
+            },
+            "widgets_values": [
+              512,
+              64,
+              64,
+              8
+            ]
+          },
+          {
+            "id": 11,
+            "type": "VRAM_Debug",
+            "title": "底图 · 清缓存与垃圾回收",
+            "pos": [
+              0,
+              1200
+            ],
+            "size": [
+              360,
+              133
+            ],
+            "flags": {},
+            "order": 10,
+            "mode": 0,
+            "inputs": [
+              {
+                "name": "any_input",
+                "type": "*",
+                "link": null
+              },
+              {
+                "name": "image_pass",
+                "type": "IMAGE",
+                "link": 13
+              },
+              {
+                "name": "model_pass",
+                "type": "MODEL",
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "name": "any_output",
+                "type": "*",
+                "links": []
+              },
+              {
+                "name": "image_pass",
+                "type": "IMAGE",
+                "links": [
+                  8
+                ]
+              },
+              {
+                "name": "model_pass",
+                "type": "MODEL",
+                "links": []
+              },
+              {
+                "name": "freemem_before",
+                "type": "INT",
+                "links": []
+              },
+              {
+                "name": "freemem_after",
+                "type": "INT",
+                "links": []
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "VRAM_Debug",
+              "cnr_id": "comfyui-kjnodes",
+              "ver": "3f20054214fec9f9234fd3841ae6f1e4287948f6",
+              "pipeline_api_id": "v3:cleanup:base",
+              "pipeline_stage": "base"
+            },
+            "widgets_values": [
+              true,
+              true,
+              false
+            ]
+          },
+          {
+            "id": 12,
+            "type": "PrimitiveInt",
+            "title": "底图 · PrimitiveInt",
+            "pos": [
+              40,
+              1200
+            ],
+            "size": [
+              360,
+              107
+            ],
+            "flags": {},
+            "order": 11,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [
+              {
+                "name": "INT",
+                "type": "INT",
+                "links": [
+                  14
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PrimitiveInt",
+              "cnr_id": "comfy-core",
+              "ver": "0.28.0",
+              "pipeline_api_id": "v3:run:seed",
+              "pipeline_stage": "base"
+            },
+            "widgets_values": [
+              20261115,
+              "fixed"
+            ]
+          },
+          {
+            "id": 13,
+            "type": "PrimitiveInt",
+            "title": "底图 · PrimitiveInt",
+            "pos": [
+              0,
+              1440
+            ],
+            "size": [
+              360,
+              107
+            ],
+            "flags": {},
+            "order": 12,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [
+              {
+                "name": "INT",
+                "type": "INT",
+                "links": [
+                  15
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PrimitiveInt",
+              "cnr_id": "comfy-core",
+              "ver": "0.28.0",
+              "pipeline_api_id": "v3:run:nonce",
+              "pipeline_stage": "base"
+            },
+            "widgets_values": [
+              2026111501,
+              "fixed"
+            ]
+          },
+          {
+            "id": 14,
+            "type": "ComfyMathExpression",
+            "title": "底图 · ComfyMathExpression",
+            "pos": [
+              40,
+              1440
+            ],
+            "size": [
+              360,
+              100
+            ],
+            "flags": {},
+            "order": 13,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "a",
+                "localized_name": "values.a",
+                "name": "values.a",
+                "type": "INT",
+                "link": 14
+              },
+              {
+                "label": "b",
+                "localized_name": "values.b",
+                "name": "values.b",
+                "shape": 7,
+                "type": "INT",
+                "link": 15
+              }
+            ],
+            "outputs": [
+              {
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": []
+              },
+              {
+                "name": "INT",
+                "type": "INT",
+                "links": [
+                  7
+                ]
+              },
+              {
+                "name": "BOOLEAN",
+                "type": "BOOLEAN",
+                "links": []
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfyMathExpression",
+              "cnr_id": "comfy-core",
+              "ver": "0.33.1",
+              "pipeline_api_id": "v3:run:gate",
+              "pipeline_stage": "base"
+            },
+            "widgets_values": [
+              "a"
+            ]
+          }
+        ],
+        "links": [
+          [
+            1,
+            2,
+            0,
+            1,
+            0,
+            "MODEL"
+          ],
+          [
+            2,
+            3,
+            0,
+            1,
+            1,
+            "CLIP"
+          ],
+          [
+            3,
+            1,
+            0,
+            5,
+            0,
+            "MODEL"
+          ],
+          [
+            4,
+            8,
+            0,
+            5,
+            1,
+            "CONDITIONING"
+          ],
+          [
+            5,
+            9,
+            0,
+            5,
+            2,
+            "CONDITIONING"
+          ],
+          [
+            6,
+            6,
+            0,
+            5,
+            3,
+            "LATENT"
+          ],
+          [
+            7,
+            14,
+            1,
+            5,
+            4,
+            "INT"
+          ],
+          [
+            8,
+            11,
+            1,
+            7,
+            0,
+            "IMAGE"
+          ],
+          [
+            9,
+            1,
+            1,
+            8,
+            0,
+            "CLIP"
+          ],
+          [
+            10,
+            1,
+            1,
+            9,
+            0,
+            "CLIP"
+          ],
+          [
+            11,
+            5,
+            0,
+            10,
+            0,
+            "LATENT"
+          ],
+          [
+            12,
+            4,
+            0,
+            10,
+            1,
+            "VAE"
+          ],
+          [
+            13,
+            10,
+            0,
+            11,
+            1,
+            "IMAGE"
+          ],
+          [
+            14,
+            12,
+            0,
+            14,
+            0,
+            "INT"
+          ],
+          [
+            15,
+            13,
+            0,
+            14,
+            1,
+            "INT"
+          ]
+        ],
+        "groups": [],
+        "config": {},
+        "extra": {
+          "pipeline_api_ids": {
+            "1": "72",
+            "2": "167:56",
+            "3": "167:57",
+            "4": "167:58",
+            "5": "691:1240",
+            "6": "691:53",
+            "7": "v2:output",
+            "8": "single:primary:positive",
+            "9": "single:primary:negative",
+            "10": "v3:decode:1",
+            "11": "v3:cleanup:base",
+            "12": "v3:run:seed",
+            "13": "v3:run:nonce",
+            "14": "v3:run:gate"
+          },
+          "pipeline": {
+            "version": 5,
+            "stages": [
+              "base",
+              "export"
+            ],
+            "execution_nonce": 2026111501,
+            "api_prompt": {
+              "72": {
+                "inputs": {
+                  "__lm_autocomplete_meta_text": {
+                    "version": 1,
+                    "textWidgetName": "text"
+                  },
+                  "text": "",
+                  "loras": {
+                    "__value__": []
+                  },
+                  "model": [
+                    "167:56",
+                    0
+                  ],
+                  "clip": [
+                    "167:57",
+                    0
+                  ]
+                },
+                "class_type": "Lora Loader (LoraManager)",
+                "_meta": {
+                  "title": "Lora堆_1",
+                  "pipeline_stage": "base"
+                }
+              },
+              "167:56": {
+                "inputs": {
+                  "unet_name": "anima-base-v1.0.safetensors",
+                  "weight_dtype": "default"
+                },
+                "class_type": "UNETLoader",
+                "_meta": {
+                  "title": "UNet加载器",
+                  "pipeline_stage": "base"
+                }
+              },
+              "167:57": {
+                "inputs": {
+                  "clip_name": "qwen_3_06b_base.safetensors",
+                  "type": "stable_diffusion",
+                  "device": "default"
+                },
+                "class_type": "CLIPLoader",
+                "_meta": {
+                  "title": "加载CLIP",
+                  "pipeline_stage": "base"
+                }
+              },
+              "167:58": {
+                "inputs": {
+                  "vae_name": "qwen_image_vae.safetensors"
+                },
+                "class_type": "VAELoader",
+                "_meta": {
+                  "title": "加载VAE",
+                  "pipeline_stage": "base"
+                }
+              },
+              "691:1240": {
+                "inputs": {
+                  "seed": [
+                    "v3:run:gate",
+                    1
+                  ],
+                  "steps": 30,
+                  "cfg": 4.0,
+                  "sampler_name": "er_sde",
+                  "scheduler": "simple",
+                  "denoise": 1.0,
+                  "positive": [
+                    "single:primary:positive",
+                    0
+                  ],
+                  "latent_image": [
+                    "691:53",
+                    0
+                  ],
+                  "model": [
+                    "72",
+                    0
+                  ],
+                  "negative": [
+                    "single:primary:negative",
+                    0
+                  ]
+                },
+                "class_type": "KSampler",
+                "_meta": {
+                  "title": "K采样器",
+                  "pipeline_stage": "base"
+                }
+              },
+              "691:53": {
+                "inputs": {
+                  "width": 768,
+                  "height": 1024,
+                  "batch_size": 1
+                },
+                "class_type": "EmptyLatentImage",
+                "_meta": {
+                  "title": "空Latent图像",
+                  "pipeline_stage": "base"
+                }
+              },
+              "v2:output": {
+                "class_type": "SaveImage",
+                "inputs": {
+                  "images": [
+                    "v3:cleanup:base",
+                    1
+                  ],
+                  "filename_prefix": "benchmarks/2026-11-15-workflow-compare/b_project_matched"
+                },
+                "_meta": {
+                  "title": "导出保存 · SaveImage",
+                  "pipeline_stage": "export"
+                }
+              },
+              "single:primary:positive": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {
+                  "clip": [
+                    "72",
+                    1
+                  ],
+                  "text": "masterpiece, best quality, scenery, a small wooden cabin beside a clear mountain lake, pine forest, distant snow capped mountains, morning sunlight, peaceful atmosphere, detailed environment, no humans"
+                },
+                "_meta": {
+                  "pipeline_stage": "base"
+                }
+              },
+              "single:primary:negative": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {
+                  "clip": [
+                    "72",
+                    1
+                  ],
+                  "text": "worst quality, low quality, blurry, jpeg artifacts, text, watermark"
+                },
+                "_meta": {
+                  "pipeline_stage": "base"
+                }
+              },
+              "v3:decode:1": {
+                "class_type": "VAEDecodeTiled",
+                "inputs": {
+                  "samples": [
+                    "691:1240",
+                    0
+                  ],
+                  "vae": [
+                    "167:58",
+                    0
+                  ],
+                  "tile_size": 512,
+                  "overlap": 64,
+                  "temporal_size": 64,
+                  "temporal_overlap": 8
+                },
+                "_meta": {
+                  "title": "底图 · VAEDecodeTiled",
+                  "pipeline_stage": "base"
+                }
+              },
+              "v3:cleanup:base": {
+                "class_type": "VRAM_Debug",
+                "inputs": {
+                  "empty_cache": true,
+                  "gc_collect": true,
+                  "unload_all_models": false,
+                  "image_pass": [
+                    "v3:decode:1",
+                    0
+                  ]
+                },
+                "_meta": {
+                  "title": "底图 · 清缓存与垃圾回收",
+                  "pipeline_stage": "base"
+                }
+              },
+              "v3:run:seed": {
+                "class_type": "PrimitiveInt",
+                "inputs": {
+                  "value": 20261115
+                },
+                "_meta": {
+                  "title": "底图 · PrimitiveInt",
+                  "pipeline_stage": "base"
+                }
+              },
+              "v3:run:nonce": {
+                "class_type": "PrimitiveInt",
+                "inputs": {
+                  "value": 2026111501
+                },
+                "_meta": {
+                  "title": "底图 · PrimitiveInt",
+                  "pipeline_stage": "base"
+                }
+              },
+              "v3:run:gate": {
+                "class_type": "ComfyMathExpression",
+                "inputs": {
+                  "expression": "a",
+                  "values.a": [
+                    "v3:run:seed",
+                    0
+                  ],
+                  "values.b": [
+                    "v3:run:nonce",
+                    0
+                  ]
+                },
+                "_meta": {
+                  "title": "底图 · ComfyMathExpression",
+                  "pipeline_stage": "base"
+                }
+              }
+            }
+          },
+          "single_workbench": {
+            "settings": {
+              "positive_prompt": "masterpiece, best quality, scenery, a small wooden cabin beside a clear mountain lake, pine forest, distant snow capped mountains, morning sunlight, peaceful atmosphere, detailed environment, no humans",
+              "prefix": "",
+              "suffix": "",
+              "lora_prefix_managed_triggers": [],
+              "input_image_id": "",
+              "denoise": 0.65,
+              "resize_mode": "crop",
+              "unlock_resources": true,
+              "weight_dtype": "default",
+              "vae_decode": {
+                "tiled": true,
+                "tile_size": 512,
+                "overlap": 64,
+                "temporal_size": 64,
+                "temporal_overlap": 8
+              },
+              "vae_encode": {
+                "tiled": true,
+                "tile_size": 512,
+                "overlap": 64,
+                "temporal_size": 64,
+                "temporal_overlap": 8
+              },
+              "loras_secondary": [],
+              "secondary_managed_triggers": [],
+              "normal_pipeline": "primary",
+              "zero_negative": false,
+              "secondary_zero_negative": false,
+              "dual": {
+                "switch_step": 15,
+                "scale": 1.0,
+                "upscale_method": "sesqui",
+                "model_format": "Wan 2.1",
+                "half_precision": true,
+                "first_pipeline": "primary",
+                "second_pipeline": "primary",
+                "second_cfg": 4.0,
+                "second_sampler_name": "er_sde",
+                "second_scheduler": "simple",
+                "first_add_noise": true,
+                "second_add_noise": true,
+                "first_leftover_noise": true,
+                "second_leftover_noise": false
+              },
+              "krea_variance": {
+                "enabled": false,
+                "randomize_percent": 50.0,
+                "auto_strength_factor": 1.0,
+                "strength": 20.0,
+                "noise_insert": "noise on beginning steps",
+                "steps_switchover_percent": 25.0,
+                "mask_starts_at": "beginning",
+                "mask_percent": 0.0,
+                "noise_distribution": "uniform",
+                "granularity": "values"
+              },
+              "prompt_processing": {
+                "expand": {
+                  "enabled": false,
+                  "rule": "扩写-通用",
+                  "custom_rule": false,
+                  "custom_rule_content": "",
+                  "user_prompt": "",
+                  "llm_service": "",
+                  "ollama_auto_unload": true,
+                  "seed": 0
+                },
+                "oc": {
+                  "enabled": false,
+                  "rule": "扩写-通用",
+                  "custom_rule": true,
+                  "custom_rule_content": "Replace only the character features specified by the user with the supplied original character description. Preserve composition, pose, expression, background, lighting, style and quality tags. If no feature list is supplied, replace character appearance and clothing. Return only the complete final English image prompt, without commentary or code fences.",
+                  "user_prompt": "",
+                  "llm_service": "",
+                  "ollama_auto_unload": true,
+                  "seed": 0,
+                  "character": "",
+                  "features": ""
+                }
+              },
+              "prompt_job_id": "",
+              "processed_prompt_override": null,
+              "latent": {
+                "upscale_method": "sesqui",
+                "model_format": "Wan 2.1",
+                "half_precision": true,
+                "pipeline": "secondary"
+              },
+              "face_pipeline": "secondary",
+              "dlss": {
+                "enabled": false,
+                "style": "电影",
+                "intensity": 1.0,
+                "local_tone": 1.0,
+                "local_struct": 1.0,
+                "output_view": "处理",
+                "output_mix": 1.0,
+                "gpu_gen": "Auto"
+              }
+            },
+            "effective_positive": {
+              "primary": "masterpiece, best quality, scenery, a small wooden cabin beside a clear mountain lake, pine forest, distant snow capped mountains, morning sunlight, peaceful atmosphere, detailed environment, no humans",
+              "secondary": "masterpiece, best quality, scenery, a small wooden cabin beside a clear mountain lake, pine forest, distant snow capped mountains, morning sunlight, peaceful atmosphere, detailed environment, no humans"
+            },
+            "positive": "masterpiece, best quality, scenery, a small wooden cabin beside a clear mountain lake, pine forest, distant snow capped mountains, morning sunlight, peaceful atmosphere, detailed environment, no humans",
+            "negative": "worst quality, low quality, blurry, jpeg artifacts, text, watermark",
+            "api_prompt": {
+              "72": {
+                "inputs": {
+                  "__lm_autocomplete_meta_text": {
+                    "version": 1,
+                    "textWidgetName": "text"
+                  },
+                  "text": "",
+                  "loras": {
+                    "__value__": []
+                  },
+                  "model": [
+                    "167:56",
+                    0
+                  ],
+                  "clip": [
+                    "167:57",
+                    0
+                  ]
+                },
+                "class_type": "Lora Loader (LoraManager)",
+                "_meta": {
+                  "title": "Lora堆_1",
+                  "pipeline_stage": "base"
+                }
+              },
+              "167:56": {
+                "inputs": {
+                  "unet_name": "anima-base-v1.0.safetensors",
+                  "weight_dtype": "default"
+                },
+                "class_type": "UNETLoader",
+                "_meta": {
+                  "title": "UNet加载器",
+                  "pipeline_stage": "base"
+                }
+              },
+              "167:57": {
+                "inputs": {
+                  "clip_name": "qwen_3_06b_base.safetensors",
+                  "type": "stable_diffusion",
+                  "device": "default"
+                },
+                "class_type": "CLIPLoader",
+                "_meta": {
+                  "title": "加载CLIP",
+                  "pipeline_stage": "base"
+                }
+              },
+              "167:58": {
+                "inputs": {
+                  "vae_name": "qwen_image_vae.safetensors"
+                },
+                "class_type": "VAELoader",
+                "_meta": {
+                  "title": "加载VAE",
+                  "pipeline_stage": "base"
+                }
+              },
+              "691:1240": {
+                "inputs": {
+                  "seed": [
+                    "v3:run:gate",
+                    1
+                  ],
+                  "steps": 30,
+                  "cfg": 4.0,
+                  "sampler_name": "er_sde",
+                  "scheduler": "simple",
+                  "denoise": 1.0,
+                  "positive": [
+                    "single:primary:positive",
+                    0
+                  ],
+                  "latent_image": [
+                    "691:53",
+                    0
+                  ],
+                  "model": [
+                    "72",
+                    0
+                  ],
+                  "negative": [
+                    "single:primary:negative",
+                    0
+                  ]
+                },
+                "class_type": "KSampler",
+                "_meta": {
+                  "title": "K采样器",
+                  "pipeline_stage": "base"
+                }
+              },
+              "691:53": {
+                "inputs": {
+                  "width": 768,
+                  "height": 1024,
+                  "batch_size": 1
+                },
+                "class_type": "EmptyLatentImage",
+                "_meta": {
+                  "title": "空Latent图像",
+                  "pipeline_stage": "base"
+                }
+              },
+              "v2:output": {
+                "class_type": "SaveImage",
+                "inputs": {
+                  "images": [
+                    "v3:cleanup:base",
+                    1
+                  ],
+                  "filename_prefix": "benchmarks/2026-11-15-workflow-compare/b_project_matched"
+                },
+                "_meta": {
+                  "title": "导出保存 · SaveImage",
+                  "pipeline_stage": "export"
+                }
+              },
+              "single:primary:positive": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {
+                  "clip": [
+                    "72",
+                    1
+                  ],
+                  "text": "masterpiece, best quality, scenery, a small wooden cabin beside a clear mountain lake, pine forest, distant snow capped mountains, morning sunlight, peaceful atmosphere, detailed environment, no humans"
+                },
+                "_meta": {
+                  "pipeline_stage": "base"
+                }
+              },
+              "single:primary:negative": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {
+                  "clip": [
+                    "72",
+                    1
+                  ],
+                  "text": "worst quality, low quality, blurry, jpeg artifacts, text, watermark"
+                },
+                "_meta": {
+                  "pipeline_stage": "base"
+                }
+              },
+              "v3:decode:1": {
+                "class_type": "VAEDecodeTiled",
+                "inputs": {
+                  "samples": [
+                    "691:1240",
+                    0
+                  ],
+                  "vae": [
+                    "167:58",
+                    0
+                  ],
+                  "tile_size": 512,
+                  "overlap": 64,
+                  "temporal_size": 64,
+                  "temporal_overlap": 8
+                },
+                "_meta": {
+                  "title": "底图 · VAEDecodeTiled",
+                  "pipeline_stage": "base"
+                }
+              },
+              "v3:cleanup:base": {
+                "class_type": "VRAM_Debug",
+                "inputs": {
+                  "empty_cache": true,
+                  "gc_collect": true,
+                  "unload_all_models": false,
+                  "image_pass": [
+                    "v3:decode:1",
+                    0
+                  ]
+                },
+                "_meta": {
+                  "title": "底图 · 清缓存与垃圾回收",
+                  "pipeline_stage": "base"
+                }
+              },
+              "v3:run:seed": {
+                "class_type": "PrimitiveInt",
+                "inputs": {
+                  "value": 20261115
+                },
+                "_meta": {
+                  "title": "底图 · PrimitiveInt",
+                  "pipeline_stage": "base"
+                }
+              },
+              "v3:run:nonce": {
+                "class_type": "PrimitiveInt",
+                "inputs": {
+                  "value": 2026111501
+                },
+                "_meta": {
+                  "title": "底图 · PrimitiveInt",
+                  "pipeline_stage": "base"
+                }
+              },
+              "v3:run:gate": {
+                "class_type": "ComfyMathExpression",
+                "inputs": {
+                  "expression": "a",
+                  "values.a": [
+                    "v3:run:seed",
+                    0
+                  ],
+                  "values.b": [
+                    "v3:run:nonce",
+                    0
+                  ]
+                },
+                "_meta": {
+                  "title": "底图 · ComfyMathExpression",
+                  "pipeline_stage": "base"
+                }
+              }
+            }
+          }
+        }
+      },
+      "anima_random_webui": {
+        "settings": {
+          "pipeline_version": 5,
+          "workbench": "single",
+          "generation_mode": "txt2img",
+          "single": {
+            "positive_prompt": "masterpiece, best quality, scenery, a small wooden cabin beside a clear mountain lake, pine forest, distant snow capped mountains, morning sunlight, peaceful atmosphere, detailed environment, no humans",
+            "prefix": "",
+            "suffix": "",
+            "lora_prefix_managed_triggers": [],
+            "input_image_id": "",
+            "denoise": 0.65,
+            "resize_mode": "crop",
+            "unlock_resources": true,
+            "weight_dtype": "default",
+            "vae_decode": {
+              "tiled": true,
+              "tile_size": 512,
+              "overlap": 64,
+              "temporal_size": 64,
+              "temporal_overlap": 8
+            },
+            "vae_encode": {
+              "tiled": true,
+              "tile_size": 512,
+              "overlap": 64,
+              "temporal_size": 64,
+              "temporal_overlap": 8
+            },
+            "loras_secondary": [],
+            "secondary_managed_triggers": [],
+            "normal_pipeline": "primary",
+            "zero_negative": false,
+            "secondary_zero_negative": false,
+            "dual": {
+              "switch_step": 15,
+              "scale": 1.0,
+              "upscale_method": "sesqui",
+              "model_format": "Wan 2.1",
+              "half_precision": true,
+              "first_pipeline": "primary",
+              "second_pipeline": "primary",
+              "second_cfg": 4.0,
+              "second_sampler_name": "er_sde",
+              "second_scheduler": "simple",
+              "first_add_noise": true,
+              "second_add_noise": true,
+              "first_leftover_noise": true,
+              "second_leftover_noise": false
+            },
+            "krea_variance": {
+              "enabled": false,
+              "randomize_percent": 50.0,
+              "auto_strength_factor": 1.0,
+              "strength": 20.0,
+              "noise_insert": "noise on beginning steps",
+              "steps_switchover_percent": 25.0,
+              "mask_starts_at": "beginning",
+              "mask_percent": 0.0,
+              "noise_distribution": "uniform",
+              "granularity": "values"
+            },
+            "prompt_processing": {
+              "expand": {
+                "enabled": false,
+                "rule": "扩写-通用",
+                "custom_rule": false,
+                "custom_rule_content": "",
+                "user_prompt": "",
+                "llm_service": "",
+                "ollama_auto_unload": true,
+                "seed": 0
+              },
+              "oc": {
+                "enabled": false,
+                "rule": "扩写-通用",
+                "custom_rule": true,
+                "custom_rule_content": "Replace only the character features specified by the user with the supplied original character description. Preserve composition, pose, expression, background, lighting, style and quality tags. If no feature list is supplied, replace character appearance and clothing. Return only the complete final English image prompt, without commentary or code fences.",
+                "user_prompt": "",
+                "llm_service": "",
+                "ollama_auto_unload": true,
+                "seed": 0,
+                "character": "",
+                "features": ""
+              }
+            },
+            "prompt_job_id": "",
+            "processed_prompt_override": null,
+            "latent": {
+              "upscale_method": "sesqui",
+              "model_format": "Wan 2.1",
+              "half_precision": true,
+              "pipeline": "secondary"
+            },
+            "face_pipeline": "secondary",
+            "dlss": {
+              "enabled": false,
+              "style": "电影",
+              "intensity": 1.0,
+              "local_tone": 1.0,
+              "local_struct": 1.0,
+              "output_view": "处理",
+              "output_mix": 1.0,
+              "gpu_gen": "Auto"
+            }
+          },
+          "dual": {
+            "switch_step": 15,
+            "scale": 1.0,
+            "second_cfg": 4.0,
+            "second_sampler_name": "er_sde",
+            "second_scheduler": "simple",
+            "upscale_method": "sesqui",
+            "model_format": "Wan 2.1",
+            "half_precision": true
+          },
+          "base_denoise": 1.0,
+          "krea_variance": {
+            "enabled": false,
+            "randomize_percent": 50.0,
+            "auto_strength_factor": 1.0,
+            "strength": 20.0,
+            "noise_insert": "noise on beginning steps",
+            "steps_switchover_percent": 25.0,
+            "mask_starts_at": "beginning",
+            "mask_percent": 0.0,
+            "noise_distribution": "uniform",
+            "granularity": "values"
+          },
+          "count": 1,
+          "random_character": false,
+          "random_clothing": false,
+          "random_pose": false,
+          "random_background": false,
+          "random_expression": false,
+          "random_character_count": 1,
+          "random_clothing_count": 1,
+          "random_pose_count": 1,
+          "random_background_count": 1,
+          "random_expression_count": 1,
+          "fixed_character": "",
+          "fixed_clothing": "",
+          "fixed_pose": "",
+          "fixed_background": "",
+          "fixed_expression": "",
+          "female_count": 1,
+          "male_count": 0,
+          "model_name": "anima-base-v1.0.safetensors",
+          "model_profile": "anima",
+          "clip_name": "qwen_3_06b_base.safetensors",
+          "vae_name": "qwen_image_vae.safetensors",
+          "clip_type": "stable_diffusion",
+          "loras": [],
+          "lora_managed_triggers": [],
+          "pools": {
+            "character": {
+              "mode": "include",
+              "ids": [],
+              "excluded_ids": []
+            },
+            "clothing": {
+              "mode": "include",
+              "ids": [],
+              "excluded_ids": []
+            },
+            "pose": {
+              "mode": "include",
+              "ids": [],
+              "excluded_ids": []
+            },
+            "background": {
+              "mode": "include",
+              "ids": [],
+              "excluded_ids": []
+            },
+            "expression": {
+              "mode": "include",
+              "ids": [],
+              "excluded_ids": []
+            }
+          },
+          "krea_prompt_pool": {
+            "enabled": false,
+            "ids": []
+          },
+          "character_detail": "trigger_tags",
+          "manual_artist": "",
+          "quality_prompt": "masterpiece, best quality, score_9, score_8, highres, year 2025, newest, safe",
+          "extra_prompt": "",
+          "negative_prompt": "worst quality, low quality, blurry, jpeg artifacts, text, watermark",
+          "zero_negative": false,
+          "width": 768,
+          "height": 1024,
+          "steps": 30,
+          "cfg": 4.0,
+          "sampler_name": "er_sde",
+          "scheduler": "simple",
+          "base_mode": "normal",
+          "upscalers": {
+            "pixel_hires": {
+              "enabled": false,
+              "model_name": "4x_foolhardy_Remacri.pth",
+              "percent": 50,
+              "upscale_method": "lanczos"
+            },
+            "post_sampler": {
+              "enabled": false,
+              "steps": 16,
+              "cfg": 4.0,
+              "sampler_name": "er_sde",
+              "scheduler": "simple",
+              "denoise": 0.2
+            },
+            "dlss": {
+              "enabled": false,
+              "style": "电影",
+              "intensity": 1.0,
+              "local_tone": 1.0,
+              "local_struct": 1.0,
+              "output_view": "处理",
+              "output_mix": 1.0,
+              "gpu_gen": "Auto"
+            },
+            "latent": {
+              "enabled": false,
+              "scale_by": 1.5,
+              "upscale_method": "sesqui",
+              "model_format": "Wan 2.1",
+              "half_precision": true,
+              "second_sampler": {
+                "enabled": true,
+                "steps": 20,
+                "cfg": 8.0,
+                "sampler_name": "euler",
+                "scheduler": "simple",
+                "denoise": 1.0
+              },
+              "sampler": {
+                "steps": 16,
+                "cfg": 4.0,
+                "sampler_name": "er_sde",
+                "scheduler": "simple",
+                "denoise": 0.2
+              }
+            },
+            "seedvr2": {
+              "enabled": false,
+              "model_name": "seedvr2_3b_int8_convrot.safetensors",
+              "vae_name": "ema_vae_fp16.safetensors",
+              "scale_by": 2.0,
+              "weight_dtype": "default",
+              "color_correction_method": "lab",
+              "sampler": {
+                "steps": 1,
+                "cfg": 1.0,
+                "sampler_name": "euler",
+                "scheduler": "simple",
+                "denoise": 1.0
+              },
+              "encode": {
+                "tile_size": 512,
+                "overlap": 64,
+                "temporal_size": 64,
+                "temporal_overlap": 8
+              },
+              "decode": {
+                "tile_size": 512,
+                "overlap": 128,
+                "temporal_size": 4096,
+                "temporal_overlap": 8
+              }
+            },
+            "nvidia": {
+              "enabled": false,
+              "resize_type": "scale by multiplier",
+              "scale": 2.0,
+              "quality": "ULTRA",
+              "dlss": {
+                "style": "电影",
+                "intensity": 1.0,
+                "local_tone": 1.0,
+                "local_struct": 1.0,
+                "output_view": "处理",
+                "output_mix": 1.0,
+                "gpu_gen": "Auto"
+              }
+            },
+            "face_refine": {
+              "enabled": false,
+              "cfg_scale": 4.0,
+              "denoise_strength": 0.3,
+              "detection_confidence": 0.75,
+              "crop_padding": 1.6,
+              "sampling_mask_blur_strength": 1.0,
+              "steps": 16,
+              "face_selection": 0,
+              "processing_resolution": 1024,
+              "blend_softness": 8,
+              "mask_expansion": 2,
+              "sampling_mask_blur_size": 21,
+              "sampler": "er_sde",
+              "scheduler": "simple",
+              "manual_rotation": "None",
+              "upscaler_model": "Fast 4x (Lanczos)",
+              "face_positive_prompt": "",
+              "face_negative_prompt": "",
+              "exclusions": "",
+              "enable_pre_upscale": true,
+              "replace_positive_prompt": false,
+              "replace_negative_prompt": false,
+              "enable_color_correction": true,
+              "enable_segmentation": true,
+              "enable_differential_diffusion": true,
+              "enable_lightness_rescue": true,
+              "enable_final_refinement": true,
+              "offload_models_to_cpu": true
+            }
+          }
+        },
+        "sample_seed": 20261115,
+        "prompt_seed": 20261115,
+        "sequence": 1,
+        "resolved_selection": {},
+        "resolved_prompt": "",
+        "resolved_prompt_full": "masterpiece, best quality, scenery, a small wooden cabin beside a clear mountain lake, pine forest, distant snow capped mountains, morning sunlight, peaceful atmosphere, detailed environment, no humans",
+        "frozen_positive_prompt": "masterpiece, best quality, scenery, a small wooden cabin beside a clear mountain lake, pine forest, distant snow capped mountains, morning sunlight, peaceful atmosphere, detailed environment, no humans",
+        "execution_context": {
+          "execution_nonce": 2026111501
+        },
+        "single_runtime": {
+          "positive": "masterpiece, best quality, scenery, a small wooden cabin beside a clear mountain lake, pine forest, distant snow capped mountains, morning sunlight, peaceful atmosphere, detailed environment, no humans",
+          "negative": "worst quality, low quality, blurry, jpeg artifacts, text, watermark",
+          "effective_positive": {
+            "primary": "masterpiece, best quality, scenery, a small wooden cabin beside a clear mountain lake, pine forest, distant snow capped mountains, morning sunlight, peaceful atmosphere, detailed environment, no humans",
+            "secondary": "masterpiece, best quality, scenery, a small wooden cabin beside a clear mountain lake, pine forest, distant snow capped mountains, morning sunlight, peaceful atmosphere, detailed environment, no humans"
+          }
+        }
+      }
+    },
+    "preview_method": "latent2rgb"
+  }
+}

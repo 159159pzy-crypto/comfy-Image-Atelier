@@ -1,0 +1,201 @@
+{
+  "4e0e94b4-d98e-43e0-a596-219466f804d6": {
+    "prompt": [
+      0,
+      "4e0e94b4-d98e-43e0-a596-219466f804d6",
+      {
+        "167:56": {
+          "class_type": "UNETLoader",
+          "inputs": {
+            "unet_name": "anima-base-v1.0.safetensors",
+            "weight_dtype": "default"
+          }
+        },
+        "167:57": {
+          "class_type": "CLIPLoader",
+          "inputs": {
+            "clip_name": "qwen_3_06b_base.safetensors",
+            "type": "stable_diffusion",
+            "device": "default"
+          }
+        },
+        "167:58": {
+          "class_type": "VAELoader",
+          "inputs": {
+            "vae_name": "qwen_image_vae.safetensors"
+          }
+        },
+        "299:52": {
+          "class_type": "CLIPTextEncode",
+          "inputs": {
+            "clip": [
+              "167:57",
+              0
+            ],
+            "text": "masterpiece, best quality, scenery, a small wooden cabin beside a clear mountain lake, pine forest, distant snow capped mountains, morning sunlight, peaceful atmosphere, detailed environment, no humans"
+          }
+        },
+        "299:295": {
+          "class_type": "CLIPTextEncode",
+          "inputs": {
+            "clip": [
+              "167:57",
+              0
+            ],
+            "text": "worst quality, low quality, blurry, jpeg artifacts, text, watermark"
+          }
+        },
+        "691:53": {
+          "class_type": "EmptyLatentImage",
+          "inputs": {
+            "width": 768,
+            "height": 1024,
+            "batch_size": 1
+          }
+        },
+        "691:1240": {
+          "class_type": "KSampler",
+          "inputs": {
+            "model": [
+              "167:56",
+              0
+            ],
+            "positive": [
+              "299:52",
+              0
+            ],
+            "negative": [
+              "299:295",
+              0
+            ],
+            "latent_image": [
+              "691:53",
+              0
+            ],
+            "seed": 20261115,
+            "steps": 30,
+            "cfg": 4.0,
+            "sampler_name": "er_sde",
+            "scheduler": "simple",
+            "denoise": 1.0
+          }
+        },
+        "691:239": {
+          "class_type": "VAEDecodeTiled",
+          "inputs": {
+            "samples": [
+              "691:1240",
+              0
+            ],
+            "vae": [
+              "167:58",
+              0
+            ],
+            "tile_size": 512,
+            "overlap": 64,
+            "temporal_size": 64,
+            "temporal_overlap": 8
+          }
+        },
+        "691:1413": {
+          "class_type": "VRAM_Debug",
+          "inputs": {
+            "image_pass": [
+              "691:239",
+              0
+            ],
+            "empty_cache": true,
+            "gc_collect": true,
+            "unload_all_models": false
+          }
+        },
+        "benchmark:save": {
+          "class_type": "SaveImage",
+          "inputs": {
+            "images": [
+              "691:1413",
+              1
+            ],
+            "filename_prefix": "benchmarks/2026-11-15-workflow-compare/a_attachment_matched"
+          },
+          "_meta": {
+            "title": "Attachment core benchmark (reconstructed, not the original full workflow)",
+            "benchmark_note": "Core enabled image-generation graph reconstructed from workflow (2).json. Missing Silvermoon Turbo replaced with Anima base and both arms matched to 30 steps / CFG 4 / normal sampling / negative zeroing disabled. Prompt, seed, dimensions and output saver standardized. Manual confirmation, notifications and inactive branches omitted. VRAM cleanup retained before SaveImage. This does not test the original Turbo configuration."
+          }
+        }
+      },
+      {
+        "comfy_usage_source": "comfy-cli/comfy-mcp",
+        "extra_pnginfo": {},
+        "client_id": "3fbb04fa-4e12-4d1f-97b9-8093022898ce",
+        "create_time": 1794675957898
+      },
+      [
+        "benchmark:save"
+      ]
+    ],
+    "outputs": {
+      "691:1413": {
+        "text": [
+          "1,627,792,906x1,627,792,906"
+        ]
+      },
+      "benchmark:save": {
+        "images": [
+          {
+            "filename": "a_attachment_matched_00001_.png",
+            "subfolder": "benchmarks\\2026-11-15-workflow-compare",
+            "type": "output",
+            "metadata": {
+              "kind": "image",
+              "width": 768,
+              "height": 1024
+            }
+          }
+        ]
+      }
+    },
+    "status": {
+      "status_str": "success",
+      "completed": true,
+      "messages": [
+        [
+          "execution_start",
+          {
+            "prompt_id": "4e0e94b4-d98e-43e0-a596-219466f804d6",
+            "timestamp": 1794675957899
+          }
+        ],
+        [
+          "execution_cached",
+          {
+            "nodes": [],
+            "prompt_id": "4e0e94b4-d98e-43e0-a596-219466f804d6",
+            "timestamp": 1794675957904
+          }
+        ],
+        [
+          "execution_success",
+          {
+            "prompt_id": "4e0e94b4-d98e-43e0-a596-219466f804d6",
+            "timestamp": 1794675995500
+          }
+        ]
+      ]
+    },
+    "meta": {
+      "691:1413": {
+        "node_id": "691:1413",
+        "display_node": "691:1413",
+        "parent_node": null,
+        "real_node_id": "691:1413"
+      },
+      "benchmark:save": {
+        "node_id": "benchmark:save",
+        "display_node": "benchmark:save",
+        "parent_node": null,
+        "real_node_id": "benchmark:save"
+      }
+    }
+  }
+}

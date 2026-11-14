@@ -1,0 +1,62 @@
+{
+  "system": {
+    "os": "win32",
+    "ram_total": 16898727936,
+    "ram_free": 1604767744,
+    "comfyui_version": "0.43.0",
+    "required_frontend_version": "1.57.4",
+    "installed_templates_version": "0.11.97",
+    "required_templates_version": "0.11.97",
+    "comfy_package_versions": [
+      {
+        "name": "comfyui-frontend-package",
+        "installed": "1.57.4",
+        "required": "1.57.4"
+      },
+      {
+        "name": "comfyui-workflow-templates",
+        "installed": "0.11.97",
+        "required": "0.11.97"
+      },
+      {
+        "name": "comfyui-embedded-docs",
+        "installed": "0.5.15",
+        "required": "0.5.15"
+      },
+      {
+        "name": "comfy-aimdo",
+        "installed": "0.6.0",
+        "required": "0.6.0"
+      },
+      {
+        "name": "comfy-kitchen",
+        "installed": "0.2.40",
+        "required": "0.2.40"
+      }
+    ],
+    "python_version": "3.11.9 (tags/v3.11.9:de54cf5, Apr  2 2024, 10:12:12) [MSC v.1938 64 bit (AMD64)]",
+    "pytorch_version": "2.13.0+cu130",
+    "embedded_python": false,
+    "deploy_environment": "local-git",
+    "argv": [
+      "F:\\comfyui\\main.py",
+      "--listen",
+      "127.0.0.1",
+      "--port",
+      "8188",
+      "--disable-auto-launch",
+      "--enable-manager"
+    ]
+  },
+  "devices": [
+    {
+      "name": "cuda:0 NVIDIA GeForce RTX 4060 Laptop GPU : cudaMallocAsync",
+      "type": "cuda",
+      "index": 0,
+      "vram_total": 8585216000,
+      "vram_free": 7396524032,
+      "torch_vram_total": 33554432,
+      "torch_vram_free": 25034752
+    }
+  ]
+}

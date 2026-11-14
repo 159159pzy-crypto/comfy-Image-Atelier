@@ -1,0 +1,97 @@
+{
+  "purpose": "Matched-settings comparison between the reconstructed attachment core and the current project single-image builder. Original Silvermoon Turbo model is unavailable, so this does not validate its saved Turbo configuration. Neither arm uses Triton. Cache/warmup conditions must be reported with timings.",
+  "source_attachment": "D:\\loud\\workflow (2).json",
+  "source_attachment_sha256": "42f2c1a965f12de8d2d80125ed676974fdd4a83bb62178c0c2e26f6751cbd414",
+  "shared": {
+    "width": 768,
+    "height": 1024,
+    "batch_size": 1,
+    "sample_seed": 20261115,
+    "prompt_seed": 20261115,
+    "positive": "masterpiece, best quality, scenery, a small wooden cabin beside a clear mountain lake, pine forest, distant snow capped mountains, morning sunlight, peaceful atmosphere, detailed environment, no humans",
+    "negative": "worst quality, low quality, blurry, jpeg artifacts, text, watermark",
+    "model": "anima-base-v1.0.safetensors",
+    "weight_dtype": "default",
+    "steps": 30,
+    "cfg": 4.0,
+    "sampler": "er_sde",
+    "scheduler": "simple",
+    "denoise": 1.0,
+    "base_mode": "normal",
+    "zero_negative": false,
+    "loras": [],
+    "postprocessing": [],
+    "vae": "qwen_image_vae.safetensors",
+    "clip": "qwen_3_06b_base.safetensors",
+    "clip_type": "stable_diffusion",
+    "vae_decode": {
+      "tiled": true,
+      "tile_size": 512,
+      "overlap": 64,
+      "temporal_size": 64,
+      "temporal_overlap": 8
+    }
+  },
+  "a": {
+    "description": "Reconstruction of the attachment's enabled base-generation core, with matched test settings",
+    "original_saved_parameters": {
+      "model": "silvermoonmixAnima_v2329BTurbo.safetensors",
+      "steps": 12,
+      "cfg": 1,
+      "sampler": "er_sde",
+      "scheduler": "simple",
+      "base_mode": "normal",
+      "zero_negative": true
+    },
+    "deviations": [
+      "Silvermoon Turbo unavailable: use anima-base-v1.0 for both arms",
+      "Match 30 steps / CFG 4 / negative zeroing disabled to current project single-image defaults",
+      "Shared test prompt, seed and dimensions replace saved values",
+      "Resolve Get/Set nodes and switches to their selected active inputs",
+      "Omit manual image confirmation, notifications and inactive modules",
+      "Use ordinary SaveImage after VRAM_Debug instead of ConditionalSaveImage before VRAM_Debug"
+    ]
+  },
+  "b": {
+    "description": "Current real project builder with a new Anima single-workbench draft",
+    "pipeline_version": 5,
+    "builder": "WorkflowTemplates.submission(default_settings_for_profile('anima', workbench='single'))",
+    "execution_nonce": 2026111501,
+    "deviations": [
+      "Shared test prompt, seed and dimensions replace defaults",
+      "One image instead of a batch",
+      "Explicitly freeze the same positive and negative prompt strings"
+    ]
+  },
+  "node_counts": {
+    "a": 10,
+    "b": 14
+  },
+  "class_counts": {
+    "a": {
+      "UNETLoader": 1,
+      "CLIPLoader": 1,
+      "VAELoader": 1,
+      "CLIPTextEncode": 2,
+      "EmptyLatentImage": 1,
+      "KSampler": 1,
+      "VAEDecodeTiled": 1,
+      "VRAM_Debug": 1,
+      "SaveImage": 1
+    },
+    "b": {
+      "Lora Loader (LoraManager)": 1,
+      "UNETLoader": 1,
+      "CLIPLoader": 1,
+      "VAELoader": 1,
+      "KSampler": 1,
+      "EmptyLatentImage": 1,
+      "SaveImage": 1,
+      "CLIPTextEncode": 2,
+      "VAEDecodeTiled": 1,
+      "VRAM_Debug": 1,
+      "PrimitiveInt": 2,
+      "ComfyMathExpression": 1
+    }
+  }
+}
