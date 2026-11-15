@@ -15,7 +15,7 @@ internal static class SetupModelSelectionTests
         var choices = SetupModelSelection.Choices(models, profiles, "anima");
         Check(choices.Length == 16 && choices.Count(choice => choice.ModelIds.Length == 2) == 4
             && choices.Single(choice => choice.Id == "face-refine").ModelIds.Length == 2 && choices.Any(choice => choice.Id == "seedvr2"),
-            "onboarding offers both SeedVR2 variants, profile pixel model, Krea, faces, eight taggers and native runtimes");
+            "onboarding offers both SeedVR2 variants, optional AnimeSharp download, Krea, faces, eight taggers and native runtimes");
         Check(choices.Single(choice => choice.Recommended).Id == "tagger-pixai-tagger-v0.9-timm",
             "tagger recommendation is metadata, not an automatic selection");
         Check(profiles.RequiredModels(models, "anima").Length == 3
@@ -34,10 +34,10 @@ internal static class SetupModelSelectionTests
             && SetupModelSelection.SetChoiceSelected(importedKreaChoices,
                 importedKreaChoices.Single(choice => choice.Id == "base").ModelIds, "base", false).Length == 0,
             "imported Krea exposes one base choice that can be unchecked without a duplicate retaining it");
-        Check(choices.Single(choice => choice.Id == "pixel_hires").ModelIds.SequenceEqual(["pixel-remacri"])
+        Check(choices.Single(choice => choice.Id == "pixel_hires").ModelIds.SequenceEqual(["pixel-animesharp"])
             && kreaChoices.Single(choice => choice.Id == "pixel_hires").ModelIds.SequenceEqual(["pixel-animesharp"])
             && kreaChoices.Any(choice => choice.Id == "sesqui") && choices.All(choice => choice.Id != "sesqui"),
-            "pixel selection follows the existing profile and fresh Krea can opt into Sesqui");
+            "both profiles offer the same optional AnimeSharp download and fresh Krea can opt into Sesqui");
         var seed3 = choices.Single(choice => choice.Id == "seedvr2");
         var seed7 = choices.Single(choice => choice.Id == "seedvr2-7b");
         Check(!seed3.Recommended && !seed7.Recommended && !choices.Single(choice => choice.Id == "pixel_hires").Recommended

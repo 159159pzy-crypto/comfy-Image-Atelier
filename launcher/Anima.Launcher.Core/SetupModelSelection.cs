@@ -67,7 +67,7 @@ public static class SetupModelSelection
         Add("seedvr2", "SeedVR2 3B INT8 修复放大", "保留当前默认模型；已有兼容模型可在工作台选择。", SeedModelIds);
         if (byId.ContainsKey("seedvr2-7b-sharp"))
             Add("seedvr2-7b", "SeedVR2 7B Sharp INT8", "可选的 7B Sharp 模型，与 3B 共用 VAE；安装后可在工作台选择。", ["seedvr2-7b-sharp", "seedvr2-vae"]);
-        Add("pixel_hires", "像素高清默认模型", "准备当前档案的像素放大模型；保持像素高清默认关闭。", [profile == "krea2" ? "pixel-animesharp" : "pixel-remacri"]);
+        Add("pixel_hires", "4x AnimeSharp 通用放大模型", "准备可选的像素放大模型下载；工作台默认模型和生成参数保持不变。", ["pixel-animesharp"]);
         if (profile != "krea2") Add("krea2", "Krea 2 图像生成", "Krea 2 Turbo 与文本编码器，共用基础 Qwen VAE。", ["krea2-turbo", "qwen3vl-krea2", "qwen-vae"]);
         Add("face-refine", "脸部细化默认模型", "集成脸部细化使用的人脸检测与分割模型。", ["forbidden-vision-detect", "forbidden-vision-segment"]);
         foreach (var model in models.Models.Where(model => model.Category == "wd_taggers").OrderByDescending(model => model.Recommended))

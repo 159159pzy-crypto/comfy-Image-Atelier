@@ -102,7 +102,7 @@ internal static class InstallationReadinessTests
             ("qwen-text", "text_encoders", "qwen.safetensors"), ("qwen-vae", "vae", "qwen_vae.safetensors"),
             ("seedvr2-model", "diffusion_models", "seedvr2.safetensors"), ("seedvr2-vae", "vae", "seedvr2_vae.safetensors"),
             ("seedvr2-7b-sharp", "diffusion_models", "seedvr2_7b_sharp_int8_convrot.safetensors"),
-            ("pixel-remacri", "upscale_models", "4x_foolhardy_Remacri.pth"),
+            ("pixel-animesharp", "upscale_models", "4x-AnimeSharp.pth"),
             ("krea2-turbo", "diffusion_models", "krea.safetensors"), ("qwen3vl-krea2", "text_encoders", "krea_clip.safetensors"),
             ("forbidden-vision-detect", "forbidden_vision", "face.pt") };
         var bytes = Encoding.UTF8.GetBytes("verified fixture");
@@ -200,8 +200,8 @@ internal static class InstallationReadinessTests
                 && handler.LastSettings.GetProperty("model_profile").GetString() == "krea2"
                 && handler.LastSettings.GetProperty("model_name").GetString() == "krea.safetensors"
                 && config.SelectedProfile == "anima", "optional Krea verifies its own profile without requiring or changing the active Anima profile");
-            Check((await checker.CheckAsync(config, minimalRuntime, models, profiles, ["pixel-remacri"], default, features: ["pixel_hires"])).Ready
-                && handler.LastSettings.GetProperty("upscalers").GetProperty("pixel_hires").GetProperty("model_name").GetString() == "4x_foolhardy_Remacri.pth", "pixel high-resolution checks the selected upscale model explicitly");
+            Check((await checker.CheckAsync(config, minimalRuntime, models, profiles, ["pixel-animesharp"], default, features: ["pixel_hires"])).Ready
+                && handler.LastSettings.GetProperty("upscalers").GetProperty("pixel_hires").GetProperty("model_name").GetString() == "4x-AnimeSharp.pth", "pixel high-resolution checks the explicitly selected AnimeSharp download without asserting the profile default");
             handler.HideAssistant = true;
             var noAssistant = await checker.CheckAsync(config, minimalRuntime, models, profiles, [], default);
             Check(noAssistant.Ready && !noAssistant.PromptAssistantAvailable, "an unselected absent prompt assistant does not prevent completion");

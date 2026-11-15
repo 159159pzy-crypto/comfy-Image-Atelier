@@ -170,25 +170,8 @@
       "revision": "df48879708206a403d2a61acd55578c2e80fd233"
     },
     {
-      "id": "pixel-remacri",
-      "name": "4x Remacri（Anima 像素高清）",
-      "group": "像素高清（可选）",
-      "category": "upscale_models",
-      "relativePath": "4x_foolhardy_Remacri.pth",
-      "aliases": [],
-      "size": 67025055,
-      "sha256": "e1a73bd89c2da1ae494774746398689048b5a892bd9653e146713f9df8bca86a",
-      "urls": [
-        "https://huggingface.co/FacehugmanIII/4x_foolhardy_Remacri/resolve/cc321d560d74ac924feac463373b8fc4f59fee31/4x_foolhardy_Remacri.pth"
-      ],
-      "sourceUrl": "https://huggingface.co/FacehugmanIII/4x_foolhardy_Remacri/blob/cc321d560d74ac924feac463373b8fc4f59fee31/4x_foolhardy_Remacri.pth",
-      "license": "CC-BY-NC-SA-4.0",
-      "licenseUrl": "https://github.com/OpenModelDB/open-model-database/blob/233259dbb522ad8841331a8995fef884c9bf7ef9/data/models/4x-Remacri.json",
-      "revision": "cc321d560d74ac924feac463373b8fc4f59fee31"
-    },
-    {
       "id": "pixel-animesharp",
-      "name": "4x AnimeSharp（Krea 2 像素高清）",
+      "name": "4x AnimeSharp（通用像素高清）",
       "group": "像素高清（可选）",
       "category": "upscale_models",
       "relativePath": "4x-AnimeSharp.pth",
