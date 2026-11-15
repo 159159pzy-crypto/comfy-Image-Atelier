@@ -223,6 +223,9 @@ internal static class RuntimeDependencyTests
             var fixture = Path.Combine(work, "joint-pip-fixture");
             var wheels = Path.Combine(fixture, "wheels");
             Directory.CreateDirectory(wheels);
+            var environmentRoot = Path.Combine(fixture, ".venv");
+            await Commands.Run(python, ["-m", "venv", environmentRoot], fixture, null, default);
+            var fixturePython = Path.Combine(environmentRoot, "Scripts", "python.exe");
             void Wheel(string name, string version, params string[] dependencies)
             {
                 using var archive = ZipFile.Open(Path.Combine(wheels, name + "-" + version + "-py3-none-any.whl"), ZipArchiveMode.Create);
@@ -236,7 +239,7 @@ internal static class RuntimeDependencyTests
             Wheel("anima_fixture_shared", "2.0");
             Wheel("anima_fixture_core", "1.0", "anima-fixture-shared>=1");
             Wheel("anima_fixture_manager", "1.0", "anima-fixture-core==1.0");
-            var fixtureConfig = new LauncherConfig { ComfyRoot = fixture, Python = python };
+            var fixtureConfig = new LauncherConfig { ComfyRoot = fixture, Python = fixturePython };
             var cache = Path.Combine(fixture, "cache");
             var snapshot = new ComfyDependencySnapshot(new string('a', 40), "anima-fixture-core==1.0\n", "anima-fixture-manager==1.0\n", []);
             var env = new Dictionary<string, string> { ["PIP_NO_INDEX"] = "1", ["PIP_FIND_LINKS"] = wheels };

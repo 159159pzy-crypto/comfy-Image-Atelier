@@ -76,6 +76,18 @@ internal static class ComfyReleaseUpdateTests
             && restartedPlan.Dependencies.PythonIdentity == exactDependencies.PythonIdentity, "manual update restart restores the exact release and resolved dependency snapshot without network access");
         var changedPython = updateConfig.Clone(); changedPython.Python = Path.Combine(directory, "another-python.exe");
         Check(plans.Read(changedPython) is null && plans.Read(updateConfig) is not null, "saved manual plans bind the selected interpreter and never follow an environment switch");
+        Check(plans.ResetDependencyReview(changedPython) is null && plans.Read(updateConfig)!.Dependencies.Resolved,
+            "recovery of a different interpreter cannot invalidate a saved update review");
+        var repairedPlan = plans.ResetDependencyReview(updateConfig)!;
+        Check(repairedPlan.Release == restartedPlan!.Release && repairedPlan.CreatedAt == restartedPlan.CreatedAt
+            && repairedPlan.Dependencies.ComfyCommit == exactDependencies.ComfyCommit
+            && repairedPlan.Dependencies.RequirementsText == exactDependencies.RequirementsText
+            && repairedPlan.Dependencies.ManagerRequirementsText == exactDependencies.ManagerRequirementsText,
+            "dependency repair preserves the exact reviewed source release and its declarations");
+        Check(!repairedPlan.Dependencies.Resolved && repairedPlan.Dependencies.Constraints.Length == 0
+            && repairedPlan.Dependencies.Packages.Length == 0 && repairedPlan.Dependencies.EnvironmentPackages.Length == 0
+            && new ComfyUpdatePlans(directory).Read(updateConfig)!.Dependencies.PythonIdentity.Length == 0,
+            "a repaired environment discards the outdated dependency baseline before retrying the same target");
         plans.Save(updateConfig, latest, exactDependencies with { Resolved = false, Constraints = [] });
         Check(new ComfyUpdatePlans(directory).Read(updateConfig)?.Dependencies.Resolved == false, "an interrupted dependency review remains explicitly incomplete after restart");
         plans.Clear(updateConfig);

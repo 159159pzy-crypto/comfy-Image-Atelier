@@ -15,6 +15,8 @@ public sealed record ComfyDependencySnapshot(string ComfyCommit, string Requirem
     public int WorkbenchDependencyContractVersion { get; init; }
     public string WorkbenchRequirementsText { get; init; } = "";
     public string WorkbenchRequirementsIdentity { get; init; } = "";
+    public int WorkbenchDistributionScopeVersion { get; init; }
+    public WorkbenchDistributionPlan? WorkbenchDistribution { get; init; }
     public int PlanVersion { get; init; }
     public string PackageIndex { get; init; } = "";
     public string GitSource { get; init; } = "";

@@ -119,8 +119,13 @@ public static class ComfyDependencyResolver
         if (snapshot.Resolved && snapshot.WorkbenchDependencyContractVersion > 0 && checkWorkbench
             && (snapshot.WorkbenchRequirementsIdentity != workbench.Identity || snapshot.WorkbenchRequirementsText != workbench.RequirementsText))
             throw new InvalidOperationException("工作台依赖声明在检查后已变化，请重新检查依赖计划；原计划保持不变。");
+        var workbenchDistribution = checkWorkbench ? await WorkbenchDistribution.PreparePlanAsync(config, ct, cacheRoot) : null;
+        if (snapshot.Resolved && checkWorkbench) snapshot = await WorkbenchDistribution.BindAsync(config, snapshot, ct, cacheRoot);
         bool SameWorkbench(ComfyDependencySnapshot value) => value.WorkbenchDependencyContractVersion == (checkWorkbench ? 1 : 0)
-            && value.WorkbenchRequirementsIdentity == workbench.Identity && value.WorkbenchRequirementsText == workbench.RequirementsText;
+            && value.WorkbenchRequirementsIdentity == workbench.Identity && value.WorkbenchRequirementsText == workbench.RequirementsText
+            && (!checkWorkbench || value.WorkbenchDistributionScopeVersion == 1
+                && value.WorkbenchDistribution?.InputIdentity == workbenchDistribution?.InputIdentity
+                && value.WorkbenchDistribution?.Metadata == workbenchDistribution?.Metadata);
         var reporter = new DependencyProgressReporter(dependencyProgress, log);
         reporter.Phase("resolving", "正在检查已安装依赖与固定版本");
         var inventory = await Commands.Run(config.Python, ["-B", "-c", "import sys,importlib.metadata as m; print(sys.version.split()[0]); print(chr(10).join(sorted(d.metadata['Name']+'=='+d.version for d in m.distributions() if d.metadata['Name'])))"], config.ComfyRoot, null, ct, timeout: TimeSpan.FromSeconds(30));
@@ -139,7 +144,8 @@ public static class ComfyDependencyResolver
         var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity + "\n" + snapshot.ComfyCommit + "\n" + snapshot.RequirementsText + "\n" + snapshot.ManagerRequirementsText
             + (snapshot.ComfySourceKind == "git" ? "" : "\nCOMFY_SOURCE=" + snapshot.ComfySourceKind)
             + (nodeIdentity.Length == 0 ? "" : "\n" + nodeIdentity)
-            + (checkWorkbench ? "\nWORKBENCH_CONTRACT_V1=" + workbench.Identity + "\n" + workbench.RequirementsText : "")))).ToLowerInvariant();
+            + (checkWorkbench ? "\nWORKBENCH_CONTRACT_V1=" + workbench.Identity + "\n" + workbench.RequirementsText
+                + "\nWORKBENCH_DISTRIBUTION_V1=" + WorkbenchDistribution.Identity(workbenchDistribution) : "")))).ToLowerInvariant();
         var root = Path.Combine(cacheRoot, "dependency-plans", key);
         var saved = Path.Combine(root, "resolved.json");
         // Older installers placed both plans and pip downloads one extra level down. Reuse
@@ -149,6 +155,7 @@ public static class ComfyDependencyResolver
         if (File.Exists(existingPath))
         {
             var existing = JsonFile.Read<ComfyDependencySnapshot>(existingPath);
+            if (checkWorkbench) existing = await WorkbenchDistribution.BindAsync(config, existing, ct, cacheRoot);
             if (!existing.Resolved || existing.PythonIdentity != identity || existing.ComfyCommit != snapshot.ComfyCommit || existing.ComfySourceKind != snapshot.ComfySourceKind
                 || existing.NodeRequirementsIdentity != nodeIdentity || !SameWorkbench(existing))
                 throw new InvalidDataException("已有依赖快照身份不匹配，已保留原文件。");
@@ -168,6 +175,7 @@ public static class ComfyDependencyResolver
                 if (File.Exists(saved))
                 {
                     var reviewed = JsonFile.Read<ComfyDependencySnapshot>(saved);
+                    if (checkWorkbench) reviewed = await WorkbenchDistribution.BindAsync(config, reviewed, ct, cacheRoot);
                     if (reviewed.PythonIdentity != identity || reviewed.NodeRequirementsIdentity != nodeIdentity || reviewed.ComfyCommit != snapshot.ComfyCommit || reviewed.ComfySourceKind != snapshot.ComfySourceKind || !SameWorkbench(reviewed))
                         throw new InvalidDataException("新检查的依赖快照身份不符。");
                     DependencyPlans.ValidateEnvironment(reviewed, lines.Skip(1));
@@ -222,6 +230,7 @@ public static class ComfyDependencyResolver
                 PlanVersion = 1, PackageIndex = index, GitSource = gitSource, EnvironmentPackages = lines.Skip(1).ToArray(), Packages = packages,
                 TransportIdentity = DependencyPlans.TransportIdentity(config), WorkbenchDependencyContractVersion = checkWorkbench ? 1 : 0,
                 WorkbenchRequirementsText = workbench.RequirementsText, WorkbenchRequirementsIdentity = workbench.Identity };
+            if (checkWorkbench) resolved = WorkbenchDistribution.Attach(resolved, workbenchDistribution);
             JsonFile.Write(saved, resolved);
             return resolved;
         }, ct, log, config);

@@ -38,6 +38,19 @@ public sealed class ComfyUpdatePlans(string stateDir)
         if (Read(config) is not null) File.Delete(PathFor(config));
     }
 
+    // Explicit recovery can change the installed baseline. Keep the reviewed source
+    // release, but resolve its dependencies again before another update attempt.
+    public ComfyUpdatePlan? ResetDependencyReview(LauncherConfig config)
+    {
+        var saved = Read(config);
+        if (saved is null) return null;
+        var reset = saved with { Dependencies = new(saved.Release.Commit,
+            saved.Dependencies.RequirementsText, saved.Dependencies.ManagerRequirementsText, [])
+            { ComfySourceKind = saved.Dependencies.ComfySourceKind } };
+        JsonFile.Write(PathFor(config), reset);
+        return reset;
+    }
+
     private static void Validate(ComfyRelease release, ComfyDependencySnapshot dependencies)
     {
         Safety.Commit(release.Commit);

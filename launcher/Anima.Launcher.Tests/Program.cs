@@ -10,6 +10,7 @@ using Anima.Launcher.Core;
 if (await LauncherUpdateProcessTests.TryHandleFixture(args)) return;
 if (await TaskServiceTests.TryHandleFixture(args)) return;
 if (await DownloadCrashTests.TryHandleFixture(args)) return;
+if (await WorkbenchMetadataRegressionTests.TryHandleFixture(args)) return;
 
 if (args.FirstOrDefault() == "--exit-fixture")
 {
@@ -306,6 +307,11 @@ if (args.Contains("--launch-arguments-only"))
     count += await ComfyLaunchArgumentsTests.Run(work, manifest);
     Console.WriteLine($"{count} launch argument checks passed."); return;
 }
+if (args.Contains("--workbench-metadata-only"))
+{
+    count += await WorkbenchMetadataRegressionTests.Run(work, root);
+    Console.WriteLine($"{count} editable workbench metadata checks passed; artifacts: {work}"); return;
+}
 if (args.Contains("--runtime-dependencies-only"))
 {
     count += await RuntimeDependencyTests.Run(work);
@@ -414,6 +420,7 @@ if (!args.Contains("--resume-node-updates"))
     count += DependencyProgressTests.Run();
     count += await DependencyTransferTests.Run(work);
     count += await DependencyInstallationTests.Run(work);
+    count += await WorkbenchMetadataRegressionTests.Run(work, root);
     count += await ComfyReleaseUpdateTests.Run(work, manifest);
     count += ComfyUpdatePresentationTests.Run();
     count += await ComfyUpdateProbeTests.Run(work);

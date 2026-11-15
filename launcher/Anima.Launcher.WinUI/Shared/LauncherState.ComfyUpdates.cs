@@ -214,18 +214,22 @@ internal sealed partial class LauncherState
         var runtime = Program.Runtime with { Comfy = Program.Runtime.Comfy with { Commit = release.Commit }, PythonConstraints = dependencies.Constraints };
         var installer = CreateInstaller(runtime);
         PreparedDependencyInstallation? prepared = null;
-        await coordinator.UpdateAsync(config, release, runtime, dependencies,
-            (target, _, token) => installer.InstallComfyUpdateDependenciesAsync(target,
-                prepared ?? throw new InvalidOperationException("依赖资源尚未准备完成。"), token),
-            ValidateComfyCoreAsync, ct,
-            prepareDependencies: async (target, snapshot, token) =>
-                prepared = await installer.PrepareComfyUpdateDependenciesAsync(target, snapshot, token),
-            validateRecovery: ValidateRestoredComfyAsync,
-            validateTargetSource: (target, parser, _) =>
-            {
-                ComfyUpdateProbe.ValidateSource(parser, target.ComfyArguments);
-                return Task.CompletedTask;
-            });
+        try
+        {
+            await coordinator.UpdateAsync(config, release, runtime, dependencies,
+                (target, _, token) => installer.InstallComfyUpdateDependenciesAsync(target,
+                    prepared ?? throw new InvalidOperationException("依赖资源尚未准备完成。"), token),
+                ValidateComfyCoreAsync, ct,
+                prepareDependencies: async (target, snapshot, token) =>
+                    prepared = await installer.PrepareComfyUpdateDependenciesAsync(target, snapshot, token),
+                validateRecovery: ValidateRestoredComfyAsync,
+                validateTargetSource: (target, parser, _) =>
+                {
+                    ComfyUpdateProbe.ValidateSource(parser, target.ComfyArguments);
+                    return Task.CompletedTask;
+                });
+        }
+        finally { prepared?.Dispose(); }
         checkedComfyRelease = null; checkedComfyDependencies = null; checkedComfyRoot = "";
         new ComfyUpdatePlans(Program.StateDir).Clear(config);
         SetComfyUpdateStatus($"已更新至 {release.Tag}，ComfyUI 核心启动验证通过。可启动工作台，或恢复上次版本。");
@@ -281,9 +285,13 @@ internal sealed partial class LauncherState
         SetComfyUpdateStatus("正在准备当前源码版本的依赖修复；GPU 版本保持固定…");
         var dependencies = await ResolveComfyUpdateDependenciesAsync(config, new(commit, requirements, manager, []), git, ct);
         var installer = CreateInstaller(Program.Runtime with { Comfy = Program.Runtime.Comfy with { Commit = commit } });
-        var prepared = await installer.PrepareComfyUpdateDependenciesAsync(config, dependencies, ct);
+        using var prepared = await installer.PrepareComfyUpdateDependenciesAsync(config, dependencies, ct);
         await installer.InstallComfyUpdateDependenciesAsync(config, prepared, ct);
         await coordinator.CompleteDependencyRepairAsync(config, ValidateComfyCoreAsync, ct);
+        if (new ComfyUpdatePlans(Program.StateDir).ResetDependencyReview(config) is { } retry)
+        {
+            checkedComfyRelease = retry.Release; checkedComfyDependencies = retry.Dependencies; checkedComfyRoot = retry.Root;
+        }
         SetComfyUpdateStatus("当前版本依赖已修复，ComfyUI 核心启动验证通过。插件将在正常启动工作台时检查。");
     });
 

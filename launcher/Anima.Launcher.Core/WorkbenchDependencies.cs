@@ -24,7 +24,7 @@ public static class WorkbenchDependencies
         return reader.ReadToEnd();
     }
 
-    private static string PrivateParser()
+    internal static string PrivateParser()
     {
         using var resource = typeof(WorkbenchDependencies).Assembly.GetManifestResourceStream(ArchiveResource)
             ?? throw new InvalidDataException("启动器缺少私有依赖解析工具。");
