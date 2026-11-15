@@ -27,9 +27,10 @@ internal sealed partial class LauncherState
     public InstallationPlan? SetupPlan { get; private set; }
     public PreflightResult? SetupPreflight { get; private set; }
     public bool SetupCanInstall => !Busy && setupReview.CanInstall && SetupPlan is not null;
-    public bool SetupCanResume => !Busy && (Setup.InstallStarted && SetupPlan is not null || Setup.InstallFinished && Setup.ModelsPending
+    public bool SetupCanResume => !Busy && !Setup.SelectionNeedsReview && (Setup.InstallStarted && SetupPlan is not null || Setup.InstallFinished && Setup.ModelsPending
         || setupRetryAvailable && setupInstallAction is not null);
     public bool SetupImportNeedsRepair => setupImportNeedsRepair;
+    public bool SetupSelectionNeedsReview => Setup.SelectionNeedsReview && !setupReview.CanInstall;
     public bool SetupLegacyDirectRoot => Setup.Fresh && Setup.DirectComfyRoot;
 
     private void InitializeSetup()
@@ -57,7 +58,8 @@ internal sealed partial class LauncherState
         var route = restore.Step;
         Setup = saved ?? NewSetupRecord();
         // A saved receipt cannot establish that this process's runtime is healthy.
-        Setup.RuntimeVerified = false;
+        Setup.MarkRuntimeCheckStale();
+        Setup.ConfigurationIssues ??= [];
         if (Config.InstallPending && (saved is null || !SamePath(Config.ComfyRoot, SetupTarget(saved))))
         {
             Setup = NewSetupRecord();
@@ -84,7 +86,8 @@ internal sealed partial class LauncherState
         if (Setup.InstallStarted && Setup.ReviewedPlan is { } resumed && SamePath(resumed.ComfyRoot, SetupTarget(Setup)))
             SetupPlan = resumed;
         if (route == SetupStep.Location && saved?.InstallFinished == true)
-            SetupNotice = "上次配置的环境文件发生变化，请重新检查目录。";
+            SetupNotice = Setup.SelectionNeedsReview ? "上次选择尚未确认，请检查所选内容后再开始安装。"
+                : "上次配置的环境文件发生变化，请重新检查目录。";
         SetSetupRestoreNotice(restore);
         SynchronizeSetupVersion();
         ResetSetupStages();
@@ -175,7 +178,7 @@ internal sealed partial class LauncherState
         if (Busy) return;
         if (Setup.Fresh != fresh)
         {
-            Setup.Fresh = fresh;
+            Setup.SetInstallationMode(fresh);
             Setup.InstallStarted = false;
             Setup.InstallFinished = false;
             Setup.ModelsPending = false;
@@ -183,6 +186,7 @@ internal sealed partial class LauncherState
             Setup.ReviewedPlan = null;
             Setup.Draft.Python = "";
             Setup.Draft.PythonExplicit = false;
+            Setup.ConfigurationIssues = [];
             InvalidateSetupReview();
         }
         MoveSetupTo(SetupStep.Location);
@@ -191,9 +195,11 @@ internal sealed partial class LauncherState
     public void SaveSetupDraft(LauncherConfig draft)
     {
         if (Busy) return;
+        if (!SamePath(SetupTarget(Setup), Setup.Fresh && draft.InstallRoot.Length > 0 ? Path.Combine(draft.InstallRoot, "ComfyUI") : draft.ComfyRoot))
+            Setup.ConfigurationIssues = [];
         if (!Setup.InstallStarted || !SamePath(SetupTarget(Setup), Setup.Fresh && draft.InstallRoot.Length > 0 ? Path.Combine(draft.InstallRoot, "ComfyUI") : draft.ComfyRoot))
             Setup.ReviewedPlan = null;
-        Setup.Draft = draft.Clone();
+        Setup.UpdateDraft(draft);
         Setup.InstallFinished = false;
         Setup.RuntimeVerified = false;
         Setup.SkippedOptionalModelIds = [];
@@ -302,6 +308,7 @@ internal sealed partial class LauncherState
             SetStatus("正在检查系统、目录和磁盘空间…");
             var draft = SetupConfiguration();
             var fresh = Setup.Fresh;
+            if (!fresh) await WorkbenchDependencies.ValidateInterpreterAsync(draft, ct);
             var plan = await Task.Run(() => InstallationPlanner.Create(draft, Program.Runtime, Program.StateDir,
                 fresh, Program.Models, Program.ModelProfiles, Setup.OptionalModelIds), ct);
             plan = await InstallationPlanner.ResolveStableAsync(plan, Program.Runtime, Program.StateDir, ct);
@@ -317,6 +324,7 @@ internal sealed partial class LauncherState
                     UpdateSetupMissingModels(plan.ModelInventory.ToList());
                     var import = await SetupImportReview.InspectAsync(plan.CreateConfig(), plan.ResolvedRuntime ?? Program.Runtime, ct, Program.StateDir);
                     setupImportNeedsRepair = import.NeedsRepair;
+                    plan = plan with { DependencyReviewIssues = import.PreparationIssues.Distinct().ToArray() };
                     if (import.MissingCoreModules.Length > 0)
                         preflight = preflight with { Issues = preflight.Issues.Add(new("import_dependencies",
                             "核心依赖尚未安装完整（" + string.Join("、", import.MissingCoreModules) + "），将在安装环境阶段补齐。", false)) };
@@ -345,6 +353,7 @@ internal sealed partial class LauncherState
     {
         if (!SetupCanInstall || SetupPlan is null) return;
         var reviewed = SetupPlan;
+        Setup.SelectionNeedsReview = false;
         Setup.Step = SetupStep.Installing;
         Setup.InstallStarted = true;
         Setup.InstallFinished = false;
@@ -464,6 +473,7 @@ internal sealed partial class LauncherState
     public async Task ResumeSetupAsync()
     {
         if (Busy) return;
+        if (Setup.SelectionNeedsReview) { await CheckSetupAsync(); return; }
         SetupError = "";
         SetupNotice = "";
         if (SetupPlan is { } plan && Setup.InstallStarted)

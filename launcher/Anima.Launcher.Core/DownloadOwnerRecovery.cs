@@ -112,6 +112,10 @@ public static class DownloadOwnerRecovery
         var setup = sameSetup ? DownloadTaskIdentity.Copy(savedSetup!) : new SetupRecord { AssistantStatus = AssistantSetupStatus.Pending };
         setup.Draft = config.Clone(); setup.Fresh = frozen.Fresh; setup.InstallStarted = true;
         setup.Step = SetupStep.Installing; setup.ReviewedPlan = frozen; setup.OptionalModelIds = optional;
+        // Explicitly resuming this owner restores its already confirmed selection, not
+        // the newer unconfirmed draft. Its runtime still needs a fresh verification.
+        setup.SelectionNeedsReview = false;
+        setup.MarkRuntimeCheckStale();
         return new(config, frozen, setup, DownloadTaskIdentity.Copy(models), DownloadTaskIdentity.Copy(profiles), !sameSetup, reusesInstalled);
     }
 

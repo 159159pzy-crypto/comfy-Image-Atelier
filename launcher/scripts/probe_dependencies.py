@@ -10,14 +10,44 @@ import importlib.metadata as metadata
 import json
 from pathlib import Path
 import re
+import struct
 import sys
-import tomllib
 from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
+
+
+def interpreter_compatibility(app_root: str) -> dict:
+    version = ".".join(map(str, sys.version_info[:3]))
+    bits = struct.calcsize("P") * 8
+    report = {"ready": False, "version": version, "bits": bits, "requiresPython": ">=3.11", "detail": ""}
+    if sys.version_info[:2] < (3, 11) or bits != 64:
+        report["detail"] = f"当前选择 Python {version}（{bits} 位）；启动器与工作台需要 Python 3.11 或更新的 64 位解释器。"
+        return report
+    if app_root:
+        from packaging.specifiers import InvalidSpecifier, SpecifierSet
+        import tomllib
+
+        path = Path(app_root) / "pyproject.toml"
+        project = tomllib.loads(path.read_text(encoding="utf-8-sig")).get("project", {})
+        required = project.get("requires-python", ">=3.11")
+        if not isinstance(required, str):
+            raise ValueError("工作台 pyproject.toml 的 requires-python 无效")
+        report["requiresPython"] = required
+        try:
+            supported = SpecifierSet(required).contains(version, prereleases=True)
+        except InvalidSpecifier as error:
+            raise ValueError("工作台 pyproject.toml 的 requires-python 无效：" + str(error)) from error
+        if not supported:
+            report["detail"] = f"当前选择 Python {version}（{bits} 位）；此工作台要求 Python {required}。"
+            return report
+    report["ready"] = True
+    return report
 
 
 def workbench_contract(app_root: str) -> dict:
     if not app_root:
         return {"requirementsText": "", "identity": ""}
+    import tomllib
+
     path = Path(app_root) / "pyproject.toml"
     project = tomllib.loads(path.read_text(encoding="utf-8-sig")).get("project", {})
     requirements = project.get("dependencies")
@@ -72,6 +102,12 @@ def inspect(request: dict) -> dict:
                 issue("unknown", line, location, "依赖使用了需要安装解析器确认的选项或路径")
                 continue
             line = re.sub(r"\s+--hash(?:=|\s+)\S+", "", line)
+            # Rules come from the same fixed-source policy used by the installer.
+            # Keep the original source/line so an origin mismatch remains actionable.
+            for rule in request.get("knownDirectRequirements", []):
+                if re.fullmatch(rule["pattern"], line, re.I):
+                    line = rule["replacement"]
+                    break
             try:
                 requirement = Requirement(line)
                 if requirement.marker and not requirement.marker.evaluate({"extra": ""}):
@@ -182,7 +218,13 @@ def main():
     # The archive path is supplied by the launcher after verifying its embedded bytes.
     sys.path.insert(0, sys.argv[1])
     request = json.loads(sys.argv[3])
-    result = workbench_contract(request.get("appRoot", "")) if sys.argv[2] == "contract" else inspect(request)
+    if sys.argv[2] == "interpreter":
+        result = interpreter_compatibility(request.get("appRoot", ""))
+    else:
+        compatibility = interpreter_compatibility(request.get("appRoot", ""))
+        if not compatibility["ready"]:
+            raise ValueError(compatibility["detail"])
+        result = workbench_contract(request.get("appRoot", "")) if sys.argv[2] == "contract" else inspect(request)
     print(json.dumps(result, ensure_ascii=True))
 
 

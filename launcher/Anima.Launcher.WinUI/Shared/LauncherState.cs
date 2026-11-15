@@ -506,13 +506,21 @@ internal sealed partial class LauncherState : IDisposable
         var scan = await Task.Run(() => Inventory.Scan(probe, OperationModels, hashes, ct), ct);
         UpdateSetupMissingModels(scan);
         var nodes = await Inventory.Nodes(Config.ComfyRoot, Program.Runtime, Commands.Find("git.exe"), ct);
+        var skippedIds = SetupRouting.TargetsMatch(Config, Setup.Draft, Setup.Fresh) ? Setup.SkippedOptionalModelIds : [];
+        var selectedFeatures = new[] { activeInstallationPlan, Setup.InstallStarted ? Setup.ReviewedPlan : null }
+            .Where(plan => plan is not null && SetupRouting.TargetsMatch(Config, new LauncherConfig { ComfyRoot = plan.ComfyRoot }, false))
+            .SelectMany(plan => ResourceInventoryPresentation.FeaturesForPlan(plan!, Program.Runtime,
+                FeaturePreparation.IsFeaturePlan(plan!) ? [] : skippedIds))
+            .Concat(ResourceInventoryPresentation.FeaturesForOwners(Config, DownloadTasks.Owners, Program.Runtime, AppendLog))
+            .Concat(SetupFeatures.Resolve(false, [], Config.SelectedProfile)).Distinct().ToArray();
+        var classifiedNodes = ResourceInventoryPresentation.Classify(nodes, selectedFeatures);
         var loras = await Task.Run(() => Inventory.Loras(probe), ct);
         AppendLog($"本地 LoRA：{loras.Length} 个，仅检测；请在工作台选择使用。");
-        foreach (var node in nodes) AppendLog($"节点 {node.Name}: {node.State} {node.Commit} · {node.Path}");
+        foreach (var item in classifiedNodes) AppendLog($"节点 {item.Node.Name} · {item.PurposeLabel}：{item.StateLabel} {item.Node.Commit} · {item.Node.Path}");
         Scanned?.Invoke(scan);
         Save();
         Reloaded();
-        SetStatus($"已扫描：模型 {scan.Count(s => !s.Missing)}/{scan.Count}；缺失节点 {nodes.Count(n => n.State == "缺失")}；本地 LoRA {loras.Length}。勾选后才下载。");
+        SetStatus($"已扫描：目录中可识别的清单模型 {scan.Count(s => !s.Missing)}/{scan.Count}；{ResourceInventoryPresentation.Summary(classifiedNodes)}；本地 LoRA {loras.Length}。可选资源勾选后才下载。");
     }
 
     public void RebuildRows(List<ModelStatus> scan)

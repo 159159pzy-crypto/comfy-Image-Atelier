@@ -5,6 +5,7 @@ using System.Text.Json;
 namespace Anima.Launcher.Core;
 
 public sealed record WorkbenchDependencyContract(string RequirementsText, string Identity);
+public sealed record InterpreterCompatibility(bool Ready, string Version, int Bits, string RequiresPython, string Detail);
 public sealed record DeclaredDependencyIssue(string State, string Requirement, string Source, string Message);
 public sealed record DeclaredDependencyReport(DeclaredDependencyIssue[] Issues, WorkbenchDependencyContract Workbench)
 {
@@ -58,6 +59,14 @@ public static class WorkbenchDependencies
         string.IsNullOrWhiteSpace(config.AppRoot) ? Task.FromResult(new WorkbenchDependencyContract("", ""))
         : Probe<WorkbenchDependencyContract>(config, "contract", new { appRoot = config.AppRoot }, ct);
 
+    public static async Task ValidateInterpreterAsync(LauncherConfig config, CancellationToken ct)
+    {
+        var result = await Probe<InterpreterCompatibility>(config, "interpreter", new { appRoot = config.AppRoot }, ct);
+        if (!result.Ready)
+            throw new InvalidOperationException(result.Detail + "\n当前解释器：" + config.Python
+                + "\n请选择满足要求的独立 .venv、venv 或便携 Python，或新建完整环境；原解释器保持不变。");
+    }
+
     public static IReadOnlyList<string> RequirementFiles(LauncherConfig config, RuntimeManifest runtime)
     {
         var files = new List<string> { Path.Combine(config.ComfyRoot, "requirements.txt") };
@@ -69,7 +78,8 @@ public static class WorkbenchDependencies
     }
 
     public static Task<DeclaredDependencyReport> InspectAsync(LauncherConfig config, RuntimeManifest runtime, CancellationToken ct) =>
-        Probe<DeclaredDependencyReport>(config, "inspect", new { appRoot = config.AppRoot, files = RequirementFiles(config, runtime) }, ct);
+        Probe<DeclaredDependencyReport>(config, "inspect", new { appRoot = config.AppRoot, files = RequirementFiles(config, runtime),
+            knownDirectRequirements = new[] { KnownDependencyRequirements.Sam2(runtime.Sam2Commit) } }, ct);
 
     public static Task<DeclaredDependencyReport> InspectFilesAsync(LauncherConfig config, IEnumerable<string> files, CancellationToken ct) =>
         Probe<DeclaredDependencyReport>(config, "inspect", new { appRoot = config.AppRoot, files = files.Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray() }, ct);

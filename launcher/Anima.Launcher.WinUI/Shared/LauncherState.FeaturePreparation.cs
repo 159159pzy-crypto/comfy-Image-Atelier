@@ -40,6 +40,7 @@ internal sealed partial class LauncherState
             timeout.CancelAfter(TimeSpan.FromMinutes(10));
             using var lease = await EnvironmentOperationLease.AcquireAsync(snapshot.ComfyRoot, false, timeout.Token);
             SetStatus("正在检查所选功能的模型、插件、运行文件与磁盘空间…");
+            await WorkbenchDependencies.ValidateInterpreterAsync(snapshot, timeout.Token);
             var plan = await Task.Run(() => FeaturePreparation.Create(snapshot, Program.Runtime, Program.StateDir,
                 Program.Models, Program.ModelProfiles, choiceIds), timeout.Token);
             plan = await InstallationPlanner.ResolveStableAsync(plan, Program.Runtime, Program.StateDir, timeout.Token);

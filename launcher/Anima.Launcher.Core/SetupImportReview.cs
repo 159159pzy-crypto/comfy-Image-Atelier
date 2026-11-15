@@ -10,6 +10,8 @@ public sealed record SetupImportReview(bool NeedsRepair, string[] MissingCoreMod
 
     public static async Task<SetupImportReview> InspectAsync(LauncherConfig config, RuntimeManifest manifest, CancellationToken ct, string? stateDir = null)
     {
+        // Report interpreter compatibility before any TOML, dependency or model-path probes.
+        await WorkbenchDependencies.ValidateInterpreterAsync(config, ct);
         // Match the core imports verified after installation, without loading torch,
         // initializing a GPU, importing custom nodes, or requiring packaging/PyYAML.
         const string script = """
@@ -24,6 +26,8 @@ print(json.dumps([name for name in ('aiohttp', 'yaml', 'torch') if importlib.uti
         var nodes = await Inventory.Nodes(config.ComfyRoot, manifest, null, ct);
         ct.ThrowIfCancellationRequested();
         var preparation = new List<string>();
+        preparation.AddRange(nodes.Where(node => node.State == "缺失")
+            .Select(node => "需要安装插件：" + node.Name + "（" + node.Path + "）"));
         var dependencies = await WorkbenchDependencies.InspectAsync(config, manifest, ct);
         preparation.AddRange(dependencies.Issues.Select(issue => "依赖" + (issue.State == "unknown" ? "尚未验证" : "需要补齐") + "：" + issue.Message + "（" + issue.Source + "）"));
         var runtimeRoot = InstallationPlanner.ResolveRuntimeRoot(config,

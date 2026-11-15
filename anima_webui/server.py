@@ -32,6 +32,7 @@ from .image_location import ImageLocationError, reveal_image
 from .prompt_images import PromptImageStore
 from .single_workbench import SINGLE_DEFAULTS, active_lora_pipelines
 from .history import ArtworkCollectionConflict, HistoryStore
+from .history_filters import HistoryFilterError, HistoryFilterService, parse_content_filters, validate_query
 from .http_security import (
     SQLITE_MAX_INTEGER,
     LimitedMultipartStream,
@@ -70,6 +71,7 @@ logger = logging.getLogger(__name__)
 # aiohttp 4 将移除字符串 app key;统一使用 AppKey(消除弃用告警)。
 COMFY_KEY: web.AppKey[Any] = web.AppKey("comfy", object)
 HISTORY_KEY: web.AppKey[Any] = web.AppKey("history", object)
+HISTORY_FILTERS_KEY: web.AppKey[Any] = web.AppKey("history_filters", object)
 MANAGER_KEY: web.AppKey[Any] = web.AppKey("manager", object)
 CATALOG_KEY: web.AppKey[Any] = web.AppKey("catalog", object)
 CUSTOM_PROMPTS_KEY: web.AppKey[Any] = web.AppKey("custom_prompts", object)
@@ -203,6 +205,8 @@ async def local_only_middleware(request: web.Request, handler: Any) -> web.Strea
 async def error_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
     try:
         response = await handler(request)
+    except HistoryFilterError as error:
+        response = web.json_response(error.payload, status=error.status)
     except PoolLifecycleError as error:
         response = web.json_response(error.payload, status=503)
     except FavoriteSavePendingError as error:
@@ -364,6 +368,7 @@ def create_app(
     style_preset_covers = StylePresetCoverStore(storage / "style-preset-covers", style_presets)
     prompt_pools = PromptPoolStore(storage / "prompt_pools.json")
     pool_lifecycle = PoolLifecycleService(storage, custom_prompts, prompt_pools, profile_favorites)
+    history_filters = HistoryFilterService(history, catalog, pool_lifecycle)
     # Deprecated argument retained for embedded callers. The legacy ownership
     # file is intentionally never opened, migrated, repaired, or overwritten.
     templates = WorkflowTemplates.load(root / "templates")
@@ -398,6 +403,7 @@ def create_app(
     app[ALLOWED_HOSTNAMES_KEY] = frozenset(LOCAL_HOSTNAMES | normalized_trusted_hostnames)
     app[COMFY_KEY] = client
     app[HISTORY_KEY] = history
+    app[HISTORY_FILTERS_KEY] = history_filters
     app[MANAGER_KEY] = manager
     app[CATALOG_KEY] = catalog
     app[CUSTOM_PROMPTS_KEY] = custom_prompts
@@ -1649,10 +1655,32 @@ def create_app(
         folder_id = request.query.get("folder_id")
         if folder_id is not None and before_id is not None:
             raise WorkflowError("收藏夹按收藏时间分页，不能与 before_id 同时使用")
+        filter_args: dict[str, Any] = {}
+        revision = None
+        if "q" in request.query or "content_filters" in request.query:
+            filters = parse_content_filters(request.query.get("content_filters"))
+            resolved, revision = await history_filters.resolve(filters, request.query.get("group_revision"))
+            filter_args = {"q": validate_query(request.query.get("q", "")), "content_filter": resolved}
         return web.json_response({
-            **await history.list_images(page, limit, workbench, before_id=before_id, folder_id=folder_id),
+            **await history.list_images(page, limit, workbench, before_id=before_id, folder_id=folder_id, **filter_args),
             "available": history.available,
+            **({"group_revision": revision} if revision is not None else {}),
         })
+
+    async def history_filter_catalog(_: web.Request) -> web.Response:
+        snapshot = await history_filters.snapshot()
+        return web.json_response({"sections": snapshot.sections, "group_revision": snapshot.revision})
+
+    async def history_filter_options(request: web.Request) -> web.Response:
+        try:
+            page, limit = int(request.query.get("page", "1")), int(request.query.get("limit", "40"))
+        except ValueError as error:
+            raise WorkflowError("候选分页参数无效") from error
+        return web.json_response(await history_filters.options(
+            section=request.query.get("section", ""), kind=request.query.get("group_kind", ""),
+            value=request.query.get("group_id", ""), query=request.query.get("q", ""),
+            page=page, limit=limit, revision=request.query.get("group_revision"),
+        ))
 
     async def _regeneration_context(image_id: int) -> tuple[dict[str, Any], dict[str, Any]]:
         record = await history.get_image(image_id)
@@ -2153,6 +2181,8 @@ def create_app(
     app.router.add_post("/api/batches/{batch_id}/stop", stop_batch)
     app.router.add_delete("/api/batches/queue/{queue_id}", remove_queued_batch)
     app.router.add_get("/api/history", list_history)
+    app.router.add_get("/api/history/filter-catalog", history_filter_catalog)
+    app.router.add_get("/api/history/filter-options", history_filter_options)
     app.router.add_post("/api/history/delete", delete_history_batch)
     app.router.add_get(
         r"/api/history/{image_id:\d+}/regeneration-options",

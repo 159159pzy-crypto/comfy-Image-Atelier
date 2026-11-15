@@ -31,6 +31,7 @@
             <StackPanel Spacing="16" Margin="8,0,8,12" HorizontalAlignment="Stretch">
                 <InfoBar x:Name="ErrorBar" IsOpen="False" IsClosable="False" Severity="Error"
                     Title="需要处理" AutomationProperties.AutomationId="SetupError" />
+                <TextBlock x:Name="ErrorHelp" Visibility="Collapsed" Style="{StaticResource StudioBodyStyle}" AutomationProperties.AutomationId="SetupErrorHelp" />
                 <InfoBar x:Name="NoticeBar" IsOpen="False" IsClosable="False" Severity="Informational"
                     Style="{StaticResource StudioInformationalInfoBarStyle}"
                     AutomationProperties.AutomationId="SetupNotice" />
@@ -47,7 +48,7 @@
                                 <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                                 <StackPanel Spacing="8">
                                     <TextBlock Text="第一次使用" FontSize="20" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
-                                    <TextBlock Text="选择「安装完整环境」。自动准备 ComfyUI、独立运行环境、必要节点、Anima 基础模型和双采样使用的 Sesqui。SeedVR2 等增强功能可按需选装。" Style="{StaticResource StudioBodyStyle}" />
+                                    <TextBlock Text="选择「安装完整环境」。自动准备生图程序、独立运行环境、必要插件、Anima 基础模型和默认双采样所需的 Sesqui。保持默认选项即可开始生图，其他增强功能可稍后安装。" Style="{StaticResource StudioBodyStyle}" />
                                     <TextBlock Text="需要联网和足够磁盘空间；下载量会在开始前确认。" Style="{StaticResource StudioBodyStyle}" />
                                 </StackPanel>
                                 <StackPanel x:Name="ImportChoice" Grid.Column="1" Spacing="8">
@@ -135,6 +136,9 @@
                     <StackPanel x:Name="IssuesPanel" Spacing="8" Visibility="Collapsed">
                         <TextBlock Text="检查结果" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
                         <TextBlock x:Name="IssuesSummary" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="SetupPreflightIssues" />
+                        <Expander Header="查看完整检查结果与路径" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                            <TextBlock x:Name="IssuesDetails" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="SetupPreflightDetails" />
+                        </Expander>
                         <ContentControl x:Name="IssueActionsHost" HorizontalContentAlignment="Stretch" IsTabStop="False">
                             <StackPanel x:Name="IssueActions" Spacing="8" />
                         </ContentControl>
@@ -154,13 +158,20 @@
                     </Border>
                     <Border Style="{StaticResource StudioPanelStyle}">
                         <StackPanel Spacing="12">
-                            <TextBlock Text="本次准备的模型" FontSize="18" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
-                            <TextBlock Text="基础模型固定包含。可选模型默认不选，勾选后会重新计算下载量与磁盘空间。" Style="{StaticResource StudioBodyStyle}" />
+                            <TextBlock Text="本次准备的功能与模型" FontSize="18" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
+                            <TextBlock x:Name="ReviewModelHelp" Style="{StaticResource StudioBodyStyle}" AutomationProperties.AutomationId="SetupModelSelectionHelp" />
                             <ContentControl x:Name="SetupModelChoicesHost" HorizontalContentAlignment="Stretch" IsTabStop="False">
                                 <StackPanel x:Name="SetupModelChoices" Spacing="14" AutomationProperties.AutomationId="SetupModelChoices" />
                             </ContentControl>
                         </StackPanel>
                     </Border>
+                    <StackPanel x:Name="DependencyReviewPanel" Spacing="8" Visibility="Collapsed">
+                        <TextBlock Text="将补齐的插件与依赖" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
+                        <TextBlock x:Name="DependencyReviewSummary" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="SetupDependencyReview" />
+                        <Expander Header="查看依赖来源与路径" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                            <TextBlock x:Name="DependencyReviewDetails" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="SetupDependencyDetails" />
+                        </Expander>
+                    </StackPanel>
                     <StackPanel Spacing="8">
                         <TextBlock Text="磁盘空间" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
                         <TextBlock x:Name="VolumeSummary" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="SetupVolumeSummary" />
@@ -220,6 +231,11 @@
                     <Border Background="{ThemeResource StudioAccentSoftBrush}" CornerRadius="18" Padding="20,17">
                         <TextBlock x:Name="CompletionHelp" Text="确认模型状态后，可以准备基础模型或打开工作台。" Style="{StaticResource StudioBodyStyle}" />
                     </Border>
+                    <StackPanel x:Name="ConfigurationIssuesPanel" Visibility="Collapsed" Spacing="8">
+                        <TextBlock x:Name="ConfigurationIssuesTitle" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
+                        <TextBlock x:Name="ConfigurationIssuesSummary" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="SetupConfigurationIssues" />
+                    </StackPanel>
+                    <TextBlock x:Name="CompletionAssistantSummary" Style="{StaticResource StudioBodyStyle}" AutomationProperties.AutomationId="SetupAssistantSummary" />
                     <StackPanel x:Name="CompletionProgressPanel" Visibility="Collapsed" Spacing="10">
                         <TextBlock x:Name="CompletionOperationText" Style="{StaticResource StudioBodyStyle}" AutomationProperties.AutomationId="SetupCompletionOperation" />
                         <StackPanel x:Name="CompletionBatchPanel" Spacing="8" Visibility="Collapsed">

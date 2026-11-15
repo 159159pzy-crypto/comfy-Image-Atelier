@@ -11,6 +11,7 @@ public sealed record NodeUpdateEntry(string Name, string Directory, string Url, 
 {
     public string StagedDirectory { get; init; } = "";
     public string StagedFingerprint { get; init; } = "";
+    public bool? Managed { get; init; }
 }
 public sealed record NodeUpdatePlan(string Root, string Python, string CoreCommit, NodeUpdateEntry[] Entries,
     ComfyDependencySnapshot? Dependencies, DateTimeOffset CreatedAt)
@@ -18,7 +19,8 @@ public sealed record NodeUpdatePlan(string Root, string Python, string CoreCommi
     public string Note { get; init; } = "";
     public string BeforeRequirementsIdentity { get; init; } = "";
     public string Sam2Commit { get; init; } = "";
-    public bool CanApply => Dependencies?.Resolved == true && Entries.Any(entry => entry.CanUpdate);
+    public bool CanApply => Dependencies?.Resolved == true && Regex.IsMatch(Sam2Commit ?? "", "^[a-fA-F0-9]{40}$")
+        && Entries.Any(entry => entry.CanUpdate);
 }
 public sealed record NodeUpdateBackup(string Root, string Python, string PythonDirectory, string CoreCommit,
     NodeUpdateEntry[] Entries, string Directory, string Status, DateTimeOffset CreatedAt,
@@ -32,6 +34,27 @@ public sealed class NodeUpdateCoordinator(string stateDir, string git, Action<st
     Func<string, NodeUpdateEntry, CancellationToken, Task>? prepareSubmodules = null,
     Action<DependencyProgress>? dependencyProgress = null)
 {
+    /// <summary>Resume the dependency contract that was reviewed, even after the launcher catalog changes.</summary>
+    public static RuntimeManifest DependencyRuntime(NodeUpdatePlan plan, RuntimeManifest current)
+    {
+        if (!plan.CanApply || plan.Dependencies is null)
+            throw new InvalidOperationException("请先重新固定节点依赖；原节点目标提交会继续保留。");
+        return current with
+        {
+            Comfy = current.Comfy with { Commit = plan.CoreCommit },
+            PythonConstraints = plan.Dependencies.Constraints,
+            Sam2Commit = plan.Sam2Commit,
+        };
+    }
+
+    /// <summary>Only the reviewed updated nodes may run managed installers; no optional resource is added.</summary>
+    public static NodeInstallPlan[] DependencyRepairNodes(NodeUpdatePlan plan, RuntimeManifest runtime) =>
+        plan.Entries.Where(entry => entry.CanUpdate).Select(entry => new NodeInstallPlan(
+            new Repository(entry.Name, entry.Url, entry.TargetSha,
+                runtime.Nodes.FirstOrDefault(node => node.Id == entry.Name)?.RequiredClasses ?? []),
+            // Old plans did not persist ownership; retain their existing marker-based behavior.
+            entry.Directory, PreserveExisting: !(entry.Managed ?? File.Exists(Path.Combine(entry.Directory, ".anima-revision.json"))))).ToArray();
+
     private static string Full(string path) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
     private static bool Same(string a, string b) => Full(a).Equals(Full(b), StringComparison.OrdinalIgnoreCase);
     private static string SafeMessage(string message) => Regex.Replace(message, @"(?:https?://|git@)[^\s\""']+", "[来源地址]", RegexOptions.IgnoreCase);
@@ -115,7 +138,7 @@ public sealed class NodeUpdateCoordinator(string stateDir, string git, Action<st
             {
                 var marker = Path.Combine(directory, ".anima-revision.json");
                 var managed = File.Exists(marker) ? JsonFile.Read<Repository>(marker) : null;
-                entry = entry with { Name = managed?.Id ?? name };
+                entry = entry with { Name = managed?.Id ?? name, Managed = managed is not null };
                 if (PromptAssistantCompatibility.ResolveDirectory(config.ComfyRoot) is { } assistant && Same(assistant, directory))
                     entry = entry with { Name = PromptAssistantCompatibility.NodeId };
                 if (ForbiddenVisionCompatibility.ResolveDirectory(config.ComfyRoot) is { } face && Same(face, directory))

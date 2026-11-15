@@ -22,12 +22,14 @@ function renderHistorySource({ immediate = false } = {}) {
 }
 function historyQueryParams(view = historyViewState()) {
   return (view.query.source ? `&workbench=${encodeURIComponent(view.query.source)}` : "")
-    + (view.query.folderId ? `&folder_id=${encodeURIComponent(view.query.folderId)}` : "");
+    + (view.query.folderId ? `&folder_id=${encodeURIComponent(view.query.folderId)}` : "")
+    + (typeof historyFiltersQueryParams === "function" ? historyFiltersQueryParams(view) : "");
 }
 function historyQueryKey(view = historyViewState()) { return `${view.kind}:${view.queryEpoch}:${historyQueryParams(view)}`; }
 function setHistorySource(source) {
   if (!HISTORY_SOURCES.has(source) || source === historyDetailState.homeQuery.source) return;
   historyDetailState.homeQuery = { ...historyDetailState.homeQuery, source };
+  if (typeof historyFiltersPersist === "function") historyFiltersPersist();
   invalidateHistoryView(); renderHistorySource(); void loadHistory(1);
 }
 function historyDetailWritable() { return config?.storage_status?.history?.available !== false && !config?.storage_status?.history?.read_only; }
@@ -148,7 +150,10 @@ function removeHistoryViewRecords(view, records) {
     if (typeof ArtworkThumbnails !== "undefined") ArtworkThumbnails.remove(node);
     node.remove();
   }
-  if (Number.isFinite(total) && removedCount) {
+  // Group rules are resolved by the server and can change independently of a
+  // selected record. Do not guess whether off-page deleted records matched.
+  const filtered = typeof historyFiltersActive === "function" && historyFiltersActive(view);
+  if (!filtered && Number.isFinite(total) && removedCount) {
     view.total = Math.max(0, total - removedCount); view.pages = Math.max(1, Math.ceil(view.total / 24)); view.page = Math.min(view.page, view.pages);
     if (elements?.historyCount) elements.historyCount.textContent = `${view.total} 张图片`;
     if (elements?.pageLabel) elements.pageLabel.textContent = `${view.page} / ${view.pages}`;
@@ -156,6 +161,7 @@ function removeHistoryViewRecords(view, records) {
     if (elements?.nextPage) elements.nextPage.disabled = view.page >= view.pages;
   }
   if (elements?.emptyState) elements.emptyState.hidden = view.items.length > 0;
+  if (unique.size && typeof historyFiltersHistoryChanged === "function") historyFiltersHistoryChanged();
   invalidateHistoryView(view);
 }
 async function applyHistoryDeleted(record, owner, { beforeDetailUpdate } = {}) {

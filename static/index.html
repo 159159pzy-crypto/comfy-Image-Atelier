@@ -18,6 +18,7 @@
   <link rel="stylesheet" href="/static/single-layout.css?v=20261024-motion">
   <link rel="stylesheet" href="/static/single-details.css?v=20261024-motion">
   <link rel="stylesheet" href="/static/history-detail.css?v=20261110-delete-choice">
+  <link rel="stylesheet" href="/static/history-filters.css?v=20261115-filter-window">
   <link rel="stylesheet" href="/static/character-classification.css?v=20261111-local-classification">
   <link rel="stylesheet" href="/static/artwork-favorites.css?v=20261029-favorites-motion">
   <link rel="stylesheet" href="/static/lora-manager.css?v=20261107-remove-pool-lora-entry">
@@ -332,12 +333,35 @@
         <div class="pager"><button id="prevPage" class="icon-button round-icon-button" type="button" title="上一页" aria-label="上一页"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m15 6-6 6 6 6"/></svg></button><span id="pageLabel">1 / 1</span><button id="nextPage" class="icon-button round-icon-button" type="button" title="下一页" aria-label="下一页"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m9 6 6 6-6 6"/></svg></button></div>
         </div>
       </div>
-      <div id="artworkToolbar" class="history-home-toolbar artwork-toolbar"></div>
+      <div class="history-browse-toolbar">
+        <div id="artworkToolbar" class="history-home-toolbar artwork-toolbar"></div>
+        <button id="openHistoryFilters" class="history-filter-trigger" type="button" aria-label="筛选作品" title="筛选作品" aria-haspopup="dialog" aria-controls="historyFilterDrawer" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M4 7h9m4 0h3M4 17h3m4 0h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></button>
+      </div>
       <div id="gallery" class="gallery" aria-live="polite"></div>
       <div id="emptyState" class="empty-state"><span class="empty-mark">A</span><strong>等待第一张作品</strong><small>完成生成后会出现在这里</small></div>
       </div>
     </section>
   </main>
+
+  <aside id="historyFilterDrawer" class="history-filter-drawer" role="dialog" aria-modal="false" aria-labelledby="historyFilterTitle" aria-describedby="historyFilterDescription" aria-hidden="true" hidden inert>
+    <header class="history-filter-header">
+      <div><h2 id="historyFilterTitle">筛选作品</h2><p id="historyFilterDescription">根据生成记录筛选</p></div>
+      <button id="historyFilterClear" class="history-filter-text-button" type="button">清除</button>
+      <button id="closeHistoryFilters" class="history-filter-close" type="button" aria-label="关闭作品筛选">×</button>
+    </header>
+    <div class="history-filter-search-area">
+      <label class="history-filter-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><input id="historyFilterSearch" type="search" maxlength="500" autocomplete="off" placeholder="搜索提示词或名称" aria-label="搜索作品的生成提示词或名称"></label>
+      <div id="historyFilterConditions" class="history-filter-conditions" aria-label="已选筛选条件" hidden></div>
+      <p id="historyFilterFeedback" class="history-filter-feedback" role="status" hidden></p>
+    </div>
+    <div id="historyFilterBody" class="history-filter-body">
+      <p class="history-filter-help">同池满足任一，不同池同时满足。排除命中时优先。</p>
+      <div id="historyFilterCatalogStatus" class="history-filter-catalog-status" role="status"></div>
+      <button id="historyFilterCatalogRetry" class="history-filter-text-button" type="button" hidden>重试加载分组</button>
+      <div id="historyFilterPools" class="history-filter-pools"></div>
+    </div>
+    <footer class="history-filter-footer"><p id="historyFilterResult" role="status" aria-live="polite">正在读取作品…</p><button id="historyFilterRetry" class="history-filter-text-button" type="button" hidden>重试</button><button id="historyFilterShowResults" class="button primary compact" type="button">查看结果</button></footer>
+  </aside>
 
   <div class="command-deck glass" role="group" aria-label="生成控制">
     <label class="quantity-field"><span>批次数量</span><input id="count" form="settingsForm" type="number" min="1" max="1000" step="1" required></label>
@@ -885,7 +909,9 @@
   <script src="/static/single-compatibility.js?v=20261024-single-ui" defer></script>
   <script src="/static/single-details.js?v=20261110-resource-resolution" defer></script>
   <script src="/static/krea-pool.js?v=20261030-source-lifecycle" defer></script>
-  <script src="/static/history-detail.js?v=20261114-thumbnail-recovery" defer></script>
+  <script src="/static/history-detail.js?v=20261115-filter-window" defer></script>
+  <script src="/static/history-filter-window.js?v=20261115-filter-window" defer></script>
+  <script src="/static/history-filters.js?v=20261115-filter-window" defer></script>
   <script src="/static/artwork-favorites.js?v=20261114-thumbnail-recovery" defer></script>
   <script src="/static/detail-actions.js?v=20261027-history-polish" defer></script>
   <script src="/static/lora-manager.js?v=20261112-preview-retry" defer></script>
@@ -893,6 +919,6 @@
   <script src="/static/resource-resolution.js?v=20261110-resource-resolution" defer></script>
   <script src="/static/character-classification.js?v=20261111-local-classification" defer></script>
   <script src="/static/style-preset-manager.js?v=20261115-presets-favorites" defer></script>
-  <script src="/static/app.js?v=20261114-thumbnail-recovery" defer></script>
+  <script src="/static/app.js?v=20261115-filter-window" defer></script>
 </body>
 </html>

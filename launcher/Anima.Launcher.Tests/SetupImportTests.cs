@@ -103,8 +103,9 @@ folder_names_and_paths = {key: ([str(Path(models_dir) / key)], set()) for key in
             "module presence checks do not import torch or execute third-party initialization");
         Directory.Delete(nodeDirectory);
         var missingNode = await SetupImportReview.InspectAsync(config, withNode, default);
-        Check(missingNode.NeedsRepair && missingNode.MissingCoreModules.Length == 0,
-            "complete core modules still require repair when a declared node is missing");
+        Check(missingNode.NeedsRepair && missingNode.MissingCoreModules.Length == 0
+            && missingNode.PreparationIssues.Any(issue => issue.Contains(node.Id) && issue.Contains(nodeDirectory)),
+            "a missing declared node is included by name and destination in the actionable import repair list");
         Directory.CreateDirectory(nodeDirectory);
 
         var externalVenv = Path.Combine(directory, "external-python");

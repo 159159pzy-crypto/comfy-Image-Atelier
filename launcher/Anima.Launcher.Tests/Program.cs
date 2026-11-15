@@ -58,6 +58,11 @@ if (args.FirstOrDefault() == "--dependency-install-acceptance")
 var models = JsonFile.Read<ModelManifest>(Path.Combine(manifestDir, "model-manifest.json"));
 var taggerModels = JsonFile.Read<ModelManifest>(Path.Combine(root, "anima_webui", "tagger-models.json"));
 models = models with { Models = models.Models.Concat(taggerModels.Models).ToArray() };
+if (args.FirstOrDefault() == "--onboarding-ui-fixture")
+{
+    await OnboardingUiFixture.Seed(Path.GetFullPath(args[1]), root, models, args.ElementAtOrDefault(2) ?? "configuration-issues");
+    return;
+}
 if (args.FirstOrDefault() == "--download-tools-acceptance")
 {
     await ArtifactNetworkTests.RunAcceptance(root, Path.GetFullPath(args[1]));
@@ -291,6 +296,11 @@ if (args.Contains("--node-releases-only"))
 {
     count += await NodeReleaseTests.Run(work, manifest);
     Console.WriteLine($"{count} node release and install snapshot checks passed."); return;
+}
+if (args.Contains("--node-update-transactions-only"))
+{
+    count += await NodeUpdateTests.Run(work, manifest);
+    Console.WriteLine($"{count} node update transaction checks passed; artifacts: {work}"); return;
 }
 if (args.Contains("--node-updates-only"))
 {

@@ -7,6 +7,18 @@ public enum SetupModelReadiness { Unknown, Checking, NeedsDownload, NeedsAttenti
 public enum SetupCompletionOperation { None, ReviewModels, DownloadModels, StartWorkbench }
 public enum SetupCompletionAction { None, ReviewModels, DownloadModels, ResumeModels, StartWorkbench }
 
+/// <summary>Preview and launch share the same frozen installation contract, including after restart.</summary>
+public static class SetupCompletionResources
+{
+    public static ModelItem[] RequiredDownloads(SetupRecord setup, InstallationPlan? activePlan,
+        ModelManifest models, ModelProfilesManifest profiles, string profile)
+    {
+        var plan = activePlan ?? setup.ReviewedPlan;
+        return plan is not null ? SetupModelSelection.RequiredForPlan(plan, models, profiles, profile)
+            : setup.Fresh ? SetupModelSelection.MandatoryModels(models, profiles, profile) : [];
+    }
+}
+
 /// <summary>Optional tagger runtime discovery is needed only for tagger model selections.</summary>
 public static class ModelProbePolicy
 {
@@ -93,7 +105,7 @@ public sealed record SetupCompletionPresentation(string Title, string Descriptio
 {
     public static SetupCompletionPresentation Resolve(SetupModelReadiness readiness, bool reviewVisible = false,
         bool canDownload = false, bool canResume = false, bool startFailed = false, bool hasError = false,
-        bool runtimeVerified = false)
+        bool runtimeVerified = false, bool hasConfigurationIssues = false)
     {
         if (startFailed) return new("工作台还没有启动。", "环境配置已保留。处理提示的问题后，可以重试启动。",
             "重试启动", SetupCompletionAction.StartWorkbench, false);
@@ -101,6 +113,8 @@ public sealed record SetupCompletionPresentation(string Title, string Descriptio
             hasError ? "重试下载" : "继续下载", SetupCompletionAction.ResumeModels, false);
         return readiness switch
         {
+            SetupModelReadiness.Ready when runtimeVerified && hasConfigurationIssues => new("环境可启动，生成资源待配置。", "环境与服务检查已通过。下方列出了仍需配置的生成资源，进入工作台后选择兼容模型即可继续。", "打开工作台配置模型", SetupCompletionAction.StartWorkbench, false),
+            SetupModelReadiness.Ready when hasConfigurationIssues => new("环境已连接，需要重新检查。", "下方保留的是上次发现的资源问题；启动前会重新检查当前环境，再进入工作台配置模型。", "重新检查并打开工作台", SetupCompletionAction.StartWorkbench, false),
             SetupModelReadiness.Ready when runtimeVerified => new("环境已准备好。", "环境与服务检查已通过，可打开工作台选择兼容模型并创作。", "打开工作台", SetupCompletionAction.StartWorkbench, false),
             SetupModelReadiness.Ready => new("环境已连接，还需检查运行状态。", "启动后检查连接和实际资源；缺少生成模型时可进入工作台配置。", "检查并启动工作台", SetupCompletionAction.StartWorkbench, false),
             SetupModelReadiness.Checking => new("正在检查基础模型。", "正在确认实际模型位置和文件状态，请稍候。", "正在检查…", SetupCompletionAction.None, false),

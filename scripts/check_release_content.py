@@ -1,6 +1,7 @@
 """Reject local state and internal notes from the files selected for release."""
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
@@ -18,6 +19,10 @@ LOCAL_PARTS = {
     "node_modules", "bin", "obj", "test-results", "playwright-report",
 }
 LOCAL_ROOTS = {"data", "output", "dist", "tools", "anima_natural", "anima_studio"}
+VENDORED_ARCHIVES = {
+    # Embedded by the launcher; retain the reviewed source archive in source releases.
+    "launcher/vendor/packaging-26.0.zip": "e5b1dfcdf8311b0c161ddda81ed7c1db9216ed42d4740a5460b42a03075cf56c",
+}
 MACHINE_PATH = re.compile(r"(?i)(?:(?<![a-z0-9])[a-z]:[\\/]|/Users/|/home/)")
 
 
@@ -25,7 +30,8 @@ def check_path(name: str) -> None:
     path = PurePosixPath(name)
     if set(path.parts) & LOCAL_PARTS or path.parts[0] in LOCAL_ROOTS:
         raise ValueError(f"Local directory selected for release: {name}")
-    if path.name.startswith(".env") or path.suffix.lower() in {".pyc", ".log", ".lnk", ".exe", ".dll", ".pdb", ".zip"}:
+    if path.name.startswith(".env") or (path.suffix.lower() in {".pyc", ".log", ".lnk", ".exe", ".dll", ".pdb", ".zip"}
+                                        and name not in VENDORED_ARCHIVES):
         raise ValueError(f"Local or generated file selected for release: {name}")
     if path.suffix.lower() == ".md" and name not in PUBLIC_MARKDOWN:
         raise ValueError(f"Unapproved Markdown selected for release: {name}")
@@ -53,6 +59,8 @@ def check_release_content() -> None:
         path = ROOT / name
         if not path.is_file():
             raise ValueError(f"Tracked release file is missing: {name}")
+        if name in VENDORED_ARCHIVES and hashlib.sha256(path.read_bytes()).hexdigest() != VENDORED_ARCHIVES[name]:
+            raise ValueError(f"Vendored archive checksum mismatch: {name}")
         if name in PUBLIC_MARKDOWN:
             content = path.read_text(encoding="utf-8")
             if MACHINE_PATH.search(content):

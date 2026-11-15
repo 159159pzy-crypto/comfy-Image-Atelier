@@ -28,6 +28,34 @@ def catalog_inventory(settings, **extra):
     return result
 
 
+@pytest.mark.parametrize("available,expected", [
+    (["4x-AnimeSharp.pth"], "4x-AnimeSharp.pth"),
+    (["4x-AnimeSharp.pth", "4x_foolhardy_Remacri.pth"], "4x_foolhardy_Remacri.pth"),
+    ([], None),
+])
+def test_launcher_pixel_download_preserves_existing_selection_and_resolves_new_install(available, expected):
+    settings = validate_settings({"pipeline_version": 5, "base_mode": "normal",
+                                  "upscalers": {"pixel_hires": {"enabled": True}}})
+    original = copy.deepcopy(settings)
+    inventory = catalog_inventory(settings, upscale_models=available)
+    inventory["resource_catalog"].extend(
+        {"kind": "upscale_models", "name": name, "roles": ["upscale"], "status": "recognized"}
+        for name in available
+    )
+    result = resolve_resources(settings, inventory)
+    assert settings == original
+    assert settings["upscalers"]["pixel_hires"]["model_name"] == "4x_foolhardy_Remacri.pth"
+    assert result["ready"] is (expected is not None)
+    if expected is None:
+        assert any(issue["module"] == "pixel_hires" and issue["code"] == "missing_model" for issue in result["issues"])
+    else:
+        assert result["effective_settings"]["upscalers"]["pixel_hires"]["model_name"] == expected
+        replacements = [item for item in result["replacements"] if item["module"] == "pixel_hires"]
+        assert bool(replacements) is (expected == "4x-AnimeSharp.pth")
+        if replacements:
+            assert replacements[0]["reason"] == "missing_model"
+
+
 @pytest.mark.parametrize("kind,tensors,roles", [
     ("models", {"blocks.0.mlp.layer1.weight": [1], "llm_adapter.blocks.0.cross_attn.q_proj.weight": [1]}, ["anima.model"]),
     ("models", {"net.blocks.0.mlp.layer1.weight": [1], "net.llm_adapter.blocks.0.cross_attn.q_proj.weight": [1]}, ["anima.model"]),

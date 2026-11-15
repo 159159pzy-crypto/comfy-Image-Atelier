@@ -222,8 +222,8 @@
     },
     {
       "id": "forbidden-vision-corrector",
-      "name": "Forbidden Vision 颜色校正",
-      "group": "脸部细化（可选）",
+      "name": "Forbidden Vision 神经校正（其他工作流）",
+      "group": "其他工作流兼容（当前工作台无需）",
       "category": "forbidden_vision",
       "relativePath": "ForbiddenVision_neural_corrector_v1.safetensors",
       "aliases": [],

@@ -640,6 +640,11 @@ async function request(path, options = {}) {
     error.payload = payload;
     throw error;
   }
+  if (typeof historyFiltersCatalogChanged === "function" && options.method && !["GET", "HEAD"].includes(options.method)
+    && /^\/api\/(?:favorites|custom-prompts|custom-groups)(?:\/|\?|$)/.test(path)
+    && !/\/(?:query|preview|character-analysis|reconcile)(?:\?|$)/.test(path)) {
+    historyFiltersCatalogChanged();
+  }
   if (path.startsWith("/api/favorites/") && !path.split("?")[0].endsWith("/reconcile") && options.method && options.method !== "GET") {
     if (typeof singleWorkbenchFavoritesChanged === "function") singleWorkbenchFavoritesChanged({
       model_profile: favoriteProfile, section: favoriteSection,
@@ -2461,6 +2466,7 @@ function renderBatch(batch, queue = currentQueue) {
     }
     // New output can shift every page boundary, including a page being read
     // by the fullscreen viewer. Preserve selections, invalidate only reads.
+    if (completed > 0 && typeof historyFiltersHistoryChanged === "function") historyFiltersHistoryChanged();
     if (typeof invalidateHistoryView === "function") invalidateHistoryView();
     else if (typeof historyCache !== "undefined") historyCache.clear();
     if (batch.settings?.workbench === "single") {
@@ -2614,6 +2620,9 @@ function renderHistoryPage(data, historyView = null) {
   const view = historyViewState(historyView), elements = view.elements;
   view.dirty = false;
   const previousPage = view.page;
+  const renderedQuery = typeof historyQueryParams === "function" ? historyQueryParams(view) : "";
+  const queryChanged = view.renderedQuery != null && view.renderedQuery !== renderedQuery;
+  view.renderedQuery = renderedQuery;
   view.page = Number(data.page) || 1;
   view.pages = Number(data.pages) || 1;
   view.total = Number(data.total) || 0;
@@ -2634,7 +2643,7 @@ function renderHistoryPage(data, historyView = null) {
     if (typeof decorateArtworkCard === "function") decorateArtworkCard(node, record, button);
     retained.add(node);
     if (elements.gallery.children[index] !== node) elements.gallery.insertBefore(node, elements.gallery.children[index] || null);
-    if (fresh && previousPage === view.page && existing.size && typeof StudioMotion !== "undefined") {
+    if (fresh && !queryChanged && previousPage === view.page && existing.size && typeof StudioMotion !== "undefined") {
       node.hidden = true;
       StudioMotion.presence(node, true, { from: { opacity: 0, y: 6 }, manageInert: false });
     }
@@ -2644,7 +2653,7 @@ function renderHistoryPage(data, historyView = null) {
     node.remove();
   }
   ArtworkThumbnails.refresh();
-  if (previousPage !== view.page && typeof StudioMotion !== "undefined") {
+  if ((previousPage !== view.page || queryChanged) && typeof StudioMotion !== "undefined") {
     StudioMotion.spring(elements.gallery, "page", { opacity: 1 }, {
       initial: { opacity: .4 }, response: .2,
       onUpdate: value => { elements.gallery.style.opacity = value.opacity; },
@@ -2662,6 +2671,20 @@ function renderHistoryPage(data, historyView = null) {
   elements.nextPage.disabled = view.page >= view.pages;
   elements.historyCount.textContent = historyUnavailable ? "历史存储不可用" : `${data.total || 0} 张图片`;
   if (typeof artworkHistoryRendered === "function") artworkHistoryRendered(view);
+  const filtered = typeof historyFiltersActive === "function" && historyFiltersActive(view);
+  if (!historyUnavailable && filtered && !view.items.length) {
+    elements.emptyState.querySelector("strong").textContent = "没有匹配的作品";
+    elements.emptyState.querySelector("small").textContent = "可以调整条件，或清除内容筛选后继续浏览";
+  }
+  let clearFilters = elements.emptyState.querySelector(".history-empty-clear");
+  if (filtered && !view.items.length && !historyUnavailable && !clearFilters) {
+    clearFilters = document.createElement("button");
+    clearFilters.type = "button"; clearFilters.className = "button ghost compact history-empty-clear";
+    clearFilters.textContent = "清除内容筛选";
+    clearFilters.addEventListener("click", () => { if (typeof historyFiltersClear === "function") historyFiltersClear(); });
+    elements.emptyState.append(clearFilters);
+  }
+  if (clearFilters) clearFilters.hidden = !filtered || Boolean(view.items.length) || historyUnavailable;
   updatePreviewNavigation();
 }
 
@@ -2670,6 +2693,7 @@ async function loadHistory(page = historyPage, historyView = null) {
   // 与 loadPool 相同的竞态守卫:快速翻页时丢弃乱序到达的旧响应。
   const requestId = ++view.requestId;
   const queryKey = typeof historyQueryKey === "function" ? historyQueryKey(view) : "";
+  if (typeof historyFiltersHistoryLoading === "function") historyFiltersHistoryLoading(view);
   try {
     const params = typeof historyQueryParams === "function" ? historyQueryParams(view) : "";
     const data = await request(`/api/history?page=${page}&limit=24${params}`);
@@ -2677,10 +2701,16 @@ async function loadHistory(page = historyPage, historyView = null) {
     // Removing a collection's last page must land on a valid page, not an empty
     // offset beyond the new total. The nested read owns a fresh request token.
     if (Number(data.page) > Number(data.pages) && Number(data.pages) > 0) return loadHistory(Number(data.pages), view);
+    if (typeof historyFiltersHistoryResponse === "function" && historyFiltersHistoryResponse(data, view) === false) return;
     renderHistoryPage(data, view);
     return data;
   } catch (error) {
     if (view.closed || requestId !== view.requestId) return;
+    if (typeof historyFiltersHistoryError === "function") {
+      const handled = await historyFiltersHistoryError(error, view);
+      if (handled || view.closed || requestId !== view.requestId
+        || (typeof historyQueryKey === "function" && queryKey !== historyQueryKey(view))) return;
+    }
     toast(error.message);
   }
 }
@@ -2756,6 +2786,7 @@ function updateDetailRecord(record) {
 }
 function openDetail(record, { origin = "random", returnFocus = null, historyView = null } = {}) {
   if (!record) return;
+  if (typeof historyFiltersSuspendPainting === "function") historyFiltersSuspendPainting();
   closeImagePreview({ immediate: true, restoreFocus: false });
   detailContext = { origin, returnFocus: returnFocus || document.activeElement, historyView: historyViewState(historyView) };
   if (typeof showHistoryDetail === "function") showHistoryDetail();
@@ -3002,9 +3033,19 @@ async function loadHistoryPageForPreview(page, historyView = null) {
   const cached = view.cache.get(page);
   if (cached && cached.historyQueryKey === queryKey) return cached;
   const params = typeof historyQueryParams === "function" ? historyQueryParams(view) : "";
-  const data = await request(`/api/history?page=${page}&limit=24${params}`);
+  let data;
+  try { data = await request(`/api/history?page=${page}&limit=24${params}`); }
+  catch (error) {
+    if (view.closed || (typeof historyQueryKey === "function" && queryKey !== historyQueryKey(view))) return null;
+    if (typeof historyFiltersHistoryError === "function") {
+      const handled = await historyFiltersHistoryError(error, view);
+      if (handled || view.closed || (typeof historyQueryKey === "function" && queryKey !== historyQueryKey(view))) return null;
+    }
+    throw error;
+  }
   if (view.closed || (typeof historyQueryKey === "function" && queryKey !== historyQueryKey(view))) return null;
-  cacheHistoryPage(data, queryKey, view);
+  if (typeof historyFiltersHistoryResponse === "function" && historyFiltersHistoryResponse(data, view) === false) return null;
+  cacheHistoryPage(data, null, view);
   return data;
 }
 
@@ -7437,6 +7478,7 @@ async function initialize() {
     if (typeof initializeSingleWorkbench === "function") await initializeSingleWorkbench({ legacyRestored: Boolean(restored) });
     if (typeof initializeHistoryDetail === "function") initializeHistoryDetail();
     if (typeof initializeArtworkFavorites === "function") initializeArtworkFavorites();
+    if (typeof historyFiltersInit === "function") historyFiltersInit();
     initializeLoraManager();
     if (typeof StudioMotion !== "undefined") {
       StudioMotion.bindDisclosures(document);

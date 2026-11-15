@@ -17,6 +17,8 @@ public sealed class SetupRecord
     public bool InstallFinished { get; set; }
     public bool ModelsPending { get; set; }
     public bool RuntimeVerified { get; set; }
+    public SetupRuntimeIssue[] ConfigurationIssues { get; set; } = [];
+    public bool SelectionNeedsReview { get; set; }
     public string[] OptionalModelIds { get; set; } = [];
     public string[] SkippedOptionalModelIds { get; set; } = [];
     public string[] FailedFeatureIds { get; set; } = [];
@@ -27,6 +29,149 @@ public sealed class SetupRecord
     // Old installations selected the ComfyUI folder itself. Keep that identity
     // when the user temporarily clears the path while editing a recovery draft.
     public bool DirectComfyRoot { get; set; }
+
+    public void MarkRuntimeCheckStale() => RuntimeVerified = false;
+
+    public void SetInstallationMode(bool fresh)
+    {
+        ResetAssistantForTargetChange(Draft, fresh);
+        Fresh = fresh;
+    }
+
+    public void UpdateDraft(LauncherConfig draft)
+    {
+        // Opening the location page also saves its fields. Only a real value change
+        // invalidates a previously confirmed owner; checking a new plan is not confirmation.
+        if (System.Text.Json.JsonSerializer.Serialize(Draft, JsonFile.Options)
+            != System.Text.Json.JsonSerializer.Serialize(draft, JsonFile.Options))
+        {
+            SelectionNeedsReview = true;
+            MarkRuntimeCheckStale();
+        }
+        ResetAssistantForTargetChange(draft, Fresh);
+        Draft = draft.Clone();
+    }
+
+    private void ResetAssistantForTargetChange(LauncherConfig draft, bool fresh)
+    {
+        if (TargetKey(Draft, Fresh).Equals(TargetKey(draft, fresh), StringComparison.OrdinalIgnoreCase)) return;
+        AssistantStatus = AssistantSetupStatus.Pending;
+        AssistantAvailable = null;
+    }
+
+    private static string TargetKey(LauncherConfig draft, bool fresh)
+    {
+        var root = fresh && !string.IsNullOrWhiteSpace(draft.InstallRoot)
+            ? Path.Combine(draft.InstallRoot.Trim().Trim('"'), "ComfyUI") : draft.ComfyRoot.Trim().Trim('"');
+        if (root.Length == 0) return "";
+        try { return Path.TrimEndingDirectorySeparator(Path.GetFullPath(root)); }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or IOException)
+        { return root.TrimEnd('\\', '/'); } // An incomplete draft cannot retain another target's service receipt.
+    }
+
+    public void RecordRuntimeCheck(SetupRuntimeReadinessReport report)
+    {
+        if (!report.RequiredReady) throw new InvalidOperationException("运行检查尚未通过，不能替换已保存的资源检查结果。");
+        ConfigurationIssues = report.ConfigurationIssues.Distinct().ToArray();
+        RuntimeVerified = true;
+    }
+}
+
+public sealed record SetupAssistantPresentation(string Status, string Description, bool Configured = false)
+{
+    public static SetupAssistantPresentation Resolve(SetupRecord setup) => setup.AssistantAvailable == false
+        ? new("未安装", "提示词助手未安装或未加载。需要时可到「模型资源」准备此功能，再到「设置」配置服务。")
+        : setup.AssistantStatus switch
+        {
+            AssistantSetupStatus.Configured => new("已配置", "提示词助手已配置，可在工作台使用；服务设置仍可随时修改。", true),
+            AssistantSetupStatus.Skipped => new("稍后配置", "已跳过提示词助手配置，不影响基础生图。需要时可到「设置」继续配置。"),
+            AssistantSetupStatus.Legacy => new("沿用已有设置", "保留已有提示词助手设置，可在「设置」中查看或修改。"),
+            _ => new("可选", "提示词助手为可选功能，不影响基础生图。"),
+        };
+}
+
+public sealed record SetupDependencyReviewPresentation(string Summary, string Details)
+{
+    public static SetupDependencyReviewPresentation Create(IEnumerable<string> issues)
+    {
+        var details = issues.Where(issue => !string.IsNullOrWhiteSpace(issue)).ToArray();
+        return new(string.Join("\n", details.Select(Summarize).Distinct().Select(issue => "• " + issue)),
+            string.Join("\n\n", details.Select(issue => "• " + issue)));
+    }
+
+    public static SetupDependencyReviewPresentation ForPreflight(IEnumerable<PreflightIssue> issues)
+    {
+        var rows = issues.ToArray();
+        return new(string.Join("\n\n", rows.Select(issue => (issue.Blocking ? "需处理：" : "提示：") + SummarizePreflight(issue))),
+            string.Join("\n\n", rows.Select(issue => (issue.Blocking ? "需处理：" : "提示：") + issue.Message)));
+    }
+
+    private static string SummarizePreflight(PreflightIssue issue)
+    {
+        // This specific safety boundary appends arbitrary Python exceptions and a full
+        // preparation list. Keep its two recovery choices clear; the exact list belongs in details.
+        if (issue.Code == "import_probe" && issue.Message.Contains(
+            "此导入环境需要补齐节点、依赖或安装准备。请选择 ComfyUI 目录内的独立", StringComparison.Ordinal))
+            return "此导入环境需要补齐插件或依赖。请选择 ComfyUI 目录内的独立 .venv、venv 或独立便携 Python；也可以先在原环境中手动补齐，再重新检查。缺项与检查原因见「查看完整检查结果与路径」。";
+        return Summarize(issue.Message);
+    }
+
+    private static string Summarize(string issue)
+    {
+        var summary = issue.TrimEnd();
+        // These producers append exactly one full-width parenthesized source.
+        // Balance it so parentheses inside a directory do not corrupt the package message.
+        if ((summary.StartsWith("依赖需要补齐：", StringComparison.Ordinal)
+            || summary.StartsWith("依赖尚未验证：", StringComparison.Ordinal)
+            || summary.StartsWith("需要安装插件：", StringComparison.Ordinal)) && summary.EndsWith('）'))
+        {
+            var depth = 0;
+            for (var index = summary.Length - 1; index >= 0; index--)
+            {
+                if (summary[index] == '）') depth++;
+                else if (summary[index] == '（' && --depth == 0)
+                {
+                    summary = summary[..index].TrimEnd();
+                    break;
+                }
+            }
+        }
+        summary = FoldPathSources(summary);
+        foreach (var prefix in new[] { "依赖尚未验证：无法读取依赖文件：", "依赖尚未验证：无法离线解析依赖：",
+                     "Forbidden Vision 下载管理需要准备：", "NVIDIA 运行库检查未通过：" })
+            if (summary.StartsWith(prefix, StringComparison.Ordinal)) return prefix.TrimEnd('：') + "，具体原因见详情。";
+        return summary;
+    }
+
+    private static string FoldPathSources(string message)
+    {
+        // Import-blocking diagnostics can contain several joined preparation issues.
+        // Fold only recognizable path sources; keep the decision guidance and package text intact.
+        var result = new System.Text.StringBuilder();
+        for (var index = 0; index < message.Length; index++)
+        {
+            if (message[index] == '（')
+            {
+                var depth = 1;
+                var end = index + 1;
+                for (; end < message.Length && depth > 0; end++)
+                    if (message[end] == '（') depth++;
+                    else if (message[end] == '）') depth--;
+                if (depth == 0)
+                {
+                    var source = message[(index + 1)..(end - 1)];
+                    if (source.Contains(":\\", StringComparison.Ordinal) || source.Contains(":/", StringComparison.Ordinal)
+                        || source.StartsWith(@"\\", StringComparison.Ordinal) || source.StartsWith('/'))
+                    {
+                        index = end - 1;
+                        continue;
+                    }
+                }
+            }
+            result.Append(message[index]);
+        }
+        return result.ToString();
+    }
 }
 
 public static class SetupRouting
@@ -42,6 +187,9 @@ public static class SetupRouting
     /// </summary>
     public static SetupStep? Resolve(LauncherConfig current, SetupRecord? saved)
     {
+        if (saved is { SchemaVersion: 1, Draft: not null, SelectionNeedsReview: true }
+            && (string.IsNullOrWhiteSpace(current.ComfyRoot) || TargetsMatch(current, saved.Draft, saved.Fresh)))
+            return SetupStep.Location;
         if (current.InstallPending) return SetupStep.Installing;
         var configured = !string.IsNullOrWhiteSpace(current.ComfyRoot);
         if (saved is null || saved.SchemaVersion != 1 || saved.Draft is null || !Enum.IsDefined(saved.Step))

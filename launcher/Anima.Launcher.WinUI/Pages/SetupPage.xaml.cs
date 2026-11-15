@@ -26,6 +26,9 @@ public sealed partial class SetupPage : LauncherPage
     private object? renderedPreflight;
     private object? renderedChoicesPlan;
     private string renderedChoiceSelection = "";
+    private string renderedChoiceMode = "";
+    private bool updatingChoiceSelection;
+    private readonly Dictionary<string, (SetupModelChoice Choice, CheckBox Box)> choiceBoxes = new();
     private readonly SetupAssistantPanel assistant = new();
 
     public SetupPage()
@@ -46,6 +49,7 @@ public sealed partial class SetupPage : LauncherPage
             renderedModelReview = null;
             renderedChoicesPlan = null;
             renderedChoiceSelection = "";
+            renderedChoiceMode = "";
             if (active) Refresh();
         };
     }
@@ -164,12 +168,16 @@ public sealed partial class SetupPage : LauncherPage
             && State.SetupCompletionOperation != SetupCompletionOperation.StartWorkbench && ErrorBar.Message.Length > 0)
             ErrorBar.Message = "基础模型检查未完成。请确认已连接的 ComfyUI 目录和 Python 可用，再重新检查；详细原因见日志。";
         ErrorBar.IsOpen = !string.IsNullOrWhiteSpace(ErrorBar.Message);
+        ErrorHelp.Visibility = Visible(ErrorBar.IsOpen);
+        ErrorHelp.Text = step == SetupStep.Installing
+            ? State.SetupCanSkipOptional ? "基础功能已通过检查。可以重试失败项，或跳过剩余可选项，稍后在模型资源页补齐。"
+                : "已完成的文件与步骤会保留。查看日志确认失败原因后点击「重试」；下载连接失败可更改来源后重新检查。"
+            : step == SetupStep.Complete ? "环境配置已保留。请按下方检查结果处理，再重新检查或重试启动；详细原因可在「查看日志」中找到。"
+            : "请先处理下方检查结果。修改目录、Python 或下载来源后需要重新检查；详细原因可在「查看日志」中找到。";
         if (ErrorBar.IsOpen && displayedError != ErrorBar.Message) BodyScroll.ChangeView(null, 0, null, true);
         displayedError = ErrorBar.Message;
         NoticeBar.Message = State.SetupNotice;
-        NoticeBar.IsOpen = !string.IsNullOrWhiteSpace(State.SetupNotice)
-            && step != SetupStep.Review
-            && step != SetupStep.Complete;
+        NoticeBar.IsOpen = !string.IsNullOrWhiteSpace(State.SetupNotice) && step != SetupStep.Review;
         LocationFields.IsEnabled = !State.Busy;
         BackButton.IsEnabled = !State.Busy && (step != SetupStep.Complete || State.Setup.RuntimeVerified);
         SecondaryButton.IsEnabled = !State.Busy;
@@ -210,10 +218,10 @@ public sealed partial class SetupPage : LauncherPage
                 UpdateReview();
                 PrimaryButton.Content = State.Busy ? "正在检查…" : State.SetupCanInstall
                     ? (!State.Setup.Fresh && !State.SetupImportNeedsRepair ? "连接并准备模型"
-                        : State.Setup.InstallStarted ? "继续安装" : "开始安装") : "重新检查";
+                        : State.Setup.InstallStarted ? "继续安装" : "开始安装") : State.SetupSelectionNeedsReview ? "检查所选内容" : "重新检查";
                 FooterHint.Text = State.SetupCanInstall
                     ? State.Setup.Fresh ? "确认后再开始下载与安装。" : "确认后连接现有环境，按清单补齐节点和模型。"
-                    : "处理上方问题后重新检查。";
+                    : State.SetupSelectionNeedsReview ? "可连续勾选功能，选好后统一检查，再确认安装。" : "处理上方问题后重新检查。";
                 break;
             case SetupStep.Installing:
                 UpdateInstallation();
@@ -261,6 +269,12 @@ public sealed partial class SetupPage : LauncherPage
             labels[i].FontWeight = i == current ? FontWeights.SemiBold : FontWeights.Normal;
             labels[i].Opacity = i == current ? 1 : .65;
             AutomationProperties.SetName(labels[i], titles[i] + (i < current ? "，已完成" : i == current ? "，当前步骤" : "，待进行"));
+            if (i == 4 && i < current)
+            {
+                var assistantState = SetupAssistantPresentation.Resolve(State.Setup);
+                labels[i].Text = (assistantState.Configured ? "✓  " : "—  ") + titles[i] + " · " + assistantState.Status;
+                AutomationProperties.SetName(labels[i], titles[i] + "，" + assistantState.Status);
+            }
         }
     }
 
@@ -329,12 +343,23 @@ public sealed partial class SetupPage : LauncherPage
         var plan = State.SetupPlan;
         var preflight = State.SetupPreflight;
         ReviewSummary.Text = State.Busy ? "正在检查环境、可复用文件和各磁盘空间…"
+            : State.SetupSelectionNeedsReview ? "选择已变化。可以继续勾选，选好后点击「检查所选内容」统一更新下载量、依赖与磁盘空间。"
             : State.SetupCanInstall ? "检查通过。以下是这次安装会准备的内容。" : "还不能开始安装，请处理检查结果中的问题。";
+        ReviewModelHelp.Text = (State.Setup.Fresh
+            ? "默认包含 Anima 基础三件套和双采样 Sesqui；其他功能默认不选，可稍后安装。"
+            : "默认连接已有环境，复用兼容模型；只有勾选「推荐基础模型」才下载基础三件套。")
+            + (State.SetupSelectionNeedsReview ? " 选择已变化，下方文件详情为上次结果，统一检查后更新。" : " 可以连续选择多个功能，再统一检查。")
+            + " 条目大小仅为模型或固定运行文件大小，插件与 Python 依赖另行检查。";
         ReviewMode.Text = State.Setup.Fresh ? "安装完整环境" : "连接已有 ComfyUI";
         ReviewLocation.Text = "位置：" + (plan?.ComfyRoot ?? State.Setup.Draft.ComfyRoot);
         PlanContents.Text = plan is null ? "完成检查后显示安装内容。"
             : string.Join("\n", plan.Stages.Select(stage => "• " + stage)) + $"\n\n环境：{plan.ComfyRoot}\nPython：{plan.CreateConfig().Python}\n工具与缓存：{plan.RuntimeRoot}";
         DownloadEstimate.Text = plan is null ? "等待计算下载量" : $"已知剩余下载 {Bytes(plan.EstimatedDownloadBytes)}";
+        DependencyReviewPanel.Visibility = Visible(plan is { DependencyReviewIssues.Length: > 0 });
+        var dependencyReview = SetupDependencyReviewPresentation.Create(plan?.DependencyReviewIssues ?? []);
+        DependencyReviewSummary.Text = dependencyReview.Summary
+            + (dependencyReview.Summary.Length > 0 ? "\n确认后按清单准备并重新验证；无法确认的依赖会保留具体原因。" : "");
+        DependencyReviewDetails.Text = dependencyReview.Details;
         if (plan is not null)
         {
             var existing = plan.Downloads.Count(download => File.Exists(download.Destination));
@@ -346,8 +371,9 @@ public sealed partial class SetupPage : LauncherPage
         VolumeSummary.Text = preflight is null ? "等待检查各目标磁盘。"
             : string.Join("\n", preflight.Volumes.Select(volume => $"{volume.Volume}  需预留 {Bytes(volume.RequiredBytes)} · 可用 {(volume.AvailableBytes is { } available ? Bytes(available) : "无法读取")}"));
         IssuesPanel.Visibility = Visible(preflight is not null && preflight.Issues.Length > 0);
-        IssuesSummary.Text = preflight is null ? "" : string.Join("\n\n",
-            preflight.Issues.Select(issue => (issue.Blocking ? "需处理：" : "提示：") + issue.Message));
+        var issuePresentation = SetupDependencyReviewPresentation.ForPreflight(preflight?.Issues ?? []);
+        IssuesSummary.Text = issuePresentation.Summary;
+        IssuesDetails.Text = issuePresentation.Details;
         UpdateIssueActions();
     }
 
@@ -355,11 +381,28 @@ public sealed partial class SetupPage : LauncherPage
     {
         SetupModelChoicesHost.IsEnabled = !State.Busy;
         var selection = string.Join("|", State.Setup.OptionalModelIds ?? []);
-        if (ReferenceEquals(renderedChoicesPlan, State.SetupPlan) && renderedChoiceSelection == selection
-            && SetupModelChoices.Children.Count > 0) return;
+        var mode = State.Setup.Fresh + "|" + State.Setup.Draft.SelectedProfile;
+        if (SetupModelChoices.Children.Count > 0 && renderedChoiceMode == mode
+            && (ReferenceEquals(renderedChoicesPlan, State.SetupPlan) || State.SetupSelectionNeedsReview))
+        {
+            if (renderedChoiceSelection != selection)
+            {
+                updatingChoiceSelection = true;
+                try
+                {
+                    foreach (var (choice, box) in choiceBoxes.Values)
+                        box.IsChecked = choice.ModelIds.All(id => (State.Setup.OptionalModelIds ?? []).Contains(id));
+                    renderedChoiceSelection = selection;
+                }
+                finally { updatingChoiceSelection = false; }
+            }
+            return;
+        }
         renderedChoicesPlan = State.SetupPlan;
         renderedChoiceSelection = selection;
+        renderedChoiceMode = mode;
         SetupModelChoices.Children.Clear();
+        choiceBoxes.Clear();
         var profile = State.Setup.Fresh ? "anima" : State.Setup.Draft.SelectedProfile;
         var required = State.Setup.Fresh ? SetupModelSelection.MandatoryModels(Program.Models, Program.ModelProfiles, profile) : [];
         SetupModelChoices.Children.Add(new TextBlock
@@ -376,7 +419,8 @@ public sealed partial class SetupPage : LauncherPage
             {
                 Content = new TextBlock
                 {
-                    Text = choice.Label + (choice.Recommended ? " · 推荐" : "") + " · " + Bytes(choice.Size),
+                    Text = choice.Label + (choice.Recommended ? " · 推荐" : "")
+                        + (choice.Size > 0 ? " · 固定文件 " + Bytes(choice.Size) : " · 插件与依赖将在检查时确认"),
                     TextWrapping = TextWrapping.Wrap
                 },
                 IsChecked = selected,
@@ -386,12 +430,13 @@ public sealed partial class SetupPage : LauncherPage
             AutomationProperties.SetName(box, choice.Label);
             async void Changed(object sender, RoutedEventArgs e)
             {
-                if (State.Busy) return;
+                if (State.Busy || updatingChoiceSelection) return;
                 try { await State.SelectSetupModelsAsync(choice, box.IsChecked == true); }
                 catch (Exception ex) { ShowLocalError(ex); }
             }
             box.Checked += Changed;
             box.Unchecked += Changed;
+            choiceBoxes[choice.Id] = (choice, box);
             var row = new StackPanel { Spacing = 6 };
             row.Children.Add(box);
             row.Children.Add(BodyText(choice.Description));
@@ -475,7 +520,7 @@ public sealed partial class SetupPage : LauncherPage
         State.SetupModelsReadiness, State.SetupModelReviewVisible, State.SetupCanDownloadModels,
         State.SetupCanResumeModels,
         State.SetupCompletionOperation == SetupCompletionOperation.StartWorkbench && State.SetupError.Length > 0,
-        State.SetupError.Length > 0, State.Setup.RuntimeVerified);
+        State.SetupError.Length > 0, State.Setup.RuntimeVerified, State.Setup.ConfigurationIssues.Length > 0);
 
     private void UpdateCompletion()
     {
@@ -484,10 +529,16 @@ public sealed partial class SetupPage : LauncherPage
         CompletionHelp.Text = presentation.Description;
         CompletionSummary.Text = (State.Setup.Fresh ? "独立创作环境已安装。" : "现有 ComfyUI 已连接。")
             + "\n" + State.Config.ComfyRoot;
-        var ready = State.SetupModelsReadiness == SetupModelReadiness.Ready;
+        var hasConfigurationIssues = State.Setup.ConfigurationIssues.Length > 0;
+        ConfigurationIssuesPanel.Visibility = Visible(hasConfigurationIssues);
+        ConfigurationIssuesTitle.Text = State.Setup.RuntimeVerified ? "生成资源待配置" : "上次发现的资源问题（待重新检查）";
+        ConfigurationIssuesSummary.Text = string.Join("\n", State.Setup.ConfigurationIssues.Select(issue => "• " + issue.Message));
+        var assistantState = SetupAssistantPresentation.Resolve(State.Setup);
+        CompletionAssistantSummary.Text = "提示词助手 · " + assistantState.Status + "\n" + assistantState.Description;
+        var ready = State.SetupModelsReadiness == SetupModelReadiness.Ready && State.Setup.RuntimeVerified && !hasConfigurationIssues;
         var attention = State.SetupModelsReadiness is SetupModelReadiness.NeedsAttention or SetupModelReadiness.ScanFailed;
-        CompletionIcon.Glyph = ready ? "\uE73E" : attention ? "\uE7BA" : "\uE946";
-        CompletionIcon.Foreground = PageBrush(ready ? "StudioSuccessBrush" : attention ? "StudioWarningBrush" : "StudioAccentBrush");
+        CompletionIcon.Glyph = ready ? "\uE73E" : attention || hasConfigurationIssues ? "\uE7BA" : "\uE946";
+        CompletionIcon.Foreground = PageBrush(ready ? "StudioSuccessBrush" : attention || hasConfigurationIssues ? "StudioWarningBrush" : "StudioAccentBrush");
         MissingModelsPanel.Visibility = Visible(State.SetupMissingModels.Count > 0 && !State.SetupModelReviewVisible);
         MissingModelsText.Text = string.Join("\n", State.SetupMissingModels.Select(name => "• " + name));
         ModelReviewPanel.Visibility = Visible(State.SetupModelReviewVisible && State.SetupModelReview is not null);
@@ -543,7 +594,9 @@ public sealed partial class SetupPage : LauncherPage
                 ? "启动未完成。查看日志并处理问题后，可以重试。"
                 : State.SetupCanResumeModels ? "已完成的下载会保留，可以继续下载或稍后再开始。"
                 : State.SetupModelsReadiness == SetupModelReadiness.ScanFailed ? "检查未完成，请查看日志并重新检查。"
-                : ready ? "必需运行检查通过后打开工作台。" : "请先准备全部必需模型，再完成运行检查。";
+                : State.SetupModelsReadiness == SetupModelReadiness.Ready
+                    ? hasConfigurationIssues ? "可以进入工作台选择兼容模型；打开前会重新检查当前运行状态。" : "打开前会重新检查当前运行状态。"
+                    : "请先准备全部必需模型，再完成运行检查。";
     }
 
     private static TextBlock BodyText(string text) => new()
@@ -568,7 +621,7 @@ public sealed partial class SetupPage : LauncherPage
             return;
         }
         var codes = preflight.Issues.Select(issue => issue.Code).ToHashSet();
-        if (codes.Overlaps(["target_not_empty", "target_access", "directory_access", "volume_unavailable", "disk_space"]))
+        if (codes.Overlaps(["target_not_empty", "target_access", "directory_access", "volume_unavailable", "disk_space", "temporary_directory"]))
             AddIssueAction("更换安装位置", () => EditLocation(false));
         if (codes.Overlaps(["python", "import_probe"]))
             AddIssueAction("检查目录与 Python", () => EditLocation(true));

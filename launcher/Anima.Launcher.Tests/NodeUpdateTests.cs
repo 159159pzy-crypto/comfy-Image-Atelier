@@ -128,6 +128,14 @@ internal static class NodeUpdateTests
         var loaded = Coordinator().LoadPlan(config)!;
         Check(loaded.CanApply && loaded.Entries.Single(entry => entry.CanUpdate).TargetSha == target && resolves.Count == 1,
             "restart reloads the reviewed full commit and never re-resolves a newer branch head");
+        var repairNodes = NodeUpdateCoordinator.DependencyRepairNodes(loaded, runtime);
+        Check(repairNodes.Length == 1 && repairNodes[0].Directory == node && repairNodes[0].Repository.Commit == target
+            && repairNodes[0].PreserveExisting && repairNodes.All(item => item.Repository.Id != "SesquiLSR"),
+            "node repair uses only frozen updated directories and commits without adding absent Sesqui or catalog nodes");
+        var managedPlan = loaded with { Entries = loaded.Entries.Select(entry => entry.CanUpdate ? entry with { Managed = true } : entry).ToArray() };
+        var savedManagedPlan = JsonSerializer.Deserialize<NodeUpdatePlan>(JsonSerializer.Serialize(managedPlan, JsonFile.Options), JsonFile.Options)!;
+        Check(!NodeUpdateCoordinator.DependencyRepairNodes(savedManagedPlan, runtime).Single().PreserveExisting,
+            "managed installer permission is frozen and survives plan reload while external node scripts remain preserved");
         if (healthMutationsOnly) { await HealthMutationChecks(); return passed; }
         var switched = config.Clone(); switched.Python = Path.Combine(fixture, "other-python.exe");
         Check(coordinator.LoadPlan(switched) is null, "persisted node plans cannot follow a changed interpreter");

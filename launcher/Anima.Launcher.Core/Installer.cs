@@ -15,7 +15,6 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         var directories = Inventory.ResolveNodeDirectories(root, runtime);
         return runtime.Nodes.Select(repo => new NodeInstallPlan(repo, directories[repo.Id], Directory.Exists(directories[repo.Id]) && !File.Exists(Path.Combine(directories[repo.Id], ".anima-revision.json")))).ToArray();
     }
-    private static readonly Regex Sam2Line = new(@"^(?:sam[-_.]?2(?:\[[^\]]*\])?\s*@\s*)?git\+https://github\.com/facebookresearch/sam2(?:\.git)?(?:@[\w./\-]+)?\s*$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private bool featureScoped;
     private bool includeWorkbenchDependencies = true;
     private bool featureDependencyCheckpoint;
@@ -198,18 +197,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             throw new InvalidDataException($"子模块尚未完成或与锁定提交不同，已保留：{path}。请先恢复子模块后继续安装。");
     }
     /// <summary>Pin any SAM2 source line in a requirements file to the locked commit. Returns the rewritten content, or null when no SAM2 line exists.</summary>
-    public static string? PinSam2(string content, string commit)
-    {
-        var found = false;
-        // Select is lazy: materialize before reading `found`, or this always returns null.
-        var lines = content.Replace("\r\n", "\n").Split('\n').Select(line =>
-        {
-            if (!Sam2Line.IsMatch(line.Trim())) return line;
-            found = true;
-            return "SAM-2 @ git+https://github.com/facebookresearch/sam2@" + commit;
-        }).ToArray();
-        return found ? string.Join("\n", lines) : null;
-    }
+    public static string? PinSam2(string content, string commit) => KnownDependencyRequirements.PinSam2(content, commit);
     private bool ManagedRoot(LauncherConfig config) => File.Exists(Path.Combine(config.ComfyRoot, ".anima-revision.json"));
     /// <summary>The pip constraint file mirrors the full lock for managed installs and freezes only the imported torch ABI otherwise.</summary>
     public static string[] ConstraintsFor(bool managedRoot, RuntimeManifest manifest, string importedPins) => managedRoot ? manifest.PythonConstraints : importedPins.Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -326,14 +314,16 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         }, ct);
     }
 
-    public async Task RepairDependencies(LauncherConfig config, ComfyDependencySnapshot? dependencies, CancellationToken ct)
+    public async Task RepairDependencies(LauncherConfig config, ComfyDependencySnapshot? dependencies, CancellationToken ct,
+        IReadOnlyList<NodeInstallPlan>? nodeUpdates = null)
     {
         featureDependencyCheckpoint = false;
         includeWorkbenchDependencies = true;
         installationDependenciesPath = null;
         config.Validate();
         _ = ComfyUpdateCoordinator.IndependentPythonDirectory(config);
-        manifest = InstallationPlanner.PreserveExistingNodeVersions(config.ComfyRoot, manifest);
+        manifest = nodeUpdates is null ? InstallationPlanner.PreserveExistingNodeVersions(config.ComfyRoot, manifest)
+            : manifest with { Nodes = nodeUpdates.Select(node => node.Repository).ToArray() };
         await new ComfyUpdateCoordinator(stateDir, git ?? "git.exe").EnsureStoppedAsync(config, ct);
         if (await ServiceManager.PortOpen(config.ComfyPort, ct) || OwnedComfyRunning())
             throw new IOException("修复依赖前请先停止此环境的 ComfyUI，避免运行中改动 Python 包。");
@@ -345,9 +335,14 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         var gpuPins = await Commands.Run(config.Python, ["-B", "-c", "import importlib.metadata as m; print(chr(10).join(n+'=='+m.version(n) for n in ['torch','torchvision','torchaudio'] if m.packages_distributions().get(n)))"], config.ComfyRoot, null, ct);
         activeDependencies = dependencies;
         await InstallCombinedDependencies(config, gpuPins, requiredManager: true, ct);
-        await CompleteNodeInstallers(config, PlanNodes(config.ComfyRoot, manifest).Where(node => Directory.Exists(node.Directory)), ct);
+        await CompleteNodeInstallers(config, nodeUpdates ?? PlanNodes(config.ComfyRoot, manifest).Where(node => Directory.Exists(node.Directory)).ToArray(), ct);
         await SesquiRuntimePreparation.PrepareAsync(config, manifest, runtime, downloads, log, progress, ct);
-        await RepairOptionalDependencies(config, ct);
+        if (nodeUpdates is null)
+        {
+            // Explicit advanced maintenance retains the historical optional repairs.
+            // Node updates prepare resources only for their frozen updated nodes, without adding Triton.
+            await RepairOptionalDependencies(config, ct);
+        }
         await Commands.Run(config.Python, ["-m", "pip", "check"], config.ComfyRoot, log, ct);
     }
 

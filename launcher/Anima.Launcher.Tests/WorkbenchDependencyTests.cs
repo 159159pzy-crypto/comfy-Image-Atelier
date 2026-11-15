@@ -76,6 +76,17 @@ internal static class WorkbenchDependencyTests
         var contract = await WorkbenchDependencies.ReadAsync(config, default);
         Check(contract.RequirementsText.Contains("aiohttp>=3.14.5,<4") && contract.Identity.Length == 64,
             "the dependency contract is extracted from the selected workbench pyproject using standard-library TOML");
+        var projectFile = Path.Combine(app, "pyproject.toml");
+        var originalProject = File.ReadAllText(projectFile);
+        File.AppendAllText(projectFile, "requires-python='>=99'\n");
+        try { await SetupImportReview.InspectAsync(config, runtime, default); throw new Exception("Expected interpreter compatibility rejection"); }
+        catch (InvalidOperationException error)
+        { Check(error.Message.Contains(">=99") && error.Message.Contains(config.Python) && error.Message.Contains("独立"),
+            "import checks the selected workbench Python range first and reports the chosen interpreter with recovery guidance"); }
+        File.WriteAllText(projectFile, originalProject);
+        await WorkbenchDependencies.ValidateInterpreterAsync(config, default);
+        Check((await Commands.Run(python, ["-B", "-c", "import importlib.util; print(importlib.util.find_spec('pip') is None and importlib.util.find_spec('packaging') is None)"], root, null, default)).Trim() == "True",
+            "interpreter and TOML compatibility checks do not install pip or packaging in the target environment");
         File.AppendAllText(Path.Combine(nodeDir, "requirements.txt"), "direct-fixture @ git+https://github.com/example/dependency@main\n-r https://example.invalid/requirements.txt\n");
         Package("direct-fixture", "1");
         var unknown = await SetupImportReview.InspectAsync(config, runtime, default);
@@ -90,6 +101,40 @@ internal static class WorkbenchDependencyTests
         File.WriteAllText(directInfo, JsonSerializer.Serialize(new { url = "https://github.com/example/dependency", vcs_info = new { vcs = "git", commit_id = new string('c', 40) } }));
         Check((await WorkbenchDependencies.InspectAsync(config, runtime, default)).Issues.Any(issue => issue.State == "incompatible"),
             "a different installed direct VCS commit requires repair");
+        Package("SAM-2", "1.0");
+        var samOrigin = Path.Combine(site, "SAM_2-fixture.dist-info", "direct_url.json");
+        File.WriteAllText(samOrigin, JsonSerializer.Serialize(new { url = "https://github.com/facebookresearch/sam2",
+            vcs_info = new { vcs = "git", commit_id = runtime.Sam2Commit } }));
+        var samSource = "git+https://github.com/facebookresearch/sam2\n";
+        File.WriteAllText(Path.Combine(nodeDir, "requirements.txt"), samSource);
+        Check((await WorkbenchDependencies.InspectAsync(config, runtime, default)).Ready
+            && File.ReadAllText(Path.Combine(nodeDir, "requirements.txt")) == samSource,
+            "the installer and metadata probe share SAM2 normalization without editing upstream declarations");
+        var commentedSamSource = "SAM-2 @ git+https://github.com/facebookresearch/sam2@" + new string('f', 40) + " # pinned by upstream\n";
+        File.WriteAllText(Path.Combine(nodeDir, "requirements.txt"), commentedSamSource);
+        var normalizedSam = Installer.PinSam2(commentedSamSource, runtime.Sam2Commit);
+        var preparedSamFile = ComfyDependencyResolver.PrepareNodeRequirements(Path.Combine(nodeDir, "requirements.txt"),
+            Path.Combine(root, "commented-sam-requirements"), runtime.Sam2Commit);
+        Check(normalizedSam == "SAM-2 @ git+https://github.com/facebookresearch/sam2@" + runtime.Sam2Commit + " # pinned by upstream\n"
+            && preparedSamFile != Path.Combine(nodeDir, "requirements.txt") && File.ReadAllText(preparedSamFile) == normalizedSam,
+            "installer input with a trailing comment is actually rewritten to the same fixed SAM2 commit as the probe");
+        Check((await WorkbenchDependencies.InspectAsync(config, runtime, default)).Ready
+            && File.ReadAllText(Path.Combine(nodeDir, "requirements.txt")) == commentedSamSource,
+            "commented SAM2 declarations accept the installed locked commit without modifying the original source file");
+        File.WriteAllText(samOrigin, JsonSerializer.Serialize(new { url = "https://github.com/facebookresearch/sam2",
+            vcs_info = new { vcs = "git", commit_id = new string('f', 40) } }));
+        var wrongSam = await WorkbenchDependencies.InspectAsync(config, runtime, default);
+        Check(wrongSam.Issues.Single() is { State: "incompatible" } issue && issue.Source.EndsWith("requirements.txt:1"),
+            "commented managed SAM2 still rejects the wrong recorded commit and retains the original source line");
+        File.Delete(samOrigin);
+        Check((await WorkbenchDependencies.InspectAsync(config, runtime, default)).Issues.Single().State == "unknown",
+            "managed SAM2 without recorded provenance remains explicitly unverified");
+        const string unknownSource = "git+https://github.com/example/unmanaged@main # unrelated repository\n";
+        File.WriteAllText(Path.Combine(nodeDir, "requirements.txt"), unknownSource);
+        Check((await WorkbenchDependencies.InspectAsync(config, runtime, default)).Issues.Single().State == "unknown"
+            && Installer.PinSam2(unknownSource, runtime.Sam2Commit) is null
+            && Installer.PinSam2("git+https://github.com/facebookresearch/sam2#egg=SAM-2", runtime.Sam2Commit) is null,
+            "comment handling never normalizes unknown VCS sources or mistakes URL fragments for comments");
         var external = config.Clone();
         external.ComfyRoot = Path.Combine(root, "other-comfy"); Directory.CreateDirectory(external.ComfyRoot);
         File.WriteAllText(Path.Combine(external.ComfyRoot, "requirements.txt"), "");

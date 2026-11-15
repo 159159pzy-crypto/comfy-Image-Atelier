@@ -12,14 +12,16 @@ internal sealed partial class LauncherState
         && SetupRequiredModelsReady && Setup.RuntimeVerified && SetupOptionalFailures.Count > 0;
     public bool SetupAssistantReady { get; private set; }
 
-    public async Task SelectSetupModelsAsync(SetupModelChoice choice, bool selected)
+    public Task SelectSetupModelsAsync(SetupModelChoice choice, bool selected)
     {
-        if (Busy || Setup.Step != SetupStep.Review) return;
+        if (Busy || Setup.Step != SetupStep.Review) return Task.CompletedTask;
         var choices = SetupModelSelection.Choices(Program.Models, Program.ModelProfiles, Setup.Draft.SelectedProfile, includeBase: !Setup.Fresh);
         Setup.OptionalModelIds = SetupModelSelection.SetChoiceSelected(choices, Setup.OptionalModelIds ?? [], choice.Id, selected);
         InvalidateSetupReview();
+        Setup.SelectionNeedsReview = true;
         PersistSetup();
-        await CheckSetupAsync();
+        NotifySetup();
+        return Task.CompletedTask;
     }
 
     private async Task RunSetupSelectedModelsAsync(string[] modelIds, CancellationToken ct, bool finalize = true)

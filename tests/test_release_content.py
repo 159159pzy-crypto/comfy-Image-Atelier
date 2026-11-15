@@ -1,5 +1,6 @@
 import pytest
 import subprocess
+import hashlib
 
 from scripts import check_release_content as release_content
 
@@ -11,6 +12,7 @@ from scripts.check_release_content import MACHINE_PATH, check_path
     ".codex-local/notes.md", ".claude/settings.json", ".anima-temp/.anima-owner", "launcher/Core/obj/build.json",
     "anima_webui/__pycache__/server.pyc", ".env", "AGENTS.md",
     "docs/acceptance.md", "docs/conversation.md", "AnimaRandomStudio.exe",
+    "launcher/vendor/unreviewed.zip",
 ])
 def test_local_files_are_rejected(name):
     with pytest.raises(ValueError):
@@ -23,6 +25,7 @@ def test_local_files_are_rejected(name):
     "launcher/tests/fixtures/prompt-assistant/README.md",
     "launcher/manifests/launcher-manifest.json", "anima_webui/server.py",
     "docs/screenshots/anima-studio-single-workbench.png",
+    "launcher/vendor/packaging-26.0.zip",
 ])
 def test_product_files_are_accepted(name):
     check_path(name)
@@ -45,4 +48,18 @@ def test_source_release_respects_export_ignore_without_allowing_internal_notes(t
     # Removing the explicit archive exclusion restores the original rejection.
     (tmp_path / ".gitattributes").write_text("", encoding="utf-8")
     with pytest.raises(ValueError, match="Unapproved Markdown"):
+        release_content.check_release_content()
+
+
+def test_reviewed_vendor_archive_must_match_its_checksum(tmp_path, monkeypatch):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    name = "launcher/vendor/packaging-26.0.zip"
+    archive = tmp_path / name
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"reviewed source archive")
+    monkeypatch.setattr(release_content, "ROOT", tmp_path)
+    monkeypatch.setattr(release_content, "VENDORED_ARCHIVES", {name: hashlib.sha256(archive.read_bytes()).hexdigest()})
+    release_content.check_release_content()
+    archive.write_bytes(b"unexpected replacement")
+    with pytest.raises(ValueError, match="Vendored archive checksum mismatch"):
         release_content.check_release_content()

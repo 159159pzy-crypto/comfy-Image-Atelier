@@ -31,9 +31,8 @@ internal sealed partial class LauncherState
         SetupCompletionOperation = SetupCompletionOperation.None;
     }
 
-    private ModelItem[] SetupRequiredDownloads => (activeInstallationPlan ?? Setup.ReviewedPlan) is not null
-        ? SetupModelSelection.RequiredForPlan(activeInstallationPlan ?? Setup.ReviewedPlan, OperationModels, OperationProfiles, Config.SelectedProfile)
-        : Setup.Fresh ? SetupModelSelection.MandatoryModels(OperationModels, OperationProfiles, Config.SelectedProfile) : [];
+    private ModelItem[] SetupRequiredDownloads => SetupCompletionResources.RequiredDownloads(
+        Setup, activeInstallationPlan, OperationModels, OperationProfiles, Config.SelectedProfile);
 
     private SetupModelReview BuildSetupModelReview(List<ModelStatus> scan) => SetupRequiredDownloads.Length == 0
         ? new(SetupModelReadiness.Ready, []) : Core.SetupModelReview.Create(

@@ -106,14 +106,15 @@ internal sealed partial class LauncherState
         }
         var config = Config.Clone();
         var plan = checkedNodePlan!;
-        var runtime = Program.Runtime with { Comfy = Program.Runtime.Comfy with { Commit = plan.CoreCommit }, PythonConstraints = plan.Dependencies!.Constraints };
+        var runtime = NodeUpdateCoordinator.DependencyRuntime(plan, Program.Runtime);
         var installer = CreateInstaller(runtime);
+        var repairNodes = NodeUpdateCoordinator.DependencyRepairNodes(plan, runtime);
         NodeUpdateStatus = "正在备份节点、完整 Python 与配置，并更新已固定的节点版本…";
         NodeUpdateChanged?.Invoke();
         try
         {
             await coordinator.ApplyAsync(config, plan,
-                (target, dependencies, token) => installer.RepairDependencies(target, dependencies, token),
+                (target, dependencies, token) => installer.RepairDependencies(target, dependencies, token, repairNodes),
                 async (target, token) =>
                 {
                     var path = Path.Combine(Program.StateDir, "logs", "ComfyUI.log");

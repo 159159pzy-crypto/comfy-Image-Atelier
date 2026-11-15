@@ -60,3 +60,9 @@ pwsh -NoProfile -File F:\comfyuishengtu\launcher\scripts\Start-IsolatedCandidate
 ```
 
 该脚本使用候选目录内独立配置，避免同版本协调器转回日常入口。
+
+## 后续变更：新手引导与资源检查
+
+本文件保留上述候选构建时的验收事实。其后的当前下载清单已只提供 AnimeSharp；Remacri 的旧任务、磁盘文件和工作台默认选择保持兼容。后续只读检查确认启动器保存配置中的 `<ComfyUI>/.venv/Scripts/python.exe` 已有 aiohttp 3.14.5、multidict 6.9.1、Pillow 13.0.0，满足本轮工作台要求且 `pip check` 通过。验收时的日常服务进程另由全局 Python 启动，版本与保存配置不同；两个解释器的证据应分别阅读，不能将其中一个的结果归到另一个。占位符与本地原始证据的保留方式见下文链接。
+
+六步向导统一检查、资源分类、依赖误报修正及本轮独立候选的验证范围，见 [新手引导与资源检查验收](launcher-onboarding-resource-acceptance-2026-11-15.md)。

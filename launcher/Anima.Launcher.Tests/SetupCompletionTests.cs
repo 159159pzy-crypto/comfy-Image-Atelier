@@ -108,6 +108,17 @@ internal static class SetupCompletionTests
             "in-flight checks cannot expose a stale confirmation action");
         var filesOnly = SetupCompletionPresentation.Resolve(SetupModelReadiness.Ready);
         var runtimeReady = SetupCompletionPresentation.Resolve(SetupModelReadiness.Ready, runtimeVerified: true);
+        var configurationPending = SetupCompletionPresentation.Resolve(SetupModelReadiness.Ready, runtimeVerified: true, hasConfigurationIssues: true);
+        Check(configurationPending.Title.Contains("生成资源待配置") && configurationPending.PrimaryLabel == "打开工作台配置模型"
+            && configurationPending.PrimaryAction == SetupCompletionAction.StartWorkbench,
+            "configured environment with missing generation resources explains the remaining work and permits model selection");
+        var staleConfiguration = SetupCompletionPresentation.Resolve(SetupModelReadiness.Ready, hasConfigurationIssues: true);
+        Check(staleConfiguration.Title.Contains("重新检查") && staleConfiguration.Description.Contains("上次")
+            && staleConfiguration.PrimaryLabel.Contains("重新检查") && staleConfiguration.PrimaryAction == SetupCompletionAction.StartWorkbench,
+            "restored configuration issues are explicitly stale and require runtime recheck before entry");
+        Check(SetupCompletionPresentation.Resolve(SetupModelReadiness.NeedsDownload, runtimeVerified: true, hasConfigurationIssues: true)
+                .PrimaryAction == SetupCompletionAction.ReviewModels,
+            "configuration guidance never bypasses required model downloads");
         Check(filesOnly.Title != runtimeReady.Title && filesOnly.Title.Contains("还需检查")
             && runtimeReady.Description.Contains("服务检查已通过") && !runtimeReady.Description.Contains("必需模型"),
             "verified files alone cannot display the successful runtime completion message");

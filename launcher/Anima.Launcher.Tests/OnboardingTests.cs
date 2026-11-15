@@ -25,6 +25,154 @@ internal static class OnboardingTests
         var configured = new LauncherConfig { InstallRoot = environment, ComfyRoot = comfy, Python = python };
         var first = new LauncherConfig();
 
+        var legacyReceipt = JsonSerializer.Deserialize<SetupRecord>("{}", JsonFile.Options)!;
+        Check(legacyReceipt.ConfigurationIssues.Length == 0 && !legacyReceipt.SelectionNeedsReview,
+            "legacy onboarding receipts default to no remembered configuration issues or pending selection review");
+        var configurationIssue = new SetupRuntimeIssue("base", "请选择兼容的 Anima 主模型", "anima-base");
+        var remembered = new SetupRecord { RuntimeVerified = true, ConfigurationIssues = [configurationIssue] };
+        var restored = JsonSerializer.Deserialize<SetupRecord>(JsonSerializer.Serialize(remembered, JsonFile.Options), JsonFile.Options)!;
+        restored.MarkRuntimeCheckStale();
+        Check(!restored.RuntimeVerified && restored.ConfigurationIssues.Single() == configurationIssue,
+            "restoring runtime results keeps issue context but marks the result stale");
+        var failedCheckRejected = false;
+        try { restored.RecordRuntimeCheck(new([new("base", "service unavailable")], [])); }
+        catch (InvalidOperationException) { failedCheckRejected = true; }
+        Check(failedCheckRejected && !restored.RuntimeVerified && restored.ConfigurationIssues.Single() == configurationIssue,
+            "failed runtime verification cannot clear the previous resource issues");
+        restored.RecordRuntimeCheck(new([], []) { ConfigurationIssues = [configurationIssue] });
+        Check(restored.RuntimeVerified && restored.ConfigurationIssues.Single() == configurationIssue,
+            "successful runtime check preserves actionable configuration issues without blocking entry");
+        restored.MarkRuntimeCheckStale();
+        restored.RecordRuntimeCheck(new([], []));
+        Check(restored.RuntimeVerified && restored.ConfigurationIssues.Length == 0,
+            "only a new successful check with no configuration issues clears the previous result");
+        foreach (var (status, expected) in new[] { (AssistantSetupStatus.Pending, "可选"), (AssistantSetupStatus.Skipped, "稍后配置"),
+                     (AssistantSetupStatus.Configured, "已配置"), (AssistantSetupStatus.Legacy, "沿用已有设置") })
+        {
+            var display = SetupAssistantPresentation.Resolve(new() { AssistantStatus = status, AssistantAvailable = true });
+            Check(display.Status == expected && display.Configured == (status == AssistantSetupStatus.Configured),
+                "assistant progress distinguishes " + status);
+        }
+        Check(SetupAssistantPresentation.Resolve(new() { AssistantAvailable = false, AssistantStatus = AssistantSetupStatus.Configured })
+                is { Status: "未安装", Configured: false }, "missing assistant cannot appear configured because of an old receipt");
+        var editedSelection = new SetupRecord { Draft = configured.Clone(), Fresh = false, InstallStarted = true,
+            InstallFinished = true, SelectionNeedsReview = true, Step = SetupStep.Review };
+        Check(SetupRouting.Resolve(configured, editedSelection) == SetupStep.Location,
+            "restart with unconfirmed feature changes requires review instead of resuming an old plan");
+        var pendingSelectionConfig = configured.Clone();
+        pendingSelectionConfig.InstallPending = true;
+        Check(SetupRouting.Resolve(pendingSelectionConfig, editedSelection) == SetupStep.Location,
+            "pending installation cannot bypass a new unconfirmed feature selection after restart");
+        var sameDraft = new SetupRecord { Draft = configured.Clone(), RuntimeVerified = true };
+        sameDraft.UpdateDraft(sameDraft.Draft.Clone());
+        Check(!sameDraft.SelectionNeedsReview && sameDraft.RuntimeVerified,
+            "saving unchanged location fields does not invalidate a confirmed selection or runtime receipt");
+        SetupRecord AssistantRecord(bool fresh = true) => new() { Draft = configured.Clone(), Fresh = fresh,
+            AssistantStatus = AssistantSetupStatus.Configured, AssistantAvailable = true };
+        foreach (var change in new Action<LauncherConfig>[]
+        {
+            draft => draft.SourceId = "custom",
+            draft => { draft.Python += ".other"; draft.PythonExplicit = true; },
+            draft => draft.InstallRoot += Path.DirectorySeparatorChar,
+        })
+        {
+            var sameTargetAssistant = AssistantRecord();
+            var replacement = sameTargetAssistant.Draft.Clone(); change(replacement);
+            sameTargetAssistant.UpdateDraft(replacement);
+            Check(sameTargetAssistant.AssistantStatus == AssistantSetupStatus.Configured && sameTargetAssistant.AssistantAvailable == true,
+                "source, interpreter and equivalent-path edits retain assistant configuration for the same target");
+        }
+        var changedTargetAssistant = AssistantRecord();
+        var newTarget = changedTargetAssistant.Draft.Clone(); newTarget.InstallRoot += "-new";
+        changedTargetAssistant.UpdateDraft(newTarget);
+        Check(changedTargetAssistant.AssistantStatus == AssistantSetupStatus.Pending && changedTargetAssistant.AssistantAvailable is null
+            && !SetupAssistantPresentation.Resolve(changedTargetAssistant).Configured,
+            "changing the effective installation target discards only the old assistant completion receipt");
+        changedTargetAssistant.AssistantAvailable = true;
+        Check(SetupRouting.AfterModels(changedTargetAssistant) == SetupStep.Assistant,
+            "a newly installed assistant in the new target still visits provider configuration");
+        var importTargetAssistant = AssistantRecord(false);
+        var importTarget = importTargetAssistant.Draft.Clone(); importTarget.InstallRoot += "-unused";
+        importTargetAssistant.UpdateDraft(importTarget);
+        Check(importTargetAssistant.AssistantStatus == AssistantSetupStatus.Configured && importTargetAssistant.AssistantAvailable == true,
+            "editing an unused install root during import preserves the actual target's assistant receipt");
+        importTarget.ComfyRoot += "-new";
+        importTargetAssistant.UpdateDraft(importTarget);
+        Check(importTargetAssistant.AssistantStatus == AssistantSetupStatus.Pending && importTargetAssistant.AssistantAvailable is null,
+            "changing the imported ComfyUI directory resets the previous environment's assistant receipt");
+        var sameModeTarget = AssistantRecord(); sameModeTarget.SetInstallationMode(false);
+        Check(sameModeTarget.AssistantStatus == AssistantSetupStatus.Configured && sameModeTarget.AssistantAvailable == true,
+            "switching install mode without changing the effective target preserves assistant configuration");
+        foreach (var fresh in new[] { false, true })
+        {
+            var differentModeTarget = AssistantRecord(fresh);
+            differentModeTarget.Draft.InstallRoot += "-new";
+            differentModeTarget.SetInstallationMode(!fresh);
+            Check(differentModeTarget.AssistantStatus == AssistantSetupStatus.Pending && differentModeTarget.AssistantAvailable is null,
+                "switching install mode to a different effective target resets assistant availability and completion");
+        }
+        foreach (var (name, change) in new (string, Action<LauncherConfig>)[]
+        {
+            ("download source", draft => draft.SourceId = "custom"),
+            ("Python interpreter", draft => { draft.Python += ".other"; draft.PythonExplicit = true; }),
+            ("installation directory", draft => { draft.InstallRoot += "-other"; draft.ComfyRoot = Path.Combine(draft.InstallRoot, "ComfyUI"); }),
+        })
+        {
+            var changedDraft = new SetupRecord { Draft = configured.Clone(), Fresh = true, InstallStarted = true,
+                Step = SetupStep.Location, RuntimeVerified = true };
+            var replacement = changedDraft.Draft.Clone();
+            change(replacement);
+            changedDraft.UpdateDraft(replacement);
+            changedDraft.Step = SetupStep.Review; // Inspection completed; no installation confirmation yet.
+            var restoredDraft = JsonSerializer.Deserialize<SetupRecord>(JsonSerializer.Serialize(changedDraft, JsonFile.Options), JsonFile.Options)!;
+            var pendingTarget = replacement.Clone(); pendingTarget.InstallPending = true;
+            Check(restoredDraft.SelectionNeedsReview && !restoredDraft.RuntimeVerified
+                && SetupRouting.Resolve(pendingTarget, restoredDraft) == SetupStep.Location,
+                "changing " + name + " on a paused setup still requires confirmation after checking and restarting");
+        }
+        var dependencyDetails = new[]
+        {
+            @"依赖需要补齐：aiohttp 已安装 3.8.1，要求 >=3.9（F:\创作环境（测试）\ComfyUI\requirements.txt:12）",
+            @"需要安装插件：ComfyUI-LoRA-Manager（F:\创作环境\ComfyUI\custom_nodes\ComfyUI-LoRA-Manager）",
+            @"依赖尚未验证：无法读取依赖文件：[Errno 2] 'F:\创作环境\missing requirements.txt'（F:\创作环境\missing requirements.txt）",
+            "SesquiLSR 的 upscaler_Wan21.safetensors 缺失或校验失败，请在启动器修复安装。",
+        };
+        var dependencyPresentation = SetupDependencyReviewPresentation.Create(dependencyDetails);
+        Check(dependencyPresentation.Summary.Contains("aiohttp 已安装 3.8.1，要求 >=3.9")
+            && dependencyPresentation.Summary.Contains("ComfyUI-LoRA-Manager")
+            && dependencyPresentation.Summary.Contains("upscaler_Wan21.safetensors"),
+            "dependency summary preserves package versions, plugin names and actionable runtime filenames");
+        Check(!dependencyPresentation.Summary.Contains(@"F:\") && !dependencyPresentation.Summary.Contains("requirements.txt")
+            && dependencyPresentation.Summary.Contains("尚未验证") && dependencyPresentation.Summary.Contains("具体原因见详情"),
+            "dependency summary folds source paths and unreadable-file details without claiming unknown dependencies can be repaired");
+        Check(dependencyDetails.All(dependencyPresentation.Details.Contains),
+            "dependency details retain every complete original diagnostic and source path");
+        var parentheticalDependency = SetupDependencyReviewPresentation.Create([
+            @"依赖需要补齐：example（GPU extra） 已安装 1.0，要求 >=2.0（F:\目录（含括号）\requirements.txt:2）"]);
+        Check(parentheticalDependency.Summary == "• 依赖需要补齐：example（GPU extra） 已安装 1.0，要求 >=2.0",
+            "folding a trailing source preserves package explanation parentheses and handles parentheses inside directories");
+        var importGuidance = "无法检查导入环境：此导入环境需要补齐节点、依赖或安装准备。请选择 ComfyUI 目录内的独立 .venv、venv 或独立便携 Python，或先在原环境中手动补齐后重新检查。";
+        var sharedInterpreterMessage = importGuidance + dependencyDetails[0] + "；" + dependencyDetails[1]
+            + "更新需要本环境内的 .venv、venv 或独立便携 Python；无法确认专用的共享或外部解释器不会被修改。";
+        var sharedInterpreterPresentation = SetupDependencyReviewPresentation.ForPreflight([new("import_probe", sharedInterpreterMessage)]);
+        Check(sharedInterpreterPresentation.Summary.StartsWith("需处理：此导入环境需要补齐插件或依赖。", StringComparison.Ordinal)
+            && sharedInterpreterPresentation.Summary.Contains("独立 .venv、venv 或独立便携 Python")
+            && sharedInterpreterPresentation.Summary.Contains("先在原环境中手动补齐，再重新检查")
+            && !sharedInterpreterPresentation.Summary.Contains(@"F:\"),
+            "shared-interpreter preflight gives both recovery choices and folds the exact preparation list into details");
+        Check(sharedInterpreterPresentation.Details == "需处理：" + sharedInterpreterMessage,
+            "blocked preflight keeps its exact full diagnostic in expandable details");
+        var compositeFileError = importGuidance
+            + @"需要安装插件：prompt-assistant（C:\test\onboarding\fixture-environment\custom_nodes\prompt-assistant）；"
+            + @"依赖尚未验证：无法读取依赖文件：[Errno 2] No such file or directory: 'C:\test\onboarding\fixture-environment\requirements.txt'（C:\test\onboarding\fixture-environment\requirements.txt）"
+            + "更新需要本环境内的 .venv、venv 或独立便携 Python；无法确认专用的共享或外部解释器不会被修改。";
+        var compositePresentation = SetupDependencyReviewPresentation.ForPreflight([new("import_probe", compositeFileError)]);
+        Check(compositePresentation.Summary == sharedInterpreterPresentation.Summary
+            && !compositePresentation.Summary.Contains("Errno") && !compositePresentation.Summary.Contains("requirements.txt")
+            && !compositePresentation.Summary.Contains("更新需要")
+            && compositePresentation.Details == "需处理：" + compositeFileError,
+            "real compound external-Python failure keeps nested file exceptions and adjacent updater text out of the summary while preserving the full diagnostic");
+
         Check(SetupRouting.Resolve(first, null) == SetupStep.Welcome, "first unconfigured launch enters welcome");
         Check(SetupRouting.Resolve(configured, null) is null, "legacy environment opens overview before its first successful workbench launch");
         configured.SetupComplete = true;
@@ -95,6 +243,25 @@ internal static class OnboardingTests
         };
         var legacyPlan = currentPlan with { RuntimeArtifactsIdentity = "", MandatoryModelIds = [],
             ModelIds = currentPlan.ModelIds.Take(3).ToImmutableArray(), FrozenModels = upgradeModels.Models.Take(3).ToArray() };
+        var importWithoutDownloads = new SetupRecord
+        {
+            Fresh = false, InstallStarted = true, InstallFinished = true, Step = SetupStep.Complete,
+            Draft = configured.Clone(), AssistantStatus = AssistantSetupStatus.Skipped,
+            ReviewedPlan = currentPlan with { ResourcePolicyVersion = SetupFeatures.PolicyVersion,
+                ModelIds = [], MandatoryModelIds = [], FrozenModels = [] },
+        };
+        Check(SetupCompletionResources.RequiredDownloads(importWithoutDownloads, null, upgradeModels, upgradeProfiles, "anima").Length == 0,
+            "import completion with no selected model downloads does not invent mandatory generation models");
+        var restoredImport = JsonSerializer.Deserialize<SetupRecord>(JsonSerializer.Serialize(importWithoutDownloads, JsonFile.Options), JsonFile.Options)!;
+        restoredImport.MarkRuntimeCheckStale();
+        Check(SetupRouting.ResolveForRuntime(configured, restoredImport, manifest, upgradeModels, upgradeProfiles).Step == SetupStep.Complete
+            && SetupCompletionResources.RequiredDownloads(restoredImport, null, upgradeModels, upgradeProfiles, "anima").Length == 0,
+            "reopened import uses the reviewed empty model contract for both completion preview and launch verification");
+        Check(SetupCompletionResources.RequiredDownloads(restoredImport, currentPlan, upgradeModels, upgradeProfiles, "anima").Length == 5,
+            "an active frozen installation contract takes priority over an older completion receipt");
+        Check(SetupCompletionResources.RequiredDownloads(new() { Fresh = true }, null, upgradeModels, upgradeProfiles, "anima").Length == 3
+            && SetupCompletionResources.RequiredDownloads(new() { Fresh = false, ReviewedPlan = legacyPlan }, null, upgradeModels, upgradeProfiles, "anima").Length == 3,
+            "unplanned fresh setup and legacy frozen contracts retain their required generation models");
         foreach (var step in new[] { SetupStep.Complete, SetupStep.Assistant })
         {
             var upgradeReceipt = Record(step);

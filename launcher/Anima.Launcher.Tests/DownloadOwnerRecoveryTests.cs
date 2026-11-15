@@ -82,6 +82,27 @@ internal static class DownloadOwnerRecoveryTests
         resumed.Models.Models[0].Urls[0] = "https://mutated.example/file";
         Check(plan.FrozenModels[0].Urls[0] == "https://example.com/diffusion", "recovery outputs cannot mutate the saved model snapshot");
 
+        var editedDraft = JsonSerializer.Deserialize<SetupRecord>(JsonSerializer.Serialize(installed, JsonFile.Options), JsonFile.Options)!;
+        editedDraft.SelectionNeedsReview = true;
+        editedDraft.RuntimeVerified = true;
+        editedDraft.OptionalModelIds = ["new-unconfirmed-choice"];
+        editedDraft.ConfigurationIssues = [new("base", "Previous model configuration needs review")];
+        Check(SetupRouting.Resolve(resumed.Configuration, editedDraft) == SetupStep.Location,
+            "an edited selection requires review before explicitly choosing an old download owner");
+        var resumedConfirmedOwner = Prepare(editedDraft);
+        Check(!resumedConfirmedOwner.Setup.SelectionNeedsReview && !resumedConfirmedOwner.Setup.RuntimeVerified
+            && resumedConfirmedOwner.Setup.OptionalModelIds.SequenceEqual(["optional"])
+            && resumedConfirmedOwner.Setup.ConfigurationIssues.SequenceEqual(editedDraft.ConfigurationIssues)
+            && editedDraft.SelectionNeedsReview && editedDraft.RuntimeVerified,
+            "explicit old-owner resume restores its confirmed selection and stales runtime while retaining prior issue context without mutating the draft");
+        resumedConfirmedOwner.Setup.RecordRuntimeCheck(new([], []));
+        resumedConfirmedOwner.Setup.ModelsPending = false;
+        resumedConfirmedOwner.Setup.Step = SetupStep.Finished;
+        var reopenedOwner = JsonSerializer.Deserialize<SetupRecord>(JsonSerializer.Serialize(resumedConfirmedOwner.Setup, JsonFile.Options), JsonFile.Options)!;
+        reopenedOwner.MarkRuntimeCheckStale();
+        Check(SetupRouting.Resolve(resumedConfirmedOwner.Configuration, reopenedOwner) is null,
+            "a resumed confirmed owner that finishes does not reopen the wizard because of an abandoned unconfirmed selection");
+
         var changedRelease = JsonSerializer.Deserialize<SetupRecord>(JsonSerializer.Serialize(installed, JsonFile.Options), JsonFile.Options)!;
         changedRelease.ReviewedPlan = plan with { Release = plan.Release with { Commit = new string('b', 40) } };
         Fails(() => Prepare(changedRelease), "completed same-environment receipt for another release refuses the old plan");
