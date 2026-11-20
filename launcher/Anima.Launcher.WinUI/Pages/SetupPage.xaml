@@ -53,7 +53,7 @@
                                 </StackPanel>
                                 <StackPanel x:Name="ImportChoice" Grid.Column="1" Spacing="8">
                                     <TextBlock Text="已经有 ComfyUI" FontSize="20" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
-                                    <TextBlock Text="选择「我已有 ComfyUI」。连接原来的文件夹，复用已有模型与节点，只补齐缺少的内容。" Style="{StaticResource StudioBodyStyle}" />
+                                    <TextBlock Text="选择「我已有 ComfyUI」，连接已启动的整合包。默认只读使用已有模型和节点，也可预览并选择补齐缺项。" Style="{StaticResource StudioBodyStyle}" />
                                     <TextBlock Text="保留现有节点版本和显卡运行环境。" Style="{StaticResource StudioBodyStyle}" />
                                 </StackPanel>
                             </Grid>
@@ -62,6 +62,7 @@
                                     <TextBlock Text="这台电脑" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
                                     <TextBlock x:Name="SystemSummary" Text="正在检测系统和显卡…" Style="{StaticResource StudioBodyStyle}" AutomationProperties.AutomationId="SetupSystemSummary" />
                                     <TextBlock x:Name="SystemAdvice" Style="{StaticResource StudioBodyStyle}" />
+                                    <HyperlinkButton x:Name="HardwareGuide" Content="查看 ComfyUI 官方安装指南" NavigateUri="https://docs.comfy.org/installation/manual_install" Visibility="Collapsed" />
                                     <Button x:Name="DetectAgainButton" Content="重新检测" Click="DetectAgain_Click" HorizontalAlignment="Left" AutomationProperties.AutomationId="SetupDetectAgain" />
                                 </StackPanel>
                             </Border>
@@ -86,11 +87,17 @@
                                     AutomationProperties.AutomationId="SetupPickRoot" AutomationProperties.Name="选择安装或导入文件夹" />
                             </Grid>
                             <TextBlock x:Name="ResolvedRoot" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="SetupResolvedRoot" />
+                            <Button x:Name="ImportDetectedRoot" Content="导入这个已有环境" Click="ImportDetectedRoot_Click" Visibility="Collapsed" />
                             <TextBlock x:Name="DiskSummary" Style="{StaticResource StudioBodyStyle}" AutomationProperties.AutomationId="SetupDiskSummary" />
                         </StackPanel>
                         <StackPanel x:Name="ImportPythonPanel" Spacing="8" Visibility="Collapsed">
+                            <TextBlock Text="先在原整合包中启动 ComfyUI。只读连接使用独立工作台 Python，按运行中的节点识别可用功能。" Style="{StaticResource StudioBodyStyle}" />
+                            <TextBox x:Name="ExternalComfyPort" Header="已有 ComfyUI 的本机端口" TextChanged="Input_Changed"
+                                AutomationProperties.AutomationId="SetupImportPort" />
+                            <CheckBox x:Name="AllowExternalRepair" Content="允许补齐此环境（下一步预览节点、依赖和改动目录）"
+                                Click="ExternalRepair_Click" AutomationProperties.AutomationId="SetupAllowRepair" />
                             <TextBlock x:Name="DetectedPython" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="SetupDetectedPython" />
-                            <Expander x:Name="PythonSettings" Header="手动指定 Python" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                            <Expander x:Name="PythonSettings" AutomationProperties.AutomationId="SetupPythonSettings" Header="手动指定 Python" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
                                 <StackPanel Spacing="8">
                                     <TextBlock Text="自动识别 .venv、venv 和便携版 Python。留空使用自动识别。" Style="{StaticResource StudioBodyStyle}" />
                                     <Grid ColumnSpacing="8">
@@ -107,13 +114,19 @@
                             <TextBlock Text="下载来源" FontWeight="SemiBold" Foreground="{ThemeResource StudioTextBrush}" />
                             <ComboBox x:Name="SourceBox" HorizontalAlignment="Stretch" SelectionChanged="Source_Changed"
                                 AutomationProperties.AutomationId="SetupSource" AutomationProperties.Name="下载来源" />
-                            <TextBlock Text="下载慢或连接失败时，可以暂停后切换来源。已完成的下载会继续复用。" Style="{StaticResource StudioBodyStyle}" />
+                            <TextBlock Text="中国大陆优先会使用 ModelScope、第三方公共镜像和中科大 Python 包索引。若只希望使用官方站点，请选择「官方来源」。" Style="{StaticResource StudioBodyStyle}" />
                         </StackPanel>
                         <Border Background="{ThemeResource StudioAccentSoftBrush}" CornerRadius="14" Padding="16,13">
                             <TextBlock x:Name="ModelSummary" Text="将准备 Anima 基础三件套与默认双采样使用的 Sesqui；其他功能按需选择。" Style="{StaticResource StudioBodyStyle}" />
                         </Border>
                         <Expander x:Name="AdvancedSettings" Header="高级下载设置" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
                             <StackPanel Spacing="12">
+                                <ComboBox x:Name="SetupNetworkMode" Header="网络连接" HorizontalAlignment="Stretch" SelectionChanged="NetworkMode_Changed" AutomationProperties.AutomationId="SetupNetworkMode">
+                                    <ComboBoxItem Content="使用系统代理" Tag="system" />
+                                    <ComboBoxItem Content="直连" Tag="direct" />
+                                    <ComboBoxItem Content="自定义 HTTP 代理" Tag="custom" />
+                                </ComboBox>
+                                <TextBox x:Name="SetupProxy" Header="HTTP 代理地址" PlaceholderText="http://127.0.0.1:7890" TextChanged="Input_Changed" AutomationProperties.AutomationId="SetupProxy" />
                                 <TextBox x:Name="GitMirrorBox" Header="Git HTTPS 镜像模板" PlaceholderText="HTTPS 前缀或包含 {url} 的模板"
                                     TextChanged="Input_Changed" AutomationProperties.AutomationId="SetupGitMirror" />
                                 <TextBox x:Name="ModelMirrorBox" Header="Hugging Face 镜像" TextChanged="Input_Changed" AutomationProperties.AutomationId="SetupModelMirror" />
@@ -185,6 +198,7 @@
                     <StackPanel Spacing="7">
                         <TextBlock x:Name="InstallingTitle" Text="正在准备创作环境。" Style="{StaticResource StudioHeadingStyle}" />
                         <TextBlock x:Name="InstallationHelp" Style="{StaticResource StudioBodyStyle}" />
+                        <Button x:Name="StopInstallingServicesButton" AutomationProperties.AutomationId="SetupInstallStopStarted" Content="停止本次启动的服务" Visibility="Collapsed" Click="StopSetupServices_Click" />
                     </StackPanel>
                     <Border Style="{StaticResource StudioPanelStyle}">
                         <StackPanel Spacing="13">
@@ -218,7 +232,8 @@
 
                 <StackPanel x:Name="AssistantPanel" Visibility="Collapsed" Spacing="18">
                     <TextBlock Text="连接你的提示词助手。" Style="{StaticResource StudioHeadingStyle}" />
-                    <TextBlock Text="配置供应商和默认文本模型，用于提示词重写。可以稍后配置，不影响基础生图。" Style="{StaticResource StudioBodyStyle}" />
+                    <TextBlock x:Name="AssistantStepInstructions" TextWrapping="Wrap" Style="{StaticResource StudioBodyStyle}" />
+                    <Button x:Name="RepairAssistantButton" Content="检查与修复提示词助手插件" Click="PrepareAssistant_Click" AutomationProperties.AutomationId="SetupAssistantRepair" />
                     <ContentControl x:Name="AssistantHost" HorizontalContentAlignment="Stretch" />
                 </StackPanel>
 
@@ -236,6 +251,18 @@
                         <TextBlock x:Name="ConfigurationIssuesSummary" Style="{StaticResource StudioBodyStyle}" IsTextSelectionEnabled="True" AutomationProperties.AutomationId="SetupConfigurationIssues" />
                     </StackPanel>
                     <TextBlock x:Name="CompletionAssistantSummary" Style="{StaticResource StudioBodyStyle}" AutomationProperties.AutomationId="SetupAssistantSummary" />
+                    <Button x:Name="PrepareAssistantButton" AutomationProperties.AutomationId="SetupPrepareAssistant" Content="准备或配置提示词助手" Click="PrepareAssistant_Click" />
+                    <TextBlock x:Name="ServiceAddresses" AutomationProperties.AutomationId="SetupServiceAddresses" IsTextSelectionEnabled="True" TextWrapping="Wrap" />
+                    <StackPanel Spacing="8">
+                        <Button Content="复制工作台地址" AutomationProperties.AutomationId="SetupCopyWorkbench" Click="CopyWorkbench_Click" />
+                        <Button x:Name="ManualOpenDone" Content="已手动打开，完成设置" Click="ManualOpenDone_Click" />
+                        <Button x:Name="StopSetupServicesButton" AutomationProperties.AutomationId="SetupStopStarted" Content="停止本次启动的服务" Click="StopSetupServices_Click" />
+                        <Button x:Name="RepairSetupButton" AutomationProperties.AutomationId="SetupRepair" Content="返回环境检查" Click="RepairSetup_Click" />
+                        <Button x:Name="SetupLogDirectoryButton" Content="打开日志目录" Click="OpenLogDirectory_Click" />
+                        <Button x:Name="SmokeButton" AutomationProperties.AutomationId="SetupSmoke" Content="试生成一张 512 × 512 图片" Click="Smoke_Click" />
+                        <Image x:Name="SmokePreview" AutomationProperties.AutomationId="SetupSmokePreview" MaxWidth="256" MaxHeight="256" HorizontalAlignment="Left" ImageOpened="SmokePreview_Opened" ImageFailed="SmokePreview_Failed" />
+                        <TextBlock x:Name="SmokeResult" AutomationProperties.AutomationId="SetupSmokeResult" IsTextSelectionEnabled="True" TextWrapping="Wrap" />
+                    </StackPanel>
                     <StackPanel x:Name="CompletionProgressPanel" Visibility="Collapsed" Spacing="10">
                         <TextBlock x:Name="CompletionOperationText" Style="{StaticResource StudioBodyStyle}" AutomationProperties.AutomationId="SetupCompletionOperation" />
                         <StackPanel x:Name="CompletionBatchPanel" Spacing="8" Visibility="Collapsed">

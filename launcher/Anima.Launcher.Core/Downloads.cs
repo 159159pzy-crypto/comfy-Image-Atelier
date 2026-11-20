@@ -77,11 +77,11 @@ public sealed class Downloads : IDisposable
     }
 
     public Task Fetch(string name, IEnumerable<string> urls, string destination, long size, string sha,
-        IProgress<DownloadProgress>? progress, CancellationToken ct)
+        IProgress<DownloadProgress>? progress, CancellationToken ct, NetworkPolicySnapshot? network = null)
     {
         // Capture before dispatch so an unowned task cannot silently fall back to system proxy settings.
         var request = Normalize(new(name, urls.ToArray(), destination, size, sha)
-        { Network = EngineOptions.NetworkPolicyResolver?.Invoke() ?? NetworkPolicySnapshot.Capture() });
+        { Network = network ?? EngineOptions.NetworkPolicyResolver?.Invoke() ?? NetworkPolicySnapshot.Capture() });
         return Dispatcher is { } dispatcher ? dispatcher.FetchAsync(request, progress, ct) : FetchDirectAsync(request, progress, ct);
     }
 

@@ -60,6 +60,16 @@ public sealed class DownloadTaskStore
             DownloadTaskIdentity.ValidatePayload(System.Text.Json.JsonSerializer.SerializeToElement(owner.Models, JsonFile.Options));
             if (owner.Fingerprint != DownloadTaskIdentity.Owner(owner)) throw new InvalidDataException("下载批次固定内容发生变化，请重新确认。");
         }
+        // A superseded plan may only point forward to another verified review for the same environment.
+        var latestRoots = new Dictionary<string, string?>(StringComparer.Ordinal);
+        foreach (var owner in value.Owners.AsEnumerable().Reverse())
+        {
+            var reviewRoot = DownloadTaskIdentity.EnvironmentReviewRoot(owner);
+            if (owner.SupersededBy is { } replacement && (reviewRoot is null || !DownloadTaskIdentity.Terminal(owner.Status)
+                || !latestRoots.TryGetValue(replacement, out var targetRoot) || targetRoot != reviewRoot))
+                throw new InvalidDataException("历史安装计划与替代方案的关联无效。");
+            latestRoots.Add(owner.Id, reviewRoot);
+        }
         foreach (var owner in value.Owners.Where(owner => owner.IsResourceGroup))
         {
             if (owner.Kind != "models" || owner.Models.Length <= 1 || owner.ResourceOwnerIds.Count != owner.Models.Length

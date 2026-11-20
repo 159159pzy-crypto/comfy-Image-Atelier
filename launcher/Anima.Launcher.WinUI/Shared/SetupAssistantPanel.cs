@@ -16,6 +16,7 @@ public sealed class SetupAssistantPanel : UserControl
     private readonly CheckBox clearKey = new() { Content = "清除已保存的 API Key" };
     private readonly ComboBox configuredModels = new() { Header = "已配置的文本模型", DisplayMemberPath = "Name", PlaceholderText = "也可直接填写新的模型名", HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBox modelName = new() { Header = "默认文本模型（LLM）", PlaceholderText = "填写供应商提供的完整模型名称" };
+    private readonly TextBox templateContent = new() { Header = "首个重写模板（可选）", PlaceholderText = "填写重写规则，或稍后在设置中创建", TextWrapping = TextWrapping.Wrap, AcceptsReturn = true, Visibility = Visibility.Collapsed };
     private readonly ComboBox remoteModels = new() { PlaceholderText = "从供应商返回的模型中选择", HorizontalAlignment = HorizontalAlignment.Stretch, Visibility = Visibility.Collapsed };
     private readonly TextBlock status = BodyText("先启动 ComfyUI，再加载当前环境的供应商配置。");
     private readonly StackPanel editor = new() { Spacing = 12 };
@@ -53,7 +54,7 @@ public sealed class SetupAssistantPanel : UserControl
         actions.Children.Add(refresh);
         actions.Children.Add(add);
         foreach (var child in new UIElement[] { services, actions, name, type, url, key, clearKey,
-            configuredModels, modelName, fetch, remoteModels,
+            configuredModels, modelName, templateContent, fetch, remoteModels,
             BodyText("模型列表仅在点击上方按钮时向供应商获取，也可直接填写模型名。保存会设置此供应商的默认文本模型，不会发送提示词或生成请求。"), save })
             editor.Children.Add(child);
         var body = new StackPanel { Spacing = 12 };
@@ -79,6 +80,7 @@ public sealed class SetupAssistantPanel : UserControl
                 url.Text = "http://localhost:11434";
         };
         Unloaded += (_, _) => { session.Cancel(); key.Password = ""; };
+        Loaded += (_, _) => { if (session.IsCancellationRequested && !IsWorking) { session.Dispose(); session = new(); } };
         SelectService(null);
         editorHost.IsEnabled = false;
     }
@@ -90,6 +92,8 @@ public sealed class SetupAssistantPanel : UserControl
         return Run(async (client, token) =>
         {
             var list = await client.Services(token);
+            var templates = await client.Templates(token);
+            templateContent.Visibility = templates.Any(item => !string.IsNullOrWhiteSpace(item.Content)) ? Visibility.Collapsed : Visibility.Visible;
             var selected = list.FirstOrDefault(item => item.Id == serviceId) ?? list.FirstOrDefault();
             updating = true;
             try
@@ -117,6 +121,7 @@ public sealed class SetupAssistantPanel : UserControl
     {
         if (IsWorking) return;
         key.Password = "";
+        templateContent.Text = "";
         loaded = false;
         environment = null;
         loadedRoot = null;
@@ -208,6 +213,9 @@ public sealed class SetupAssistantPanel : UserControl
             if (!service.Models.Any(item => item.Name == model))
                 await client.SaveModel(id, model, .7, .9, 4096, false, token);
             await client.SetDefaultModel(id, model, token);
+            if (templateContent.Visibility == Visibility.Visible && !string.IsNullOrWhiteSpace(templateContent.Text)
+                && !(await client.Templates(token)).Any(item => !string.IsNullOrWhiteSpace(item.Content)))
+                await client.SaveTemplate(null, "重写模板", templateContent.Text, "", token);
             status.Text = "供应商与默认文本模型已保存并回读确认。";
         }, ct);
         if (saved) Saved?.Invoke();
@@ -227,6 +235,7 @@ public sealed class SetupAssistantPanel : UserControl
         var config = App.Shared.Config.Clone();
         try
         {
+            if (!connecting) config.RequireEnvironmentWrite();
             var currentEnvironment = config.ComfyUrl + "|" + config.ComfyRoot;
             if (!connecting && environment != currentEnvironment)
             {

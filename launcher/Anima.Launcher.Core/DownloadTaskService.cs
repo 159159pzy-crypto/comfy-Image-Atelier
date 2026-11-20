@@ -69,12 +69,41 @@ public sealed partial class DownloadTaskService : IDownloadDispatcher, IAsyncDis
             else if (interrupted && string.IsNullOrWhiteSpace(owner.Error)) owner.Error = "上次任务尚未完成，可手动继续原计划。";
             recovered = true;
         }
+        // Historical versions included remaining bytes in the identity of a resumed install.
+        // Migrate verified records only, after the store has checked their original fingerprints.
+        var duplicateGroups = database.Owners.Where(o => o.Kind is "setup" or "install" && !DownloadTaskIdentity.Terminal(o.Status))
+            .GroupBy(DownloadTaskIdentity.ScheduleKey).Where(group => group.Count() > 1).ToArray();
+        foreach (var group in duplicateGroups)
+        {
+            // Registration order records review order. An old retry may have a newer UpdatedAt.
+            var keep = group.Last();
+            var redundant = group.Where(o => o.Id != keep.Id).Select(o => o.Id).ToHashSet();
+            foreach (var task in database.Tasks.Where(t => t.OwnerIds.Any(redundant.Contains)))
+            {
+                task.OwnerIds.RemoveAll(redundant.Contains);
+                if (!task.OwnerIds.Contains(keep.Id)) task.OwnerIds.Add(keep.Id);
+            }
+            foreach (var historical in database.Owners.Where(o => o.SupersededBy is { } replaced && redundant.Contains(replaced)))
+                historical.SupersededBy = keep.Id;
+            database.Owners.RemoveAll(o => redundant.Contains(o.Id));
+            recovered = true;
+        }
+        // Older launchers kept every confirmed review resumable. A newer review of the same
+        // environment supersedes the earlier one even if the latest has since finished or stopped.
+        var reviews = database.Owners.Where(o => o.SupersededBy is null)
+            .GroupBy(DownloadTaskIdentity.EnvironmentReviewRoot).Where(group => group.Key is not null && group.Count() > 1);
+        foreach (var group in reviews)
+        {
+            SupersedeEnvironmentReviews(group.SkipLast(1).ToArray(), group.Last());
+            recovered = true;
+        }
         if (recovered) Save();
         downloads.Dispatcher = this;
     }
 
     public DownloadOwnerRecord RegisterOwner(string kind, string title, LauncherConfig configuration,
-        IEnumerable<ModelDownloadIntent>? models = null, JsonElement? payload = null, string? id = null)
+        IEnumerable<ModelDownloadIntent>? models = null, JsonElement? payload = null, string? id = null,
+        bool resumeEnvironmentReview = false)
     {
         var record = new DownloadOwnerRecord
         {
@@ -96,25 +125,73 @@ public sealed partial class DownloadTaskService : IDownloadDispatcher, IAsyncDis
         lock (sync)
         {
             EnsureWritable();
+            var scheduleKey = DownloadTaskIdentity.ScheduleKey(record);
+            var reviewRoot = DownloadTaskIdentity.EnvironmentReviewRoot(record);
+            var previousReview = reviewRoot is null ? null : database.Owners.LastOrDefault(o => o.SupersededBy is null
+                && DownloadTaskIdentity.EnvironmentReviewRoot(o) == reviewRoot);
+            // A saved wizard receipt can lag behind the durable download store after a crash.
+            if (resumeEnvironmentReview && previousReview is not null && id is null)
+                return DownloadTaskIdentity.Copy(previousReview);
             var existing = id is not null ? database.Owners.SingleOrDefault(o => o.Id == record.Id)
-                : database.Owners.LastOrDefault(o => o.Fingerprint == record.Fingerprint && o.Status != DownloadTaskStatus.Canceled);
+                : database.Owners.LastOrDefault(o => o.Kind == kind && o.SupersededBy is null && o.Status != DownloadTaskStatus.Canceled
+                    && (o.Fingerprint == record.Fingerprint || (reviewRoot is not null || o.Status != DownloadTaskStatus.Completed)
+                        && DownloadTaskIdentity.ScheduleKey(o) == scheduleKey));
             if (existing is not null)
             {
-                if (existing.Fingerprint != record.Fingerprint) throw new InvalidOperationException("此任务的版本或目标已经变化，请创建新的任务。");
+                DownloadTaskIdentity.EnsureCurrentReview(existing);
+                if (existing.Fingerprint != record.Fingerprint && DownloadTaskIdentity.ScheduleKey(existing) != scheduleKey)
+                    throw new InvalidOperationException("此任务的版本或目标已经变化，请创建新的任务。");
                 return DownloadTaskIdentity.Copy(existing);
             }
-            database.Owners.Add(record);
-            try { Save(); }
-            catch { database.Owners.Remove(record); throw; }
+            if (previousReview is not null && ownerExecutions.ContainsKey(previousReview.Id))
+                throw new InvalidOperationException("请先暂停正在执行的环境安装，再确认新的方案。");
+            var before = previousReview is null ? null : DownloadTaskIdentity.Copy(database);
+            try
+            {
+                database.Owners.Add(record);
+                if (previousReview is not null) SupersedeEnvironmentReviews([previousReview], record);
+                Save();
+            }
+            catch
+            {
+                if (before is null) database.Owners.Remove(record);
+                else { database.Owners = before.Owners; database.Tasks = before.Tasks; }
+                throw;
+            }
         }
         Notify();
         return DownloadTaskIdentity.Copy(record);
     }
 
+    private void SupersedeEnvironmentReviews(DownloadOwnerRecord[] previous, DownloadOwnerRecord current)
+    {
+        foreach (var owner in previous)
+        {
+            owner.SupersededBy = current.Id;
+            owner.Detail = "此环境已确认新方案，请继续最新的安装任务。";
+            if (!DownloadTaskIdentity.Terminal(owner.Status))
+            {
+                owner.Status = DownloadTaskStatus.Canceled;
+                owner.CancellationRequested = true;
+                owner.Phase = "Superseded";
+            }
+        }
+        // Release obsolete content/target reservations. Shared files keep their other
+        // owners, and a future request for the same verified content may reuse its partial.
+        var retired = previous.Select(o => o.Id).ToHashSet();
+        foreach (var task in database.Tasks.Where(t => !DownloadTaskIdentity.Terminal(t.Status) && t.OwnerIds.Any(retired.Contains)
+            && !executions.ContainsKey(t.Id) && t.OwnerIds.All(id => DownloadTaskIdentity.Terminal(Owner(id).Status))))
+        {
+            task.Status = DownloadTaskStatus.Canceled;
+            task.CancellationRequested = true;
+            task.Phase = "Superseded";
+        }
+    }
+
     /// <summary>Use inside an owner coordinator to tag each required/optional child. Scope flows across await.</summary>
     public IDisposable WithinOwner(string id, bool required = true)
     {
-        lock (sync) { EnsureWritable(); _ = Owner(id); }
+        lock (sync) { EnsureWritable(); DownloadTaskIdentity.EnsureCurrentReview(Owner(id)); }
         var previous = context.Value;
         context.Value = new(id, required);
         return new Scope(() => context.Value = previous);
@@ -128,6 +205,7 @@ public sealed partial class DownloadTaskService : IDownloadDispatcher, IAsyncDis
             EnsureWritable();
             if (ownerExecutions.ContainsKey(id)) throw new InvalidOperationException("此下载批次已经在运行。");
             var owner = Owner(id);
+            DownloadTaskIdentity.EnsureCurrentReview(owner);
             if (owner.IsResourceGroup) throw new InvalidOperationException("此旧批次已按模型拆分，请继续其中的模型任务。");
             var previous = DownloadTaskIdentity.Copy(owner);
             execution = new(CancellationTokenSource.CreateLinkedTokenSource(ct));
@@ -187,6 +265,7 @@ public sealed partial class DownloadTaskService : IDownloadDispatcher, IAsyncDis
         lock (sync)
         {
             EnsureWritable();
+            if (current is not null) DownloadTaskIdentity.EnsureCurrentReview(Owner(current.Id));
             // Ambient owner wins over a mutable global configuration resolver.
             request = request with { Network = current is not null ? NetworkPolicySnapshot.Capture(Owner(current.Id).Configuration)
                 : request.Network ?? NetworkPolicySnapshot.Capture() };
@@ -408,6 +487,7 @@ public sealed partial class DownloadTaskService : IDownloadDispatcher, IAsyncDis
         {
             EnsureWritable(allowClosing: true);
             var record = Owner(id);
+            if (record.SupersededBy is not null) return;
             if (ownerExecutions.TryGetValue(id, out var active))
             {
                 active.CancelRequested |= cancel; record.CancellationRequested |= cancel; record.Status = DownloadTaskStatus.Pausing;
@@ -658,6 +738,7 @@ public sealed partial class DownloadTaskService : IDownloadDispatcher, IAsyncDis
 
     private void EnsureSourcesStopped(string id, IEnumerable<DownloadTaskRecord> tasks)
     {
+        DownloadTaskIdentity.EnsureCurrentReview(Owner(id));
         if (ownerExecutions.ContainsKey(id)) throw new InvalidOperationException("请先暂停此批次，再选择换源继续。");
         if (Owner(id).IsResourceGroup) throw new InvalidOperationException("请先选择此批次中的模型，再更换下载来源。");
         if (tasks.Any(task => executions.ContainsKey(task.Id))) throw new InvalidOperationException("共享文件仍在下载，请先暂停后换源。");

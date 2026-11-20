@@ -1033,6 +1033,43 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_history_record_returns_404(self):
         self.assertEqual((await self.client.get("/api/images/999")).status, 404)
 
+    async def test_launcher_generation_tracks_its_own_output_and_refuses_a_busy_queue(self):
+        manager = self.client.server.app[MANAGER_KEY]
+        with mock.patch.object(self.comfy, "queue_idle", new=mock.AsyncMock(return_value=False), create=True):
+            response = await self.client.post("/api/launcher-test-generation", json={"model_profile": "anima"})
+        self.assertEqual(response.status, 409, await response.text())
+        self.assertEqual(manager.queue_snapshot(), [])
+        with mock.patch.object(self.comfy, "queue_idle", new=mock.AsyncMock(return_value=True), create=True):
+            response = await self.client.post("/api/launcher-test-generation", json={"model_profile": "anima"})
+        self.assertEqual(response.status, 201, await response.text())
+        batch = await response.json()
+        settings = batch["settings"]
+        self.assertEqual((settings["model_profile"], settings["workbench"], settings["base_mode"]), ("anima", "single", "normal"))
+        self.assertEqual((settings["count"], settings["width"], settings["height"], settings["steps"]), (1, 512, 512, 4))
+        self.assertTrue(all(not stage["enabled"] for stage in settings["upscalers"].values()))
+        await manager.wait()
+        await self.client.post("/api/batches", json={**DEFAULT_SETTINGS, "count": 1})
+        await manager.wait()
+        result = await (await self.client.get(f"/api/batches/{batch['id']}")).json()
+        self.assertEqual((result["id"], result["status"], result["completed"]), (batch["id"], "completed", 1))
+        self.assertEqual(len(result["image_ids"]), 1)
+        output = await self.client.get(f"/api/images/{result['image_ids'][0]}")
+        self.assertEqual((output.content_type, await output.read()), ("image/png", b"png"))
+
+    async def test_launcher_generation_uses_the_selected_krea_profile(self):
+        inventory = await self.comfy.resource_inventory()
+        inventory["models"].append("krea2_turbo_int8_convrot.safetensors")
+        self.comfy.resource_inventory = mock.AsyncMock(return_value=inventory)
+        with mock.patch.object(self.comfy, "queue_idle", new=mock.AsyncMock(return_value=True), create=True):
+            response = await self.client.post("/api/launcher-test-generation", json={"model_profile": "krea2"})
+        self.assertEqual(response.status, 201, await response.text())
+        batch = await response.json()
+        self.assertEqual(batch["settings"]["model_profile"], "krea2")
+        self.assertEqual(batch["settings"]["model_name"], "krea2_turbo_int8_convrot.safetensors")
+        await self.client.server.app[MANAGER_KEY].wait()
+        result = await (await self.client.get(f"/api/batches/{batch['id']}")).json()
+        self.assertEqual(result["status"], "completed", result["error"])
+
     async def test_reveal_image_uses_history_record_for_both_workbenches(self):
         headers = {"Origin": str(self.client.make_url("/")).rstrip("/")}
         history = self.client.server.app[HISTORY_KEY]

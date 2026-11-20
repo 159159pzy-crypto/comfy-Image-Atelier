@@ -55,6 +55,7 @@ internal sealed partial class LauncherState
 
     private async Task DownloadModelsAsync(List<ModelStatus> selected, CancellationToken ct, ISet<string>? optionalIds = null)
     {
+        Config.RequireEnvironmentWrite();
         var queue = new List<ModelStatus>();
         foreach (var item in selected)
         {

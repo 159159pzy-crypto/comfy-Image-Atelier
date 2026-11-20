@@ -27,6 +27,7 @@ public sealed partial class ComfyUpdateCoordinator
         Func<LauncherConfig, CancellationToken, Task>? validateRecovery = null,
         Func<LauncherConfig, string, CancellationToken, Task>? validateTargetSource = null)
     {
+        config.RequireEnvironmentWrite();
         Safety.Commit(release.Commit);
         if (!dependencies.Resolved || dependencies.ComfyCommit != release.Commit)
             throw new InvalidOperationException("更新前必须完成目标版本的依赖解析。");
@@ -345,6 +346,7 @@ public sealed partial class ComfyUpdateCoordinator
     public async Task CompleteDependencyRepairAsync(LauncherConfig config,
         Func<LauncherConfig, CancellationToken, Task> validateRecovery, CancellationToken ct)
     {
+        config.RequireEnvironmentWrite();
         var backup = Previous(config) ?? throw new InvalidOperationException("没有待完成的恢复记录。");
         ValidateLightRecord(config, backup);
         if (backup.Status != "needs-repair") throw new InvalidOperationException("当前恢复记录不需要完成依赖修复。");

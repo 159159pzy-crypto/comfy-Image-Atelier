@@ -65,9 +65,12 @@ public sealed partial class ModelsPage : LauncherPage
     {
         if (!active) return;
         ModelActions.IsEnabled = !State.Busy && !State.PreparingModelDownloads;
+        DownloadButton.IsEnabled = !State.Config.ReadOnlyConnection;
+        PrepareFeaturesButton.IsEnabled = !State.Config.ReadOnlyConnection;
         PrepareFeaturesButton.Content = State.PreparingModelDownloads ? "正在检查资源…" : "一键准备完整功能";
         var pending = State.Rows.Count(r => r.Download is { Status: not (DownloadTaskStatus.Completed or DownloadTaskStatus.Canceled) });
-        DownloadSummary.Text = pending > 0 ? $"{pending} 个模型任务 · 可在条目中暂停、继续或重试" : "下载进度和操作会显示在对应模型中。";
+        DownloadSummary.Text = State.Config.ReadOnlyConnection ? LauncherConfig.ReadOnlyMaintenanceNotice
+            : pending > 0 ? $"{pending} 个模型任务 · 可在条目中暂停、继续或重试" : "下载进度和操作会显示在对应模型中。";
         UpdateDetails();
         UpdateFeatureProgress();
     });
@@ -244,7 +247,7 @@ public sealed partial class ModelsPage : LauncherPage
             var location = row.Status.FoundPath ?? row.Status.Destination;
             var folder = row.Status.Model.IsPackage ? location : Path.GetDirectoryName(location);
             if (string.IsNullOrWhiteSpace(folder)) throw new IOException("此模型目录尚未确定，请重新扫描。");
-            Directory.CreateDirectory(folder);
+            LauncherState.EnsureModelFolder(State.Config, folder);
             Program.Open(folder);
         }
         catch (Exception ex) { if (State.Root is { } root) await Dialogs.Error(root, ex.Message); }

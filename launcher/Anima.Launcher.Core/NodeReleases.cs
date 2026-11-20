@@ -10,10 +10,10 @@ public sealed record NodeRelease(string Id, string Url, string Branch, string Co
 
 /// <summary>Resolve a node's official default branch once; downloads use the resulting immutable SHA.</summary>
 public sealed class NodeReleases(HttpClient? client = null,
-    Func<Repository, CancellationToken, Task<NodeRelease>>? resolveHead = null)
+    Func<Repository, CancellationToken, Task<NodeRelease>>? resolveHead = null, LauncherConfig? config = null) : IDisposable
 {
-    private static readonly HttpClient Shared = new(NetworkPolicy.HttpHandler(allowAutoRedirect: true)) { Timeout = TimeSpan.FromSeconds(35) };
-    private readonly HttpClient http = client ?? Shared;
+    private readonly HttpClient http = client ?? new HttpClient(NetworkPolicySnapshot.Capture(config).CreateHttpHandler(true)) { Timeout = TimeSpan.FromSeconds(35) };
+    public void Dispose() { if (client is null) http.Dispose(); }
 
     public static string RepositoryName(string url)
     {
@@ -74,11 +74,16 @@ public sealed class NodeReleases(HttpClient? client = null,
         {
             await slots.WaitAsync(ct);
             try { return await LatestAsync(repository, ct); }
+            catch (Exception ex) when (ComfyReleases.MetadataUnavailable(ex, ct))
+            {
+                Safety.Commit(repository.Commit);
+                return new(repository.Id, repository.Url, "安装清单版本", repository.Commit);
+            }
             finally { slots.Release(); }
         }));
     }
 
-    public static async Task<NodeRelease> ResolveHeadWithGit(string git, Repository repository, string cwd, CancellationToken ct)
+    public static async Task<NodeRelease> ResolveHeadWithGit(string git, Repository repository, string cwd, CancellationToken ct, LauncherConfig? config = null)
     {
         var name = RepositoryName(repository.Url);
         var url = "https://github.com/" + name + ".git";
@@ -87,6 +92,7 @@ public sealed class NodeReleases(HttpClient? client = null,
             ["GIT_CONFIG_NOSYSTEM"] = "1", ["GIT_CONFIG_SYSTEM"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null",
             ["GIT_CONFIG_GLOBAL"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null", ["GIT_CONFIG_COUNT"] = "0",
         };
+        NetworkPolicySnapshot.Capture(config).AddEnvironment(environment, new Uri(url));
         var output = await Commands.Run(git, ["ls-remote", "--symref", url, "HEAD"], cwd, null, ct, environment, timeout: TimeSpan.FromSeconds(45));
         return ParseRemoteHead(repository.Id, url, output);
     }

@@ -83,7 +83,7 @@ public sealed class IdleShutdownException(IdleShutdownResult result) : IOExcepti
     public IdleShutdownResult Result { get; } = result;
 }
 
-public sealed partial class ServiceManager(string stateDir, Action<string> log)
+public sealed partial class ServiceManager(string stateDir, Action<string> log, Downloads? workbenchDownloads = null)
 {
     private readonly List<Process> owned = [];
     private readonly List<OwnedProcess> records = [];
@@ -157,6 +157,23 @@ public sealed partial class ServiceManager(string stateDir, Action<string> log)
             return new(false, false, "当前端口未返回可确认的 ComfyUI 状态。");
         }
         var comparison = ComfyLaunchArguments.Compare(stats.Value, config);
+        if (config.ReadOnlyConnection)
+        {
+            // The external launcher owns its arguments. Keep both directory and process identity checks.
+            var matches = SameRoot(stats.Value, config.ComfyRoot);
+            if (!matches && stats.Value.TryGetProperty("system", out var system)
+                && system.TryGetProperty("argv", out var arguments) && arguments.ValueKind == JsonValueKind.Array
+                && arguments.GetArrayLength() > 0 && arguments[0].GetString() is { } main
+                && !Path.IsPathFullyQualified(main) && Path.GetFileName(main).Equals("main.py", StringComparison.OrdinalIgnoreCase))
+            {
+                var paths = await Json(config.ComfyUrl + "/internal/folder_paths", ct);
+                matches = paths is { ValueKind: JsonValueKind.Object } folders && folders.TryGetProperty("custom_nodes", out var roots)
+                    && roots.ValueKind == JsonValueKind.Array && roots.EnumerateArray().Any(dir =>
+                        dir.ValueKind == JsonValueKind.String && Path.IsPathFullyQualified(dir.GetString()!)
+                        && SameExecutable(dir.GetString()!, Path.Combine(config.ComfyRoot, "custom_nodes")));
+            }
+            comparison = new(matches, matches, matches ? "" : "正在运行的 ComfyUI 与选定的目录不匹配。");
+        }
         if (!comparison.RootMatches || !comparison.Matches) return comparison;
         var after = await ReadComfyProcessIdentity(config, await FindPortOwner(config.ComfyPort, ct), ct);
         if (!ComfyProcessIdentityMatches(config, before.Process, after.Process, before.Launcher, after.Launcher))
@@ -240,8 +257,8 @@ public sealed partial class ServiceManager(string stateDir, Action<string> log)
     public async Task StartComfy(LauncherConfig config, RuntimeManifest manifest, CancellationToken ct)
     {
         config.Validate();
-        var extension = ResourceInspectionExtension.Ensure(config, await PortOpen(config.ComfyPort, ct));
-        log(extension.Message);
+        if (!config.ReadOnlyConnection)
+            log(ResourceInspectionExtension.Ensure(config, await PortOpen(config.ComfyPort, ct)).Message);
         var before = owned.Count;
         try
         {
@@ -251,6 +268,8 @@ public sealed partial class ServiceManager(string stateDir, Action<string> log)
             }
             else
             {
+                if (config.ReadOnlyConnection)
+                    throw new IOException("请使用原整合包启动此 ComfyUI，然后重试只读连接：" + config.ComfyUrl);
                 // Optional compatibility patches are prepared by selected installation
                 // features. Starting the core service never edits dormant plugins.
                 var args = ComfyLaunchArguments.Build(config);
@@ -264,14 +283,19 @@ public sealed partial class ServiceManager(string stateDir, Action<string> log)
             // their additional checks in the installation completion probe.
             string[] core = ["UNETLoader", "CLIPLoader", "VAELoader", "KSampler", "KSamplerAdvanced", "VAEDecodeTiled", "EmptyLatentImage"];
             var missing = RuntimeCapabilities.StartupClasses(manifest).Concat(core).Distinct().Where(n => !nodes.TryGetProperty(n, out _)).ToArray();
-            if (missing.Length > 0) throw new InvalidOperationException("缺少节点或导入失败：" + string.Join("、", missing));
+            if (missing.Length > 0)
+            {
+                var detail = "缺少节点或导入失败：" + string.Join("、", missing);
+                if (!config.ReadOnlyConnection) throw new InvalidOperationException(detail);
+                log(detail);
+            }
             if (nodes.TryGetProperty("PromptExpand", out var expand) &&
                 (!expand.TryGetProperty("input", out var inputs) ||
                  !inputs.TryGetProperty("optional", out var optional) ||
                  !optional.TryGetProperty("template_only", out _)))
                 log("当前 ComfyUI 尚未加载纯模板兼容更新；重写功能需停止 ComfyUI 后从启动器重新启动，其他功能可继续使用。");
             var bindings = ResourceBindings(nodes);
-            var resourceFile = Path.Combine(stateDir, "resource-paths.json");
+            var resourceFile = ExternalWorkbench.ResourceBindingsFile(stateDir, config);
             JsonFile.Write(resourceFile, bindings);
         }
         catch
@@ -282,19 +306,43 @@ public sealed partial class ServiceManager(string stateDir, Action<string> log)
     }
 
     /// <summary>Ensure ComfyUI then start (or reuse) the Anima WebUI and verify it reports online.</summary>
+    private async Task<LauncherConfig> WorkbenchInterpreterAsync(LauncherConfig config, RuntimeManifest manifest, CancellationToken ct)
+    {
+        if (!config.HasIsolatedWorkbench)
+        {
+            await WorkbenchDependencies.ValidateAsync(config, ct);
+            return config;
+        }
+        using var fallback = workbenchDownloads is null ? new Downloads(engineOptions: new()
+            { NetworkPolicyResolver = () => NetworkPolicySnapshot.Capture(config) }) : null;
+        return await ExternalWorkbench.PrepareAsync(config, manifest, stateDir, workbenchDownloads ?? fallback!, log, ct);
+    }
+
+    private async Task VerifyWorkbenchBindingAsync(LauncherConfig config, RuntimeManifest manifest, CancellationToken ct)
+    {
+        if (!config.HasIsolatedWorkbench) return;
+        var expected = config.Clone();
+        expected.Python = ExternalWorkbench.ExpectedPython(config, manifest, stateDir);
+        var before = await ReadComfyProcessIdentity(expected, await FindPortOwner(config.WebPort, ct), ct);
+        var health = await Json(config.WebUrl + "/api/launcher-health", ct);
+        var after = await ReadComfyProcessIdentity(expected, await FindPortOwner(config.WebPort, ct), ct);
+        if (!IsOurWebUi(health, config) || !ComfyProcessIdentityMatches(expected, before.Process, after.Process, before.Launcher, after.Launcher))
+            throw new IOException($"工作台端口 {config.WebPort} 的进程与本次独立 Python 不匹配。请关闭原工作台或更换工作台端口。");
+    }
+
     public async Task StartWebUI(LauncherConfig config, RuntimeManifest manifest, CancellationToken ct)
     {
         config.Validate();
+        ExternalWorkbench.ValidateDataDirectory(config);
         RuntimePolicies.ValidateWorkbenchDirectory(config.AppRoot);
         var nodeDirectories = Inventory.ResolveNodeDirectories(config.ComfyRoot, SetupFeatures.SelectRuntime(manifest, []));
         var before = owned.Count;
         try
         {
-            var dependenciesChecked = !await PortOpen(config.WebPort, ct);
-            if (dependenciesChecked) await WorkbenchDependencies.ValidateAsync(config, ct);
+            var interpreter = !await PortOpen(config.WebPort, ct) ? await WorkbenchInterpreterAsync(config, manifest, ct) : null;
             await StartComfy(config, manifest, ct);
-            await ModelMetadata.SynchronizePendingAsync(config, ct, log);
-            var resourceFile = Path.Combine(stateDir, "resource-paths.json");
+            if (!config.ReadOnlyConnection) await ModelMetadata.SynchronizePendingAsync(config, ct, log);
+            var resourceFile = ExternalWorkbench.ResourceBindingsFile(stateDir, config);
             if (await PortOpen(config.WebPort, ct))
             {
                 var current = await Json(config.WebUrl + "/api/launcher-health", ct);
@@ -305,7 +353,7 @@ public sealed partial class ServiceManager(string stateDir, Action<string> log)
             {
                 // A reused service does not need another package scan; a new process does,
                 // including legacy installations whose frozen plan predates this contract.
-                if (!dependenciesChecked) await WorkbenchDependencies.ValidateAsync(config, ct);
+                interpreter ??= await WorkbenchInterpreterAsync(config, manifest, ct);
                 // Per-run token lets the launcher ask this instance to stop during a version
                 // switch. Only payloads that implement the endpoint get the argument —
                 // rolling back to an older snapshot must not crash its argparse.
@@ -313,12 +361,13 @@ public sealed partial class ServiceManager(string stateDir, Action<string> log)
                 var shutdownToken = supportsShutdown ? Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant() : null;
                 var argv = WebUiArguments(config, resourceFile, nodeDirectories);
                 if (shutdownToken is not null) { argv.Add("--shutdown-token"); argv.Add(shutdownToken); }
-                var process = await StartProcess(config.Python, argv, config.AppRoot, "WebUI", ct, PrepareRuntimeEnvironment(config), shutdownToken);
+                var process = await StartProcess(interpreter.Python, argv, config.AppRoot, "WebUI", ct, WorkbenchEnvironment(config), shutdownToken);
                 await Ready(config.WebUrl + "/api/launcher-health", process, ct, "WebUI", Path.Combine(stateDir, "logs", "WebUI.log"));
             }
+            await VerifyWorkbenchBindingAsync(config, manifest, ct);
             var status = await Json(config.WebUrl + "/api/status", ct);
             if (status is null || !status.Value.TryGetProperty("online", out var online) || !online.GetBoolean()) throw new IOException("工作台已启动，但尚未连接 ComfyUI，请查看日志。");
-            await ModelMetadata.ConfirmPendingAsync(config, ct, log);
+            if (!config.ReadOnlyConnection) await ModelMetadata.ConfirmPendingAsync(config, ct, log);
             log("ComfyUI 与工作台已就绪。");
         }
         catch
@@ -347,21 +396,23 @@ public sealed partial class ServiceManager(string stateDir, Action<string> log)
     public async Task StartWebUIForSoftwareUpdateAsync(LauncherConfig config, RuntimeManifest manifest, CancellationToken ct)
     {
         config.Validate();
+        ExternalWorkbench.ValidateDataDirectory(config);
         RuntimePolicies.ValidateWorkbenchDirectory(config.AppRoot);
         ct.ThrowIfCancellationRequested();
         if (!await PortOpen(config.WebPort, ct))
         {
-            await WorkbenchDependencies.ValidateAsync(config, ct);
+            var interpreter = await WorkbenchInterpreterAsync(config, manifest, ct);
             var nodes = Inventory.ResolveNodeDirectories(config.ComfyRoot, manifest);
             var token = SupportsShutdownEndpoint(config.AppRoot) ? Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant() : null;
-            var args = WebUiArguments(config, Path.Combine(stateDir, "resource-paths.json"), nodes);
+            var args = WebUiArguments(config, ExternalWorkbench.ResourceBindingsFile(stateDir, config), nodes);
             if (token is not null) { args.Add("--shutdown-token"); args.Add(token); }
-            var process = await StartProcess(config.Python, args, config.AppRoot, "WebUI", ct,
-                PrepareRuntimeEnvironment(config), token, preserveOnFailure: true);
+            var process = await StartProcess(interpreter.Python, args, config.AppRoot, "WebUI", ct,
+                WorkbenchEnvironment(config), token, preserveOnFailure: true);
             await Ready(config.WebUrl + "/api/launcher-health", process, ct, "WebUI", Path.Combine(stateDir, "logs", "WebUI.log"));
         }
         var health = await Json(config.WebUrl + "/api/launcher-health", ct);
         if (!IsWorkbenchHealth(health) || !IsOurWebUi(health, config)) throw new PortConflictException(config.WebPort);
+        await VerifyWorkbenchBindingAsync(config, manifest, ct);
         var status = await Json(config.WebUrl + "/api/status", ct);
         if (status is not { ValueKind: JsonValueKind.Object } value || !value.TryGetProperty("online", out var online)
             || online.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
@@ -399,6 +450,10 @@ public sealed partial class ServiceManager(string stateDir, Action<string> log)
         env["TEMP"] = env["TMP"] = env["TMPDIR"] = Path.Combine(runtime, "temp");
         return env;
     }
+
+    private static Dictionary<string, string> WorkbenchEnvironment(LauncherConfig config) =>
+        config.HasIsolatedWorkbench ? new() { ["PYTHONHOME"] = "", ["PYTHONPATH"] = "", ["PYTHONNOUSERSITE"] = "1",
+            ["PYTHONDONTWRITEBYTECODE"] = "1" } : PrepareRuntimeEnvironment(config);
 
     private static Dictionary<string, string> PrepareRuntimeEnvironment(LauncherConfig config)
     {
@@ -527,7 +582,7 @@ public sealed partial class ServiceManager(string stateDir, Action<string> log)
                 await Task.Delay(750, timeout.Token);
             }
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new TimeoutException("服务在 6 分钟内未就绪，请查看服务日志后重试。"); }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new TimeoutException($"{role} 在 6 分钟内未就绪，请查看服务日志：{logPath}"); }
     }
     public void RecoverOwned()
     {
@@ -576,6 +631,22 @@ public sealed partial class ServiceManager(string stateDir, Action<string> log)
     }
     /// <summary>True when a service with this role ("ComfyUI" or "WebUI") is currently owned and running.</summary>
     public bool IsOwnedRunning(string role) => records.Where(r => r.Role == role).Any(r => owned.Any(p => p.Id == r.Pid && !p.HasExited));
+
+    public OwnedProcess[] RunningOwned() => records.Where(record =>
+        owned.Any(process => process.Id == record.Pid && !process.HasExited)).ToArray();
+
+    public void StopStartedServices(IEnumerable<OwnedProcess> started)
+    {
+        var selected = started.ToHashSet();
+        foreach (var record in records.Where(selected.Contains).Reverse().ToArray())
+        {
+            var process = owned.FirstOrDefault(item => item.Id == record.Pid && !item.HasExited
+                && item.StartTime.ToUniversalTime().Ticks == record.StartTimeUtcTicks);
+            if (process is null) continue;
+            if (!Stop(process)) throw new IOException($"无法停止本次启动的 {record.Role}，请查看服务日志。");
+            ForgetOwned(record.Pid);
+        }
+    }
 
     /// <summary>True when the payload's server.py implements /api/launcher-shutdown.</summary>
     public static bool SupportsShutdownEndpoint(string appRoot)

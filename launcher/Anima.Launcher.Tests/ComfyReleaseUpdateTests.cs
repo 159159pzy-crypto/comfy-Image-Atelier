@@ -32,7 +32,7 @@ internal static class ComfyReleaseUpdateTests
         var client = new ComfyReleases(http);
         using var nodeHttp = new HttpClient(new Handler(request => Json(request.RequestUri!.AbsolutePath.Contains("/commits/")
             ? "{\"sha\":\"" + (request.RequestUri.AbsolutePath.Contains("ComfyUI-Prompt-Assistant") ? PromptAssistantCompatibility.SupportedCommit
-                : request.RequestUri.AbsolutePath.Contains("ComfyUI-Forbidden-Vision") ? ForbiddenVisionCompatibility.SupportedCommit : sha) + "\"}" : "{\"default_branch\":\"main\"}")));
+                : sha) + "\"}" : "{\"default_branch\":\"main\"}")));
         var nodeReleases = new NodeReleases(nodeHttp);
         var latest = await client.LatestAsync(default);
         Check(latest.Tag == "v1.2.3" && latest.Commit == sha, "official stable release is resolved to a complete immutable SHA");
@@ -57,7 +57,19 @@ internal static class ComfyReleaseUpdateTests
         var planConfig = new LauncherConfig { ComfyRoot = Path.Combine(directory, "fresh"), RuntimeRoot = Path.Combine(directory, "runtime") };
         var plan = new InstallationPlan(JsonSerializer.Serialize(planConfig, JsonFile.Options), planConfig.ComfyRoot, planConfig.RuntimeRoot, "anima", true, 0, 0, 0, []);
         var stable = await InstallationPlanner.ResolveStableAsync(plan, runtime, directory, default, client, nodeReleases);
+        Check(stable.NodeVersions.Single(node => node.Id == ForbiddenVisionCompatibility.NodeId).Commit == ForbiddenVisionCompatibility.SupportedCommit,
+            "first installation freezes a verified Forbidden Vision version when the upstream branch advances");
         using var offline = new HttpClient(new Handler(_ => throw new HttpRequestException("offline")));
+        var bundled = await InstallationPlanner.ResolveStableAsync(plan, runtime, Path.Combine(directory, "offline-first"),
+            default, new ComfyReleases(offline), new NodeReleases(offline));
+        Check(bundled.Release?.Commit == runtime.Comfy.Commit && bundled.Release.Tag.Contains("安装清单")
+            && bundled.Dependencies?.ComfyCommit == runtime.Comfy.Commit && bundled.Dependencies.ManagerRequirementsText.Contains("comfyui_manager"),
+            "first install with unavailable official metadata freezes the matching embedded commit and dependency files");
+        var metadata = Path.Combine(directory, "metadata");
+        var firstRead = await new ComfyReleases(http, metadataDirectory: metadata).DependenciesAsync(latest, runtime, default);
+        var cachedRead = await new ComfyReleases(offline, metadataDirectory: metadata).DependenciesAsync(latest, runtime, default);
+        Check(firstRead.RequirementsText == cachedRead.RequirementsText && firstRead.ManagerRequirementsText == cachedRead.ManagerRequirementsText,
+            "immutable dependency metadata reopens offline for the exact commit");
         var resumed = await InstallationPlanner.ResolveStableAsync(plan, runtime, directory, default, new ComfyReleases(offline));
         Check(stable.Release == resumed.Release && resumed.Dependencies!.RequirementsText == stable.Dependencies!.RequirementsText,
             "a restarted offline install reuses its saved release and dependency text without drifting to a newer release");

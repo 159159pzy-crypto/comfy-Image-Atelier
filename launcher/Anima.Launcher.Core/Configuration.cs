@@ -24,6 +24,18 @@ public sealed class LauncherConfig
     public string RuntimeRoot { get; set; } = "";
     public string Python { get; set; } = "";
     public bool PythonExplicit { get; set; }
+    // Missing on existing configurations and frozen installation records.
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ExternalEnvironmentMode { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool HasIsolatedWorkbench => ExternalEnvironmentMode is "readOnly" or "repair";
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool ReadOnlyConnection => ExternalEnvironmentMode == "readOnly";
+    public const string ReadOnlyMaintenanceNotice = "当前环境以只读方式连接。可查看已有文件和版本。需要安装、更新或修复时，请在安装向导选择「允许补齐此环境」并确认改动。";
+    public void RequireEnvironmentWrite()
+    {
+        if (ReadOnlyConnection) throw new InvalidOperationException(ReadOnlyMaintenanceNotice);
+    }
     public string AppRoot { get; set; } = "";
     public string DataDir { get; set; } = "";
     public bool ManagedComfy { get; set; }
@@ -52,6 +64,8 @@ public sealed class LauncherConfig
     public void Validate(bool validateArguments = true)
     {
         if (SchemaVersion != 1) throw new InvalidDataException("不支持此配置版本，请使用对应版本的启动器。");
+        if (ExternalEnvironmentMode is not (null or "readOnly" or "repair"))
+            throw new InvalidDataException("无法识别此环境的连接方式，请重新检查导入设置。");
         if (SelectedProfile is not ("anima" or "krea2")) throw new InvalidDataException("请选择 Anima 或 Krea 2 模型档案。");
         NetworkPolicySnapshot.ValidateSettings(NetworkMode, ProxyAddress);
         if (ComfyPort is < 1024 or > 65535 || WebPort is < 1024 or > 65535 || ComfyPort == WebPort) throw new InvalidDataException("端口需为 1024–65535 的两个不同值。");

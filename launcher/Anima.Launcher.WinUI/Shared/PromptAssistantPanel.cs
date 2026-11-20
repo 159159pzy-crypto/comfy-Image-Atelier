@@ -24,7 +24,7 @@ public sealed class PromptAssistantPanel : UserControl
     {
         templateDetail.MaxLines = 3;
         body.Children.Add(BodyText("连接当前 ComfyUI 的 Prompt Assistant。文本重写与图像反推共用服务，分别管理模型与系统提示词。配置由插件保存，Anima / Krea 2 共用。"));
-        body.Children.Add(Row(Button("加载 / 刷新", async () => await Run(async (client, ct) => await Reload(client, ct))),
+        body.Children.Add(Row(Button("加载 / 刷新", async () => await Run(async (client, ct) => await Reload(client, ct), readOnly: true)),
             Button("检查 / 修复重写纯模板支持", Repair)));
         body.Children.Add(modePicker);
         body.Children.Add(new TextBlock { Text = "共用服务", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
@@ -62,7 +62,7 @@ public sealed class PromptAssistantPanel : UserControl
             if (!loaded) return;
             loaded = false;
             UpdateActions();
-            await Run(async (client, ct) => await Reload(client, ct));
+            await Run(async (client, ct) => await Reload(client, ct), readOnly: true);
         };
         UpdateActions();
     }
@@ -95,12 +95,12 @@ public sealed class PromptAssistantPanel : UserControl
         foreach (var child in children) panel.Children.Add(child);
         return panel;
     }
-    private void UpdateActions() { foreach (var action in loadedActions) action.IsEnabled = loaded; }
+    private void UpdateActions() { foreach (var action in loadedActions) action.IsEnabled = loaded && !App.Shared.Config.ReadOnlyConnection; }
     private AssistantMode Mode => modePicker.SelectedIndex == 1 ? AssistantMode.Reverse : AssistantMode.Rewrite;
     private AssistantService? SelectedService() => services.SelectedItem as AssistantService;
     private AssistantTemplate? SelectedTemplate() => templates.SelectedItem as AssistantTemplate;
 
-    private async Task Run(Func<PromptAssistantClient, CancellationToken, Task> operation)
+    private async Task Run(Func<PromptAssistantClient, CancellationToken, Task> operation, bool readOnly = false)
     {
         if (!IsEnabled) return;
         IsEnabled = false;
@@ -109,6 +109,7 @@ public sealed class PromptAssistantPanel : UserControl
         try
         {
             var config = App.Shared.Config.Clone();
+            if (!readOnly) config.RequireEnvironmentWrite();
             var environment = config.ComfyUrl + "|" + config.ComfyRoot;
             var stats = await ServiceManager.Json(config.ComfyUrl + "/system_stats");
             if (stats is null || !ServiceManager.SameRoot(stats.Value, config.ComfyRoot))
@@ -124,6 +125,7 @@ public sealed class PromptAssistantPanel : UserControl
             }
             loadedEnvironment = environment;
             await operation(client, CancellationToken.None);
+            if (config.ReadOnlyConnection) status.Text = LauncherConfig.ReadOnlyMaintenanceNotice;
         }
         catch (Exception error)
         {

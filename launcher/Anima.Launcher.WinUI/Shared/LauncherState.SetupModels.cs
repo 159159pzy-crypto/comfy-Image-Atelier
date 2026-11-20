@@ -47,19 +47,19 @@ internal sealed partial class LauncherState
             return urls.Length > 0 ? string.Join("\n", urls) : status.Model.SourceUrl;
         });
 
-    private async Task ScanSetupModelsAsync(CancellationToken ct)
+    private async Task ScanSetupModelsAsync(CancellationToken ct, bool verifyHashes = true)
     {
         SetupNotice = "";
         ResetTransferProgress();
         SetupModelsReadiness = SetupModelReadiness.Checking;
-        SetStatus("正在验证基础模型完整性…");
+        SetStatus(verifyHashes ? "正在验证基础模型完整性…" : "正在检查基础模型位置与大小…");
         NotifySetup();
         try
         {
             var ids = SetupRequiredDownloads.Select(model => model.Id).ToArray();
             // Only the required generation models are checked here. This never invokes
             // installation, repairs nodes, or applies the original installation draft.
-            var scan = await ResolveModelIdsAsync(ids, true, ct);
+            var scan = await ResolveModelIdsAsync(ids, verifyHashes, ct);
             ct.ThrowIfCancellationRequested();
             UpdateSetupMissingModels(scan);
         }
@@ -101,7 +101,7 @@ internal sealed partial class LauncherState
             try
             {
                 SetStatus("正在检查基础模型的位置和文件完整性…");
-                await ScanSetupModelsAsync(ct);
+                await ScanSetupModelsAsync(ct, verifyHashes: showPreview);
                 if (showPreview && SetupModelReview is { DownloadableItems.IsEmpty: false } review
                     && review.Readiness != SetupModelReadiness.ScanFailed)
                     setupModelPreviewPlan = new(Config, review);

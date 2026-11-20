@@ -18,22 +18,56 @@ public static class Inventory
         .Distinct(StringComparer.OrdinalIgnoreCase).Order().ToArray();
     public static string NormalizeRoot(string selected)
     {
-        var path = Path.GetFullPath(selected.Trim().Trim('"'));
-        if (File.Exists(Path.Combine(path, "ComfyUI", "main.py"))) path = Path.Combine(path, "ComfyUI");
-        if (!File.Exists(Path.Combine(path, "main.py")) || !File.Exists(Path.Combine(path, "folder_paths.py"))) throw new InvalidDataException("请选择包含 main.py 的 ComfyUI 根目录，或其便携版上级目录。");
+        var path = InstallLocation(selected);
+        if (IsComfyDirectory(path)) return path;
+        var child = Path.Combine(path, "ComfyUI");
+        if (IsComfyDirectory(child)) return child;
+        throw new InvalidDataException("请选择包含 main.py 和 folder_paths.py 的 ComfyUI 根目录，或其便携版上级目录。");
+    }
+    public static string InstallLocation(string selected)
+    {
+        var input = selected.Trim().Trim('"');
+        if (!Path.IsPathFullyQualified(input)) throw new InvalidDataException("请输入完整的安装或导入路径。");
+        var path = Path.GetFullPath(input);
+        if (OperatingSystem.IsWindows())
+        {
+            if (path.StartsWith(@"\\", StringComparison.Ordinal))
+                throw new InvalidDataException("此位置为网络共享。请先映射为驱动器盘符，或选择本地磁盘。");
+            var drive = new DriveInfo(Path.GetPathRoot(path)!);
+            if (!drive.IsReady) throw new IOException($"磁盘 {drive.Name} 尚未就绪，请连接该磁盘后重试或更换目录。");
+        }
         return path;
     }
-    public static string FindPython(string root, string manual)
+
+    public static bool IsComfyDirectory(string path) => !string.IsNullOrWhiteSpace(path) && File.Exists(Path.Combine(path, "main.py"))
+        && File.Exists(Path.Combine(path, "folder_paths.py"));
+
+    public static string[] UnavailableEnvironmentVolumes(params string[] paths)
     {
+        if (!OperatingSystem.IsWindows()) return [];
+        var volumes = paths.Where(Path.IsPathFullyQualified).Select(Path.GetPathRoot)
+            .OfType<string>().Where(root => root.Length == 3 && root[1] == ':').Distinct(StringComparer.OrdinalIgnoreCase);
+        return volumes.Where(root => !new DriveInfo(root).IsReady).ToArray();
+    }
+
+    public static string FindPython(string root, string manual, bool explicitSelection = false)
+    {
+        if (explicitSelection)
+        {
+            var path = manual.Trim().Trim('"');
+            if (!Path.IsPathFullyQualified(path) || !File.Exists(path))
+                throw new FileNotFoundException("手动指定的 Python 不存在，请重新选择该环境的 python.exe，或清空以自动识别。", path);
+            return Path.GetFullPath(path);
+        }
         var candidates = new[] { manual, Path.Combine(root, ".venv", "Scripts", "python.exe"), Path.Combine(root, "venv", "Scripts", "python.exe"), Path.Combine(Path.GetDirectoryName(root)!, "python_embeded", "python.exe"), Path.Combine(Path.GetDirectoryName(root)!, "python_embedded", "python.exe"), Path.Combine(root, "python_embeded", "python.exe") };
         return candidates.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p) && File.Exists(p)) ?? throw new FileNotFoundException("未找到 ComfyUI Python，请在设置中选择该环境的 python.exe。");
     }
     public static async Task<ProbeResult> Probe(string root, string python, string script, CancellationToken ct, IEnumerable<string>? arguments = null)
     {
-        var result = await Commands.Run(python, new[] { script, root }.Concat(arguments ?? []).ToArray(), root, null, ct, timeout: TimeSpan.FromSeconds(30));
+        var result = await Commands.Run(python, new[] { "-B", script, root }.Concat(arguments ?? []).ToArray(), root, null, ct, timeout: TimeSpan.FromSeconds(30));
         return JsonSerializer.Deserialize<ProbeResult>(result, JsonFile.Options) ?? throw new InvalidDataException("模型路径探测失败。");
     }
-    public static async Task<List<ModelStatus>> Scan(ProbeResult probe, ModelManifest manifest, bool hashes, CancellationToken ct)
+    public static async Task<List<ModelStatus>> Scan(ProbeResult probe, ModelManifest manifest, bool hashes, CancellationToken ct, bool reuseVerified = false)
     {
         var results = new List<ModelStatus>();
         foreach (var item in manifest.Models)
@@ -48,7 +82,7 @@ public static class Inventory
                     continue;
                 }
                 var packagePath = Safety.Under(packageRoots[0], item.RelativePath);
-                var packageState = await ModelPackages.State(item, packagePath, ct, forceVerification: hashes);
+                var packageState = await ModelPackages.State(item, packagePath, ct, forceVerification: hashes && !reuseVerified);
                 results.Add(new(item, packageState, Directory.Exists(packagePath) ? packagePath : null, packagePath));
                 continue;
             }
@@ -83,7 +117,12 @@ public static class Inventory
             if (found is not null)
             {
                 state = item.Size > 0 && new FileInfo(found).Length != item.Size ? "大小异常" : "已存在";
-                if (state == "已存在" && hashes && item.Sha256.Length == 64) state = await Downloads.Verify(found, item.Size, item.Sha256, ct) ? "已校验" : "哈希异常";
+                if (state == "已存在" && item.Sha256.Length == 64)
+                {
+                    var file = new FileInfo(found);
+                    state = hashes ? await ModelFileVerification.CheckAsync(file, item.Size, item.Sha256, !reuseVerified, ct)
+                        : ModelFileVerification.LastResult(file, item.Sha256) ?? state;
+                }
             }
             results.Add(new(item, state, found, destination));
         }

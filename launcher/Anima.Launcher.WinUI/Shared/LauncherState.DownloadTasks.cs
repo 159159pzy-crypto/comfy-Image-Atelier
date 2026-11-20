@@ -54,7 +54,7 @@ internal sealed partial class LauncherState
 
     public void SaveDownloadSettings(string source, string git, string hf, string pip, string networkMode, string proxy)
     {
-        var next = Config.Clone();
+        var next = (stagedRepair is { Published: false } pending ? pending.Previous : Config).Clone();
         next.SourceId = source;
         next.GitMirror = git.Trim();
         next.ModelMirror = hf.Trim();
@@ -64,8 +64,11 @@ internal sealed partial class LauncherState
         next.Validate();
         if (configWriteError is not null) throw new IOException(configWriteError);
         JsonFile.Write(configFile, next);
-        Config = next;
+        if (stagedRepair is { Published: false } repair) repair.RememberDownloadSettings(next);
+        else Config = next;
         savedDownloadSettings = next.Clone();
+        if (SetupActive && !Busy && Setup.Step is SetupStep.Location or SetupStep.Review or SetupStep.Welcome)
+            SaveSetupDraft(DownloadIntegrationPolicy.WithDownloadSettings(Setup.Draft, next));
         // Only new work uses these values. Running and paused owners keep their snapshot.
         if (PendingEnvironmentFields is { } draft)
             PendingEnvironmentFields = draft with { SourceId = source, GitMirror = git.Trim(), HfMirror = hf.Trim(), PipIndex = pip.Trim() };
@@ -99,6 +102,7 @@ internal sealed partial class LauncherState
             if (ids.Length == 0) { SetStatus("请勾选需要下载的模型。"); return; }
             ApplyPendingFields();
             var snapshot = Config.Clone();
+            snapshot.RequireEnvironmentWrite();
             var originalContext = ModelContext(Config);
             ResolveModelConfiguration(snapshot);
             var context = CaptureModelContext(snapshot);
@@ -148,7 +152,7 @@ internal sealed partial class LauncherState
         foreach (var owner in owners.Where(o => o.Kind == "setup" || o.Kind == "install")) await ResumeDownloadOwnerAsync(owner.Id);
         await Task.WhenAll(owners.Where(o => o.Kind == "models" || o.Id == software?.Id).Select(o => ResumeDownloadOwnerAsync(o.Id)));
         await Task.WhenAll(DownloadTasks.Tasks.Where(t => t.OwnerIds.Count == 0 && t.Status is DownloadTaskStatus.Paused or DownloadTaskStatus.Failed)
-            .Select(t => DownloadTasks.ResumeTaskAsync(t.Id)));
+            .Select(t => ResumeStandaloneFileAsync(t.Id)));
         if (skippedSoftware > 0)
             SetStatus($"一键继续仅选择最高的新软件版本；其余 {skippedSoftware} 个旧版或无效更新任务已保留，未自动应用更新。");
     }
@@ -164,6 +168,20 @@ internal sealed partial class LauncherState
             using var cacheUse = await LauncherCache.AcquireUseAsync(Program.StateDir, modelInspectionLifetime.Token);
             if (shuttingDown) return;
             var owner = DownloadTasks.Owners.Single(o => o.Id == id);
+            if (owner.Kind is "models" or "install" or "setup")
+            {
+                var connection = owner.Kind == "setup" && owner.Configuration.ReadOnlyConnection
+                    && owner.Payload is { } payload && payload.TryGetProperty("purpose", out var purpose) && purpose.GetString() == "external-connection";
+                if (!connection)
+                {
+                    owner.Configuration.RequireEnvironmentWrite();
+                    var reviewedRepair = owner.Kind == "setup" && owner.Configuration.ExternalEnvironmentMode == "repair" && SetupActive
+                        && Setup.InstallStarted && !Setup.SelectionNeedsReview && Setup.InstallationOwnerId == owner.Id;
+                    if (!reviewedRepair && Config.ReadOnlyConnection && LauncherUpdateStore.SamePath(owner.EnvironmentRoot, Config.ComfyRoot))
+                        Config.RequireEnvironmentWrite();
+                }
+            }
+            if (owner.SupersededBy is not null) { SetStatus("此环境已确认新方案，请继续最新的安装任务。"); return; }
             if (owner.Kind == "models" && owner.Models.Length > 1)
             {
                 var resources = DownloadTasks.EnsureResourceOwners(id);
@@ -188,7 +206,9 @@ internal sealed partial class LauncherState
                 if (Busy) { SetStatus("请等待当前环境操作结束后继续安装。"); return; }
                 var plan = owner.Payload?.Deserialize<InstallationPlan>(JsonFile.Options)
                     ?? throw new InvalidDataException("安装任务缺少已确认的固定计划。");
-                if (FeaturePreparation.IsFeaturePlan(plan) && SetupActive)
+                if (FeaturePreparation.IsFeaturePlan(plan) && SetupActive
+                    && !(SetupAssistantPreparationAllowed && plan.RequestedChoices.SequenceEqual(["prompt-assistant"])
+                        && SamePath(owner.EnvironmentRoot, Config.ComfyRoot)))
                 { SetStatus("请先完成或退出当前安装向导，再继续完整功能准备。"); return; }
                 foreach (var active in DownloadTasks.Owners.Where(o => o.Kind == "models" && o.Status == DownloadTaskStatus.Running
                     && SamePath(o.EnvironmentRoot, owner.EnvironmentRoot)))
@@ -221,6 +241,8 @@ internal sealed partial class LauncherState
 
     private async Task DownloadFrozenModelsAsync(DownloadOwnerRecord owner, CancellationToken ct, IProgress<DownloadProgress>? progress = null)
     {
+        owner.Configuration.RequireEnvironmentWrite();
+        if (Config.ReadOnlyConnection && LauncherUpdateStore.SamePath(owner.EnvironmentRoot, Config.ComfyRoot)) Config.RequireEnvironmentWrite();
         // Setup already owns the exclusive lease for this environment on the UI coordinator.
         using var environmentLease = Busy && SamePath(owner.EnvironmentRoot, Config.ComfyRoot)
             ? null : await EnvironmentOperationLease.AcquireAsync(owner.EnvironmentRoot, false, ct);
@@ -268,6 +290,26 @@ internal sealed partial class LauncherState
         await ResumeDownloadOwnerAsync(resource.Id, newSources);
     }
 
+    public void CheckDownloadFileWrite(string id)
+    {
+        var file = DownloadTasks.Tasks.Single(item => item.Id == id);
+        if (Path.GetFullPath(file.Destination).StartsWith(Path.TrimEndingDirectorySeparator(Program.StateDir) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return;
+        var owners = DownloadTasks.Owners.Where(item => file.OwnerIds.Contains(item.Id)).ToArray();
+        foreach (var owner in owners.Where(item => item.Kind is "models" or "setup" or "install"))
+        {
+            owner.Configuration.RequireEnvironmentWrite();
+            if (Config.ReadOnlyConnection && LauncherUpdateStore.SamePath(owner.EnvironmentRoot, Config.ComfyRoot)) Config.RequireEnvironmentWrite();
+        }
+        if (Config.ReadOnlyConnection && (owners.Length == 0 || owners.Any(item => item.Kind == "file")))
+            Config.RequireEnvironmentWrite();
+    }
+
+    public Task ResumeStandaloneFileAsync(string id)
+    {
+        CheckDownloadFileWrite(id);
+        return DownloadTasks.ResumeTaskAsync(id);
+    }
+
     private async Task DownloadFrozenSoftwareAsync(DownloadOwnerRecord owner, CancellationToken ct)
     {
         var release = owner.Payload?.Deserialize<LauncherRelease>(JsonFile.Options)
@@ -290,7 +332,7 @@ internal sealed partial class LauncherState
         }
         var recovery = DownloadOwnerRecovery.Prepare(owner, plan, FeaturePreparation.IsFeaturePlan(plan) ? null : Setup,
             Program.Models, Program.ModelProfiles, installedCommit);
-        Config = WithSavedDownloadSettings(recovery.Configuration);
+        if (recovery.Plan.Purpose != "external-connection") Config = WithSavedDownloadSettings(recovery.Configuration);
         plan = recovery.Plan;
         activeInstallationPlan = plan;
         FreshInstallRequested = plan.Fresh;

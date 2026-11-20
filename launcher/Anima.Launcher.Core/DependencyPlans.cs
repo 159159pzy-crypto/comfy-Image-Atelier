@@ -15,6 +15,16 @@ public static class DependencyPlans
         return output.Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
+    internal static async Task<(string Identity, string[] Packages, string[] Gpu)> ReadEnvironmentAsync(LauncherConfig config, CancellationToken ct)
+    {
+        var output = await Commands.Run(config.Python, ["-B", "-c", "import sys,importlib.metadata as m; print(sys.version.split()[0]); print(chr(10).join(sorted(d.metadata['Name']+'=='+d.version for d in m.distributions() if d.metadata['Name'])))"],
+            config.ComfyRoot, null, ct, timeout: TimeSpan.FromSeconds(30));
+        var lines = output.Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var packages = lines.Skip(1).ToArray();
+        var gpu = packages.Where(line => Regex.IsMatch(line, @"^(torch|torchvision|torchaudio)==", RegexOptions.IgnoreCase)).ToArray();
+        return (Path.GetFullPath(config.Python).ToUpperInvariant() + "\n" + lines[0] + "\n" + string.Join("\n", gpu.Order()), packages, gpu);
+    }
+
     public static Dictionary<string, string> Versions(IEnumerable<string> lines)
     {
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);

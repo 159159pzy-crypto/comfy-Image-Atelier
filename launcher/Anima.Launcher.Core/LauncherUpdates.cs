@@ -141,17 +141,25 @@ public sealed class LauncherUpdates : IDisposable
     public LauncherUpdateStore Store { get; }
     public string CurrentExecutable { get; }
     public string CurrentVersion { get; }
-    private readonly HttpClient http;
+    private readonly HttpClient? injectedHttp;
+    private readonly Func<NetworkPolicySnapshot> network;
     private readonly Action<string> log;
     // Repository-scoped caches also isolate negative (no update) results from
     // the previous update source. Keep legacy files for older installations.
     private string CachePath => Path.Combine(Store.Root, "release-cache-" + Repository.Replace('/', '-') + ".json");
-    public LauncherUpdates(string stateDir, string currentExe, string currentVersion, Action<string>? log = null, HttpMessageHandler? handler = null)
+    public LauncherUpdates(string stateDir, string currentExe, string currentVersion, Action<string>? log = null, HttpMessageHandler? handler = null,
+        Func<NetworkPolicySnapshot>? networkPolicy = null)
     {
         Store = new(stateDir); CurrentExecutable = Path.GetFullPath(currentExe); CurrentVersion = currentVersion;
         this.log = log ?? (_ => { });
-        http = new HttpClient(handler ?? NetworkPolicy.HttpHandler()) { Timeout = TimeSpan.FromSeconds(25) };
-        http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("AnimaRandomStudio", currentVersion));
+        network = networkPolicy ?? (() => NetworkPolicySnapshot.Capture());
+        if (handler is not null) injectedHttp = CreateHttp(handler);
+    }
+    private HttpClient CreateHttp(HttpMessageHandler handler)
+    {
+        var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(25) };
+        client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("AnimaRandomStudio", CurrentVersion));
+        return client;
     }
     public static Version ParseVersion(string text)
     {
@@ -233,6 +241,8 @@ public sealed class LauncherUpdates : IDisposable
     }
     private async Task<string> GetText(string url, int maxBytes, CancellationToken ct)
     {
+        using var owned = injectedHttp is null ? CreateHttp(network().CreateHttpHandler()) : null;
+        var http = injectedHttp ?? owned!;
         var uri = Safety.Https(url);
         for (var i = 0; i < 8; i++)
         {
@@ -415,5 +425,5 @@ public sealed class LauncherUpdates : IDisposable
         info.Environment["ANIMA_LAUNCHER_HOME"] = Store.StateDirectory;
         return info;
     }
-    public void Dispose() => http.Dispose();
+    public void Dispose() => injectedHttp?.Dispose();
 }

@@ -5,7 +5,7 @@ internal static class FeaturePreparationTests
 {
     public static async Task<int> Run(string work, RuntimeManifest runtime, ModelManifest models, ModelProfilesManifest profiles)
     {
-        var count = 0;
+        var count = await InstallationDependencyRecoveryTests.Run(work);
         void Check(bool condition, string message) { if (!condition) throw new Exception("FAIL: " + message); count++; Console.WriteLine("PASS: " + message); }
         void Reject(Action action, string message)
         {

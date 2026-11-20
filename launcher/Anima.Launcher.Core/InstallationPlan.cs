@@ -31,6 +31,7 @@ public sealed record InstallationDownload(string Destination, long Size, string 
 public sealed record PreflightResult(ImmutableArray<PreflightIssue> Issues, ImmutableArray<VolumeEstimate> Volumes)
 {
     public bool CanInstall => Issues.All(issue => !issue.Blocking);
+    public InstallationPlan? VerifiedPlan { get; init; }
 }
 
 /// <summary>The JSON snapshot prevents later edits to the UI config from changing a running install.</summary>
@@ -44,6 +45,8 @@ public sealed record InstallationPlan(
     public string DependencyCheckpointId { get; init; } = "";
     // Read-only findings shown in the confirmation; not a replacement for final validation.
     public string[] DependencyReviewIssues { get; init; } = [];
+    public ReviewedDependencyAdditions? ReviewedDependencyAdditions { get; init; }
+    public string ExternalRepairBackupId { get; init; } = "";
     public int WorkbenchDependencyContractVersion { get; init; }
     public RuntimeManifest? ResolvedRuntime { get; init; }
     // Absent in historical receipts: those retain their original frozen contract.
@@ -123,22 +126,31 @@ public static class InstallationPlanner
         {
             var config = plan.CreateConfig();
             var git = Commands.Find("git.exe");
-            releases ??= new ComfyReleases(resolveTag: git is null ? null : (tag, token) => ComfyReleases.ResolveTagWithGit(git, tag, stateDir, config, token), config: config);
+            using var ownedReleases = releases is null ? new ComfyReleases(resolveTag: git is null ? null : (tag, token) =>
+                ComfyReleases.ResolveTagWithGit(git, tag, stateDir, config, token), config: config, metadataDirectory: Path.Combine(stateDir, "release-metadata")) : null;
+            releases ??= ownedReleases!;
             var marker = Path.Combine(plan.ComfyRoot, ".anima-revision.json");
-            var release = saved?.Release ?? (File.Exists(marker)
-                ? new ComfyRelease("继续已安装提交", JsonFile.Read<Repository>(marker).Commit, null, "https://github.com/Comfy-Org/ComfyUI")
-                : await releases.LatestAsync(ct));
-            var dependencies = await releases.DependenciesAsync(release, runtime, ct);
+            var existing = saved?.Release ?? (File.Exists(marker)
+                ? new ComfyRelease("继续已安装提交", JsonFile.Read<Repository>(marker).Commit, null, "https://github.com/Comfy-Org/ComfyUI") : null);
+            ComfyRelease release;
+            ComfyDependencySnapshot dependencies;
+            try
+            {
+                release = existing ?? await releases.LatestAsync(ct);
+                dependencies = await releases.DependenciesAsync(release, runtime, ct);
+            }
+            catch (Exception ex) when ((existing is null || existing.Commit == runtime.Comfy.Commit) && ComfyReleases.MetadataUnavailable(ex, ct))
+            {
+                dependencies = ComfyReleases.BundledDependencies(runtime);
+                release = existing ?? new("安装清单版本（官方元数据暂不可用）", runtime.Comfy.Commit, null,
+                    "https://github.com/Comfy-Org/ComfyUI/commit/" + runtime.Comfy.Commit);
+            }
             runtime = PreserveExistingNodeVersions(plan.ComfyRoot, runtime);
             var missingNodes = Installer.PlanNodes(plan.ComfyRoot, runtime).Where(node => !Directory.Exists(node.Directory)).Select(node => node.Repository).ToArray();
-            nodeReleases ??= new NodeReleases(resolveHead: git is null ? null : (repository, token) =>
-                NodeReleases.ResolveHeadWithGit(git, repository, Directory.Exists(stateDir) ? stateDir : Environment.CurrentDirectory, token));
-            var versions = await nodeReleases.ResolveAsync(missingNodes, ct);
-            foreach (var version in versions)
-            {
-                PromptAssistantCompatibility.ValidatePlannedVersion(version.Id, version.Commit);
-                ForbiddenVisionCompatibility.ValidatePlannedVersion(version.Id, version.Commit);
-            }
+            using var ownedNodes = nodeReleases is null ? new NodeReleases(resolveHead: git is null ? null : (repository, token) =>
+                NodeReleases.ResolveHeadWithGit(git, repository, Directory.Exists(stateDir) ? stateDir : Environment.CurrentDirectory, token, config), config: config) : null;
+            nodeReleases ??= ownedNodes!;
+            var versions = await ResolveInstallVersionsAsync(missingNodes, nodeReleases, ct);
             var byId = versions.ToDictionary(node => node.Id, StringComparer.Ordinal);
             var resolved = runtime with
             {
@@ -175,20 +187,32 @@ public static class InstallationPlanner
         var missing = Installer.PlanNodes(plan.ComfyRoot, runtime).Where(node => !Directory.Exists(node.Directory)).Select(node => node.Repository).ToArray();
         if (missing.Length == 0) return plan with { ResolvedRuntime = runtime, NodeVersionsResolved = true };
         var git = Commands.Find("git.exe");
-        releases ??= new NodeReleases(resolveHead: git is null ? null : (repository, token) =>
-            NodeReleases.ResolveHeadWithGit(git, repository, Directory.Exists(stateDir) ? stateDir : Environment.CurrentDirectory, token));
-        var versions = await releases.ResolveAsync(missing, ct);
-        foreach (var version in versions)
-        {
-            PromptAssistantCompatibility.ValidatePlannedVersion(version.Id, version.Commit);
-            ForbiddenVisionCompatibility.ValidatePlannedVersion(version.Id, version.Commit);
-        }
+        var config = plan.CreateConfig();
+        using var ownedNodes = releases is null ? new NodeReleases(resolveHead: git is null ? null : (repository, token) =>
+            NodeReleases.ResolveHeadWithGit(git, repository, Directory.Exists(stateDir) ? stateDir : Environment.CurrentDirectory, token, config), config: config) : null;
+        releases ??= ownedNodes!;
+        var versions = await ResolveInstallVersionsAsync(missing, releases, ct);
         var byId = versions.ToDictionary(node => node.Id, StringComparer.Ordinal);
         runtime = runtime with { Nodes = runtime.Nodes.Select(repository => byId.TryGetValue(repository.Id, out var node)
             ? repository with { Url = node.Url, Commit = node.Commit } : repository).ToArray() };
         Safety.ValidateRuntime(runtime);
         JsonFile.Write(path, new NodeInstallSnapshot(plan.ComfyRoot, runtime, versions));
         return plan with { ResolvedRuntime = runtime, NodeVersions = versions, NodeVersionsResolved = true };
+    }
+
+    private static async Task<NodeRelease[]> ResolveInstallVersionsAsync(Repository[] missing, NodeReleases releases, CancellationToken ct)
+    {
+        // New installs use a build-tested source for the download-management patch.
+        // Explicit updates validate newer source in staging before switching the active node.
+        ct.ThrowIfCancellationRequested();
+        var pinned = missing.Where(node => node.Id == ForbiddenVisionCompatibility.NodeId).Select(node =>
+        {
+            ForbiddenVisionCompatibility.ValidatePlannedVersion(node.Id, node.Commit);
+            return new NodeRelease(node.Id, node.Url, "已验证版本", node.Commit);
+        }).ToArray();
+        var latest = await releases.ResolveAsync(missing.Where(node => node.Id != ForbiddenVisionCompatibility.NodeId), ct);
+        foreach (var version in latest) PromptAssistantCompatibility.ValidatePlannedVersion(version.Id, version.Commit);
+        return [.. latest, .. pinned];
     }
 
     /// <summary>Existing managed node versions belong to the environment; only an explicit update may replace them.</summary>
@@ -229,7 +253,9 @@ public static class InstallationPlanner
         manifest = SetupFeatures.SelectRuntime(manifest, features);
         if (fresh && !string.IsNullOrWhiteSpace(snapshot.InstallRoot))
         {
-            snapshot.InstallRoot = Path.GetFullPath(snapshot.InstallRoot.Trim().Trim('"'));
+            snapshot.InstallRoot = Inventory.InstallLocation(snapshot.InstallRoot);
+            if (Inventory.IsComfyDirectory(snapshot.InstallRoot))
+                throw new InvalidDataException("所选安装文件夹本身就是已有 ComfyUI。请导入此环境或另选安装位置：" + snapshot.InstallRoot);
             snapshot.ComfyRoot = Path.Combine(snapshot.InstallRoot, "ComfyUI");
             snapshot.RuntimeRoot = Path.Combine(snapshot.InstallRoot, "runtime");
             snapshot.Python = Path.Combine(snapshot.ComfyRoot, ".venv", "Scripts", "python.exe");
@@ -237,7 +263,7 @@ public static class InstallationPlanner
         }
         if (string.IsNullOrWhiteSpace(snapshot.ComfyRoot)) throw new InvalidDataException("请先选择安装目录或现有 ComfyUI。");
         snapshot.ComfyRoot = fresh ? Path.GetFullPath(snapshot.ComfyRoot.Trim().Trim('"')) : Inventory.NormalizeRoot(snapshot.ComfyRoot);
-        if (!fresh) snapshot.Python = Inventory.FindPython(snapshot.ComfyRoot, snapshot.Python);
+        if (!fresh) snapshot.Python = Inventory.FindPython(snapshot.ComfyRoot, snapshot.Python, snapshot.PythonExplicit);
         snapshot.RuntimeRoot = ResolveRuntimeRoot(snapshot, stateDir);
         if (!fresh) manifest = PreserveExistingNodeVersions(snapshot.ComfyRoot, manifest);
         if (SameOrInside(snapshot.RuntimeRoot, snapshot.ComfyRoot) || SameOrInside(snapshot.ComfyRoot, snapshot.RuntimeRoot))
@@ -267,16 +293,22 @@ public static class InstallationPlanner
         var environmentDownloads = deferredBytes + artifacts.Where(a => a.InEnvironment).Sum(a => a.RemainingAllocationBytes);
         var runtimeDownloads = artifacts.Where(a => !a.InEnvironment).Sum(a => a.RemainingAllocationBytes);
         var networkDownloads = deferredBytes + artifacts.Sum(a => a.RemainingBytes);
-        var stages = (fresh
-            ? new[] { "检查系统与磁盘", "准备隔离工具", "安装 ComfyUI 与 Python", "安装 CUDA / PyTorch", "安装必要节点", "验证依赖", "下载所选模型" }
-            : new[] { "检查现有环境", "补齐缺失节点", "验证依赖", "检查所选模型" }).ToImmutableArray();
+        var stages = SetupStages(fresh).Select(stage => stage.Title).ToImmutableArray();
         return new(JsonSerializer.Serialize(snapshot, JsonFile.Options), snapshot.ComfyRoot, snapshot.RuntimeRoot,
             snapshot.SelectedProfile, fresh, environmentReserve + environmentDownloads, runtimeReserve + runtimeDownloads, networkDownloads, stages)
         { WorkbenchDependencyContractVersion = 1, ResourcePolicyVersion = SetupFeatures.PolicyVersion, Features = features, ResolvedRuntime = fresh ? null : manifest, EnvironmentReserveBytes = environmentReserve, RuntimeReserveBytes = runtimeReserve, Downloads = artifacts.ToImmutableArray(),
             ModelIds = required.Select(model => model.Id).ToImmutableArray(), MandatoryModelIds = mandatory.Select(model => model.Id).ToImmutableArray(), FrozenModels = required,
             FrozenProfile = profiles?.Get(snapshot.SelectedProfile), DeferredModelBytes = deferredBytes, ModelPathsDeferred = deferredBytes > 0,
+            ExternalRepairBackupId = !fresh && snapshot.ExternalEnvironmentMode == "repair" ? Guid.NewGuid().ToString("N") : "",
             RuntimeArtifactsIdentity = RuntimeArtifactPlanning.Identity };
     }
+
+    public static (string Id, string Title)[] SetupStages(bool fresh) => fresh
+        ? [("tools", "准备安装工具"), ("comfy", "准备 ComfyUI"), ("python", "准备 Python"),
+           ("torch", "安装 GPU 运行环境"), ("dependencies", "安装环境依赖"), ("nodes", "准备必要节点"),
+           ("validation", "验证运行依赖"), ("models", "下载所选模型"), ("verify", "最终检查")]
+        : [("tools", "准备安装工具"), ("dependencies", "检查与补齐环境依赖"), ("nodes", "检查与补齐节点"),
+           ("validation", "验证运行依赖"), ("models", "下载所选模型"), ("verify", "检查现有环境")];
 
     private static (long Environment, long Runtime) RemainingComponentReserves(LauncherConfig config, RuntimeManifest manifest, string stateDir, bool fresh)
     {
@@ -429,7 +461,7 @@ public static class InstallationPlanner
         var probe = new ProbeResult(plan.ComfyRoot, config.Python, paths);
         var resolved = false;
         string? python = null;
-        try { python = Inventory.FindPython(plan.ComfyRoot, config.Python); }
+        try { python = Inventory.FindPython(plan.ComfyRoot, config.Python, config.PythonExplicit); }
         catch (FileNotFoundException) { }
         if (python is not null && File.Exists(Path.Combine(plan.ComfyRoot, "folder_paths.py")))
         {
@@ -619,12 +651,18 @@ public static class InstallationPlanner
         ct.ThrowIfCancellationRequested();
         if (plan.ModelPathsDeferred)
             issues.Add(new("model_paths_deferred", "依赖尚未安装完整，先按环境内模型目录预留空间；恢复依赖后会重新解析额外模型目录，并在下载前检查实际目标磁盘。", false));
+        if (plan.RuntimeArtifactHost is { Generation.Length: 0 } && plan.Features.Any(feature => feature is "nvidia" or "dlss"))
+            issues.Add(new("optional_gpu", "所选 N 卡放大或 DLSS 需要 RTX 30/40/50 系列。当前设备未检测到支持的显卡，可取消该选项后重新检查。", false));
+        if (OperatingSystem.IsWindows() && Path.Combine(plan.ComfyRoot, ".venv", "Lib", "site-packages", "torch", "include", "ATen", "ops", "_scaled_dot_product_flash_attention_for_cpu_backward_native.h").Length >= 260)
+            issues.Add(new("long_path", "安装路径较深，部分 Python 包或 Git 工具可能超出 Windows 路径长度限制。建议使用更短的位置。", false));
         if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 17763) || RuntimeInformation.OSArchitecture != Architecture.X64)
             issues.Add(new("system", "安装启动器需要 Windows 10 1809 或更新版本的 x64 系统。"));
         if (plan.Fresh)
         {
             try
             {
+                if (!string.IsNullOrWhiteSpace(config.InstallRoot) && Inventory.IsComfyDirectory(config.InstallRoot))
+                    issues.Add(new("install_root_has_environment", "安装位置本身已包含 ComfyUI，请导入此环境或另选安装位置。"));
                 if (Directory.Exists(plan.ComfyRoot) && Directory.EnumerateFileSystemEntries(plan.ComfyRoot).Any()
                     && !File.Exists(Path.Combine(plan.ComfyRoot, ".anima-revision.json")))
                     issues.Add(new("target_not_empty", "ComfyUI 目标目录不为空，请导入现有环境或选择新的安装目录。"));
@@ -676,7 +714,7 @@ public static class InstallationPlanner
             else if (volume.AvailableBytes < volume.RequiredBytes)
                 issues.Add(new("disk_space", $"磁盘 {volume.Volume} 需预留 {volume.RequiredBytes / (double)GiB:N1} GiB，当前可用 {volume.AvailableBytes / (double)GiB:N1} GiB。"));
         }
-        return new(issues.ToImmutable(), volumes);
+        return new(issues.ToImmutable(), volumes) { VerifiedPlan = issues.Any(issue => issue.Code == "cache_invalid") ? null : plan };
     }
 
     private static void CheckWriteAccess(string path)

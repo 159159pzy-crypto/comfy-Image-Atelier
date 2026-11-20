@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import os
+import sys
 import threading
 import webbrowser
 from email.utils import formatdate
@@ -1386,6 +1387,26 @@ def create_app(
     async def start_batch(request: web.Request) -> web.Response:
         history.ensure_writable()
         body = await _json_body(request)
+        return await submit_batch(body)
+
+    async def launcher_test_generation(request: web.Request) -> web.Response:
+        history.ensure_writable()
+        body = await _json_body(request)
+        if set(body) != {"model_profile"} or body["model_profile"] not in ("anima", "krea2"):
+            raise WorkflowError("请选择有效的模型档案。")
+        profile = body["model_profile"]
+        return await submit_batch({
+            "model_profile": profile, "workbench": "single", "base_mode": "normal",
+            "width": 512, "height": 512, "steps": 4, "count": 1,
+            "pipeline_version": startup_defaults["pipeline_version"],
+            "single": {"positive_prompt": "A red apple on a wooden table"},
+            "upscalers": {key: {"enabled": False} for key in startup_defaults["upscalers"]},
+        }, only_if_idle=True)
+
+    async def batch_result(request: web.Request) -> web.Response:
+        return web.json_response(await history.batch_result(request.match_info["batch_id"]))
+
+    async def submit_batch(body: dict[str, Any], *, only_if_idle: bool = False) -> web.Response:
         editor_replacements = body.pop("resource_replacements", [])
         if not isinstance(editor_replacements, list) or len(editor_replacements) > 32:
             raise WorkflowError("resource_replacements 必须是最多 32 项的数组")
@@ -1435,7 +1456,8 @@ def create_app(
         if requested_model_name:
             body["model_name"] = requested_model_name
         await hydrate_single_triggers(body)
-        state = await manager.start(body, seeds=seeds, resource_resolution={"replacements": valid_replacements})
+        state = await manager.start(body, seeds=seeds, resource_resolution={"replacements": valid_replacements},
+                                    only_if_idle=only_if_idle)
         return web.json_response(state, status=201)
 
     async def read_uploaded_fields(request: web.Request, *, allow_crop: bool = False) -> tuple[bytes, str, Any]:
@@ -2047,6 +2069,7 @@ def create_app(
         return web.json_response({
             "app": "anima-random-studio",
             "app_dir": str(root.resolve()),
+            "python_executable": sys.executable,
             "data_dir": str(storage.resolve()),
             "comfy_url": getattr(client, "base_url", "local"),
             "idle_shutdown_supported": shutdown_token is not None,
@@ -2157,6 +2180,7 @@ def create_app(
     app.router.add_delete("/api/custom-groups/{section}/{group_id}", delete_custom_group)
     app.router.add_post("/api/settings/normalize", normalize_settings)
     app.router.add_post("/api/batches", start_batch)
+    app.router.add_post("/api/launcher-test-generation", launcher_test_generation)
     app.router.add_get("/api/artwork-folders", list_artwork_folders)
     app.router.add_post("/api/artwork-folders", create_artwork_folder)
     app.router.add_post("/api/artwork-folders/reorder", reorder_artwork_folders)
@@ -2177,6 +2201,7 @@ def create_app(
     app.router.add_get("/api/prompt-jobs/{job_id}", get_prompt_job)
     app.router.add_post("/api/prompt-jobs/{job_id}/cancel", cancel_prompt_job)
     app.router.add_get("/api/batches/current", current_batch)
+    app.router.add_get(r"/api/batches/{batch_id:[0-9a-f]{12}}", batch_result)
     app.router.add_get("/api/batches/current/preview", batch_preview)
     app.router.add_post("/api/batches/{batch_id}/stop", stop_batch)
     app.router.add_delete("/api/batches/queue/{queue_id}", remove_queued_batch)

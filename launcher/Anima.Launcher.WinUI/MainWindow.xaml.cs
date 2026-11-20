@@ -25,6 +25,8 @@ public sealed partial class MainWindow : Window
     private TaskbarIcon? tray;
     private volatile bool reallyClose;
     private bool exiting;
+    private Task? downloadShutdown;
+    private bool offerForceExit;
     private bool minimizeNotified;
     private int selectedPage;
     private int downloadsOriginPage;
@@ -71,6 +73,8 @@ public sealed partial class MainWindow : Window
             HideWindow = () => { try { if (tray is not null) AppWindow.Hide(); } catch { } RefreshPresentationVisibility(); },
         };
         app.State = State; // Pages resolve state via App.Shared during navigation.
+        ConfigurationNotice.Message = State.ConfigurationNotice;
+        ConfigurationNotice.IsOpen = State.ConfigurationNotice.Length > 0;
         WireState();
         State.SoftwareUpdateExitRequested += () => DispatcherQueue.TryEnqueue(() => Exit(false));
         Program.UpdateExitRequested += OnSoftwareUpdateExit;
@@ -310,6 +314,13 @@ public sealed partial class MainWindow : Window
             }
             _ = State.InitializeSoftwareUpdatesAsync();
             updateTimer.Start();
+            var offlineVolumes = await Task.Run(() => Anima.Launcher.Core.Inventory.UnavailableEnvironmentVolumes(State.Config.ComfyRoot, State.Config.RuntimeRoot));
+            if (offlineVolumes.Length > 0)
+            {
+                var message = "环境所在磁盘 " + string.Join("、", offlineVolumes) + " 尚未就绪，请连接磁盘后重试，或在环境页重新选择位置。";
+                ConfigurationNotice.Message = string.Join(Environment.NewLine, new[] { State.ConfigurationNotice, message }.Where(value => value.Length > 0));
+                ConfigurationNotice.IsOpen = true;
+            }
             var info = await State.DetectSystem();
             State.SystemInfoText = info;
             State.Reloaded();
@@ -370,8 +381,29 @@ public sealed partial class MainWindow : Window
     {
         if (reallyClose || exiting) return;
         exiting = true;
+        try { State.FlushSetupDraft(); } catch (Exception ex) { Program.Log("保存向导草稿失败：" + ex.Message); }
         StatusText.Text = "正在保存下载检查点并退出…";
-        try { await State.PauseDownloadsAndExitAsync(); }
+        try
+        {
+            downloadShutdown ??= State.PauseDownloadsAndExitAsync();
+            if (offerForceExit && !downloadShutdown.IsCompleted && Content?.XamlRoot is { } root
+                && await Dialogs.Confirm(root, "仍有任务正在停止", "立即退出将保留上次写入的检查点，重开后需重新核对未完成的任务。", "立即退出", "继续等待"))
+            {
+                if (stop) State.Services.StopOwned();
+                tray?.Dispose();
+                Environment.Exit(0);
+                return;
+            }
+            await downloadShutdown.WaitAsync(TimeSpan.FromSeconds(20));
+        }
+        catch (TimeoutException)
+        {
+            offerForceExit = true;
+            exiting = false;
+            StatusText.Text = "任务仍在停止。请再次选择托盘的退出操作，选择立即退出或继续等待。";
+            ShowWindow();
+            return;
+        }
         catch (Exception ex) { exiting = false; Program.Log("保存下载状态失败：" + ex.Message); StatusText.Text = ex.Message; return; }
         reallyClose = true;
         try

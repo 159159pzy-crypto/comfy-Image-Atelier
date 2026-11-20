@@ -78,9 +78,11 @@ public static class ArtifactNetworkTests
             Check(china[0] == artifact.Sources[0].Url && china[^1] == artifact.Url, "native artifact mirror precedes gateway and official fallback");
             Check(DownloadSources.ArtifactCandidates(artifact, new() { SourceId = "official" }).SequenceEqual([artifact.Url]), "official profile does not inject native mirrors");
             var info = new ProcessStartInfo("fixture");
+            var nextGitOption = info.Environment.TryGetValue("GIT_CONFIG_COUNT", out var configuredCount) && int.TryParse(configuredCount, out var count) ? count : 0;
             new NetworkPolicySnapshot("custom", "http://127.0.0.1:7890").Apply(info, new Uri("https://pypi.org/simple"));
             Check(info.Environment["HTTPS_PROXY"] == "http://127.0.0.1:7890" && info.Environment["PIP_PROXY"] == "http://127.0.0.1:7890"
-                && info.Environment["GIT_CONFIG_VALUE_0"] == "http://127.0.0.1:7890", "Git pip and HTTP child transports receive one explicit proxy");
+                && info.Environment["GIT_CONFIG_KEY_" + nextGitOption] == "http.proxy" && info.Environment["GIT_CONFIG_VALUE_" + nextGitOption] == "http://127.0.0.1:7890",
+                "Git pip and HTTP child transports receive one explicit proxy after inherited Git options");
             using var handler = new NetworkPolicySnapshot("custom", "http://127.0.0.1:7890").CreateHttpHandler();
             Check(handler.UseProxy && handler.Proxy!.GetProxy(new Uri("https://pypi.org"))!.Port == 7890, "managed HTTP uses the same explicit proxy endpoint");
             new NetworkPolicySnapshot("direct").Apply(info);
@@ -140,10 +142,24 @@ public static class ArtifactNetworkTests
         using (var scratch = InstallationTemporaryDirectory.Enter(deepRuntime, _ => true))
         {
             firstScratch = scratch.Path;
+            var old = DateTime.UtcNow.AddDays(-3);
+            File.SetLastWriteTimeUtc(Path.Combine(firstScratch, ".anima-owner"), old);
+            var abandonedToken = Guid.NewGuid().ToString("N");
+            var abandonedPath = Directory.CreateDirectory(Path.Combine(Path.GetDirectoryName(firstScratch)!, "t-" + abandonedToken[..8])).FullName;
+            File.WriteAllText(Path.Combine(abandonedPath, ".anima-owner"), abandonedToken);
+            File.WriteAllText(Path.Combine(abandonedPath, ".anima-active"), "");
+            File.SetLastWriteTimeUtc(Path.Combine(abandonedPath, ".anima-owner"), old);
+            var legacyToken = Guid.NewGuid().ToString("N");
+            var legacyPath = Directory.CreateDirectory(Path.Combine(Path.GetDirectoryName(firstScratch)!, "t-" + legacyToken[..8])).FullName;
+            File.WriteAllText(Path.Combine(legacyPath, ".anima-owner"), legacyToken);
+            File.SetLastWriteTimeUtc(Path.Combine(legacyPath, ".anima-owner"), old - TimeSpan.FromMilliseconds(Environment.TickCount64));
             Check(scratch.Path.Length <= InstallationTemporaryDirectory.MaximumPathLength
                 && InstallationTemporaryDirectory.VolumeRoot(scratch.Path) == InstallationTemporaryDirectory.VolumeRoot(deepRuntime),
                 "deep Windows installation uses short scratch on its original volume");
             using var parallel = InstallationTemporaryDirectory.Enter(deepRuntime, _ => true);
+            Check(!Directory.Exists(abandonedPath) && Directory.Exists(firstScratch), "scavenging retires abandoned scratch and preserves a live lease even if old");
+            if (OperatingSystem.IsWindows() && new DriveInfo(Path.GetPathRoot(firstScratch)!).DriveType == DriveType.Fixed)
+                Check(!Directory.Exists(legacyPath), "legacy scratch predating the last local boot can be reclaimed safely");
             Check(parallel.Path != scratch.Path && Directory.Exists(scratch.Path) && Directory.Exists(parallel.Path),
                 "independent operations on the same environment receive separate scratch directories");
             using var fallback = InstallationTemporaryDirectory.Enter(deepRuntime, candidate => candidate != candidates[0]);

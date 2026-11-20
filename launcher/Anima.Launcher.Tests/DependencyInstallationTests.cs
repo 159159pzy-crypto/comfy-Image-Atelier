@@ -422,7 +422,7 @@ internal static class DependencyInstallationTests
         Check(File.Exists(directModule) && File.ReadAllText(receiptPath).StartsWith('{'),
             "a malformed completion receipt cannot authorize a skip or prevent repairing an incomplete package");
 
-        var fallback = await Prepare("pip-environment");
+        var fallback = await Prepare("pip environment with spaces");
         await DependencyInstallation.InstallAsync(fallback.Config, fallback.Plan, fallback.Runtime, downloads, fallback.Env,
             _ => Task.FromResult<string?>(null), ct, Log, Progress);
         var fallbackInventory = await DependencyPlans.InventoryAsync(fallback.Config, ct);
@@ -649,11 +649,16 @@ def build_wheel(wheel_directory,config_settings=None,metadata_directory=None):
         const string url = "https://github.com/anima-offline-fixture/source";
         var runtime = Path.Combine(root, "runtime");
         var cacheKey = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(url + "\n" + commit))).ToLowerInvariant();
-        var source = Path.Combine(runtime, "cache", "dependency-sources", cacheKey);
+        var sourceCache = Path.Combine("cache", "dependency-sources", cacheKey);
+        var wheelMember = Path.Combine("build", "bdist.win-amd64", "wheel", "sam2", "configs", "sam2.1_training", "sam2.1_hiera_b+_MOSE_finetune.yaml");
+        // Exercise the same native MAX_PATH boundary even when the caller supplies a short test root.
+        var padding = Math.Max(0, 264 - Path.GetFullPath(Path.Combine(runtime, sourceCache, wheelMember)).Length);
+        runtime += new string('x', padding);
+        var source = Path.Combine(runtime, sourceCache);
         Directory.CreateDirectory(Path.GetDirectoryName(source)!); Directory.Move(repository, source);
         var stale = Path.Combine(source, "build", "stale.txt"); File.WriteAllText(stale, "untracked previous build must remain untouched");
         project = Path.Combine(source, "projects", "package");
-        var oldLongest = Path.Combine(source, "build", "bdist.win-amd64", "wheel", "sam2", "configs", "sam2.1_training", "sam2.1_hiera_b+_MOSE_finetune.yaml");
+        var oldLongest = Path.Combine(source, wheelMember);
         Check(oldLongest.Length > 260, "source fixture reproduces a real legacy Win32 path beyond MAX_PATH");
         var baselineWheels = Path.Combine(root, "baseline-wheels"); Directory.CreateDirectory(baselineWheels);
         var failure = "";

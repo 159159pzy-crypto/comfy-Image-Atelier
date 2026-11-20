@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
 namespace Anima.Launcher.Core;
@@ -66,6 +67,8 @@ public sealed class DownloadOwnerRecord
     public bool IsResourceGroup => ResourceOwnerIds.Count > 0;
     // Data for a known, explicitly registered UI coordinator. The service never executes payload commands.
     public JsonElement? Payload { get; set; }
+    // Audit history is retained when a new environment review replaces this plan.
+    public string? SupersededBy { get; set; }
     public string Fingerprint { get; set; } = "";
     public int TransportRevision { get; set; } = 1;
     public DownloadTaskStatus Status { get; set; } = DownloadTaskStatus.Paused;
@@ -101,6 +104,43 @@ internal static class DownloadTaskIdentity
         owner.Configuration.SelectedProfile, owner.Configuration.CustomRepository,
         owner.Models, owner.Payload
     }, JsonFile.Options));
+
+    // Keep the original fingerprint for integrity checks on the full saved payload.
+    // Scheduling uses a separate key: recording fresh disk observations must not add work.
+    internal static string ScheduleKey(DownloadOwnerRecord owner)
+    {
+        if (owner.Kind is not ("install" or "setup") || owner.Payload is not { ValueKind: JsonValueKind.Object } payload
+            || !payload.TryGetProperty("configurationJson", out _)) return owner.Fingerprint;
+        var plan = JsonNode.Parse(payload.GetRawText())!.AsObject();
+        foreach (var key in new[] { "environmentBytes", "runtimeBytes", "estimatedDownloadBytes", "environmentReserveBytes",
+            "runtimeReserveBytes", "deferredModelBytes", "dependencyReviewIssues", "stages" }) plan.Remove(key);
+        if (plan["downloads"] is JsonArray downloads)
+            foreach (var file in downloads.OfType<JsonObject>())
+                foreach (var key in new[] { "remainingBytes", "remainingAllocationBytes", "verifiedExisting",
+                    "verifiedLegacyDestinations", "requiresReplacement", "bundled" }) file.Remove(key);
+        return Hash(owner.Kind + "\n" + (owner.EnvironmentRoot.Length == 0 ? "" : PathKey(owner.EnvironmentRoot)) + "\n" + plan.ToJsonString()
+            + "\n" + JsonSerializer.Serialize(owner.Models, JsonFile.Options));
+    }
+
+    internal static string? EnvironmentReviewRoot(DownloadOwnerRecord owner)
+    {
+        if (owner.Kind is not ("setup" or "install") || string.IsNullOrWhiteSpace(owner.EnvironmentRoot)
+            || owner.Payload is not { ValueKind: JsonValueKind.Object } plan
+            || !plan.TryGetProperty("configurationJson", out var config) || config.ValueKind != JsonValueKind.String
+            || !plan.TryGetProperty("comfyRoot", out var root) || root.ValueKind != JsonValueKind.String
+            || !Path.IsPathFullyQualified(root.GetString()!)
+            || plan.TryGetProperty("purpose", out var purpose) && (purpose.ValueKind != JsonValueKind.String
+                || purpose.GetString() is not ("environment" or "external-connection"))) return null;
+        var key = PathKey(owner.EnvironmentRoot);
+        try { return PathKey(root.GetString()!) == key ? key : null; }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or PathTooLongException) { return null; }
+    }
+
+    internal static void EnsureCurrentReview(DownloadOwnerRecord owner)
+    {
+        if (owner.SupersededBy is not null)
+            throw new InvalidOperationException("此环境已有更新的已确认方案，请继续最新的安装任务。");
+    }
 
     internal static DownloadRequest Validate(DownloadRequest request)
     {

@@ -11,6 +11,7 @@ public static class DownloadOwnerRecovery
     public static DownloadOwnerRecoveryResult Prepare(DownloadOwnerRecord owner, InstallationPlan plan, SetupRecord? savedSetup,
         ModelManifest currentModels, ModelProfilesManifest currentProfiles, string? installedCommit = null)
     {
+        DownloadTaskIdentity.EnsureCurrentReview(owner);
         if (owner.Kind is not ("setup" or "install")) throw new InvalidDataException("此下载任务不包含安装计划。");
         var frozen = DownloadTaskIdentity.Copy(plan);
         var config = frozen.CreateConfig();
@@ -24,7 +25,8 @@ public static class DownloadOwnerRecovery
             throw new InvalidDataException("固定安装清单与版本提交不一致，请重新检查。");
 
         var sameSetup = savedSetup is { SchemaVersion: 1, Draft: not null }
-            && SetupRouting.TargetsMatch(config, savedSetup.Draft, savedSetup.Fresh);
+            && SetupRouting.TargetsMatch(config, savedSetup.Draft, savedSetup.Fresh)
+            && (savedSetup.InstallationOwnerId is null || savedSetup.InstallationOwnerId == owner.Id);
         var reusesInstalled = sameSetup && savedSetup!.InstallFinished;
         // A repair/import plan may carry the bundled runtime manifest while retaining
         // an existing ComfyUI checkout. Only an explicitly frozen Release pins core.
@@ -110,6 +112,7 @@ public static class DownloadOwnerRecovery
             optional = optional.Concat(frozen.Features.Where(feature => feature is "nvidia" or "dlss" or "prompt-assistant" || feature == "sesqui" && !frozen.Fresh)
                 .Select(feature => SetupFeatures.Prefix + feature)).Distinct(StringComparer.Ordinal).ToArray();
         var setup = sameSetup ? DownloadTaskIdentity.Copy(savedSetup!) : new SetupRecord { AssistantStatus = AssistantSetupStatus.Pending };
+        setup.InstallationOwnerId = owner.Id;
         setup.Draft = config.Clone(); setup.Fresh = frozen.Fresh; setup.InstallStarted = true;
         setup.Step = SetupStep.Installing; setup.ReviewedPlan = frozen; setup.OptionalModelIds = optional;
         // Explicitly resuming this owner restores its already confirmed selection, not

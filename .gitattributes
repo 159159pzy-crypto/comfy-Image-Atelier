@@ -15,3 +15,5 @@ launcher/docs/comfy-light-update-acceptance-2026-11-15.md export-ignore
 launcher/docs/workbench-editable-repair-2026-11-15.md export-ignore
 launcher/docs/launcher-onboarding-resource-acceptance-2026-11-15.md export-ignore
 docs/onboarding-1.5.1-validation.md export-ignore
+launcher/docs/onboarding-verification-2026-11-20.md export-ignore
+launcher/docs/onboarding-evidence-2026-11-20/** export-ignore

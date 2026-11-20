@@ -7,6 +7,20 @@ public enum SetupModelReadiness { Unknown, Checking, NeedsDownload, NeedsAttenti
 public enum SetupCompletionOperation { None, ReviewModels, DownloadModels, StartWorkbench }
 public enum SetupCompletionAction { None, ReviewModels, DownloadModels, ResumeModels, StartWorkbench }
 
+public static class WorkbenchBrowser
+{
+    public static bool TryOpen(string url, Action<string> open, Action<string> log, Action<string> showNotice)
+    {
+        try { open(url); return true; }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException or IOException)
+        {
+            log("打开浏览器失败：" + ex.Message);
+            showNotice("服务已就绪。浏览器未能打开，可以复制地址后手动访问：" + url);
+            return false;
+        }
+    }
+}
+
 /// <summary>Preview and launch share the same frozen installation contract, including after restart.</summary>
 public static class SetupCompletionResources
 {

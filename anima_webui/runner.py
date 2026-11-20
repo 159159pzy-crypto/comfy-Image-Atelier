@@ -855,10 +855,14 @@ class BatchManager:
         seeds: dict[str, int] | None = None,
         regeneration: dict[str, Any] | None = None,
         resource_resolution: dict[str, Any] | None = None,
+        *,
+        only_if_idle: bool = False,
     ) -> dict[str, Any]:
         self._ensure_accepting()
         async with self._start_lock:
             self._ensure_accepting()
+            if only_if_idle and (self.active() or self.queue):
+                raise BatchConflict("有任务正在运行或等待，请在队列空闲后再试生成。")
             ensure_writable = getattr(self.history, "ensure_writable", None)
             if ensure_writable is not None:
                 ensure_writable()
@@ -974,6 +978,8 @@ class BatchManager:
                     and binding_policy(regeneration) == "current"):
                 binding_snapshot = copy.deepcopy(await self.lora_library.binding_snapshot())
             self._ensure_accepting()
+            if only_if_idle and (self.active() or self.queue or not await self.comfy.queue_idle()):
+                raise BatchConflict("有任务正在运行或等待，请在队列空闲后再试生成。")
             if self.active():
                 # 有批次在跑:进入队列,当前批次结束后自动接续。
                 if len(self.queue) >= MAX_QUEUE:

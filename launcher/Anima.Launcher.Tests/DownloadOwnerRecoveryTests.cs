@@ -64,6 +64,12 @@ internal static class DownloadOwnerRecoveryTests
         installed.Draft.Python = Path.Combine(root, "A", "installed-python.exe");
         installed.Draft.PythonExplicit = true; installed.Draft.ManagedComfy = true;
         var resumed = Prepare(installed);
+        var olderReceipt = DownloadTaskIdentity.Copy(installed);
+        olderReceipt.InstallationOwnerId = Guid.NewGuid().ToString("N");
+        var differentReview = Prepare(olderReceipt);
+        Check(differentReview.ResetSetup && !differentReview.ReusesInstalledEnvironment && !differentReview.Setup.InstallFinished
+            && differentReview.Setup.InstallationOwnerId == owner.Id && resumed.Setup.InstallationOwnerId == owner.Id,
+            "a crash between confirming a replacement and saving wizard state cannot reuse the former owner's completion");
         Check(!resumed.ResetSetup && resumed.ReusesInstalledEnvironment && resumed.Setup.InstallFinished
             && resumed.Configuration.Python == installed.Draft.Python && resumed.Configuration.PythonExplicit
             && resumed.Configuration.ManagedComfy && !resumed.Configuration.InstallPending,

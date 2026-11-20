@@ -27,6 +27,8 @@
 
 ## 下载与升级
 
+首次打开 Windows 启动器前，可用 PowerShell 的 `Get-FileHash -Algorithm SHA256 .\AnimaRandomStudio.exe` 与对应版本的 `SHA256SUMS.txt` 核对文件。安装版请换成安装程序的文件名。若双击后窗口没有出现，请检查当前用户的 TEMP 目录是否可写、所在盘是否有空间，并查看 Windows 安全中心的「保护历史记录」或安全软件的隔离记录。TEMP 受限时可在启动前设置 `DOTNET_BUNDLE_EXTRACT_BASE_DIR`，指向自己有写入权限的本地目录。签名信息可在文件属性的「数字签名」中查看。[Windows 启动器说明](launcher/README.md)
+
 - **推荐安装版**：`AnimaRandomStudio-Setup-win-x64.exe`，支持覆盖已有安装。
 - **单文件版**：`AnimaRandomStudio.exe`；`AnimaRandomStudio-portable-win-x64.zip` 仅包含同一份 EXE。
 - `SHA256SUMS.txt` 用于校验三个程序附件，`build-info.json` 记录版本、来源提交和载荷哈希。GitHub 的 Source code 附件为开发源码，不含 EXE 或模型。

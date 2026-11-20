@@ -201,7 +201,7 @@
     {
       "id": "forbidden-vision",
       "url": "https://github.com/luxdelux7/ComfyUI-Forbidden-Vision.git",
-      "commit": "5617d4395fa6be9b0e57d74a56e2943ede9ef192",
+      "commit": "ba6b30622693ef2388972d7c622ed051d50468e3",
       "requiredClasses": [
         "ForbiddenVisionFaceProcessorIntegrated"
       ]

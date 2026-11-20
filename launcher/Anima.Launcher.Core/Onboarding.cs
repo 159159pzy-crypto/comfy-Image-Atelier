@@ -1,10 +1,12 @@
 namespace Anima.Launcher.Core;
 
 public enum SetupStep { Welcome, Location, Review, Installing, Complete, Finished, Assistant = 6 }
-public enum AssistantSetupStatus { Legacy = 0, Pending, Configured, Skipped }
+public enum AssistantSetupStatus { Legacy = 0, Pending, Configured, Skipped, Saved }
 public enum SetupStageStatus { Pending, Running, Complete, Paused, Failed }
+public sealed class InstallationPlanChangedException(string message) : InvalidOperationException(message);
+public sealed class InstallationLocalRepairException(string message) : IOException(message);
 public sealed record SetupProgress(string StageId, string Detail, SetupStageStatus Status);
-public sealed record SetupRestoreDecision(SetupStep? Step, bool RequiresSupplement = false, bool RequiresRepairReview = false);
+public sealed record SetupRestoreDecision(SetupStep? Step, bool RequiresRepairReview = false);
 
 /// <summary>A draft is separate from the active configuration until installation starts.</summary>
 public sealed class SetupRecord
@@ -14,8 +16,11 @@ public sealed class SetupRecord
     public bool Fresh { get; set; } = true;
     public LauncherConfig Draft { get; set; } = new();
     public bool InstallStarted { get; set; }
+    public string? InstallationOwnerId { get; set; }
+    public bool Suspended { get; set; }
     public bool InstallFinished { get; set; }
     public bool ModelsPending { get; set; }
+    public bool OptionalReviewAtCompletion { get; set; }
     public bool RuntimeVerified { get; set; }
     public SetupRuntimeIssue[] ConfigurationIssues { get; set; } = [];
     public bool SelectionNeedsReview { get; set; }
@@ -23,9 +28,9 @@ public sealed class SetupRecord
     public string[] SkippedOptionalModelIds { get; set; } = [];
     public string[] FailedFeatureIds { get; set; } = [];
     public InstallationPlan? ReviewedPlan { get; set; }
-    public InstallationPlan? SupplementalPlan { get; set; }
     public AssistantSetupStatus AssistantStatus { get; set; }
     public bool? AssistantAvailable { get; set; }
+    public string AssistantDetail { get; set; } = "";
     // Old installations selected the ComfyUI folder itself. Keep that identity
     // when the user temporarily clears the path while editing a recovery draft.
     public bool DirectComfyRoot { get; set; }
@@ -38,18 +43,17 @@ public sealed class SetupRecord
         Fresh = fresh;
     }
 
-    public void UpdateDraft(LauncherConfig draft)
+    public bool UpdateDraft(LauncherConfig draft)
     {
         // Opening the location page also saves its fields. Only a real value change
         // invalidates a previously confirmed owner; checking a new plan is not confirmation.
         if (System.Text.Json.JsonSerializer.Serialize(Draft, JsonFile.Options)
-            != System.Text.Json.JsonSerializer.Serialize(draft, JsonFile.Options))
-        {
-            SelectionNeedsReview = true;
-            MarkRuntimeCheckStale();
-        }
+            == System.Text.Json.JsonSerializer.Serialize(draft, JsonFile.Options)) return false;
+        SelectionNeedsReview = true;
+        MarkRuntimeCheckStale();
         ResetAssistantForTargetChange(draft, Fresh);
         Draft = draft.Clone();
+        return true;
     }
 
     private void ResetAssistantForTargetChange(LauncherConfig draft, bool fresh)
@@ -57,6 +61,7 @@ public sealed class SetupRecord
         if (TargetKey(Draft, Fresh).Equals(TargetKey(draft, fresh), StringComparison.OrdinalIgnoreCase)) return;
         AssistantStatus = AssistantSetupStatus.Pending;
         AssistantAvailable = null;
+        AssistantDetail = "";
     }
 
     private static string TargetKey(LauncherConfig draft, bool fresh)
@@ -80,12 +85,13 @@ public sealed class SetupRecord
 public sealed record SetupAssistantPresentation(string Status, string Description, bool Configured = false)
 {
     public static SetupAssistantPresentation Resolve(SetupRecord setup) => setup.AssistantAvailable == false
-        ? new("未安装", "提示词助手未安装或未加载。需要时可到「模型资源」准备此功能，再到「设置」配置服务。")
+        ? new("暂不可用", setup.AssistantDetail.Length > 0 ? setup.AssistantDetail : "未发现可用的提示词重写节点。")
         : setup.AssistantStatus switch
         {
             AssistantSetupStatus.Configured => new("已配置", "提示词助手已配置，可在工作台使用；服务设置仍可随时修改。", true),
+            AssistantSetupStatus.Saved => new("已保存，待验证", setup.AssistantDetail.Length > 0 ? setup.AssistantDetail : "工作台就绪后将检查重写功能。"),
             AssistantSetupStatus.Skipped => new("稍后配置", "已跳过提示词助手配置，不影响基础生图。需要时可到「设置」继续配置。"),
-            AssistantSetupStatus.Legacy => new("沿用已有设置", "保留已有提示词助手设置，可在「设置」中查看或修改。"),
+            AssistantSetupStatus.Legacy => new("未检查", "可在「设置」检查已有提示词助手配置。"),
             _ => new("可选", "提示词助手为可选功能，不影响基础生图。"),
         };
 }
@@ -177,7 +183,7 @@ public sealed record SetupDependencyReviewPresentation(string Summary, string De
 public static class SetupRouting
 {
     public static SetupStep AfterModels(SetupRecord saved) =>
-        saved.AssistantStatus == AssistantSetupStatus.Pending && saved.AssistantAvailable != false
+        saved.AssistantStatus == AssistantSetupStatus.Pending && (saved.Draft.ReadOnlyConnection || saved.AssistantAvailable != false)
             ? SetupStep.Assistant : SetupStep.Complete;
     public static bool OpenWizardFromEnvironmentPage(LauncherConfig current, bool setupActive) =>
         setupActive || string.IsNullOrWhiteSpace(current.ComfyRoot) || current.InstallPending;
@@ -187,6 +193,8 @@ public static class SetupRouting
     /// </summary>
     public static SetupStep? Resolve(LauncherConfig current, SetupRecord? saved)
     {
+        if (saved is { SchemaVersion: 1, Suspended: true, Draft: not null }
+            && (string.IsNullOrWhiteSpace(current.ComfyRoot) || TargetsMatch(current, saved.Draft, saved.Fresh))) return null;
         if (saved is { SchemaVersion: 1, Draft: not null, SelectionNeedsReview: true }
             && (string.IsNullOrWhiteSpace(current.ComfyRoot) || TargetsMatch(current, saved.Draft, saved.Fresh)))
             return SetupStep.Location;
@@ -202,7 +210,7 @@ public static class SetupRouting
             // must never enable a misleading "start creating" screen.
             if (!configured || !TargetsMatch(current, saved.Draft, saved.Fresh) || !HasLaunchFiles(current))
                 return SetupStep.Location;
-            if (saved.ModelsPending) return SetupStep.Installing;
+            if (saved.ModelsPending) return saved.OptionalReviewAtCompletion ? SetupStep.Complete : SetupStep.Installing;
             return AfterModels(saved);
         }
         if (saved.InstallStarted) return SetupStep.Installing;
@@ -213,10 +221,19 @@ public static class SetupRouting
         };
     }
 
-    /// <summary>Unfinished completion screens must prepare requirements introduced after their frozen plan.</summary>
+    /// <summary>Resume the confirmed resource scope and request review for incompatible receipts.</summary>
     public static SetupRestoreDecision ResolveForRuntime(LauncherConfig current, SetupRecord? saved,
-        RuntimeManifest runtime, ModelManifest models, ModelProfilesManifest profiles)
+        RuntimeManifest runtime, ModelManifest models, ModelProfilesManifest profiles, bool resume = false)
     {
+        if (resume && saved is not null) saved.Suspended = false;
+        if (resume && saved is { InstallStarted: true, Fresh: false, Step: SetupStep.Installing, SelectionNeedsReview: false,
+            ReviewedPlan: not null, Draft.ExternalEnvironmentMode: "repair" }
+            && TargetsMatch(saved.Draft, new LauncherConfig { ComfyRoot = saved.ReviewedPlan.ComfyRoot }, false))
+            return new(SetupStep.Installing);
+        if (resume && saved is { InstallStarted: true, InstallFinished: false, SelectionNeedsReview: false,
+            Step: SetupStep.Installing, ReviewedPlan.Purpose: "external-connection", Draft.ReadOnlyConnection: true }
+            && TargetsMatch(saved.Draft, new LauncherConfig { ComfyRoot = saved.ReviewedPlan.ComfyRoot }, false))
+            return new(SetupStep.Installing);
         var step = Resolve(current, saved);
         // An ended wizard remains ended. Its explicit installation/repair entry point
         // creates a new reviewed plan instead of reopening onboarding on every upgrade.
@@ -225,11 +242,8 @@ public static class SetupRouting
         if (plan is null || !TargetsMatch(current, new LauncherConfig { ComfyRoot = plan.ComfyRoot }, false)
             || plan.RuntimeArtifactsIdentity.Length > 0 && plan.RuntimeArtifactsIdentity != RuntimeArtifactPlanning.Identity)
             return new(SetupStep.Location, RequiresRepairReview: true);
-        return NeedsSupplement(plan, runtime, models, profiles) ? new(SetupStep.Installing, RequiresSupplement: true) : new(step);
+        return new(step);
     }
-
-    public static bool NeedsSupplement(InstallationPlan plan, RuntimeManifest runtime,
-        ModelManifest models, ModelProfilesManifest profiles) => false;
 
     /// <summary>Compare a normalized installation target, including an unexpanded fresh-install draft.</summary>
     public static bool TargetsMatch(LauncherConfig current, LauncherConfig draft, bool fresh)

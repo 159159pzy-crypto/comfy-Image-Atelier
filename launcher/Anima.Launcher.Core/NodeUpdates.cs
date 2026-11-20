@@ -109,7 +109,7 @@ public sealed class NodeUpdateCoordinator(string stateDir, string git, Action<st
         if (!Same((await Git(entry.Directory, ["rev-parse", "--show-toplevel"], ct)).Trim(), entry.Directory)) throw new InvalidOperationException("节点不是独立 Git 根目录。");
         var head = (await Git(entry.Directory, ["rev-parse", "HEAD"], ct)).Trim();
         if (expected.Length > 0 && head != expected) throw new InvalidOperationException("检查后节点版本已变化，请重新检查。");
-        var changes = await Git(entry.Directory, ["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=untracked"], ct);
+        var changes = await Git(entry.Directory, ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain", "--untracked-files=no", "--ignore-submodules=untracked"], ct);
         if (!string.IsNullOrWhiteSpace(changes))
         {
             if (entry.Name == ForbiddenVisionCompatibility.NodeId && ForbiddenVisionCompatibility.IsOnlyCompatibilityChange(changes))
@@ -125,7 +125,7 @@ public sealed class NodeUpdateCoordinator(string stateDir, string git, Action<st
     {
         config.Validate();
         var core = await CoreCommit(config, ct);
-        var releases = new NodeReleases(resolveHead: resolveHead ?? ((repository, token) => NodeReleases.ResolveHeadWithGit(git, repository, stateDir, token)));
+        using var releases = new NodeReleases(resolveHead: resolveHead ?? ((repository, token) => NodeReleases.ResolveHeadWithGit(git, repository, stateDir, token, config)), config: config);
         var entries = new List<NodeUpdateEntry>();
         var custom = Path.Combine(config.ComfyRoot, "custom_nodes");
         foreach (var directory in Directory.Exists(custom) ? Directory.EnumerateDirectories(custom).Order(StringComparer.OrdinalIgnoreCase) : Enumerable.Empty<string>())
@@ -162,7 +162,7 @@ public sealed class NodeUpdateCoordinator(string stateDir, string git, Action<st
         }
         var plan = SavePlan(config, new(config.ComfyRoot, config.Python, core, entries.ToArray(), null, DateTimeOffset.UtcNow)
             { Sam2Commit = runtime.Sam2Commit, Note = entries.Any(entry => entry.CanUpdate) ? "待停止服务后预检依赖。" : "没有可更新的节点。" });
-        if (!entries.Any(entry => entry.CanUpdate)) return plan;
+        if (config.ReadOnlyConnection || !entries.Any(entry => entry.CanUpdate)) return plan;
         try { return await PrepareAsync(config, plan, runtime, ct); }
         catch (Exception error) when (error is not OperationCanceledException)
         { return SavePlan(config, plan with { Note = "版本已固定，依赖预检未完成：" + SafeMessage(error.Message) }); }
@@ -250,6 +250,7 @@ public sealed class NodeUpdateCoordinator(string stateDir, string git, Action<st
 
     public async Task<NodeUpdatePlan> PrepareAsync(LauncherConfig config, NodeUpdatePlan plan, RuntimeManifest runtime, CancellationToken ct)
     {
+        config.RequireEnvironmentWrite();
         ValidateIdentity(config, plan);
         await new ComfyUpdateCoordinator(stateDir, git).ValidateEnvironmentAsync(config, ct);
         if (await CoreCommit(config, ct) != plan.CoreCommit) throw new InvalidOperationException("ComfyUI 本体已变化，请重新检查节点。");
@@ -290,6 +291,7 @@ public sealed class NodeUpdateCoordinator(string stateDir, string git, Action<st
         Func<LauncherConfig, ComfyDependencySnapshot, CancellationToken, Task> installDependencies,
         Func<LauncherConfig, CancellationToken, Task> validate, CancellationToken ct)
     {
+        config.RequireEnvironmentWrite();
         ValidateIdentity(config, plan);
         if (!plan.CanApply || plan.Dependencies is null) throw new InvalidOperationException("请先完成节点依赖预检。");
         if (Previous(config)?.Status is "updating" or "restoring" or "rollback-failed") throw new InvalidOperationException("上次节点更新未完成，请先回退。");
@@ -438,6 +440,7 @@ public sealed class NodeUpdateCoordinator(string stateDir, string git, Action<st
 
     public async Task RollbackAsync(LauncherConfig config, CancellationToken ct)
     {
+        config.RequireEnvironmentWrite();
         if (ComfyUpdateCoordinator.RequiresRecovery(new ComfyUpdateCoordinator(stateDir, git).Previous(config)))
             throw new InvalidOperationException("ComfyUI 更新尚未恢复，请先恢复本体或修复更新依赖，再回退节点。");
         var backup = Previous(config) ?? throw new InvalidOperationException("没有节点更新备份。");

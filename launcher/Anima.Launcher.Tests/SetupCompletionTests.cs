@@ -1,5 +1,12 @@
 using System.Security.Cryptography;
 using Anima.Launcher.Core;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 internal static class SetupCompletionTests
 {
@@ -21,6 +28,8 @@ internal static class SetupCompletionTests
 
         var directory = Path.Combine(work, "setup-completion", "existing comfy 中文");
         Directory.CreateDirectory(directory);
+        await CheckStopPollingAsync(directory);
+        Check(true, "leaving the generation preview cancels HTTP polling without stopping the running batch");
         var payload = "locked fixture model"u8.ToArray();
         var sha = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
         ModelItem Model(string id) => new(id, id, "基础模型", "diffusion_models", id + ".safetensors", [],
@@ -165,5 +174,42 @@ internal static class SetupCompletionTests
         Check(SetupRouting.Resolve(active, JsonFile.Read<SetupRecord>(receiptFile)) == SetupStep.Complete && !active.SetupComplete,
             "restart during model preparation restores completion without marking startup successful or installing again");
         return count;
+    }
+    private static async Task CheckStopPollingAsync(string directory)
+    {
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        await using var app = builder.Build();
+        var config = new LauncherConfig { AppRoot = directory, DataDir = Path.Combine(directory, "data") };
+        var requests = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        var polled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        app.Use(async (context, next) =>
+        {
+            requests.Enqueue(context.Request.Method + " " + context.Request.Path);
+            await next();
+        });
+        app.MapGet("/api/launcher-health", () => Results.Json(new {
+            app_dir = config.AppRoot, data_dir = config.DataDir, comfy_url = config.ComfyUrl
+        }));
+        app.MapPost("/api/launcher-test-generation", () => Results.Json(new { id = "mine" }));
+        app.MapGet("/api/batches/mine", () =>
+        {
+            polled.TrySetResult();
+            return Results.Json(new { id = "mine", status = "running" });
+        });
+        await app.StartAsync();
+        var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
+        config.WebPort = new Uri(address).Port;
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var page = new CancellationTokenSource();
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(page.Token, deadline.Token);
+        var result = WorkbenchTestGeneration.RunAsync(config, _ => { }, linked.Token);
+        if (await Task.WhenAny(result, polled.Task).WaitAsync(deadline.Token) == result) await result;
+        page.Cancel();
+        try { await result; throw new Exception("The preview kept waiting after cancellation."); }
+        catch (OperationCanceledException) when (!deadline.IsCancellationRequested) { }
+        if (!requests.SequenceEqual(["GET /api/launcher-health", "POST /api/launcher-test-generation", "GET /api/batches/mine"]))
+            throw new Exception("Unexpected request while leaving the preview: " + string.Join(", ", requests));
     }
 }

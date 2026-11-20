@@ -21,14 +21,12 @@ public sealed record NetworkPolicySnapshot(string Mode, string ProxyAddress = ""
             ?? Environment.GetEnvironmentVariable("ANIMA_LAUNCHER_NETWORK_MODE") ?? "system";
         var proxy = config?.ProxyAddress ?? Environment.GetEnvironmentVariable("ANIMA_LAUNCHER_PROXY_ADDRESS") ?? "";
         ValidateSettings(mode, proxy);
-        if (mode == "system") RejectPac();
         return new(mode, mode == "custom" ? proxy : "");
     }
 
     public HttpClientHandler CreateHttpHandler(bool allowAutoRedirect = false)
     {
         ValidateSettings(Mode, ProxyAddress);
-        if (Mode == "system") RejectPac();
         return new() { UseProxy = Mode != "direct", Proxy = Mode == "custom" ? new WebProxy(ProxyAddress) : null,
             AllowAutoRedirect = allowAutoRedirect };
     }
@@ -75,12 +73,16 @@ public sealed record NetworkPolicySnapshot(string Mode, string ProxyAddress = ""
         foreach (var key in new[] { "ANIMA_LAUNCHER_NETWORK_MODE", "ANIMA_LAUNCHER_PROXY_ADDRESS", "ANIMA_LAUNCHER_NETWORK_TARGET" }) info.Environment.Remove(key);
     }
 
-    private static void RejectPac()
+    public static bool SystemUsesPac()
     {
-        if (!OperatingSystem.IsWindows()) return;
+        if (!OperatingSystem.IsWindows()) return false;
         using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Internet Settings");
-        if (key?.GetValue("AutoConfigURL") is string { Length: > 0 })
-            throw new InvalidDataException("检测到系统 PAC 自动代理脚本。下载器与 Git/pip 无法统一执行此脚本，请选择直连或填写明确的 HTTP 代理地址。");
+        return key?.GetValue("AutoConfigURL") is string { Length: > 0 };
+    }
+
+    public static void RejectPac()
+    {
+        if (SystemUsesPac()) throw new InvalidDataException("检测到系统 PAC 自动代理脚本。请在「安装位置 → 高级下载设置」选择直连或填写 HTTP 代理地址，然后重新检查。");
     }
 }
 
@@ -95,6 +97,10 @@ public static class NetworkPolicy
         var mode = Direct ? "direct" : Get("ANIMA_LAUNCHER_NETWORK_MODE") ?? "system";
         var proxy = Get("ANIMA_LAUNCHER_PROXY_ADDRESS") ?? "";
         var target = Get("ANIMA_LAUNCHER_NETWORK_TARGET");
+        // Local diagnostics and service launches have no requested install transport.
+        // Leave their inherited OS settings intact when a PAC cannot be translated.
+        if (mode == "system" && target is null && Get("ANIMA_LAUNCHER_NETWORK_MODE") is null
+            && NetworkPolicySnapshot.SystemUsesPac()) return;
         new NetworkPolicySnapshot(mode, proxy).Apply(info, Uri.TryCreate(target, UriKind.Absolute, out var uri) ? uri : null);
     }
 }

@@ -57,7 +57,11 @@
                 <Button x:Name="SetupReturnButton" Grid.Column="1" Content="返回安装向导" Click="SetupReturn_Click" Visibility="Collapsed" />
             </Grid>
         </Border>
-        <Frame x:Name="ContentFrame" Grid.Row="2" Margin="16,0,16,12" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
+        <Grid Grid.Row="2">
+            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+            <InfoBar x:Name="ConfigurationNotice" Severity="Warning" IsOpen="False" Margin="16,0,16,6" />
+            <Frame x:Name="ContentFrame" Grid.Row="1" Margin="16,0,16,12" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
+        </Grid>
         <Border x:Name="TaskFooter" Grid.Row="3" Background="{ThemeResource StudioChromeBrush}" BorderBrush="{ThemeResource StudioSeparatorBrush}" BorderThickness="1" CornerRadius="22" Margin="16,0,16,16" Padding="18,12">
             <Grid RowSpacing="8" ColumnSpacing="12">
                 <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>

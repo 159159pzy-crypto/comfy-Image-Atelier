@@ -112,6 +112,7 @@ public sealed partial class DownloadsPage : LauncherPage
                 ? "还没有下载任务。返回模型资源、安装环境或设置后，可以按需开始下载。"
                 : "此任务尚无文件记录；模型发布和安装步骤完成后，整个任务才会完成。";
         var owner = SelectedOwner();
+        ContinueOwnerButton.IsEnabled = owner?.SupersededBy is null;
         ContinueOwnerButton.Content = target.ModelId is not null && owner?.Kind == "models" ? "继续此模型" : "继续此批次";
         OwnerStatusText.Text = owner is null ? "文件校验与批次完成分别记录；包发布和安装步骤成功后批次才完成。"
             : owner.Title + " · " + (owner.Status switch { DownloadTaskStatus.Completed => "已完成", DownloadTaskStatus.Failed => "失败，需要重试",
@@ -218,7 +219,7 @@ public sealed partial class DownloadsPage : LauncherPage
         else
         {
             if (newSources) throw new InvalidOperationException("请从原资源入口创建新的来源策略。");
-            await State.DownloadTasks.ResumeTaskAsync(row.Id);
+            await State.ResumeStandaloneFileAsync(row.Id);
         }
     }
     private async void Continue_Click(object sender, RoutedEventArgs e) => await Act(() => ContinueSelected(false));
@@ -236,6 +237,7 @@ public sealed partial class DownloadsPage : LauncherPage
         if (Selected is not { } row) return;
         await Act(async () =>
         {
+            State.CheckDownloadFileWrite(row.Id);
             var preview = State.DownloadTasks.CleanupPreview(row.Id);
             if (preview.Paths.Length == 0) { Notice.Text = "没有可以删除的独占临时文件。"; return; }
             if (State.Root is not { } root) return;
@@ -258,7 +260,13 @@ public sealed partial class DownloadsPage : LauncherPage
     private async void Open_Click(object sender, RoutedEventArgs e)
     {
         if (Selected is not { } row) return;
-        await Act(() => { var folder = Path.GetDirectoryName(row.Record.Destination)!; Directory.CreateDirectory(folder); Program.Open(folder); return Task.CompletedTask; });
+        await Act(() =>
+        {
+            var folder = Path.GetDirectoryName(row.Record.Destination)!;
+            if (!Directory.Exists(folder)) { State.CheckDownloadFileWrite(row.Id); Directory.CreateDirectory(folder); }
+            Program.Open(folder);
+            return Task.CompletedTask;
+        });
     }
 
     private sealed class TransferRow(DownloadTaskRecord record) : INotifyPropertyChanged

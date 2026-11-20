@@ -75,6 +75,15 @@ public static class FeaturePreparation
 
     public static string RunningServicesIssue(bool comfyRunning, JsonElement? queue, bool webRunning, JsonElement? batch)
     {
+        var issue = QueueIssue(comfyRunning, queue, webRunning, batch);
+        if (issue.Length > 0) return issue;
+        return comfyRunning || webRunning
+            ? "本次准备需要安装或检查插件依赖。请先在概览停止此环境的 ComfyUI 和工作台，再回到本页继续；外部服务请从原入口停止。完成后会重新启动并验证所选功能。"
+            : "";
+    }
+
+    public static string QueueIssue(bool comfyRunning, JsonElement? queue, bool webRunning, JsonElement? batch)
+    {
         if (comfyRunning)
         {
             if (queue is not { ValueKind: JsonValueKind.Object } value || !value.TryGetProperty("queue_running", out var running)
@@ -86,8 +95,6 @@ public static class FeaturePreparation
         }
         if (webRunning && RuntimePolicies.WorkbenchActivity(batch) != WorkbenchActivity.Idle)
             return "工作台仍有任务，或无法确认是否空闲。请确认任务完成并停止服务后继续准备；未中断生成。";
-        return comfyRunning || webRunning
-            ? "本次准备需要安装或检查插件依赖。请先在概览停止此环境的 ComfyUI 和工作台，再回到本页继续；外部服务请从原入口停止。完成后会重新启动并验证所选功能。"
-            : "";
+        return "";
     }
 }

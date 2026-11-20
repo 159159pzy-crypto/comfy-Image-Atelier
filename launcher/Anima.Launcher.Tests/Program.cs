@@ -7,10 +7,17 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using Anima.Launcher.Core;
 
+if (args.FirstOrDefault() == "--pac-startup-child")
+{
+    if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
+    await PacStartupTests.RunChildAsync(args[1], Guid.ParseExact(args[2], "N"));
+    return;
+}
 if (await LauncherUpdateProcessTests.TryHandleFixture(args)) return;
 if (await TaskServiceTests.TryHandleFixture(args)) return;
 if (await DownloadCrashTests.TryHandleFixture(args)) return;
 if (await WorkbenchMetadataRegressionTests.TryHandleFixture(args)) return;
+if (await InstallationDependencyRecoveryTests.TryHandleFixture(args)) return;
 
 if (args.FirstOrDefault() == "--exit-fixture")
 {
@@ -150,6 +157,16 @@ var testArtifacts = Environment.GetEnvironmentVariable("ANIMA_LAUNCHER_TEST_ROOT
 var work = Path.Combine(string.IsNullOrWhiteSpace(testArtifacts) ? Path.Combine(root, "output", "launcher-tests") : Path.GetFullPath(testArtifacts), Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(work);
 var count = 0;
+if (args.Contains("--pac-startup-only"))
+{
+    count += await PacStartupTests.RunAsync(work, root);
+    Console.WriteLine($"{count} isolated PAC startup checks passed; artifacts: {work}"); return;
+}
+if (args.Contains("--external-connection-only"))
+{
+    count += await ExternalConnectionTests.Run(root, work, manifest);
+    Console.WriteLine($"{count} external connection checks passed."); return;
+}
 if (args.Contains("--feature-preparation-only"))
 {
     count += await FeaturePreparationTests.Run(work, manifest, models,
@@ -259,6 +276,7 @@ if (args.Contains("--download-tasks-only"))
 if (args.Contains("--artifact-network-only"))
 {
     count += await ArtifactNetworkTests.Run(work);
+    count += await PacStartupTests.RunAsync(work, root);
     Console.WriteLine($"{count} artifact and network checks passed; artifacts: {work}"); return;
 }
 if (args.Contains("--environment-lock-only"))
@@ -383,8 +401,15 @@ if (args.Contains("--resource-policy-only"))
     count += DownloadOwnerRecoveryTests.Run(work);
     Console.WriteLine($"{count} resource policy checks passed; artifacts: {work}"); return;
 }
+if (args.Contains("--onboarding-five-pauses"))
+{
+    await InstallationPauseTests.Run(work, manifest);
+    Console.WriteLine("Fresh-install pause fixture passed; artifacts: " + work);
+    return;
+}
 if (args.Contains("--onboarding-only"))
 {
+    count += await ExternalConnectionTests.Run(root, work, manifest);
     count += await ResourcePolicyTests.Run(work, manifest);
     count += RuntimeCapabilityTests.Run(work, manifest);
     count += await InstallationReadinessTests.Run(work, manifest);
@@ -444,6 +469,7 @@ if (args.Contains("--tagger-only"))
     Console.WriteLine($"{count} tagger package checks passed; artifacts: {work}");
     return;
 }
+count += await ExternalConnectionTests.Run(root, work, manifest);
 count += await OnboardingTests.Run(work, manifest);
 count += await FeaturePreparationTests.Run(work, manifest, models,
     JsonFile.Read<ModelProfilesManifest>(Path.Combine(manifestDir, "model-profiles.json")));
@@ -466,6 +492,7 @@ count += ModelDownloadProjectionTests.Run(work);
 count += DownloadContextPresentationTests.Run(work);
 count += await TaskServiceTests.Run(work);
 count += await ArtifactNetworkTests.Run(work);
+count += await PacStartupTests.RunAsync(work, root);
 count += await EnvironmentOperationLeaseTests.Run(work);
 count += DownloadOwnerRecoveryTests.Run(work);
 }

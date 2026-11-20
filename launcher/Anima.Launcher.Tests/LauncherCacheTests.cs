@@ -224,7 +224,7 @@ internal static class LauncherCacheTests
 
     private sealed class SimulatedCrash : Exception;
 
-    private static void CreateDirectoryLink(string path, string target)
+    internal static void CreateDirectoryLink(string path, string target)
     {
         try { Directory.CreateSymbolicLink(path, target); }
         catch (IOException error) when (OperatingSystem.IsWindows() && (error.HResult & 0xffff) == 1314)

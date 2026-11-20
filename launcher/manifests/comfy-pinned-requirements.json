@@ -1,0 +1,6 @@
+{
+  "comfyCommit": "c9602625e445e9ee37d3ac6faf5ea9ec1e0de87e",
+  "requirementsText": "comfyui-frontend-package==1.45.21\ncomfyui-workflow-templates==0.11.12\ncomfyui-embedded-docs==0.5.8\ntorch\ntorchsde\ntorchvision\ntorchaudio\nnumpy>=1.25.0\neinops\ntransformers>=4.50.3\ntokenizers>=0.13.3\nsentencepiece\nsafetensors>=0.4.2\naiohttp>=3.11.8\nyarl>=1.18.0\npyyaml\nPillow\nscipy\ntqdm\npsutil\nalembic\nSQLAlchemy>=2.0.0\nfilelock\nav>=16.0.0\ncomfy-kitchen==0.2.22\ncomfy-aimdo==0.4.10\nrequests\nsimpleeval>=1.0.0\nblake3\n\n#non essential dependencies:\nkornia>=0.7.1\nspandrel\npydantic~=2.0\npydantic-settings~=2.0\nPyOpenGL>=3.1.8\ncomfy-angle\n",
+  "managerRequirementsText": "comfyui_manager==4.2.2\n",
+  "constraints": []
+}

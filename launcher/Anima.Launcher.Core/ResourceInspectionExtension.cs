@@ -13,6 +13,7 @@ public static class ResourceInspectionExtension
 
     public static ExtensionInstallResult Ensure(LauncherConfig config, bool running)
     {
+        if (config.ReadOnlyConnection) return new(false, false, LauncherConfig.ReadOnlyMaintenanceNotice);
         if (string.IsNullOrWhiteSpace(config.ComfyRoot) || !File.Exists(Path.Combine(config.ComfyRoot, "main.py")))
             return new(false, false, "ComfyUI 目录尚未就绪，模型检查扩展未安装。");
         var source = Path.Combine(config.AppRoot, "anima_webui", "comfy_extension", "atelier_resources");

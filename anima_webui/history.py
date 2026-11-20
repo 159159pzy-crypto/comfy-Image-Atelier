@@ -664,6 +664,18 @@ class HistoryStore(StorageProtection):
     async def get_batch(self, batch_id: str) -> dict[str, Any]:
         return await self._call(self._get_batch, batch_id)
 
+    async def batch_result(self, batch_id: str) -> dict[str, Any]:
+        return await self._call(self._batch_result, batch_id)
+
+    def _batch_result(self, batch_id: str) -> dict[str, Any]:
+        batch = self._get_batch(batch_id)
+        images = self.connection.execute(
+            "SELECT id FROM images WHERE batch_id = ? AND file_type = 'output' ORDER BY sequence, id", (batch_id,)
+        )
+        return {key: batch[key] for key in ("id", "status", "completed", "total", "error")} | {
+            "image_ids": [row[0] for row in images]
+        }
+
     def _get_batch(self, batch_id: str) -> dict[str, Any]:
         row = self.connection.execute("SELECT * FROM batches WHERE id = ?", (batch_id,)).fetchone()
         if row is None:

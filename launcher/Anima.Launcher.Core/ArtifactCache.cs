@@ -86,7 +86,7 @@ public static class ArtifactCache
     {
         var destination = await PrepareAsync(runtime, artifact, ct);
         await downloads.Fetch(artifact.Id, DownloadSources.ArtifactCandidates(artifact, config), destination,
-            artifact.Size, artifact.Sha256, progress, ct);
+            artifact.Size, artifact.Sha256, progress, ct, NetworkPolicySnapshot.Capture(config));
         return destination;
     }
 

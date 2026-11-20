@@ -144,7 +144,7 @@ public sealed class DependencyProgressSession
         lock (sync)
         {
             active = false;
-            if (current is not null && (current.Status == DependencyProgressStatus.Running || status != DependencyProgressStatus.Complete))
+            if (current is { Status: DependencyProgressStatus.Running })
                 current = current with
                 {
                     Status = status, LastOutputAt = now,
@@ -165,7 +165,7 @@ public sealed record DependencyProgressPresentation(string Heading, string Detai
         var heading = value.Status switch
         {
             DependencyProgressStatus.Paused => "依赖处理已暂停",
-            DependencyProgressStatus.Failed => "依赖处理未完成",
+            DependencyProgressStatus.Failed => value.Detail,
             _ => value.Detail + (value.CurrentPackage.Length > 0 ? " · " + value.CurrentPackage : ""),
         };
         var details = new List<string>();

@@ -11,7 +11,8 @@ internal sealed partial class LauncherState
     private bool softwareExitPending;
     private bool softwareInitialized;
     private readonly SoftwareDownloadGate softwareDownloadGate = new();
-    private LauncherUpdates SoftwareUpdates => softwareUpdates ??= new(Program.StateDir, Environment.ProcessPath!, Program.Version, AppendLog);
+    private LauncherUpdates SoftwareUpdates => softwareUpdates ??= new(Program.StateDir, Environment.ProcessPath!, Program.Version, AppendLog,
+        networkPolicy: () => NetworkPolicySnapshot.Capture(Config));
 
     public event Action? SoftwareUpdateChanged;
     public event Action? SoftwareUpdateExitRequested;

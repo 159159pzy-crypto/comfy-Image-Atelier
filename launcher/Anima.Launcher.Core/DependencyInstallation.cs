@@ -134,7 +134,7 @@ public static class DependencyInstallation
         Directory.CreateDirectory(root);
         var buildConstraints = Path.Combine(root, "prepare-constraints.txt");
         File.WriteAllLines(buildConstraints, plan.Constraints);
-        env["PIP_CONSTRAINT"] = buildConstraints;
+        env["PIP_CONSTRAINT"] = new Uri(Path.GetFullPath(buildConstraints)).AbsoluteUri;
         string? editableDirectory = null;
         try
         {
@@ -341,17 +341,31 @@ public static class DependencyInstallation
                     throw new InvalidDataException("已准备依赖缺失或校验失败，请重新准备：" + wheel.Package.Name);
             // Other activity may consume space after preparation. Recheck the same
             // volumes before invoking an installer, without counting existing Python.
-            DependencyInstallationSpace.Validate(DependencyInstallationSpace.Calculate(runtimeRoot, config.Python, 0, prepared.ExpandedBytes), log: reporter.Log);
             reporter.Phase("verifying", "正在核对已完成依赖的文件完整性");
             var reusable = await InstalledPackagesAsync(config, plan, wheels, root, env, reporter, recordCompleted: false, ct);
             var pending = wheels.Where(wheel => !reusable.Contains(wheel.Package.Name)).ToArray();
+            static bool NeedsShortPath(string path) => OperatingSystem.IsWindows() && Path.GetFullPath(path).Length >= 260;
+            var shortCopyBytes = pending.Where(wheel => NeedsShortPath(wheel.Path)).Sum(wheel => wheel.Size);
+            DependencyInstallationSpace.Validate(DependencyInstallationSpace.Calculate(runtimeRoot, config.Python, shortCopyBytes, prepared.ExpandedBytes), log: reporter.Log);
+            var installInputs = Directory.CreateDirectory(Path.Combine(temporary.Path, "w-" + Guid.NewGuid().ToString("N")[..8])).FullName;
+            for (var i = 0; i < pending.Length; i++)
+            {
+                var wheel = pending[i];
+                if (!NeedsShortPath(wheel.Path)) continue;
+                var slot = Directory.CreateDirectory(Path.Combine(installInputs, i.ToString())).FullName;
+                var shortWheel = Path.Combine(slot, Path.GetFileName(wheel.Path));
+                if (NeedsShortPath(shortWheel)) throw new PathTooLongException("依赖文件名超过 Windows 安装路径上限：" + Path.GetFileName(wheel.Path));
+                File.Copy(wheel.Path, shortWheel);
+                // --require-hashes verifies the staged bytes before installation.
+                pending[i] = wheel with { Path = shortWheel };
+            }
             bridgeToApply = pending.SingleOrDefault(wheel => wheel.Package.Kind == WorkbenchDistribution.PackageKind);
             if (reusable.Count > 0) reporter.Log($"已核验并复用 {reusable.Count} 个完整依赖包，剩余 {pending.Length} 个需要安装。");
-            var requirements = Path.Combine(root, "local-wheels.txt");
+            var requirements = Path.Combine(installInputs, "local-wheels.txt");
             File.WriteAllLines(requirements, pending.Select(wheel => wheel.Package.Name + " @ " + new Uri(wheel.Path).AbsoluteUri + " --hash=sha256:" + wheel.Sha256));
-            var constraints = Path.Combine(root, "constraints.txt");
+            var constraints = Path.Combine(installInputs, "constraints.txt");
             File.WriteAllLines(constraints, plan.Constraints);
-            env["PIP_CONSTRAINT"] = constraints;
+            env["PIP_CONSTRAINT"] = new Uri(Path.GetFullPath(constraints)).AbsoluteUri;
             string? uv = null;
             try { if (pending.Length > 0) uv = await resolveUv(ct); }
             catch (Exception error) when (error is not OperationCanceledException)

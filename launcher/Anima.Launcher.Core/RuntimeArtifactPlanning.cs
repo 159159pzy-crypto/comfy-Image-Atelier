@@ -20,7 +20,7 @@ public static class RuntimeArtifactPlanning
     public static void ValidateIdentity(InstallationPlan plan)
     {
         if (plan.RuntimeArtifactsIdentity.Length > 0 && plan.RuntimeArtifactsIdentity != Identity)
-            throw new InvalidOperationException("已确认计划的 NVIDIA/放大运行资源与当前安装包不同。已保留原安装现场与下载，请重新检查安装计划后继续。");
+            throw new InstallationPlanChangedException("已确认计划的 NVIDIA/放大运行资源与当前安装包不同。已保留原安装现场与下载，请重新检查安装计划后继续。");
     }
 
     public static async Task<RuntimeArtifactHost> ProbeAsync(LauncherConfig config, RuntimeManifest runtime, bool fresh, CancellationToken ct)
@@ -181,7 +181,7 @@ print(json.dumps(dict(pythonTag='cp'+str(sys.version_info.major)+str(sys.version
         if (plan.RuntimeArtifactHost is not { } frozen) return;
         var current = await ProbeAsync(plan.CreateConfig(), runtime, plan.Fresh, ct);
         if (current.PythonTag != frozen.PythonTag || current.Generation != frozen.Generation || current.Gpu != frozen.Gpu)
-            throw new InvalidOperationException("检查后 Python ABI 或 NVIDIA 显卡发生变化。已保留安装现场，请重新检查下载计划。");
+            throw new InstallationPlanChangedException("检查后 Python ABI 或 NVIDIA 显卡发生变化。已保留安装现场，请重新检查下载计划。");
     }
 
     private static async Task<bool> HashMatches(string path, string sha256, CancellationToken ct)

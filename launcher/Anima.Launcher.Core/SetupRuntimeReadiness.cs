@@ -35,6 +35,17 @@ public sealed class SetupRuntimeReadiness : IDisposable
         var effectiveFeatures = (features ?? SetupFeatures.Resolve(false, selectedModelIds, config.SelectedProfile)).ToHashSet(StringComparer.Ordinal);
         var mandatoryFeatures = (requiredFeatures ?? []).ToHashSet(StringComparer.Ordinal);
         var selectedModels = models.Models.Where(model => selected.Contains(model.Id)).ToArray();
+        string DescribeFailure(string context, Exception error)
+        {
+            log?.Invoke(context + "：" + DiagnosticRedaction.Text(error.Message));
+            return error switch
+            {
+                OperationCanceledException or TimeoutException => context + "超时，请查看服务日志后重试。",
+                HttpRequestException => context + "失败，请确认服务连接并查看日志。",
+                _ when error.Message.Any(ch => ch is >= '\u4e00' and <= '\u9fff') => context + "：" + error.Message,
+                _ => context + "失败，具体原因已记录到服务日志。",
+            };
+        }
         void FeatureIssue(string feature, string message, string modelId)
         {
             var item = new SetupRuntimeIssue(feature, message, modelId);
@@ -44,11 +55,12 @@ public sealed class SetupRuntimeReadiness : IDisposable
         {
             try { return await ReadAsync(endpoint, ct); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (Exception ex) { required.Add(new(feature, "无法读取运行状态：" + ex.Message)); return null; }
+            catch (Exception ex) { required.Add(new(feature, DescribeFailure(feature + "运行状态检查", ex))); return null; }
         }
         log?.Invoke("正在检查环境连接与本次选择的功能…");
         var stats = await Read(config.ComfyUrl + "/system_stats", "ComfyUI");
-        if (stats is not null && !ServiceManager.SameRoot(stats.Value, config.ComfyRoot))
+        if (stats is not null && !(config.ReadOnlyConnection
+            ? await ServiceManager.CheckComfyReuseAsync(config, ct) : ServiceManager.SameRoot(stats.Value, config.ComfyRoot)))
             required.Add(new("ComfyUI身份", "当前端口上的 ComfyUI 与本次安装目录不一致。"));
         var health = await Read(config.WebUrl + "/api/launcher-health", "工作台身份");
         if (health is not null && !ServiceManager.IsOurWebUi(health, config))
@@ -57,7 +69,7 @@ public sealed class SetupRuntimeReadiness : IDisposable
         if (status is not null && !LoraManagerClassificationClient.True(status.Value, "online"))
             required.Add(new("工作台连接", "工作台尚未连接本次 ComfyUI。"));
         var configuration = await Read(config.WebUrl + "/api/config", "随机数据");
-        if (configuration is not null) ValidateCatalog(configuration.Value, required);
+        if (configuration is not null) ValidateCatalog(configuration.Value, config.ReadOnlyConnection ? configurationIssues : required);
         var nodes = await Read(config.ComfyUrl + "/object_info", "节点");
         if (effectiveFeatures.Overlaps(["prompt-assistant", "tagger", "krea2", "seedvr2", "pixel_hires"]))
         {
@@ -135,9 +147,11 @@ public sealed class SetupRuntimeReadiness : IDisposable
                         _ => ""
                     };
                     var item = new SetupRuntimeIssue(module, message, modelId);
-                    if (mandatoryFeatures.Contains(feature)) required.Add(item);
+                    if (config.ReadOnlyConnection && module == "base") configurationIssues.Add(item);
+                    else if (mandatoryFeatures.Contains(feature)) required.Add(item);
                     else if (effectiveFeatures.Contains(feature)) FeatureIssue(feature, message, modelId);
                     else if (module == "base" && code is "missing" or "missing_model" or "unknown_compatibility" or "incompatible_model" or "ambiguous_model" or "ambiguous_path") configurationIssues.Add(item);
+                    else if (config.ReadOnlyConnection) configurationIssues.Add(item);
                     else required.Add(item);
                 }
                 foreach (var binding in expected)
@@ -154,7 +168,7 @@ public sealed class SetupRuntimeReadiness : IDisposable
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (Exception ex) { required.Add(new("资源检查", "无法检查实际兼容资源：" + ex.Message)); }
+        catch (Exception ex) { required.Add(new("资源检查", DescribeFailure("实际兼容资源检查", ex))); }
 
         // Only explicitly selected official downloads are verified against their catalog.
         // Compatible alternatives are never represented as a successful official download.
@@ -187,21 +201,20 @@ public sealed class SetupRuntimeReadiness : IDisposable
                         if (scanned.Single().Missing) optional.Add(new("模型完整性", model.Name + "：" + scanned.Single().State, id));
                     }
                     catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-                    catch (Exception ex) { optional.Add(new("模型完整性", model.Name + "：" + ex.Message, id)); }
+                    catch (Exception ex) { optional.Add(new("模型完整性", DescribeFailure(model.Name + "完整性检查", ex), id)); }
                 }
             }
         }
-        if (required.Count == 0)
+        if (required.Count == 0 && !config.ReadOnlyConnection)
         {
             try { await ModelMetadata.ConfirmPendingCoreAsync(config, http, ct, log); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (Exception ex) { configurationIssues.Add(new("模型分类", ex.Message)); }
+            catch (Exception ex) { configurationIssues.Add(new("模型分类", DescribeFailure("模型分类检查", ex))); }
         }
         return new(required.Distinct().ToArray(), optional.Distinct().ToArray())
         {
             ConfigurationIssues = configurationIssues.Distinct().ToArray(),
             PromptAssistantAvailable = nodes is { } catalog && catalog.TryGetProperty("PromptExpand", out _)
-                && catalog.TryGetProperty("ImageCaptionNode", out _)
         };
     }
 

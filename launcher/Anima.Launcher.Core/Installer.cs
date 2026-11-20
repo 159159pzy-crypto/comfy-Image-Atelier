@@ -44,7 +44,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         ["UV_HTTP_RETRIES"] = "1",
         ["GIT_HTTP_LOW_SPEED_LIMIT"] = "1024",
         ["GIT_HTTP_LOW_SPEED_TIME"] = "30",
-        ["PIP_CONSTRAINT"] = Path.Combine(config.ComfyRoot, ".anima-constraints.txt"),
+        ["PIP_CONSTRAINT"] = new Uri(Path.GetFullPath(Path.Combine(config.ComfyRoot, ".anima-constraints.txt"))).AbsoluteUri,
         ["COMFYUI_PATH"] = config.ComfyRoot,
         ["COMFYUI_MODEL_PATH"] = Path.Combine(config.ComfyRoot, "models"),
         ["GIT_CONFIG_COUNT"] = DownloadSources.GitCandidates("https://github.com/", config)[0] != "https://github.com/" ? "2" : "1",
@@ -78,7 +78,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             entry.ExtractToFile(path, true);
         }
     }
-    private async Task<string> Tool(string name, LauncherConfig config, CancellationToken ct)
+    internal async Task<string> Tool(string name, LauncherConfig config, CancellationToken ct)
     {
         var tool = manifest.Tools.Single(t => t.Id == name);
         var runtime = InstallationPlanner.ResolveRuntimeRoot(config, stateDir);
@@ -181,7 +181,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         if (!Path.TrimEndingDirectorySeparator(Path.GetFullPath(root)).Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)), StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException($"目录不是独立的受管理 Git 仓库：{path}");
         var head = (await Commands.Run(git!, ["rev-parse", "HEAD"], path, null, ct)).Trim();
-        if (head != repo.Commit) throw new IOException($"受管理仓库的版本已被手动更改：{path}。请导入为现有环境或另选空目录。");
+        if (head != repo.Commit) throw new InstallationLocalRepairException($"受管理仓库的版本已被手动更改：{path}\n计划提交 {repo.Commit}，当前提交 {head}。请先备份本地修改并恢复计划提交，或将当前版本作为现有环境接入。");
         var changes = await Commands.Run(git!, ["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=untracked"], path, null, ct);
         if (!string.IsNullOrWhiteSpace(changes))
         {
@@ -190,7 +190,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             else if (repo.Id == PromptAssistantCompatibility.NodeId && PromptAssistantCompatibility.IsOnlyCompatibilityChange(changes))
                 await PromptAssistantCompatibility.CheckOrApply(config, stateDir, path, false, ct);
             else
-                throw new IOException($"受管理仓库有源代码修改，已保留：{path}。请先备份处理后再继续安装。");
+                throw new InstallationLocalRepairException($"受管理仓库有源代码修改，已保留：{path}。请先备份处理后再继续安装。");
         }
         var submodules = await Commands.Run(git!, ["submodule", "status", "--recursive"], path, null, ct);
         if (submodules.Split('\n', StringSplitOptions.RemoveEmptyEntries).Any(line => line[0] != ' '))
@@ -317,8 +317,9 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
     public async Task RepairDependencies(LauncherConfig config, ComfyDependencySnapshot? dependencies, CancellationToken ct,
         IReadOnlyList<NodeInstallPlan>? nodeUpdates = null)
     {
+        config.RequireEnvironmentWrite();
         featureDependencyCheckpoint = false;
-        includeWorkbenchDependencies = true;
+        includeWorkbenchDependencies = !config.HasIsolatedWorkbench;
         installationDependenciesPath = null;
         config.Validate();
         _ = ComfyUpdateCoordinator.IndependentPythonDirectory(config);
@@ -350,6 +351,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
     public async Task<PreparedDependencyInstallation> PrepareComfyUpdateDependenciesAsync(LauncherConfig config,
         ComfyDependencySnapshot dependencies, CancellationToken ct)
     {
+        config.RequireEnvironmentWrite();
         config.Validate();
         _ = ComfyUpdateCoordinator.IndependentPythonDirectory(config);
         await new ComfyUpdateCoordinator(stateDir, git ?? "git.exe").EnsureStoppedAsync(config, ct);
@@ -366,6 +368,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
     /// <summary>Apply prepared core dependencies only; node installers, models and optional accelerators belong to explicit maintenance.</summary>
     public async Task InstallComfyUpdateDependenciesAsync(LauncherConfig config, PreparedDependencyInstallation prepared, CancellationToken ct)
     {
+        config.RequireEnvironmentWrite();
         config.Validate();
         _ = ComfyUpdateCoordinator.IndependentPythonDirectory(config);
         await new ComfyUpdateCoordinator(stateDir, git ?? "git.exe").EnsureStoppedAsync(config, ct);
@@ -424,8 +427,20 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         var reporter = new DependencyProgressReporter(PublishDependencyProgress, log);
         // Resolving and installing artifacts are substeps. Only the final runtime
         // validation below may complete the shared dependency stage.
-        void IntermediateProgress(DependencyProgress value) => PublishDependencyProgress(
+        void IntermediateProgress(DependencyProgress value) => reporter.Report(
             value.Status == DependencyProgressStatus.Complete ? value with { Status = DependencyProgressStatus.Running } : value);
+        try { await ResolveAndInstallDependencies(config, gpuPins, requiredManager, reporter, IntermediateProgress, ct); }
+        catch (OperationCanceledException) { reporter.Pause("依赖处理已暂停"); throw; }
+        catch (Exception error)
+        {
+            reporter.Fail("依赖处理失败：" + DiagnosticRedaction.Text(error.Message));
+            throw;
+        }
+    }
+
+    private async Task ResolveAndInstallDependencies(LauncherConfig config, string gpuPins, bool requiredManager,
+        DependencyProgressReporter reporter, Action<DependencyProgress> intermediateProgress, CancellationToken ct)
+    {
         var requirements = Path.Combine(config.ComfyRoot, "requirements.txt");
         var manager = Path.Combine(config.ComfyRoot, "manager_requirements.txt");
         if (!File.Exists(manager))
@@ -462,14 +477,14 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             {
                 activeDependencies = await ComfyDependencyResolver.ResolveAsync(config, activeDependencies,
                     Path.Combine(InstallationPlanner.ResolveRuntimeRoot(config, stateDir), "cache"), ct, log, nodes, Env(config), manifest.Sam2Commit,
-                    dependencyProgress: IntermediateProgress, includeWorkbench: includeWorkbenchDependencies);
+                    dependencyProgress: intermediateProgress, includeWorkbench: includeWorkbenchDependencies);
                 EnsureConstraints(config, gpuPins);
                 if (installationDependenciesPath is not null) JsonFile.Write(installationDependenciesPath, activeDependencies);
             }
             else log("此环境没有可验证的 Git 提交；使用现有源码依赖联合安装并保留 GPU 版本，不复用依赖快照。");
             if (activeDependencies is { PlanVersion: 1 } resolved)
                 await DependencyInstallation.InstallAsync(config, resolved, InstallationPlanner.ResolveRuntimeRoot(config, stateDir), downloads, Env(config),
-                    async token => uv ??= await Tool("uv", config, token), ct, log, IntermediateProgress);
+                    async token => uv ??= await Tool("uv", config, token), ct, log, intermediateProgress);
             else
             {
                 reporter.Phase("installing", "正在按原固定计划安装依赖（兼容模式）");
@@ -504,7 +519,11 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
                 if (!node.PreserveExisting && File.Exists(install) && !RuntimeDependencies.NodeReceiptMatches(complete, config, node.Directory, commit))
                 {
                     await ValidateClone(node.Repository, node.Directory, config, ct);
-                    await Commands.Run(config.Python, [install], node.Directory, log, ct, Env(config));
+                    try { await Commands.Run(config.Python, [install], node.Directory, log, ct, Env(config)); }
+                    catch (CommandFailureException error) when (error.Kind == ProcessFailureKind.DependencyConflict)
+                    {
+                        throw new InvalidOperationException($"节点 {node.Repository.Id} 与已确认的 Python 版本约束冲突：{ComfyDependencyResolver.ConflictDetail(error)}\n节点：{install}\n约束：{Path.Combine(config.ComfyRoot, ".anima-constraints.txt")}", error);
+                    }
                 }
                 JsonFile.Write(complete, RuntimeDependencies.CreateNodeReceipt(config, node.Directory, probe, commit));
             });
@@ -518,20 +537,13 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
             await action();
             return;
         }
-        DependencyPlans.ValidateEnvironment(activeDependencies, await DependencyPlans.InventoryAsync(config, CancellationToken.None), installed: true);
-        try { await action(); }
-        finally
-        {
-            // Child processes have already stopped, even when the user paused. Keep
-            // exact additions made by authorized installers so the fixed plan resumes.
-            var inventory = await DependencyPlans.InventoryAsync(config, CancellationToken.None);
-            activeDependencies = DependencyPlans.RecordAuthorizedAdditions(activeDependencies, inventory);
-            JsonFile.Write(installationDependenciesPath, activeDependencies);
-        }
+        await InstallationDependencyRecovery.CheckpointAsync(config, activeDependencies, installationDependenciesPath, action,
+            updated => activeDependencies = updated);
     }
 
     public async Task RepairOptionalDependencies(LauncherConfig config, CancellationToken ct)
     {
+        config.RequireEnvironmentWrite();
         _ = ComfyUpdateCoordinator.IndependentPythonDirectory(config);
         await new ComfyUpdateCoordinator(stateDir, git ?? "git.exe").EnsureStoppedAsync(config, ct);
         if (await ServiceManager.PortOpen(config.ComfyPort, ct) || OwnedComfyRunning())
@@ -625,6 +637,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
     }
     public async Task Install(LauncherConfig config, bool fresh, CancellationToken ct)
     {
+        config.RequireEnvironmentWrite();
         // Resolve ambiguous/incomplete Anima Tools installations before Python discovery
         // or preflight, preserving the established fail-fast contract of this entrypoint.
         var target = fresh && !string.IsNullOrWhiteSpace(config.InstallRoot) ? Path.Combine(config.InstallRoot, "ComfyUI") : config.ComfyRoot;
@@ -640,8 +653,10 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
     }
     public async Task<LauncherConfig> Install(InstallationPlan plan, CancellationToken ct)
     {
+        var config = plan.CreateConfig();
+        config.RequireEnvironmentWrite();
         featureDependencyCheckpoint = FeaturePreparation.IsFeaturePlan(plan);
-        includeWorkbenchDependencies = plan.WorkbenchDependencyContractVersion > 0;
+        includeWorkbenchDependencies = plan.WorkbenchDependencyContractVersion > 0 && !config.HasIsolatedWorkbench;
         installationDependenciesPath = null;
         featureScoped = plan.ResourcePolicyVersion > 0;
         OptionalFailures.Clear();
@@ -651,7 +666,7 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         plan = await RuntimeArtifactPlanning.PrepareAsync(plan, manifest, ct);
         await RuntimeArtifactPlanning.ValidateHostAsync(plan, manifest, ct);
         activeDependencies = plan.Dependencies;
-        var config = plan.CreateConfig();
+        config = plan.CreateConfig();
         var fresh = plan.Fresh;
         if (featureDependencyCheckpoint)
         {
@@ -665,15 +680,17 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         }
         else if (fresh && activeDependencies is not null)
         {
-            installationDependenciesPath = Path.Combine(stateDir, "install-dependency-plans",
-                Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(config.ComfyRoot).ToUpperInvariant()))).ToLowerInvariant(),
-                activeDependencies.ComfyCommit + ".json");
+            installationDependenciesPath = InstallationDependencyRecovery.CheckpointPath(config.ComfyRoot, activeDependencies.ComfyCommit, stateDir);
             if (File.Exists(installationDependenciesPath))
             {
                 var savedDependencies = JsonFile.Read<ComfyDependencySnapshot>(installationDependenciesPath);
-                if (savedDependencies.ComfyCommit != activeDependencies.ComfyCommit || savedDependencies.RequirementsText != activeDependencies.RequirementsText
-                    || savedDependencies.ManagerRequirementsText != activeDependencies.ManagerRequirementsText)
-                    throw new InvalidDataException("续装依赖计划与已确认的 ComfyUI 版本不同。");
+                InstallationDependencyRecovery.ValidateInputs(savedDependencies, activeDependencies);
+                if (plan.ReviewedDependencyAdditions is { } approval)
+                {
+                    savedDependencies = InstallationDependencyRecovery.Apply(savedDependencies, approval,
+                        await InstallationDependencyRecovery.CurrentEnvironment(config, savedDependencies, ct));
+                    JsonFile.Write(installationDependenciesPath, savedDependencies);
+                }
                 activeDependencies = savedDependencies;
             }
         }
@@ -688,6 +705,15 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
         if (await ServiceManager.PortOpen(config.ComfyPort, ct) || OwnedComfyRunning()) throw new IOException("安装依赖前请先停止此环境的 ComfyUI，避免运行过程中改动 Python 包。");
         var preflight = await InstallationPlanner.PreflightAsync(plan, ct);
         if (!preflight.CanInstall) throw new InvalidOperationException(string.Join(Environment.NewLine, preflight.Issues.Where(i => i.Blocking).Select(i => i.Message)));
+        if (!fresh && config.ExternalEnvironmentMode == "repair")
+        {
+            var backup = await ExternalRepairBackup.EnsureAsync(plan, nodePlans, preflight.Volumes, log, ct);
+            log("外部环境修复备份：" + backup);
+            // Copying the complete interpreter may take minutes. Recheck that nobody
+            // restarted the original environment before any installation writes.
+            await new ComfyUpdateCoordinator(stateDir, git ?? "git.exe").EnsureStoppedAsync(config, ct);
+            if (await ServiceManager.PortOpen(config.ComfyPort, ct)) throw new IOException("备份期间 ComfyUI 已启动。请停止服务后继续修复。");
+        }
         var runtimeDirectory = InstallationPlanner.ResolveRuntimeRoot(config, stateDir);
         Directory.CreateDirectory(runtimeDirectory);
         using var temporary = InstallationTemporaryDirectory.Enter(runtimeDirectory);
@@ -810,8 +836,11 @@ public sealed class Installer(string stateDir, RuntimeManifest manifest, Downloa
                         await ForbiddenVisionCompatibility.CheckOrApply(config, stateDir, face, true, ct);
                     if (group.Key is "nvidia" or "dlss")
                     {
-                        var native = await NvidiaRuntimePreparation.PrepareAsync(config, runtimeDirectory, downloads, log, progress, ct, [group.Key]);
-                        if (!native.Ready) throw new InvalidOperationException(native.Detail);
+                        await WithInstallationCheckpoint(config, async () =>
+                        {
+                            var native = await NvidiaRuntimePreparation.PrepareAsync(config, runtimeDirectory, downloads, log, progress, ct, [group.Key]);
+                            if (!native.Ready) throw new InvalidOperationException(native.Detail);
+                        });
                     }
                 }
                 catch (OperationCanceledException) { throw; }

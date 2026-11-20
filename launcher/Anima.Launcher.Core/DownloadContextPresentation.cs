@@ -9,7 +9,7 @@ public sealed record DownloadContextProgress(string OwnerId, string Title, Downl
 public static class DownloadContextPresentation
 {
     public static DownloadOwnerRecord? InstallationOwner(DownloadTaskDatabase snapshot, string environmentRoot) =>
-        snapshot.Owners.Where(owner => (owner.Kind is "install" or "setup") && SamePath(owner.EnvironmentRoot, environmentRoot))
+        snapshot.Owners.Where(owner => owner.SupersededBy is null && (owner.Kind is "install" or "setup") && SamePath(owner.EnvironmentRoot, environmentRoot))
             .OrderByDescending(owner => owner.Status is DownloadTaskStatus.Running or DownloadTaskStatus.Pausing)
             .ThenByDescending(owner => owner.UpdatedAt).FirstOrDefault();
 

@@ -136,6 +136,7 @@ internal sealed partial class LauncherState
     }
     private void RequireComfyRecoveryComplete()
     {
+        if (Config.ReadOnlyConnection) return;
         var view = ComfyUpdatePresentation.From(ComfyRecovery());
         if (view.RequiresRecovery) throw new InvalidOperationException(view.Message);
     }
@@ -171,7 +172,7 @@ internal sealed partial class LauncherState
         RequireComfyRecoveryComplete();
         var git = ComfyGit();
         SetComfyUpdateStatus("正在查询官方最新稳定版本…");
-        var releases = new ComfyReleases(resolveTag: (tag, token) => ComfyReleases.ResolveTagWithGit(git, tag, Program.StateDir, Config, token), config: Config);
+        using var releases = new ComfyReleases(resolveTag: (tag, token) => ComfyReleases.ResolveTagWithGit(git, tag, Program.StateDir, Config, token), config: Config);
         var release = await releases.LatestAsync(ct);
         var current = (await Commands.Run(git, ["rev-parse", "HEAD"], Config.ComfyRoot, null, ct, timeout: TimeSpan.FromSeconds(20))).Trim();
         if (current == release.Commit)
@@ -185,12 +186,13 @@ internal sealed partial class LauncherState
         var plan = new ComfyUpdatePlans(Program.StateDir).Save(Config, release, new(release.Commit, "", "", []));
         checkedComfyRelease = plan.Release; checkedComfyDependencies = plan.Dependencies; checkedComfyRoot = plan.Root;
         loadedComfyPlanIdentity = Config.ComfyRoot + "\n" + Config.Python;
-        SetComfyUpdateStatus($"发现稳定版 {release.Tag}。停止 ComfyUI 和工作台后点击「更新 ComfyUI」；只保存轻量恢复点。");
+        SetComfyUpdateStatus(Config.ReadOnlyConnection ? $"发现稳定版 {release.Tag}。" : $"发现稳定版 {release.Tag}。停止 ComfyUI 和工作台后点击「更新 ComfyUI」；只保存轻量恢复点。");
     }, operation: "check");
 
     public Task PrepareComfyUpdateAsync() => ApplyComfyUpdateAsync();
     public Task ApplyComfyUpdateAsync() => RunComfyTaskAsync(async ct =>
     {
+        Config.RequireEnvironmentWrite();
         RestoreComfyUpdatePlan();
         RequireComfyRecoveryComplete();
         if (!ComfyHasUpdatePlan || checkedComfyRelease is null || checkedComfyDependencies is null) throw new InvalidOperationException("请先检查当前环境的稳定版本。");
@@ -203,7 +205,10 @@ internal sealed partial class LauncherState
         ComfyUpdateProbe.ValidateForRoot(config);
         var source = checkedComfyDependencies;
         if (source.RequirementsText.Length == 0)
-            source = await new ComfyReleases(config: config).DependenciesAsync(release, Program.Runtime, ct);
+        {
+            using var releases = new ComfyReleases(config: config, metadataDirectory: Path.Combine(Program.StateDir, "release-metadata"));
+            source = await releases.DependenciesAsync(release, Program.Runtime, ct);
+        }
         // Old plans are upgraded at the same commit, never silently selecting a new release.
         if (source.Resolved && (source.PlanVersion != 1 || source.WorkbenchDependencyContractVersion == 0))
             source = new(source.ComfyCommit, source.RequirementsText, source.ManagerRequirementsText, source.Constraints);
@@ -258,6 +263,7 @@ internal sealed partial class LauncherState
     }
     public Task RollbackComfyUpdateAsync() => RunComfyTaskAsync(async ct =>
     {
+        Config.RequireEnvironmentWrite();
         var coordinator = new ComfyUpdateCoordinator(Program.StateDir, ComfyGit(), AppendLog) { Progress = ComfyUpdatePhase };
         await coordinator.RollbackAsync(Config, ct, ValidateRestoredComfyAsync);
         new ComfyUpdatePlans(Program.StateDir).Clear(Config);
@@ -268,6 +274,7 @@ internal sealed partial class LauncherState
     });
     public Task RepairComfyUpdateDependenciesAsync() => RunComfyTaskAsync(async ct =>
     {
+        Config.RequireEnvironmentWrite();
         RequireRoot();
         var config = Config.Clone();
         var git = ComfyGit();
@@ -298,6 +305,7 @@ internal sealed partial class LauncherState
     // Explicit advanced maintenance retains optional-component behavior.
     public Task RepairComfyDependenciesAsync() => Run(async ct =>
     {
+        Config.RequireEnvironmentWrite();
         RequireRoot();
         RequireComfyRecoveryComplete();
         var installer = CreateInstaller(Program.Runtime);

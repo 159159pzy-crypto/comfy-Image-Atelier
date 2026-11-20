@@ -43,6 +43,8 @@ internal static class NodeUpdateTests
         File.WriteAllText(Path.Combine(source, "__init__.py"), "old node\n");
         File.WriteAllText(Path.Combine(source, "requirements.txt"), "fixture-package==1\n");
         var deepRelative = Path.Combine("nested-source-" + new string('n', 32), "nested-module-" + new string('m', 32), "deep.py");
+        while (Path.Combine(fixture, deepRelative).Length < 264)
+            deepRelative = Path.Combine("additional-nested-module", deepRelative);
         Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(source, deepRelative))!);
         File.WriteAllText(Path.Combine(source, deepRelative), "old deep node");
         var before = await Commit(source, "before");
@@ -115,6 +117,15 @@ internal static class NodeUpdateTests
                     NodeRequirementsIdentity = ComfyDependencyResolver.NodeRequirementsIdentity(requirements, runtime.Sam2Commit, map) };
             });
         var coordinator = Coordinator();
+        var readOnly = config.Clone();
+        readOnly.ExternalEnvironmentMode = "readOnly";
+        var indexFile = Path.Combine(node, ".git", "index");
+        var beforeQuery = File.GetLastWriteTimeUtc(indexFile);
+        var readOnlyPlan = await coordinator.CheckAsync(readOnly, runtime, default);
+        Check(readOnlyPlan.Entries.Count(entry => entry.CanUpdate) == 1 && !readOnlyPlan.CanApply && fetches.Count == 0
+            && dependencyCalls == 0 && beforeQuery == File.GetLastWriteTimeUtc(indexFile),
+            "read-only node inspection reports newer commits without fetching, staging dependencies or refreshing the external Git index");
+        resolves.Clear();
         var plan = await coordinator.CheckAsync(config, runtime, default);
         Check(plan.CanApply && plan.Entries.Single(entry => entry.CanUpdate).Directory == node, "only a clean independent Git node is eligible");
         Check(plan.Entries.Single(entry => entry.Name == "dirty-node").CanUpdate == false

@@ -11,7 +11,8 @@ public sealed record SetupImportReview(bool NeedsRepair, string[] MissingCoreMod
     public static async Task<SetupImportReview> InspectAsync(LauncherConfig config, RuntimeManifest manifest, CancellationToken ct, string? stateDir = null)
     {
         // Report interpreter compatibility before any TOML, dependency or model-path probes.
-        await WorkbenchDependencies.ValidateInterpreterAsync(config, ct);
+        if (config.ReadOnlyConnection) throw new InvalidOperationException("只读接入请检查正在运行的服务；补齐插件前请在向导中选择允许补齐。");
+        if (!config.HasIsolatedWorkbench) await WorkbenchDependencies.ValidateInterpreterAsync(config, ct);
         // Match the core imports verified after installation, without loading torch,
         // initializing a GPU, importing custom nodes, or requiring packaging/PyYAML.
         const string script = """
@@ -23,12 +24,24 @@ print(json.dumps([name for name in ('aiohttp', 'yaml', 'torch') if importlib.uti
             timeout: TimeSpan.FromSeconds(30));
         var missing = JsonSerializer.Deserialize<string[]>(output)
             ?? throw new InvalidDataException("无法读取导入环境的核心依赖状态。");
+        if (config.HasIsolatedWorkbench)
+        {
+            foreach (var module in new[] { "aiohttp", "yaml", "torch" }.Except(missing))
+            {
+                try { await Commands.Run(config.Python, ["-B", "-c", "import " + module], config.ComfyRoot, null, ct,
+                    timeout: TimeSpan.FromSeconds(45)); }
+                catch (Exception error) when (error is CommandFailureException or TimeoutException)
+                { throw new InvalidOperationException($"所选解释器无法加载 {module}。请先在原整合包修复该模块：{error.Message}", error); }
+            }
+        }
         var nodes = await Inventory.Nodes(config.ComfyRoot, manifest, null, ct);
         ct.ThrowIfCancellationRequested();
         var preparation = new List<string>();
         preparation.AddRange(nodes.Where(node => node.State == "缺失")
             .Select(node => "需要安装插件：" + node.Name + "（" + node.Path + "）"));
-        var dependencies = await WorkbenchDependencies.InspectAsync(config, manifest, ct);
+        var dependencyTarget = config.Clone();
+        if (config.HasIsolatedWorkbench) dependencyTarget.AppRoot = "";
+        var dependencies = await WorkbenchDependencies.InspectAsync(dependencyTarget, manifest, ct);
         preparation.AddRange(dependencies.Issues.Select(issue => "依赖" + (issue.State == "unknown" ? "尚未验证" : "需要补齐") + "：" + issue.Message + "（" + issue.Source + "）"));
         var runtimeRoot = InstallationPlanner.ResolveRuntimeRoot(config,
             stateDir ?? Path.Combine(Path.GetTempPath(), "AnimaLauncher", "import-review"));

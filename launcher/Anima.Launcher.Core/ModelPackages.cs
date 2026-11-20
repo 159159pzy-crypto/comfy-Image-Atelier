@@ -5,8 +5,6 @@ namespace Anima.Launcher.Core;
 /// <summary>A model package is published only after every locked file has passed SHA-256.</summary>
 public static class ModelPackages
 {
-    private static readonly ConcurrentDictionary<string, (long Length, long Write, long Created, string Sha)> verified = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly ConcurrentDictionary<string, (long Length, long Write, long Created, string Sha)> invalid = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> publications = new(StringComparer.OrdinalIgnoreCase);
 
     public static string Staging(ModelItem model, string destination) => Safety.Under(
@@ -27,20 +25,8 @@ public static class ModelPackages
             var info = new FileInfo(path);
             if ((info.Attributes & FileAttributes.ReparsePoint) != 0) return "文件不完整";
             if (info.Length != file.Size) return "大小异常";
-            var stamp = (info.Length, info.LastWriteTimeUtc.Ticks, info.CreationTimeUtc.Ticks, file.Sha256);
-            // Timestamp equality is a listing cache hint, not proof of content identity.
-            // Rehash small configuration/code files, and bypass all hints at verified
-            // scans and publication boundaries, including same-size/same-time writes.
-            if (forceVerification || file.Size <= 1024 * 1024 || invalid.ContainsKey(path)
-                || !verified.TryGetValue(path, out var previous) || previous != stamp)
-            {
-                if (!await Downloads.Verify(path, file.Size, file.Sha256, ct))
-                { verified.TryRemove(path, out _); invalid[path] = stamp; return "哈希异常"; }
-                info.Refresh();
-                if (stamp != (info.Length, info.LastWriteTimeUtc.Ticks, info.CreationTimeUtc.Ticks, file.Sha256)) return "文件不完整";
-                verified[path] = stamp;
-                invalid.TryRemove(path, out _);
-            }
+            var result = await ModelFileVerification.CheckAsync(info, file.Size, file.Sha256, forceVerification, ct);
+            if (result != "已校验") return result;
         }
         return "已校验";
     }
@@ -56,9 +42,8 @@ public static class ModelPackages
         {
             if (!File.Exists(path)) return false;
             var info = new FileInfo(path);
-            var stamp = (info.Length, info.LastWriteTimeUtc.Ticks, info.CreationTimeUtc.Ticks, file.Sha256);
             return (info.Attributes & FileAttributes.ReparsePoint) == 0 && info.Length == file.Size
-                && (!invalid.TryGetValue(path, out var rejected) || rejected != stamp);
+                && ModelFileVerification.LastResult(info, file.Sha256) != "哈希异常";
         }
         var unexpectedArchitecture = model.Category == "wd_taggers" && new[] { "timm_arch.py", "preprocess.json" }
             .Any(name => File.Exists(Path.Combine(destination, name)) && !model.Files.Any(file => file.Path == name));
@@ -76,6 +61,7 @@ public static class ModelPackages
     public static async Task Fetch(Downloads downloads, ModelItem model, string destination, LauncherConfig config,
         IProgress<DownloadProgress>? progress, CancellationToken ct)
     {
+        config.RequireEnvironmentWrite();
         if (!model.IsPackage || !model.CanDownload || string.IsNullOrWhiteSpace(destination))
             throw new InvalidDataException("模型包或目标目录尚未确认，请重新扫描。");
         DownloadTaskIdentity.ValidateModel(new(model, destination));
@@ -127,7 +113,8 @@ public static class ModelPackages
                         progress?.Report(value with { Name = model.Name, Received = received.Values.Sum(), Total = model.Size });
                     }
                 });
-                await downloads.Fetch(model.Name, DownloadSources.ModelCandidates(file, config), target, file.Size, file.Sha256, aggregate, token);
+                await downloads.Fetch(model.Name, DownloadSources.ModelCandidates(file, config), target, file.Size, file.Sha256, aggregate, token,
+                    NetworkPolicySnapshot.Capture(config));
                 lock (gate) received[file.Path] = file.Size;
             }
             catch { siblings.Cancel(); throw; }

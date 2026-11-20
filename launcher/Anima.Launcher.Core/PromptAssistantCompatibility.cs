@@ -37,6 +37,7 @@ public static class PromptAssistantCompatibility
 
     public static async Task CheckOrApply(LauncherConfig config, string stateDir, string pluginDirectory, bool apply, CancellationToken ct)
     {
+        if (apply) config.RequireEnvironmentWrite();
         var assembly = typeof(PromptAssistantCompatibility).Assembly;
         using var resource = assembly.GetManifestResourceStream("Anima.Launcher.Core.patch_prompt_assistant.py")
             ?? throw new InvalidOperationException("启动器缺少提示词助手兼容脚本，请重新构建完整发布包。");
@@ -49,7 +50,7 @@ public static class PromptAssistantCompatibility
         if (!File.Exists(path)) await File.WriteAllTextAsync(path, script, new UTF8Encoding(false), ct);
         try
         {
-            await Commands.Run(config.Python, [path, "--root", pluginDirectory, apply ? "--apply" : "--check"],
+            await Commands.Run(config.Python, ["-B", path, "--root", pluginDirectory, apply ? "--apply" : "--check"],
                 config.ComfyRoot, null, ct, timeout: TimeSpan.FromSeconds(30));
         }
         catch (InvalidOperationException)

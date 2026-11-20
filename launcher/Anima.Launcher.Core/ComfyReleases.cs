@@ -1,4 +1,6 @@
 using System.Net;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -26,13 +28,37 @@ public sealed record ComfyDependencySnapshot(string ComfyCommit, string Requirem
 }
 
 /// <summary>Resolve the official stable release once; all later downloads use its immutable commit.</summary>
-public sealed class ComfyReleases(HttpClient? client = null, Func<string, CancellationToken, Task<string>>? resolveTag = null, LauncherConfig? config = null)
+public sealed class ComfyReleases(HttpClient? client = null, Func<string, CancellationToken, Task<string>>? resolveTag = null, LauncherConfig? config = null,
+    string? metadataDirectory = null) : IDisposable
 {
-    private static readonly HttpClient Shared = new(NetworkPolicy.HttpHandler(allowAutoRedirect: true)) { Timeout = TimeSpan.FromSeconds(35) };
-    private readonly HttpClient http = client ?? Shared;
+    private readonly HttpClient http = client ?? new HttpClient(NetworkPolicySnapshot.Capture(config).CreateHttpHandler(true)) { Timeout = TimeSpan.FromSeconds(35) };
+    public void Dispose() { if (client is null) http.Dispose(); }
     public const string RepositoryUrl = "https://github.com/Comfy-Org/ComfyUI.git";
     private const string Api = "https://api.github.com/repos/Comfy-Org/ComfyUI";
+    private sealed record CachedRequirements(string Commit, string FileName, string Sha256, string Content);
+    internal static bool MetadataUnavailable(Exception ex, CancellationToken ct) => !ct.IsCancellationRequested && ex switch
+    {
+        HttpRequestException httpError => httpError.StatusCode is null or HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests
+            || (int)httpError.StatusCode >= 500,
+        TimeoutException or OperationCanceledException => true,
+        CommandFailureException command => command.Kind is ProcessFailureKind.Transport or ProcessFailureKind.Timeout
+            or ProcessFailureKind.RateLimited or ProcessFailureKind.ServerUnavailable,
+        IOException { InnerException: { } inner } => MetadataUnavailable(inner, ct),
+        _ => false,
+    };
     public static bool StableTag(string tag) => Regex.IsMatch(tag, @"^v?\d+\.\d+\.\d+$");
+
+    internal static ComfyDependencySnapshot BundledDependencies(RuntimeManifest runtime)
+    {
+        using var stream = typeof(ComfyReleases).Assembly.GetManifestResourceStream("Anima.Launcher.Core.comfy-pinned-requirements.json")
+            ?? throw new InvalidDataException("缺少内嵌 ComfyUI 依赖清单。");
+        var snapshot = JsonSerializer.Deserialize<ComfyDependencySnapshot>(stream, JsonFile.Options);
+        if (snapshot?.ComfyCommit != runtime.Comfy.Commit || string.IsNullOrWhiteSpace(snapshot.RequirementsText)
+            || string.IsNullOrWhiteSpace(snapshot.ManagerRequirementsText))
+            throw new InvalidDataException("内嵌 ComfyUI 依赖与清单提交不匹配，请重新检查官方来源。");
+        return snapshot with { Constraints = runtime.PythonConstraints.Where(line => Regex.IsMatch(line,
+            @"^(torch|torchvision|torchaudio)==", RegexOptions.IgnoreCase)).ToArray() };
+    }
 
     private async Task<HttpResponseMessage> Get(string url, CancellationToken ct)
     {
@@ -104,22 +130,50 @@ public sealed class ComfyReleases(HttpClient? client = null, Func<string, Cancel
         async Task<string> Read(string file)
         {
             var url = "https://raw.githubusercontent.com/Comfy-Org/ComfyUI/" + release.Commit + "/" + file;
-            Exception? last = null;
-            // Requirements are executable installation instructions, not a hash-locked
-            // binary. Read their snapshot from the official origin only.
-            foreach (var source in new[] { url })
+            var cache = metadataDirectory is null ? null : Path.Combine(metadataDirectory, release.Commit, file + ".json");
+            static string Validate(string content)
+            {
+                if (string.IsNullOrWhiteSpace(content) || content.Length > 262144 || content.TrimStart().StartsWith('<'))
+                    throw new InvalidDataException("官方依赖文件为空或格式无效。");
+                return content;
+            }
+            if (cache is not null && File.Exists(cache))
             {
                 try
                 {
-                    using var response = await Get(source, ct);
-                    response.EnsureSuccessStatusCode();
-                    var content = await response.Content.ReadAsStringAsync(ct);
-                    if (string.IsNullOrWhiteSpace(content) || content.Length > 262144 || content.TrimStart().StartsWith('<')) throw new InvalidDataException("官方依赖文件为空或格式无效。");
-                    return content;
+                    var cached = JsonFile.Read<CachedRequirements>(cache);
+                    if (cached.Commit == release.Commit && cached.FileName == file && cached.Content is not null &&
+                        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(cached.Content))) == cached.Sha256)
+                        return Validate(cached.Content);
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException) { last = ex; }
+                catch (Exception ex) when (ex is JsonException or IOException or InvalidDataException) { }
             }
-            throw new IOException("读取固定版本依赖失败：" + file, last);
+            string content;
+            try
+            {
+                using var response = await Get(url, ct);
+                response.EnsureSuccessStatusCode();
+                content = Validate(await response.Content.ReadAsStringAsync(ct));
+            }
+            catch (Exception ex) when (MetadataUnavailable(ex, ct))
+            {
+                using var response = await Get(Api + "/contents/" + file + "?ref=" + release.Commit, ct);
+                response.EnsureSuccessStatusCode();
+                using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+                var root = document.RootElement;
+                if (root.GetProperty("encoding").GetString() != "base64" || root.GetProperty("path").GetString() != file)
+                    throw new InvalidDataException("官方依赖文件身份不符：" + file);
+                content = Validate(System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(root.GetProperty("content").GetString()!)));
+            }
+            if (cache is not null)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(cache)!);
+                var temp = cache + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                var cached = new CachedRequirements(release.Commit, file, Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))), content);
+                try { await File.WriteAllTextAsync(temp, JsonSerializer.Serialize(cached, JsonFile.Options), ct); File.Move(temp, cache, true); }
+                finally { File.Delete(temp); }
+            }
+            return content;
         }
         var requirements = await Read("requirements.txt");
         var manager = await Read("manager_requirements.txt");
@@ -143,6 +197,7 @@ public sealed class ComfyReleases(HttpClient? client = null, Func<string, Cancel
                     ["GIT_CONFIG_NOSYSTEM"] = "1", ["GIT_CONFIG_SYSTEM"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null",
                     ["GIT_CONFIG_GLOBAL"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null", ["GIT_CONFIG_COUNT"] = "0",
                 };
+                NetworkPolicySnapshot.Capture(config).AddEnvironment(authorityEnvironment, new Uri(source));
                 var text = await Commands.Run(git, ["ls-remote", source, "refs/tags/" + tag, "refs/tags/" + tag + "^{}"], cwd, null, ct,
                     authorityEnvironment, timeout: TimeSpan.FromSeconds(45));
                 var lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries);

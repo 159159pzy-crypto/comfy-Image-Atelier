@@ -28,6 +28,8 @@ internal sealed partial class LauncherState : IDisposable
     private bool cancelDownloads;
     private bool upgradeOffered;
     private string? configWriteError;
+    private ExternalRepairBinding? stagedRepair;
+    public string ConfigurationNotice { get; private set; } = "";
     private Func<CancellationToken, Task>? retryAction;
     private Func<string>? retryCancellationMessage;
     private Func<bool>? retryAllowed;
@@ -79,7 +81,7 @@ internal sealed partial class LauncherState : IDisposable
         InitializeDownloadTasks();
         FreshInstallRequested = Config.InstallPending;
         Program.Log("配置已读取");
-        Services = new ServiceManager(Program.StateDir, AppendLog);
+        Services = new ServiceManager(Program.StateDir, AppendLog, Downloads);
         Services.RecoverOwned();
         InitializeSetup();
     }
@@ -96,10 +98,20 @@ internal sealed partial class LauncherState : IDisposable
                 var backup = configFile + ".corrupt-" + DateTime.Now.ToString("yyyyMMddHHmmssfff");
                 File.Copy(configFile, backup, false);
                 Program.Log("配置无法读取，已备份至 " + backup + "：" + ex.Message);
+                ConfigurationNotice = "配置需要修复，原文件已备份至 " + backup;
+                try
+                {
+                    var recovered = ConfigurationRecovery.Recover(File.ReadAllText(backup), out var defaults);
+                    if (defaults.Length > 0) ConfigurationNotice += "。已重置无效设置：" + string.Join("、", defaults);
+                    return recovered;
+                }
+                catch (Exception recovery) when (recovery is System.Text.Json.JsonException or InvalidDataException or InvalidOperationException or FormatException)
+                { ConfigurationNotice += "。请重新选择原有环境或恢复配置备份。"; }
             }
             catch (Exception backupError)
             {
                 configWriteError = "配置损坏且无法备份，暂不覆盖原文件：" + configFile + "。" + backupError.Message;
+                ConfigurationNotice = configWriteError;
                 Program.Log(configWriteError);
             }
             return new() { AppRoot = Program.AppRoot, DataDir = Path.Combine(Program.StateDir, "data") };
@@ -127,7 +139,7 @@ internal sealed partial class LauncherState : IDisposable
     public void Save()
     {
         if (configWriteError is not null) throw new IOException(configWriteError);
-        JsonFile.Write(configFile, WithSavedDownloadSettings(Config));
+        ExternalRepairBinding.SaveActive(configFile, WithSavedDownloadSettings(Config), stagedRepair);
     }
     public void Reloaded() { Config = WithSavedDownloadSettings(Config); FieldsReloaded?.Invoke(); }
     public void GoTo(int page) => NavigateRequested?.Invoke(page);
@@ -160,6 +172,7 @@ internal sealed partial class LauncherState : IDisposable
             // Carrying these across an import would override its cache configuration.
             next.ManagedComfy = newRoot.Length > 0 && File.Exists(Path.Combine(newRoot, ".anima-revision.json"));
             next.SetupComplete = false;
+            next.ExternalEnvironmentMode = !e.Fresh && newRoot.Length > 0 ? "readOnly" : null;
         }
         next.ComfyRoot = newRoot;
         next.Python = python;
@@ -167,6 +180,7 @@ internal sealed partial class LauncherState : IDisposable
         next.InstallPending = e.Fresh && chosen.Length > 0;
         if (e.Fresh && chosen.Length > 0)
         {
+            next.ExternalEnvironmentMode = null;
             next.InstallRoot = Path.GetFullPath(chosen);
             next.RuntimeRoot = Path.Combine(next.InstallRoot, "runtime");
             next.SelectedProfile = "anima";
@@ -209,7 +223,7 @@ internal sealed partial class LauncherState : IDisposable
     // --- Task gating ---
 
     public async Task Run(Func<CancellationToken, Task> action, bool applyDrafts = true, LauncherConfig? resumeConfig = null, bool resumeFresh = false, bool setupOperation = false,
-        Func<string>? cancellationMessage = null, Func<bool>? allowRetry = null)
+        Func<string>? cancellationMessage = null, Func<bool>? allowRetry = null, CancellationToken cancellationToken = default)
     {
         if (SetupActive && !setupOperation)
         {
@@ -223,7 +237,7 @@ internal sealed partial class LauncherState : IDisposable
             SetStatus("已有任务进行中，请先等待完成或暂停后再操作。");
             return;
         }
-        task = new CancellationTokenSource();
+        task = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         dependencySession.Begin();
         RequestPresentation(DisplayChange.Dependency);
         var dependencyOutcome = DependencyProgressStatus.Complete;
@@ -238,24 +252,37 @@ internal sealed partial class LauncherState : IDisposable
         ClearBatchProgress();
         BusyChanged?.Invoke(true);
         RequestPresentation(DisplayChange.Tasks);
+        var previousFresh = FreshInstallRequested;
+        OwnedProcess[] previousServices = [];
         try
         {
             using var cacheUse = await LauncherCache.AcquireUseAsync(Program.StateDir, task.Token);
-            if (resumeConfig is not null)
+            // A candidate external binding belongs to its onboarding record until both services have verified it.
+            var stagedConnection = setupOperation && resumeConfig?.ReadOnlyConnection == true;
+            if (resumeConfig is not null && !stagedConnection)
             {
+                if (setupOperation && ExternalRepairBinding.Begin(Config, resumeConfig) is { } binding)
+                {
+                    if (configWriteError is not null) throw new IOException(configWriteError);
+                    previousServices = Services.RunningOwned();
+                    stagedRepair = binding;
+                }
+                if (setupOperation && resumeConfig.ExternalEnvironmentMode == "repair") savedDownloadSettings = resumeConfig.Clone();
                 Config = WithSavedDownloadSettings(resumeConfig.Clone());
                 FreshInstallRequested = resumeFresh;
             }
-            else if (applyDrafts) ApplyPendingFields();
+            else if (applyDrafts && !stagedConnection) ApplyPendingFields();
             // Tasks own a snapshot. Pages only edit drafts until the next task.
             Config = Config.Clone();
-            retryConfig = Config.Clone();
+            var operationConfig = stagedConnection ? resumeConfig! : Config;
+            retryConfig = operationConfig.Clone();
             retryFresh = FreshInstallRequested;
             // The gate is held before awaiting a pause, so a second UI action cannot enter.
             foreach (var owner in DownloadTasks.Owners.Where(o => o.Kind == "models" && o.Status == DownloadTaskStatus.Running
-                && SamePath(o.EnvironmentRoot, Config.ComfyRoot)))
+                && SamePath(o.EnvironmentRoot, operationConfig.ComfyRoot)))
                 await DownloadTasks.PauseOwnerAsync(owner.Id);
-            using var environmentLease = await EnvironmentOperationLease.AcquireAsync(Config.ComfyRoot, true, task.Token);
+            var leaseRoot = operationConfig.ReadOnlyConnection ? Path.Combine(Program.StateDir, "external-connection") : operationConfig.ComfyRoot;
+            using var environmentLease = await EnvironmentOperationLease.AcquireAsync(leaseRoot, true, task.Token);
             await action(task.Token);
         }
         catch (OperationCanceledException) when (task.IsCancellationRequested)
@@ -283,9 +310,31 @@ internal sealed partial class LauncherState : IDisposable
             SetSetupInterruption(error.Message, false);
             TaskFailed?.Invoke(error);
         }
-        catch (Exception ex) { dependencyOutcome = DependencyProgressStatus.Failed; retryable = true; SetSetupInterruption(ex.Message, false); TaskFailed?.Invoke(ex); }
+        catch (Exception ex)
+        {
+            dependencyOutcome = DependencyProgressStatus.Failed;
+            retryable = ex is not (InstallationPlanChangedException or InstallationLocalRepairException or InvalidDataException);
+            SetSetupInterruption(ex.Message, false);
+            if (!retryable && SetupActive && Setup.Step == SetupStep.Installing)
+            {
+                Setup.SelectionNeedsReview = true;
+                PersistSetup();
+            }
+            TaskFailed?.Invoke(ex);
+        }
         finally
         {
+            if (stagedRepair is { Published: false } unverified)
+            {
+                try { Services.StopStartedServices(Services.RunningOwned().Except(previousServices).ToArray()); }
+                catch (Exception error) { AppendLog("清理本次验证启动的服务失败：" + error.Message); }
+                Config = unverified.Previous;
+                savedDownloadSettings = Config.Clone();
+                FreshInstallRequested = previousFresh;
+                SetupServicesReached = false;
+                SetupRequiredModelsReady = false;
+            }
+            stagedRepair = null;
             activeInstallationPlan = null;
             dependencySession.End(dependencyOutcome, DateTimeOffset.UtcNow);
             RequestPresentation(DisplayChange.Dependency);
@@ -353,10 +402,15 @@ internal sealed partial class LauncherState : IDisposable
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             try { gpu = (await Commands.Run(smi, ["--query-gpu=name,driver_version", "--format=csv,noheader"], Program.StateDir, null, timeout.Token)).Trim(); }
-            catch { gpu = "NVIDIA 检测失败，请检查驱动或使用导入方式"; }
+            catch (Exception ex)
+            {
+                AppendLog("NVIDIA 检测失败：" + ex.Message);
+                gpu = ex is OperationCanceledException or TimeoutException ? "NVIDIA 驱动检测超时，请重试。"
+                    : "NVIDIA 驱动检测失败，请查看日志中的 nvidia-smi 诊断，再重新检测。";
+            }
         }
         var text = $"Windows {Environment.OSVersion.Version} · {(Environment.Is64BitOperatingSystem ? "x64" : "x86")}\n{gpu}\nGit：{(Commands.Find("git.exe") is null ? "新建时自动准备" : "已检测到")} · .NET：已内置\n";
-        foreach (var drive in DriveInfo.GetDrives().Where(d => d.IsReady && d.DriveType == DriveType.Fixed))
+        foreach (var drive in DriveInfo.GetDrives().Where(d => d.DriveType == DriveType.Fixed && d.IsReady))
             text += $"{drive.Name} 可用 {drive.AvailableFreeSpace / 1073741824d:N1} GiB  ";
         UpdateSetupSystem(gpu);
         return text;
@@ -367,7 +421,7 @@ internal sealed partial class LauncherState : IDisposable
         FreshInstallRequested = false;
         // Called after ReadFields; normalize and rescan.
         Config.ComfyRoot = Inventory.NormalizeRoot(Config.ComfyRoot);
-        Config.Python = Inventory.FindPython(Config.ComfyRoot, Config.Python);
+        Config.Python = Inventory.FindPython(Config.ComfyRoot, Config.Python, Config.PythonExplicit);
         Save();
         Reloaded();
         await Scan(ct);
@@ -380,7 +434,7 @@ internal sealed partial class LauncherState : IDisposable
         if (!FreshInstallRequested)
         {
             Config.ComfyRoot = Inventory.NormalizeRoot(Config.ComfyRoot);
-            Config.Python = Inventory.FindPython(Config.ComfyRoot, Config.Python);
+            Config.Python = Inventory.FindPython(Config.ComfyRoot, Config.Python, Config.PythonExplicit);
         }
         var plan = await PlanInstallationAsync(FreshInstallRequested, ct);
         reviewedEnvironmentPlan = plan;
@@ -400,6 +454,8 @@ internal sealed partial class LauncherState : IDisposable
     private async Task<InstallationPlan> PlanInstallationAsync(bool fresh, CancellationToken ct)
     {
         var snapshot = Config.Clone();
+        if (snapshot.ReadOnlyConnection)
+            throw new InvalidOperationException("此环境使用只读连接。请打开导入向导并勾选「允许补齐此环境」，预览本次改动。");
         // Counting an existing environment can touch thousands of package files.
         // Keep it off the UI thread, then resolve ComfyUI's configured model roots.
         var plan = await Task.Run(() => InstallationPlanner.Create(snapshot, Program.Runtime, Program.StateDir, fresh, Program.Models, Program.ModelProfiles, []), ct);
@@ -420,6 +476,8 @@ internal sealed partial class LauncherState : IDisposable
 
     private async Task InstallEnvironmentAsync(CancellationToken ct, InstallationPlan? reviewedPlan = null, bool prepareModels = true)
     {
+        if (Config.ReadOnlyConnection || reviewedPlan?.CreateConfig().ReadOnlyConnection == true)
+            throw new InvalidOperationException("只读环境不能执行安装，请先在导入向导中预览并确认补齐计划。");
         RequireRoot();
         var fresh = FreshInstallRequested;
         if (fresh && Directory.Exists(Config.ComfyRoot) && File.Exists(Path.Combine(Config.ComfyRoot, "main.py")) && !File.Exists(Path.Combine(Config.ComfyRoot, ".anima-revision.json")))
@@ -427,7 +485,7 @@ internal sealed partial class LauncherState : IDisposable
         if (!fresh)
         {
             Config.ComfyRoot = Inventory.NormalizeRoot(Config.ComfyRoot);
-            Config.Python = Inventory.FindPython(Config.ComfyRoot, Config.Python);
+            Config.Python = Inventory.FindPython(Config.ComfyRoot, Config.Python, Config.PythonExplicit);
         }
         var plan = reviewedPlan ?? (reviewedEnvironmentPlan is { } reviewed && reviewed.Fresh == fresh
             && reviewed.ConfigurationJson == JsonSerializer.Serialize(Config, JsonFile.Options) ? reviewed : await PlanInstallationAsync(fresh, ct));
@@ -469,11 +527,6 @@ internal sealed partial class LauncherState : IDisposable
         Reloaded();
         if (prepareModels)
         {
-            if (SetupRouting.NeedsSupplement(plan, Program.Runtime, Program.Models, Program.ModelProfiles))
-            {
-                await SupplementReviewedSetupAsync(plan, ct);
-                return;
-            }
             await Scan(ct, true);
             await VerifySetupRuntimeAsync(plan.ModelIds.ToArray(), ct);
         }
@@ -500,7 +553,7 @@ internal sealed partial class LauncherState : IDisposable
     {
         RequireRoot();
         Config.ComfyRoot = Inventory.NormalizeRoot(Config.ComfyRoot);
-        Config.Python = Inventory.FindPython(Config.ComfyRoot, Config.Python);
+        Config.Python = Inventory.FindPython(Config.ComfyRoot, Config.Python, Config.PythonExplicit);
         SetStatus("正在读取 ComfyUI 有效模型路径…");
         var probe = await TaggerRuntime.Probe(Config, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
         var scan = await Task.Run(() => Inventory.Scan(probe, OperationModels, hashes, ct), ct);
@@ -545,24 +598,26 @@ internal sealed partial class LauncherState : IDisposable
         return token => DownloadModelIdsAsync(selectedIds, token);
     }
 
-    private async Task<List<ModelStatus>> ResolveModelIdsAsync(string[] modelIds, bool hashes, CancellationToken ct, LauncherConfig? configuration = null)
+    private async Task<List<ModelStatus>> ResolveModelIdsAsync(string[] modelIds, bool hashes, CancellationToken ct, LauncherConfig? configuration = null,
+        bool reuseVerified = false)
     {
         if (modelIds.Length == 0) return [];
         var config = configuration ?? Config;
         if (string.IsNullOrWhiteSpace(config.ComfyRoot)) throw new InvalidOperationException("请先选择 ComfyUI 环境。");
         config.ComfyRoot = Inventory.NormalizeRoot(config.ComfyRoot);
-        config.Python = Inventory.FindPython(config.ComfyRoot, config.Python);
+        config.Python = Inventory.FindPython(config.ComfyRoot, config.Python, config.PythonExplicit);
         var models = modelIds.Select(id => OperationModels.Models.SingleOrDefault(model => model.Id == id)
             ?? throw new InvalidDataException("模型清单中已不存在此资源，请重新扫描：" + id)).ToArray();
         var script = Path.Combine(Program.Assets, "probe_comfy.py");
-        var probe = ModelProbePolicy.NeedsTaggerRuntime(models)
+        var probe = config.ReadOnlyConnection || ModelProbePolicy.NeedsTaggerRuntime(models)
             ? await TaggerRuntime.Probe(config, script, ct)
             : await Inventory.Probe(config.ComfyRoot, config.Python, script, ct, config.ComfyArguments);
-        return await Task.Run(() => Inventory.Scan(probe, new ModelManifest(Program.Models.SchemaVersion, models), hashes, ct), ct);
+        return await Task.Run(() => Inventory.Scan(probe, new ModelManifest(Program.Models.SchemaVersion, models), hashes, ct, reuseVerified), ct);
     }
 
     private async Task DownloadModelIdsAsync(string[] modelIds, CancellationToken ct, bool refreshInventory = true)
     {
+        Config.RequireEnvironmentWrite();
         if (modelIds.Length == 0)
         {
             SetStatus("请勾选缺失模型。已有异常文件请先手动备份；未核实来源的模型请手动导入。");
@@ -589,12 +644,19 @@ internal sealed partial class LauncherState : IDisposable
         var dir = model.Model.IsPackage && model.FoundPath is not null ? model.FoundPath : Path.GetDirectoryName(model.FoundPath ?? model.Destination);
         if (string.IsNullOrWhiteSpace(dir)) throw new IOException("该模型没有可打开的目录。");
         ct.ThrowIfCancellationRequested();
-        Directory.CreateDirectory(dir);
+        EnsureModelFolder(Config, dir);
         Program.Open(dir);
         SetStatus(model.FoundPath is null ? "当前环境尚无此模型，已打开其下载目录。" : "已打开当前环境中的模型实际位置。");
     }
 
     public event Action<bool>? DownloadCancelable;
+
+    internal static void EnsureModelFolder(LauncherConfig config, string path)
+    {
+        if (Directory.Exists(path)) return;
+        config.RequireEnvironmentWrite();
+        Directory.CreateDirectory(path);
+    }
 
     public async Task OpenModelFolderAsync(string category, FrameworkElement? anchor = null)
     {
@@ -604,14 +666,14 @@ internal sealed partial class LauncherState : IDisposable
             if (string.IsNullOrWhiteSpace(Config.ComfyRoot)) { GoTo(1); SetStatus("先选择并检查 ComfyUI 目录，即可打开模型文件夹。"); return; }
             var snapshot = Config.Clone();
             snapshot.ComfyRoot = Inventory.NormalizeRoot(snapshot.ComfyRoot);
-            snapshot.Python = Inventory.FindPython(snapshot.ComfyRoot, snapshot.Python);
+            snapshot.Python = Inventory.FindPython(snapshot.ComfyRoot, snapshot.Python, snapshot.PythonExplicit);
             var probe = await TaggerRuntime.Probe(snapshot, Path.Combine(Program.Assets, "probe_comfy.py"), ct);
             var paths = (probe.Paths.GetValueOrDefault(category) ?? []).Where(p => !string.IsNullOrWhiteSpace(p))
                 .Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             if (paths.Length == 0) throw new IOException("此环境没有配置该类型的模型目录，请先检查 ComfyUI 路径配置。");
             void OpenFolder(string path)
             {
-                try { Directory.CreateDirectory(path); Program.Open(path); SetStatus("复制模型文件后点击重新扫描；运行中的 ComfyUI 可能需要重启以刷新列表。"); }
+                try { EnsureModelFolder(snapshot, path); Program.Open(path); SetStatus("已打开模型文件夹。复制文件后可重新扫描。"); }
                 catch (Exception ex) { TaskFailed?.Invoke(new IOException("无法打开模型目录：" + path + "\n" + ex.Message, ex)); }
             }
             if (paths.Length == 1 || anchor is null) { OpenFolder(paths[0]); return; }
@@ -635,7 +697,7 @@ internal sealed partial class LauncherState : IDisposable
     {
         RequireRoot();
         Config.ComfyRoot = Inventory.NormalizeRoot(Config.ComfyRoot);
-        Config.Python = Inventory.FindPython(Config.ComfyRoot, Config.Python);
+        Config.Python = Inventory.FindPython(Config.ComfyRoot, Config.Python, Config.PythonExplicit);
     }
 
     /// <summary>Start (or reuse) ComfyUI only.</summary>
@@ -715,7 +777,7 @@ internal sealed partial class LauncherState : IDisposable
         // them before the first-install/dev-mode early return, without rewriting
         // that plan or treating a missing path as an intentional source checkout.
         if (RuntimePolicies.EnsureWorkbenchDefaults(Config, Program.AppRoot, Path.Combine(Program.StateDir, "data"))) Save();
-        if (!Config.SetupComplete || DevAppRoot) return false;
+        if (stagedRepair is { Published: false } || !Config.SetupComplete || DevAppRoot) return false;
         var desired = Config.PinnedAppRoot.Length > 0 ? Config.PinnedAppRoot : Program.AppRoot;
         var health = await ServiceManager.PortOpen(Config.WebPort, ct) ? await ServiceManager.Json(Config.WebUrl + "/api/launcher-health", ct) : null;
         var runningDir = ServiceManager.IsWorkbenchHealth(health) && health!.Value.TryGetProperty("app_dir", out var dir) && dir.ValueKind == JsonValueKind.String ? dir.GetString()! : "";
@@ -813,9 +875,15 @@ internal sealed partial class LauncherState : IDisposable
         // A second conflict is common when both ports are taken, or a freed port is raced;
         // offer auto-assign up to three times instead of failing on the second conflict.
         await WithPortRecoveryAsync(async () => { await EnsureCurrentVersionAsync(ct); await StartWebUIAsync(ct); }, ct);
+        OpenReadyWorkbench();
+    }
+
+    private void OpenReadyWorkbench()
+    {
+        BrowserOpenPending = !OpenWorkbenchInBrowser(Config.WebUrl);
+        if (BrowserOpenPending) return;
         Config.SetupComplete = true;
         Save();
-        Program.Open(Config.WebUrl);
         SetStatus("服务已就绪：" + Config.WebUrl);
         if (Config.StartOnLaunch && !ForceShow) HideWindow?.Invoke();
     }
@@ -930,35 +998,22 @@ internal sealed partial class LauncherState : IDisposable
         }, applyDrafts: false);
     }
 
+    public Uri? TestImageUrl { get; private set; }
+    public bool BrowserOpenPending { get; private set; }
     public async Task TestGenerationAsync(CancellationToken ct)
     {
-        var queue = await ServiceManager.Json(Config.ComfyUrl + "/queue", ct) ?? throw new IOException("请先启动 ComfyUI 和工作台。");
-        if (queue.GetProperty("queue_running").GetArrayLength() > 0 || queue.GetProperty("queue_pending").GetArrayLength() > 0) throw new IOException("ComfyUI 正在处理其他任务，请等待空闲再测试。");
-        var active = await ServiceManager.Json(Config.WebUrl + "/api/batches/current", ct) ?? throw new IOException("请先启动工作台。");
-        if (active.TryGetProperty("batch", out var batch) && batch.ValueKind == JsonValueKind.Object && batch.TryGetProperty("status", out var s) && s.GetString() is "running" or "stopping") throw new IOException("工作台有正在执行的批次，请等待完成。");
-        using var client = new HttpClient(new HttpClientHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(30) };
-        var body = JsonSerializer.Serialize(new
-        {
-            count = 1,
-            width = 512,
-            height = 512,
-            steps = 4,
-            model_profile = "anima",
-            base_mode = "normal",
-            extra_prompt = "1girl, portrait, gentle smile, simple background, safe",
-            upscalers = new
-            {
-                latent = new { enabled = false, scale_by = 1.5 },
-                seedvr2 = new { enabled = false, model_name = "" },
-                nvidia = new { enabled = false, model_name = "" },
-                face_refine = new { enabled = false },
-            },
-        });
-        using var response = await client.PostAsync(Config.WebUrl + "/api/batches", new StringContent(body, System.Text.Encoding.UTF8, "application/json"), ct);
-        response.EnsureSuccessStatusCode();
-        SetStatus("已提交一张 512 × 512 测试图（4 步、无可选修复阶段），可在工作台查看进度。");
-        Program.Open(Config.WebUrl);
+        TestImageUrl = null;
+        TestImageUrl = await WorkbenchTestGeneration.RunAsync(Config, SetStatus, ct);
+        SetStatus("试生成成功，已保存一张 512 × 512 图片。");
+        if (!SetupActive) OpenWorkbenchInBrowser(TestImageUrl.ToString());
     }
+
+    private bool OpenWorkbenchInBrowser(string url) =>
+        WorkbenchBrowser.TryOpen(url, Program.Open, AppendLog, message =>
+        {
+            SetupNotice = message;
+            SetStatus(message);
+        });
 
     // --- Versioning ---
 

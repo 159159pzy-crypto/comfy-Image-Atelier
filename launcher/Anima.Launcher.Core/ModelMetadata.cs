@@ -37,6 +37,7 @@ public static class ModelMetadata
             log?.Invoke(status);
             return new(false, status, sidecar) { Queued = queued };
         }
+        if (config.ReadOnlyConnection) return Result("当前为只读连接，保留原有模型分类。");
         var profile = profiles.Get("anima");
         var model = models.Models.SingleOrDefault(m => m.Category == "diffusion_models" && m.RelativePath == profile.ModelName);
         if (model is null || !model.CanDownload || !model.Sha256.Equals(AnimaSha256, StringComparison.OrdinalIgnoreCase)
@@ -92,6 +93,7 @@ public static class ModelMetadata
     /// <summary>Call after ComfyUI starts, before WebUI starts. Pending work survives this call.</summary>
     public static async Task SynchronizePendingAsync(LauncherConfig config, CancellationToken ct, Action<string>? log = null)
     {
+        if (config.ReadOnlyConnection) return;
         using var client = new LoraManagerClassificationClient(config);
         await SynchronizePendingCoreAsync(config, client, VerifyFileAsync, ct, log);
     }
@@ -112,6 +114,7 @@ public static class ModelMetadata
     /// <summary>Call after WebUI starts. Only its authoritative classification clears a durable pending item.</summary>
     public static async Task ConfirmPendingAsync(LauncherConfig config, CancellationToken ct, Action<string>? log = null)
     {
+        if (config.ReadOnlyConnection) return;
         using var http = new HttpClient(new HttpClientHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(45) };
         await ConfirmPendingCoreAsync(config, http, ct, log);
     }

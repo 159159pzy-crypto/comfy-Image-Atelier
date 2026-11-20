@@ -12,7 +12,7 @@ internal sealed partial class LauncherState
     private readonly HashSet<TaskCompletionSource> modelInspections = [];
     public bool PreparingModelDownloads => preparingModelDownloads;
     private static string ModelContext(LauncherConfig config) => System.Text.Json.JsonSerializer.Serialize(new
-    { config.ComfyRoot, config.Python, config.ComfyArguments, config.SelectedProfile });
+    { config.ComfyRoot, config.Python, config.ComfyArguments, config.SelectedProfile, config.ExternalEnvironmentMode });
     private string CurrentModelRoot()
     {
         try { return Inventory.NormalizeRoot(Config.ComfyRoot); }
@@ -21,7 +21,7 @@ internal sealed partial class LauncherState
     private static void ResolveModelConfiguration(LauncherConfig configuration)
     {
         configuration.ComfyRoot = Inventory.NormalizeRoot(configuration.ComfyRoot);
-        configuration.Python = Inventory.FindPython(configuration.ComfyRoot, configuration.Python);
+        configuration.Python = Inventory.FindPython(configuration.ComfyRoot, configuration.Python, configuration.PythonExplicit);
     }
 
     public void RefreshModelDownloadRows(bool live = false)
@@ -61,7 +61,8 @@ internal sealed partial class LauncherState
             ResolveModelConfiguration(configuration);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(modelInspectionLifetime.Token);
             timeout.CancelAfter(TimeSpan.FromMinutes(hashes ? 30 : 2));
-            using var lease = await EnvironmentOperationLease.AcquireAsync(configuration.ComfyRoot, false, timeout.Token);
+            using var lease = await EnvironmentOperationLease.AcquireAsync(configuration.ReadOnlyConnection
+                ? Path.Combine(Program.StateDir, "external-connection") : configuration.ComfyRoot, false, timeout.Token);
             var scan = await ResolveModelIdsAsync(OperationModels.Models.Select(m => m.Id).ToArray(), hashes, timeout.Token, configuration);
             if (revision != modelScanRevision || context != ModelContext(Config) || Busy || shuttingDown) return;
             // Refresh existing objects where possible so a completion does not discard UI selection or scroll.

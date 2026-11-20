@@ -142,6 +142,8 @@ public sealed partial class EnvironmentPage : LauncherPage
         PauseInstallationButton.IsEnabled = progress.Status == DownloadTaskStatus.Running;
         ResumeInstallationButton.Visibility = progress.Status is DownloadTaskStatus.Queued or DownloadTaskStatus.Paused or DownloadTaskStatus.Failed or DownloadTaskStatus.NeedsReview ? Visibility.Visible : Visibility.Collapsed;
         ResumeInstallationButton.IsEnabled = !State.Busy;
+        NewSourceInstallationButton.Visibility = ResumeInstallationButton.Visibility;
+        NewSourceInstallationButton.IsEnabled = !State.Busy;
         ResumeInstallationButton.Content = progress.Status is DownloadTaskStatus.Failed or DownloadTaskStatus.NeedsReview ? "重试安装" : "继续安装";
     }
     private async void PauseInstallation_Click(object sender, RoutedEventArgs e)
@@ -156,6 +158,10 @@ public sealed partial class EnvironmentPage : LauncherPage
         await State.ResumeDownloadOwnerAsync(owner);
     }
     private void InstallationDetails_Click(object sender, RoutedEventArgs e) => Shell.OpenDownloads(1, displayedInstallationOwner);
+    private async void NewSourceInstallation_Click(object sender, RoutedEventArgs e)
+    {
+        if (displayedInstallationOwner is { } owner && !State.Busy) await State.ResumeDownloadOwnerAsync(owner, newSources: true);
+    }
     private void OnSummary(string text)
     {
         var reviewedHere = previewing && State.InstallPreviewReady;
@@ -173,19 +179,20 @@ public sealed partial class EnvironmentPage : LauncherPage
     private void UpdateComfyMaintenance()
     {
         State.RestoreComfyUpdatePlan();
+        var writable = !State.Config.ReadOnlyConnection;
         ComfyVersionStatus.Text = State.ComfyUpdateStatus;
         ComfyCurrentVersionText.Text = State.ComfyCurrentVersion;
         ComfyTargetVersionText.Text = State.ComfyTargetVersion;
         ComfyReleaseNotesButton.Visibility = State.ComfyReleaseUrl.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         CurrentEnvironmentText.Text = "ComfyUI：" + State.Config.ComfyRoot + "\nPython：" + State.Config.Python;
-        OptionalDependencyStatusText.Text = State.ComfyOptionalDependencyStatus;
+        OptionalDependencyStatusText.Text = writable ? State.ComfyOptionalDependencyStatus : LauncherConfig.ReadOnlyMaintenanceNotice;
         ComfyMaintenancePanel.IsEnabled = !State.Config.InstallPending && State.Config.ComfyRoot.Length > 0;
-        CheckComfyButton.IsEnabled = !State.Busy && !State.ComfyRecoveryPending;
-        UpdateComfyButton.IsEnabled = !State.Busy && State.ComfyUpdateReady;
-        RollbackComfyButton.IsEnabled = !State.Busy && State.ComfyCanRollback;
+        CheckComfyButton.IsEnabled = !State.Busy && (!writable || !State.ComfyRecoveryPending);
+        UpdateComfyButton.IsEnabled = writable && !State.Busy && State.ComfyUpdateReady;
+        RollbackComfyButton.IsEnabled = writable && !State.Busy && State.ComfyCanRollback;
         RepairUpdateDependenciesButton.Visibility = State.ComfyNeedsDependencyRepair ? Visibility.Visible : Visibility.Collapsed;
-        RepairUpdateDependenciesButton.IsEnabled = !State.Busy && State.ComfyNeedsDependencyRepair;
-        AdvancedComfyMaintenanceButton.IsEnabled = !State.Busy && !State.ComfyRecoveryPending;
+        RepairUpdateDependenciesButton.IsEnabled = writable && !State.Busy && State.ComfyNeedsDependencyRepair;
+        AdvancedComfyMaintenanceButton.IsEnabled = writable && !State.Busy && !State.ComfyRecoveryPending;
         StartUpdatedWorkbenchButton.IsEnabled = !State.Busy && !State.ComfyRecoveryPending;
         StartUpdatedWorkbenchButton.Visibility = State.ComfyCoreVerified && !State.ComfyRecoveryPending ? Visibility.Visible : Visibility.Collapsed;
     }
@@ -200,14 +207,15 @@ public sealed partial class EnvironmentPage : LauncherPage
     private void UpdateNodeMaintenance()
     {
         State.RestoreNodeUpdatePlan();
-        NodeVersionStatus.Text = State.ComfyRecoveryPending
+        var writable = !State.Config.ReadOnlyConnection;
+        NodeVersionStatus.Text = writable && State.ComfyRecoveryPending
             ? "ComfyUI 更新恢复尚未完成，请先恢复本体或修复更新依赖，再维护节点。"
             : State.NodeUpdateStatus;
         NodeUpdateList.ItemsSource = State.NodeUpdateRows;
-        NodeMaintenancePanel.IsEnabled = !State.Busy && !State.ComfyRecoveryPending && !State.Config.InstallPending && State.Config.ComfyRoot.Length > 0;
-        UpdateNodesButton.IsEnabled = State.NodesHaveUpdatePlan;
+        NodeMaintenancePanel.IsEnabled = !State.Busy && (!writable || !State.ComfyRecoveryPending) && !State.Config.InstallPending && State.Config.ComfyRoot.Length > 0;
+        UpdateNodesButton.IsEnabled = writable && State.NodesHaveUpdatePlan;
         UpdateNodesButton.Content = State.NodesUpdateReady ? "备份并更新节点" : "固定节点依赖";
-        RollbackNodesButton.IsEnabled = State.NodesCanRollback;
+        RollbackNodesButton.IsEnabled = writable && State.NodesCanRollback;
     }
     private async void CheckNodes_Click(object sender, RoutedEventArgs e) { SyncConfig(); await State.CheckNodeUpdatesAsync(); }
     private async void UpdateNodes_Click(object sender, RoutedEventArgs e) { SyncConfig(); await State.ApplyNodeUpdatesAsync(); }

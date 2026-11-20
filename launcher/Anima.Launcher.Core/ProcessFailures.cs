@@ -35,7 +35,9 @@ public sealed class CommandFailureException : InvalidOperationException
     private static string BuildMessage(string exe, int exit, string stdout, string stderr)
     {
         var detail = Tail(DiagnosticRedaction.Text(stderr.Length > 0 ? stderr : stdout).TrimEnd(), 1800);
-        return $"{Path.GetFileName(exe)} 失败，退出码 {exit}（{Classify(stdout + "\n" + stderr)}）。" + (detail.Length > 0 ? "末尾输出：" + detail : "请查看日志。");
+        var kind = Classify(stdout + "\n" + stderr);
+        var advice = kind == ProcessFailureKind.AccessDenied ? "请检查文件权限，以及 Windows 安全中心的保护历史记录是否有对应拦截。" : "";
+        return $"{Path.GetFileName(exe)} 失败，退出码 {exit}（{kind}）。" + advice + (detail.Length > 0 ? "末尾输出：" + detail : "请查看日志。");
     }
     private static string Tail(string text, int maximum) => text.Length <= maximum ? text : text[^maximum..];
     public static ProcessFailureKind Classify(string text)

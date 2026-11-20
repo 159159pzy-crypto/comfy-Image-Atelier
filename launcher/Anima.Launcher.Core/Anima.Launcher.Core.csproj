@@ -19,6 +19,7 @@
     <EmbeddedResource Include="../scripts/check_nvidia_runtime.py" LogicalName="Anima.Launcher.Core.check_nvidia_runtime.py" />
     <EmbeddedResource Include="../manifests/nvidia-runtime.json" LogicalName="Anima.Launcher.Core.nvidia-runtime.json" />
     <EmbeddedResource Include="../manifests/runtime-dependencies.json" LogicalName="Anima.Launcher.Core.runtime-dependencies.json" />
+    <EmbeddedResource Include="../manifests/comfy-pinned-requirements.json" LogicalName="Anima.Launcher.Core.comfy-pinned-requirements.json" />
     <EmbeddedResource Include="../manifests/download-tools.json" LogicalName="Anima.Launcher.Core.download-tools.json" />
     <EmbeddedResource Include="../manifests/python-runtime.json" LogicalName="Anima.Launcher.Core.python-runtime.json" />
     <EmbeddedResource Include="../../tools/download-tools/uv-f730454bf09019754e5e5abd71a8aa18683cb739cba0d9c720bac2e7c901160f.zip" LogicalName="Anima.Launcher.Core.Tools.uv.zip" Condition="Exists('../../tools/download-tools/uv-f730454bf09019754e5e5abd71a8aa18683cb739cba0d9c720bac2e7c901160f.zip')" />

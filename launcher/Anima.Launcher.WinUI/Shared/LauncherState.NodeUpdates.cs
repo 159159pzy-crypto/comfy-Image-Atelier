@@ -78,7 +78,8 @@ internal sealed partial class LauncherState
                 NodeUpdateStatus = "检查完成，没有可自动更新的节点。已是最新或跳过原因见下方。";
                 NodeUpdateChanged?.Invoke(); return;
             }
-            NodeUpdateStatus = frozen.CanApply
+            NodeUpdateStatus = Config.ReadOnlyConnection ? $"发现 {count} 个可更新的节点。"
+                : frozen.CanApply
                 ? $"已固定 {count} 个节点及完整依赖，可备份并更新。重新检查才会选择新的提交。"
                 : $"已固定 {count} 个节点的目标提交。{frozen.Note} 点击「固定节点依赖」继续原计划。";
             NodeUpdateChanged?.Invoke();
@@ -97,6 +98,7 @@ internal sealed partial class LauncherState
 
     public Task ApplyNodeUpdatesAsync() => Run(async ct =>
     {
+        Config.RequireEnvironmentWrite();
         RestoreNodeUpdatePlan();
         var coordinator = new NodeUpdateCoordinator(Program.StateDir, ComfyGit(), AppendLog, dependencyProgress: DependencyProgressObserver());
         if (!NodesUpdateReady)
@@ -152,6 +154,7 @@ internal sealed partial class LauncherState
 
     public Task RollbackNodeUpdatesAsync() => Run(async ct =>
     {
+        Config.RequireEnvironmentWrite();
         await new NodeUpdateCoordinator(Program.StateDir, ComfyGit(), AppendLog).RollbackAsync(Config, ct);
         Config = LoadConfig();
         checkedNodePlan = null;

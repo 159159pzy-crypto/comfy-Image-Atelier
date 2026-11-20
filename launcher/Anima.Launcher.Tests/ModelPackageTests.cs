@@ -13,6 +13,26 @@ internal static class ModelPackageTests
         async Task Fails(Func<Task> operation, string name)
         { try { await operation(); } catch { Check(true, name); return; } throw new Exception("Expected failure: " + name); }
         Safety.Validate(runtime, taggers);
+        var browseRoot = Directory.CreateDirectory(Path.Combine(work, "model-browsing")).FullName;
+        var browseProbe = new ProbeResult(browseRoot, "", new() { ["diffusion_models"] = [browseRoot] });
+        var contents = new byte[1024 * 1024 + 1];
+        var modelFile = Path.Combine(browseRoot, "cache-fixture.safetensors");
+        File.WriteAllBytes(modelFile, contents);
+        var originalTime = File.GetLastWriteTimeUtc(modelFile);
+        var fixture = new ModelItem("cache", "cache", "", "diffusion_models", Path.GetFileName(modelFile), [],
+            contents.Length, Convert.ToHexString(SHA256.HashData(contents)), [], "", "");
+        var browseManifest = new ModelManifest(1, [fixture]);
+        async Task<string> Inspect(bool hashes, bool reuse = false) =>
+            (await Inventory.Scan(browseProbe, browseManifest, hashes, default, reuse)).Single().State;
+        Check(await Inspect(false) == "已存在" && await Inspect(true) == "已校验", "a new file is marked verified only after hashing");
+        using (File.Open(modelFile, FileMode.Open, FileAccess.Read, FileShare.None))
+            Check(await Inspect(false) == "已校验" && await Inspect(true, true) == "已校验",
+                "listing and automatic readiness reuse the previous hash without reopening a large file");
+        contents[0] = 1;
+        File.WriteAllBytes(modelFile, contents);
+        File.SetLastWriteTimeUtc(modelFile, originalTime);
+        Check(await Inspect(true) == "哈希异常" && await Inspect(false) == "哈希异常",
+            "explicit integrity checking detects same-size same-time changes and updates the listing");
         Check(taggers.Models.Length == 8 && taggers.Models.All(model => model.IsPackage && model.CanDownload), "eight complete tagger model packages validate");
         Check(taggers.Models.Single(model => model.Recommended).Name == "pixai-tagger-v0.9-timm", "PixAI 0.9 recommendation does not auto-select models");
         Check(taggers.Models.All(model => model.Files.All(file => file.Urls.All(url => url.Contains("/resolve/" + model.Revision + "/")))), "all tagger downloads use immutable source revisions");

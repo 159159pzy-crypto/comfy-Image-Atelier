@@ -106,6 +106,7 @@ public sealed partial class ComfyUpdateCoordinator(string stateDir, string git, 
 
     public async Task ValidateEnvironmentAsync(LauncherConfig config, CancellationToken ct, bool clean = true)
     {
+        config.RequireEnvironmentWrite();
         config.Validate();
         var root = Full(config.ComfyRoot);
         if (!Directory.Exists(Path.Combine(root, ".git")) || !File.Exists(Path.Combine(root, "main.py")) || !File.Exists(config.Python))
@@ -127,7 +128,7 @@ public sealed partial class ComfyUpdateCoordinator(string stateDir, string git, 
     {
         if (inspectStopped is not null) { await inspectStopped(config, ct); return; }
         if (await ServiceManager.PortOpen(config.ComfyPort, ct) || await ServiceManager.PortOpen(config.WebPort, ct))
-            throw new InvalidOperationException("请先停止此环境的 ComfyUI 和工作台，再更新或回退；外部进程不会被自动停止。");
+            throw new InvalidOperationException($"环境端口 {config.ComfyPort} 或 {config.WebPort} 正在使用。请先确认生成队列已完成，关闭占用的服务后重新检查。");
         var processIds = new List<int>();
         foreach (var process in Process.GetProcessesByName("python").Concat(Process.GetProcessesByName("pythonw")))
         {
@@ -186,6 +187,7 @@ public sealed partial class ComfyUpdateCoordinator(string stateDir, string git, 
     public async Task RollbackAsync(LauncherConfig config, CancellationToken ct,
         Func<LauncherConfig, CancellationToken, Task>? validateRecovery = null)
     {
+        config.RequireEnvironmentWrite();
         var backup = Previous(config) ?? throw new InvalidOperationException("此环境没有可回退的更新备份。");
         if (backup.Status == "rolled-back") throw new InvalidOperationException("此备份已经回退。");
         var nodes = new NodeUpdateCoordinator(stateDir, git).Previous(config);

@@ -25,6 +25,51 @@ internal static class OnboardingTests
         var configured = new LauncherConfig { InstallRoot = environment, ComfyRoot = comfy, Python = python };
         var first = new LauncherConfig();
 
+        var directRoot = Path.Combine(state, "existing-comfy");
+        Directory.CreateDirectory(directRoot);
+        File.WriteAllText(Path.Combine(directRoot, "main.py"), "");
+        File.WriteAllText(Path.Combine(directRoot, "folder_paths.py"), "");
+        try
+        {
+            InstallationPlanner.Create(new() { InstallRoot = directRoot }, manifest, state, true);
+            throw new Exception("Nested installation was accepted.");
+        }
+        catch (InvalidDataException ex) { Check(ex.Message.Contains("导入") && !Directory.Exists(Path.Combine(directRoot, "ComfyUI")), "existing ComfyUI root is rejected before planning a nested installation"); }
+        Directory.CreateDirectory(Path.Combine(directRoot, "ComfyUI"));
+        File.WriteAllText(Path.Combine(directRoot, "ComfyUI", "main.py"), "");
+        Check(Inventory.NormalizeRoot(directRoot) == directRoot, "a selected environment takes precedence over a partial nested checkout");
+        if (OperatingSystem.IsWindows())
+        {
+            var mounted = DriveInfo.GetDrives().Select(drive => drive.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var absent = Enumerable.Range('D', 'Z' - 'D' + 1).Select(letter => $"{(char)letter}:\\").FirstOrDefault(volume => !mounted.Contains(volume));
+            if (absent is not null)
+                Check(Inventory.UnavailableEnvironmentVolumes(Path.Combine(absent, "comfy"), Path.Combine(absent, "runtime"), "", state).SequenceEqual([absent]), "offline environment drive is identified once without losing the saved directories");
+            try { Inventory.InstallLocation(@"\\localhost\unavailable-share"); throw new Exception("UNC installation was accepted."); }
+            catch (InvalidDataException ex) { Check(ex.Message.Contains("映射"), "UNC paths offer a mapped drive before probing an unavailable share"); }
+        }
+        try
+        {
+            Inventory.FindPython(comfy, Path.Combine(state, "missing-python.exe"), true);
+            throw new Exception("Explicit missing Python was silently replaced.");
+        }
+        catch (FileNotFoundException) { Check(Inventory.FindPython(comfy, "") == python, "only automatically selected interpreters can fall back"); }
+        var invalid = JsonSerializer.Serialize(new { comfyRoot = comfy, python, webPort = 22, selectedProfile = "missing", networkMode = "direct" });
+        var repairedConfig = ConfigurationRecovery.Recover(invalid, out var defaults);
+        Check(repairedConfig.ComfyRoot == comfy && repairedConfig.Python == python && repairedConfig.NetworkMode == "direct"
+            && repairedConfig.SelectedProfile == "anima" && repairedConfig.WebPort == 8190 && defaults.Length == 2, "field recovery keeps the original environment and valid settings");
+        var zipPath = Path.Combine(state, "payload.zip");
+        using (var archive = System.IO.Compression.ZipFile.Open(zipPath, System.IO.Compression.ZipArchiveMode.Create))
+        using (var writer = new StreamWriter(archive.CreateEntry("run.py").Open())) writer.Write("verified");
+        var snapshotRoot = Path.Combine(state, "snapshot");
+        var backups = Path.Combine(state, "backups");
+        BundledResourceRepair.EnsureWorkbench(zipPath, snapshotRoot, backups, _ => { });
+        var script = Path.Combine(snapshotRoot, "run.py");
+        Check(File.ReadAllText(script) == "verified", "missing embedded workbench member is restored from the package");
+        File.WriteAllText(script, "modified");
+        BundledResourceRepair.EnsureWorkbench(zipPath, snapshotRoot, backups, _ => { });
+        Check(File.ReadAllText(script) == "verified" && File.ReadAllText(Directory.GetFiles(backups).Single()) == "modified",
+            "corrupt embedded member is restored atomically and the previous bytes are recoverable");
+
         var legacyReceipt = JsonSerializer.Deserialize<SetupRecord>("{}", JsonFile.Options)!;
         Check(legacyReceipt.ConfigurationIssues.Length == 0 && !legacyReceipt.SelectionNeedsReview,
             "legacy onboarding receipts default to no remembered configuration issues or pending selection review");
@@ -47,14 +92,14 @@ internal static class OnboardingTests
         Check(restored.RuntimeVerified && restored.ConfigurationIssues.Length == 0,
             "only a new successful check with no configuration issues clears the previous result");
         foreach (var (status, expected) in new[] { (AssistantSetupStatus.Pending, "可选"), (AssistantSetupStatus.Skipped, "稍后配置"),
-                     (AssistantSetupStatus.Configured, "已配置"), (AssistantSetupStatus.Legacy, "沿用已有设置") })
+                     (AssistantSetupStatus.Configured, "已配置"), (AssistantSetupStatus.Legacy, "未检查") })
         {
             var display = SetupAssistantPresentation.Resolve(new() { AssistantStatus = status, AssistantAvailable = true });
             Check(display.Status == expected && display.Configured == (status == AssistantSetupStatus.Configured),
                 "assistant progress distinguishes " + status);
         }
         Check(SetupAssistantPresentation.Resolve(new() { AssistantAvailable = false, AssistantStatus = AssistantSetupStatus.Configured })
-                is { Status: "未安装", Configured: false }, "missing assistant cannot appear configured because of an old receipt");
+                is { Status: "暂不可用", Configured: false }, "missing assistant cannot appear configured because of an old receipt");
         var editedSelection = new SetupRecord { Draft = configured.Clone(), Fresh = false, InstallStarted = true,
             InstallFinished = true, SelectionNeedsReview = true, Step = SetupStep.Review };
         Check(SetupRouting.Resolve(configured, editedSelection) == SetupStep.Location,
@@ -193,6 +238,9 @@ internal static class OnboardingTests
         saved.Step = SetupStep.Installing;
         Check(SetupRouting.Resolve(first, saved) == SetupStep.Location, "unstarted installation screen cannot pretend an install has begun");
 
+        saved.Suspended = true;
+        Check(SetupRouting.Resolve(first, saved) is null, "deferred wizard restores the overview without claiming completion");
+        saved.Suspended = false;
         saved.InstallStarted = true;
         Check(SetupRouting.Resolve(first, saved) == SetupStep.Installing, "interrupted draft can recover even if active config was not saved");
         Check(SetupRouting.Resolve(configured, saved) == SetupStep.Installing, "matching interrupted installation enters recovery");
@@ -210,6 +258,24 @@ internal static class OnboardingTests
         saved.InstallStarted = saved.InstallFinished = true;
         Check(SetupRouting.Resolve(configured, saved) == SetupStep.Complete && !configured.SetupComplete,
             "installed but never launched wizard restores completion independently of SetupComplete");
+        var external = new SetupRecord { Draft = new() { ExternalEnvironmentMode = "readOnly" },
+            AssistantStatus = AssistantSetupStatus.Pending };
+        foreach (var present in new[] { false, true })
+        {
+            external.AssistantAvailable = present;
+            Check(SetupRouting.AfterModels(external) == SetupStep.Assistant,
+                "read-only imports show the optional assistant step, plugin present = " + present);
+        }
+        external.AssistantStatus = AssistantSetupStatus.Skipped;
+        Check(SetupRouting.AfterModels(external) == SetupStep.Complete, "read-only users can skip without writing plugin settings");
+        saved.Suspended = true;
+        Check(SetupRouting.Resolve(configured, saved) is null && !configured.SetupComplete,
+            "suspending failed completion restores overview and preserves the launch flag");
+        saved.Suspended = false;
+        saved.ModelsPending = saved.OptionalReviewAtCompletion = true;
+        Check(SetupRouting.Resolve(configured, saved) == SetupStep.Complete,
+            "optional issues discovered on the final page restore that page");
+        saved.ModelsPending = saved.OptionalReviewAtCompletion = false;
         saved.Step = SetupStep.Installing;
         Check(SetupRouting.Resolve(configured, saved) == SetupStep.Complete, "finished install receipt repairs an out-of-date installing step");
         saved.Step = SetupStep.Finished;
@@ -250,6 +316,28 @@ internal static class OnboardingTests
             ReviewedPlan = currentPlan with { ResourcePolicyVersion = SetupFeatures.PolicyVersion,
                 ModelIds = [], MandatoryModelIds = [], FrozenModels = [] },
         };
+        var restartDir = Directory.CreateDirectory(Path.Combine(state, "failed-completion-restart")).FullName;
+        var savedConfig = Path.Combine(restartDir, "launcher.json");
+        var savedSetup = Path.Combine(restartDir, "setup.json");
+        JsonFile.Write(savedSetup, importWithoutDownloads);
+        var failedLaunch = JsonFile.Read<SetupRecord>(savedSetup);
+        string browserNotice = "", browserLog = "";
+        var opened = WorkbenchBrowser.TryOpen(configured.WebUrl, _ =>
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Path.Combine(restartDir, "missing-browser.exe"))
+                { UseShellExecute = false }), text => browserLog = text, text => browserNotice = text);
+        Check(!opened && browserNotice.Contains(configured.WebUrl) && browserLog.Contains("打开浏览器失败"),
+            "browser process creation failure offers the ready workbench URL and records the native error");
+        failedLaunch.Suspended = true;
+        JsonFile.Write(savedSetup, failedLaunch);
+        JsonFile.Write(savedConfig, configured);
+        var restoredConfig = JsonFile.Read<LauncherConfig>(savedConfig);
+        failedLaunch = JsonFile.Read<SetupRecord>(savedSetup);
+        Check(SetupRouting.ResolveForRuntime(restoredConfig, failedLaunch, manifest, upgradeModels, upgradeProfiles).Step is null
+            && !restoredConfig.SetupComplete && failedLaunch.Step == SetupStep.Complete,
+            "after failed browser launch and return to overview, restart reads the retained unfinished setup from disk");
+        Check(SetupRouting.ResolveForRuntime(restoredConfig, failedLaunch, manifest, upgradeModels, upgradeProfiles, resume: true).Step == SetupStep.Complete
+            && !failedLaunch.Suspended && failedLaunch.ReviewedPlan?.ComfyRoot == configured.ComfyRoot,
+            "explicitly reopening the wizard after restart returns to completion for the same reviewed environment");
         Check(SetupCompletionResources.RequiredDownloads(importWithoutDownloads, null, upgradeModels, upgradeProfiles, "anima").Length == 0,
             "import completion with no selected model downloads does not invent mandatory generation models");
         var restoredImport = JsonSerializer.Deserialize<SetupRecord>(JsonSerializer.Serialize(importWithoutDownloads, JsonFile.Options), JsonFile.Options)!;
@@ -270,7 +358,7 @@ internal static class OnboardingTests
             upgradeReceipt.ReviewedPlan = legacyPlan;
             var before = JsonSerializer.Serialize(upgradeReceipt, JsonFile.Options);
             var decision = SetupRouting.ResolveForRuntime(configured, upgradeReceipt, manifest, upgradeModels, upgradeProfiles);
-            Check(decision.Step == step && !decision.RequiresSupplement && !decision.RequiresRepairReview
+            Check(decision.Step == step && !decision.RequiresRepairReview
                 && JsonSerializer.Serialize(upgradeReceipt, JsonFile.Options) == before,
                 $"legacy unfinished {step} retains its frozen plan without adding optional downloads");
             upgradeReceipt.ReviewedPlan = currentPlan;
@@ -290,11 +378,6 @@ internal static class OnboardingTests
         Check(SetupRouting.ResolveForRuntime(configured, noPlan, manifest, upgradeModels, upgradeProfiles).Step is null
             && !SetupRouting.OpenWizardFromEnvironmentPage(configured, false),
             "an explicitly finished legacy wizard stays closed while its maintenance entry can create a new repair plan");
-        Check(!SetupRouting.NeedsSupplement(currentPlan with { ResolvedRuntime = manifest with { Nodes = [] } }, manifest, upgradeModels, upgradeProfiles),
-            "new optional nodes never reopen a completed frozen plan");
-        Check(!SetupRouting.NeedsSupplement(legacyPlan with { RuntimeArtifactsIdentity = RuntimeArtifactPlanning.Identity }, manifest, upgradeModels, upgradeProfiles),
-            "a completed generation-only plan does not acquire optional SeedVR2");
-
         saved.SchemaVersion = 999;
         Check(SetupRouting.Resolve(configured, saved) is null && SetupRouting.Resolve(first, saved) == SetupStep.Welcome,
             "unknown onboarding schema is ignored without discarding current configuration");

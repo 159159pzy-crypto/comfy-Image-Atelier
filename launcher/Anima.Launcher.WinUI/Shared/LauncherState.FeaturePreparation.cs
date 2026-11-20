@@ -23,9 +23,13 @@ internal sealed partial class LauncherState
         }
     }
 
+    private bool SetupAssistantPreparationAllowed => SetupActive && Setup.InstallFinished && !Config.ReadOnlyConnection
+        && Setup.Step is SetupStep.Complete or SetupStep.Assistant;
+
     public async Task<InstallationPlan?> PreviewFeaturePreparationAsync(string[] choiceIds)
     {
-        if (Busy || SetupActive || preparingModelDownloads || shuttingDown) return null;
+        if (Busy || SetupActive && !(SetupAssistantPreparationAllowed && choiceIds.SequenceEqual(["prompt-assistant"]))
+            || preparingModelDownloads || shuttingDown) return null;
         var inspection = TrackModelInspection();
         preparingModelDownloads = true;
         featureReviewConfiguration = null;
@@ -33,14 +37,15 @@ internal sealed partial class LauncherState
         NotifyDownloads();
         try
         {
-            ApplyPendingFields();
+            if (!SetupActive) ApplyPendingFields();
             var snapshot = Config.Clone();
             var original = JsonSerializer.Serialize(Config, JsonFile.Options);
+            snapshot.RequireEnvironmentWrite();
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(modelInspectionLifetime.Token);
             timeout.CancelAfter(TimeSpan.FromMinutes(10));
             using var lease = await EnvironmentOperationLease.AcquireAsync(snapshot.ComfyRoot, false, timeout.Token);
             SetStatus("正在检查所选功能的模型、插件、运行文件与磁盘空间…");
-            await WorkbenchDependencies.ValidateInterpreterAsync(snapshot, timeout.Token);
+            if (!snapshot.HasIsolatedWorkbench) await WorkbenchDependencies.ValidateInterpreterAsync(snapshot, timeout.Token);
             var plan = await Task.Run(() => FeaturePreparation.Create(snapshot, Program.Runtime, Program.StateDir,
                 Program.Models, Program.ModelProfiles, choiceIds), timeout.Token);
             plan = await InstallationPlanner.ResolveStableAsync(plan, Program.Runtime, Program.StateDir, timeout.Token);
@@ -53,6 +58,7 @@ internal sealed partial class LauncherState
                 timeout.Token, Program.StateDir);
             plan = plan with { DependencyReviewIssues = review.PreparationIssues
                 .Concat(review.MissingCoreModules.Select(name => "缺少核心模块：" + name))
+                .Append(ExternalRepairBackup.Preview(plan)).Where(issue => issue.Length > 0)
                 .Select(DiagnosticRedaction.Text).Distinct(StringComparer.Ordinal).ToArray() };
             try { await RequireFeatureServicesStoppedAsync(plan.CreateConfig(), timeout.Token); }
             catch (Exception error) when (error is IOException or InvalidOperationException or TimeoutException)
@@ -63,7 +69,7 @@ internal sealed partial class LauncherState
             return plan;
         }
         catch (OperationCanceledException) when (shuttingDown) { return null; }
-        catch (Exception ex) { TaskFailed?.Invoke(ex); return null; }
+        catch (Exception ex) { if (SetupActive) { SetupError = ex.Message; NotifySetup(); } else TaskFailed?.Invoke(ex); return null; }
         finally
         {
             preparingModelDownloads = false;
@@ -75,7 +81,8 @@ internal sealed partial class LauncherState
 
     public async Task StartFeaturePreparationAsync(InstallationPlan plan)
     {
-        if (Busy || SetupActive || shuttingDown) return;
+        if (Busy || SetupActive && !(SetupAssistantPreparationAllowed && plan.RequestedChoices.SequenceEqual(["prompt-assistant"]))
+            || shuttingDown) return;
         if (FeaturePreparationPreflightIssue.Length > 0 || featureReviewConfiguration != JsonSerializer.Serialize(Config, JsonFile.Options))
         {
             TaskFailed?.Invoke(new InvalidOperationException("环境或下载设置已改变，请重新检查完整功能准备清单。"));
@@ -90,6 +97,12 @@ internal sealed partial class LauncherState
             plan.CreateConfig(), models, JsonSerializer.SerializeToElement(plan, JsonFile.Options));
         featureReviewConfiguration = null;
         await ResumeDownloadOwnerAsync(owner.Id);
+        if (SetupActive && DownloadTasks.Owners.FirstOrDefault(item => item.Id == owner.Id) is { } result
+            && result.Status != DownloadTaskStatus.Completed)
+        {
+            SetupError = result.Error.Length > 0 ? result.Error : "提示词助手准备尚未完成。可查看下载详情后继续。";
+            NotifySetup();
+        }
     }
 
     private async Task RequireFeatureServicesStoppedAsync(LauncherConfig config, CancellationToken ct)

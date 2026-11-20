@@ -117,6 +117,14 @@ internal static class DependencyProgressTests
         Check(session.Current is null && session.TryReport(next, running),
             "leaving a dependency stage clears its display without invalidating the same install coordinator");
         session.End(DependencyProgressStatus.Failed, clock.GetUtcNow());
+        reporter.Fail("依赖处理失败：共享库版本冲突");
+        var conflict = new CommandFailureException("pip", 1,
+            "The conflict is caused by:\n    plugin-a depends on demo==1\n    plugin-b depends on demo==2\n\nTo fix this...",
+            "ERROR: ResolutionImpossible");
+        Check(ComfyDependencyResolver.ConflictDetail(conflict).Contains("plugin-a") && ComfyDependencyResolver.ConflictDetail(conflict).Contains("plugin-b"),
+            "conflict diagnostics retain both package constraints from pip's stdout");
+        Check(DependencyProgressPresentation.Create(events[^1], clock.GetUtcNow()).Heading.Contains("共享库版本冲突"),
+            "failed dependency heading contains the reported cause");
         Check(session.Current?.Status == DependencyProgressStatus.Failed && !session.TryReport(next, completed),
             "a failed operation cannot be changed to success by a late callback");
 

@@ -1,0 +1,103 @@
+{
+  "date": "2026-11-20",
+  "launcherVersion": "1.7.0",
+  "sourceCommit": "602e74f1d1747bdd8a050d3c2358dc86f2a7bb60",
+  "sourceDirty": true,
+  "payloadSha256": "247832fc560aca5fb6bf94ae7fe1e058a894cc9340927c5cf909ec9b892cc0f5",
+  "executableSha256": "DB1DA0ED8CC28EA5F6A60BDDC2DCEC3B6F7DA06F6C461FC0335BD54ABC83C8B6",
+  "gpu": "cuda:0 NVIDIA GeForce RTX 4060 Laptop GPU : cudaMallocAsync",
+  "torch": "2.13.0+cu130",
+  "comfyCommit": "989d93d0d968e704c589ce0146bb18c77f6b50cc",
+  "profile": "anima",
+  "baseModel": "anima-base-v1.0.safetensors",
+  "clip": "qwen_3_06b_base.safetensors",
+  "vae": "qwen_image_vae.safetensors",
+  "steps": 4,
+  "width": 512,
+  "height": 512,
+  "comfyPort": 19992,
+  "workbenchPort": 19997,
+  "comfyOutput": "AnimaSingle/2026-11-20/c0922191f671/image_00001_.png",
+  "comfyPromptId": "c353f159-125d-4607-b6f8-339acb65f442",
+  "workbenchBatch": {
+    "id": "c0922191f671",
+    "status": "completed",
+    "completed": 1,
+    "total": 1,
+    "error": "",
+    "image_ids": [
+      1
+    ]
+  },
+  "image": "first-image.png",
+  "pngBytes": 243850,
+  "pngSha256": "CAECA1E54615F0EBE21AB2BB63DFBED009E33BB31EC2F7083D6EF4E7B5B93E88",
+  "identicalByteSources": [
+    "ComfyUI output",
+    "workbench image API",
+    "workbench image API after restart"
+  ],
+  "externalTreeEntriesComparedBeforeGeneration": 3441,
+  "browser": {
+    "browser": "msedge",
+    "httpStatus": 200,
+    "localPort": 19997,
+    "browserPid": 7500,
+    "time": "2026-11-20T10:46:14.2239958-08:00"
+  },
+  "restart": {
+    "pid": 33596,
+    "overviewAction": "管理安装环境",
+    "setupComplete": true,
+    "finishedStep": 5,
+    "externalEnvironmentMode": "readOnly",
+    "batch": {
+      "id": "c0922191f671",
+      "status": "completed",
+      "completed": 1,
+      "total": 1,
+      "error": "",
+      "image_ids": [
+        1
+      ]
+    },
+    "imageSHA256": "CAECA1E54615F0EBE21AB2BB63DFBED009E33BB31EC2F7083D6EF4E7B5B93E88",
+    "python": "E:\\CodexAcceptance\\onboarding-20261120-165179a1\\state-accepted\\workbench-runtime\\envs\\9142e923b11c66ed03c1\\Scripts\\python.exe"
+  },
+  "restartedExecutable": "E:\\CodexAcceptance\\onboarding-20261120-165179a1\\state-accepted\\launcher-updates\\1.7.0-db1da0ed8cc28ea5\\AnimaRandomStudio.exe",
+  "workbenchPython": "E:\\CodexAcceptance\\onboarding-20261120-165179a1\\state-accepted\\workbench-runtime\\envs\\9142e923b11c66ed03c1\\Scripts\\python.exe",
+  "comfyPython": "F:\\comfyui\\.venv\\Scripts\\python.exe",
+  "stateDirectory": "E:\\CodexAcceptance\\onboarding-20261120-165179a1\\state-accepted",
+  "workbenchDataDirectory": "E:\\CodexAcceptance\\onboarding-20261120-165179a1\\studio-accepted",
+  "actions": [
+    "2026-11-20T10:45:06.1349155-08:00 invoke SetupSecondary 我已有 ComfyUI",
+    "2026-11-20T10:45:06.2919907-08:00 set SetupRoot E:\\CodexAcceptance\\onboarding-20261120-165179a1\\ComfyUI",
+    "2026-11-20T10:45:06.3416910-08:00 set SetupImportPort 19992",
+    "2026-11-20T10:45:06.4587744-08:00 set SetupPython F:\\comfyui\\.venv\\Scripts\\python.exe",
+    "2026-11-20T10:45:06.5069570-08:00 invoke SetupPrimary 检查并继续",
+    "2026-11-20T10:45:07.4166379-08:00 invoke SetupPrimary 连接并准备工作台",
+    "2026-11-20T10:45:48.7701046-08:00 invoke SetupSecondary 稍后配置",
+    "2026-11-20T10:45:58.8241944-08:00 read-only import preserved paths and SHA-256 of all 3441 entries",
+    "2026-11-20T10:45:58.8512366-08:00 invoke SetupSmoke 试生成一张 512 × 512 图片",
+    "2026-11-20T10:46:09.6344843-08:00 试生成成功，图片已保存到工作台历史记录。",
+    "2026-11-20T10:46:09.7825490-08:00 invoke SetupPrimary 打开工作台",
+    "2026-11-20T10:46:09.7939258-08:00 requested workbench opening",
+    "2026-11-20T10:46:31.4423072-08:00 invoke  更多操作",
+    "2026-11-20T10:46:31.5265347-08:00 invoke  停止服务并退出",
+    "2026-11-20T10:46:31.8777439-08:00 launcher exited via its menu and external ComfyUI remained online",
+    "2026-11-20T10:46:47.8159166-08:00 invoke StartAllButton 启动并打开工作台",
+    "2026-11-20T10:46:56.5518393-08:00 restart verified overview, completed configuration, persisted batch and original PNG bytes",
+    "2026-11-20T10:47:46.6345186-08:00 invoke  更多操作",
+    "2026-11-20T10:47:46.6996897-08:00 invoke  停止服务并退出",
+    "2026-11-20T10:47:46.9712736-08:00 launcher exited via its menu and external ComfyUI remained online"
+  ],
+  "cleanup": {
+    "workbenchStoppedByLauncher": true,
+    "externalComfySurvivedLauncherExit": true,
+    "isolatedExternalProcessStopped": true,
+    "releasedPorts": [
+      19992,
+      19997
+    ]
+  }
+}

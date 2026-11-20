@@ -67,7 +67,7 @@ internal static class Program
     {
         BundledTools.VerifyEmbedded();
         _ = NvidiaRuntimePreparation.Catalog();
-        foreach (var resource in new[] { "patch_prompt_assistant.py", "patch_forbidden_vision.py", "check_nvidia_runtime.py" })
+        foreach (var resource in new[] { "patch_prompt_assistant.py", "patch_forbidden_vision.py", "check_nvidia_runtime.py", "comfy-pinned-requirements.json" })
         {
             using var embedded = typeof(Installer).Assembly.GetManifestResourceStream("Anima.Launcher.Core." + resource);
             if (embedded is null || embedded.Length == 0) throw new InvalidDataException("启动器包缺少安装资源：" + resource);
@@ -147,8 +147,14 @@ internal static class Program
         }
         using var gate = new Mutex(false, updates.Store.MutexName);
         bool acquired;
-        try { acquired = gate.WaitOne(TimeSpan.FromMinutes(4)); } catch (AbandonedMutexException) { acquired = true; }
-        if (!acquired) throw new IOException("更新正在进行，请稍后重新打开启动器。");
+        try { acquired = gate.WaitOne(TimeSpan.FromMilliseconds(500)); } catch (AbandonedMutexException) { acquired = true; }
+        if (!acquired)
+        {
+            const string message = "启动器正在完成更新。请稍后再打开，更新会继续运行。";
+            if (args.Contains("--diagnose")) Console.Error.WriteLine(message);
+            else NativeMessage(message, "正在更新", false);
+            return 1;
+        }
         try
         {
             var state = updates.Store.Load();
@@ -240,13 +246,21 @@ internal static class Program
 
     internal static void Log(string text)
     {
-        // No request URLs with signed queries or credential values are logged.
+        var line = DateTime.Now.ToString("HH:mm:ss ") + DiagnosticRedaction.Text(text) + Environment.NewLine;
         lock (LogLock)
         {
-            var dir = Path.Combine(StateDir, "logs");
-            Directory.CreateDirectory(dir);
-            var path = Path.Combine(dir, "launcher-" + DateTime.Now.ToString("yyyyMMdd") + ".log");
-            File.AppendAllText(path, DateTime.Now.ToString("HH:mm:ss ") + text + Environment.NewLine);
+            try
+            {
+                var dir = Path.Combine(StateDir, "logs");
+                Directory.CreateDirectory(dir);
+                File.AppendAllText(Path.Combine(dir, "launcher-" + DateTime.Now.ToString("yyyyMMdd") + ".log"), line);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+            {
+                try { File.AppendAllText(Path.Combine(Path.GetTempPath(), $"AnimaRandomStudio-{Environment.ProcessId}.log"), line); }
+                catch (Exception fallback) when (fallback is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+                { Debug.WriteLine(line); }
+            }
         }
     }
 
@@ -334,6 +348,17 @@ internal static class Program
         if (diagnose) AttachConsole(0xFFFFFFFF); // Attach to the parent console; EXE stays a GUI app.
         try
         {
+            try
+            {
+                Directory.CreateDirectory(StateDir);
+                using var probe = new FileStream(Path.Combine(StateDir, ".write-check-" + Guid.NewGuid().ToString("N")),
+                    FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.DeleteOnClose);
+                probe.WriteByte(1);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                throw new IOException("启动器状态目录无法写入，请检查可用空间和写入权限：" + StateDir, ex);
+            }
             using var updates = new LauncherUpdates(StateDir, Environment.ProcessPath!, Version, Log);
             if (args.Contains("--apply-update"))
                 return new LauncherUpdateCoordinator(updates, Log).Run(Argument(args, "--apply-update"), Argument(args, "--update-token"));
@@ -363,7 +388,6 @@ internal static class Program
                 if (!first) { WakeRunningInstance(); return 0; }
                 ShowSignal = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
             }
-            Directory.CreateDirectory(StateDir);
             Log("启动器初始化");
             // Diagnostics and update candidates still serialize resource preparation.
             // Ordinary duplicate launches have already signaled the existing window.
@@ -422,11 +446,14 @@ internal static class Program
         // Manifests and payload form one immutable bundle. Two builds sharing a
         // version number must never overwrite each other's running resources.
         using var identityHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var embeddedHashes = new Dictionary<string, string>();
         foreach (var resource in assembly.GetManifestResourceNames().Order(StringComparer.Ordinal))
         {
             using var source = assembly.GetManifestResourceStream(resource)!;
             identityHash.AppendData(System.Text.Encoding.UTF8.GetBytes(resource));
-            identityHash.AppendData(SHA256.HashData(source));
+            var hash = SHA256.HashData(source);
+            embeddedHashes.Add(resource, Convert.ToHexString(hash));
+            identityHash.AppendData(hash);
         }
         var bundleId = Convert.ToHexString(identityHash.GetHashAndReset())[..16].ToLowerInvariant();
         Assets = Path.Combine(StateDir, "versions", Version + "-" + bundleId);
@@ -437,6 +464,7 @@ internal static class Program
         catch (Exception error) when (error is IOException or InvalidDataException or JsonException or UnauthorizedAccessException)
         { Log("无法读取缓存维护索引，本次保留资源并跳过缓存维护登记：" + error.Message); }
         Directory.CreateDirectory(Assets);
+        var repairBackup = Path.Combine(StateDir, "resource-backups", bundleId);
         foreach (var resource in assembly.GetManifestResourceNames())
         {
             // The SDK embeds resources as "<rootNamespace>.<file>" (folder prefixes are dropped),
@@ -451,10 +479,9 @@ internal static class Program
                 : null;
             if (name is null) continue;
             var target = Path.Combine(Assets, name);
-            if (File.Exists(target)) continue;
-            using (var stream = assembly.GetManifestResourceStream(resource)!)
-            using (var file = File.Create(target + ".tmp")) stream.CopyTo(file);
-            File.Move(target + ".tmp", target, true);
+            if (repairSnapshot && File.Exists(target)) continue;
+            BundledResourceRepair.EnsureFile(target, embeddedHashes[resource],
+                () => assembly.GetManifestResourceStream(resource)!, repairBackup, Log);
         }
         Runtime = JsonFile.Read<RuntimeManifest>(Path.Combine(Assets, "launcher-manifest.json"));
         Models = JsonFile.Read<ModelManifest>(Path.Combine(Assets, "model-manifest.json"));
@@ -480,6 +507,7 @@ internal static class Program
                 Directory.Move(staging, bundled);
             }
             else if (repairSnapshot) RepairMissingWorkbench(zip, bundled);
+            else BundledResourceRepair.EnsureWorkbench(zip, bundled, repairBackup, Log);
             AppRoot = bundled;
         }
         else
@@ -545,7 +573,7 @@ internal static class Program
             return 2;
         }
         var root = Inventory.NormalizeRoot(target);
-        var python = Inventory.FindPython(root, Arg("--python"));
+        var python = Inventory.FindPython(root, Arg("--python"), args.Contains("--python"));
         var warnings = new List<string>();
         var configuration = new LauncherConfig();
         try { if (File.Exists(Path.Combine(StateDir, "launcher.json"))) configuration = JsonFile.Read<LauncherConfig>(Path.Combine(StateDir, "launcher.json")); }

@@ -24,6 +24,17 @@ public static class TaggerRuntime
 
     public static async Task<ProbeResult> Probe(LauncherConfig config, string script, CancellationToken ct)
     {
+        if (config.ReadOnlyConnection)
+        {
+            if (!await ServiceManager.CheckComfyReuseAsync(config, ct)) throw new IOException("请先从原整合包启动已连接的 ComfyUI 再扫描模型。");
+            var folders = await ServiceManager.Json(config.ComfyUrl + "/internal/folder_paths", ct);
+            if (folders is not { ValueKind: JsonValueKind.Object } catalog || !catalog.EnumerateObject().Any())
+                throw new IOException("此 ComfyUI 未提供有效的模型目录列表，请在原整合包中查看模型。");
+            var paths = catalog.EnumerateObject().Where(p => p.Value.ValueKind == JsonValueKind.Array).ToDictionary(p => p.Name,
+                p => p.Value.EnumerateArray().Where(v => v.ValueKind == JsonValueKind.String).Select(v => v.GetString()!)
+                    .Where(Path.IsPathFullyQualified).Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
+            return new(config.ComfyRoot, config.Python, paths);
+        }
         var probe = await Inventory.Probe(config.ComfyRoot, config.Python, script, ct, config.ComfyArguments);
         if (!await ServiceManager.PortOpen(config.ComfyPort, ct)) return probe;
         // A reused ComfyUI may have been started with different arguments. Its runtime is authoritative.
