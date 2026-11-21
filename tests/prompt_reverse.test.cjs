@@ -10,6 +10,7 @@ const tick = () => new Promise(setImmediate);
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
 const metadata = (overrides = {}) => ({ source: 'metadata', format: 'A1111', text: 'a quiet forest', negative: 'blur', parameters: { Seed: '123' }, candidates: [], warnings: [], ...overrides });
 const asset = (id = 'image-a', details = metadata()) => ({ id, filename: `${id}.png`, width: 640, height: 480, size: 100, image_url: `/api/prompt-images/${id}/image`, metadata: details });
+const referenceAsset = id => ({ id, filename: `${id}.png`, width: 640, height: 480, image_url: `/api/input-images/${id}/image` });
 const file = name => ({ name: name || 'test.png', type: 'image/png', size: 100 });
 const response = (value, ok = true) => ({ ok, json: async () => value });
 function target(id = '') {
@@ -59,6 +60,17 @@ function setup({ saved = null, request, fetch, leaseRequest } = {}) {
   const configure = (image = asset(), profile = ctx.profile) => { const draft = ctx.promptReverseDraft(profile); Object.assign(draft, { imageId: image.id, image, method: image.metadata?.source === 'none' ? 'vision' : 'metadata', service: 'service', model: 'vision', template: `builtin:reverse:${profile}` }); return draft; };
   return { ctx, elements, element, state, configure, calls, uploads, storage, timers, leaseTimers, leases, options, document };
 }
+function referenceControls(ctx) {
+  ctx.singleWorkbenchActive = () => ctx.singleWorkbenchState.mode === 'single';
+  ctx.singleWorkbenchRenderMode = () => ctx.promptReverseRender();
+  ctx.updateRepairControls = () => {};
+  ctx.ui = { base_mode: { value: 'dual_sampler' }, model_name: { value: 'selected model' }, width: { value: 832 }, height: { value: 1152 } };
+  const state = ctx.singleWorkbenchState;
+  state.inputImage = referenceAsset(state.single.input_image_id);
+  state.single.denoise = .43;
+  state.single.resize_mode = 'pad';
+  return state;
+}
 
 test('metadata upload extracts automatically without AI configuration and keeps generation untouched', async () => {
   const { ctx, calls, uploads, elements } = setup({ request: async (url) => url.includes('/options') ? { available: false, services: [], templates: [], reason: 'not configured' } : { id: 'metadata-job', status: 'completed', result: metadata() } });
@@ -70,6 +82,104 @@ test('metadata upload extracts automatically without AI configuration and keeps 
   assert.deepEqual(JSON.parse(posts[0].init.body), { kind: 'reverse', method: 'metadata', model_profile: 'anima', image_id: 'image-a' });
   assert.equal(elements.single_positive_prompt.value, 'current body'); assert.equal(elements.singleNegative.value, 'current negative');
   assert.equal(ctx.singleWorkbenchState.single.input_image_id, 'reference-untouched'); assert.equal(ctx.singleWorkbenchState.generationMode, 'img2img');
+});
+
+test('reverse image becomes the image-to-image reference only after an explicit successful transfer', async () => {
+  const { ctx, configure, elements, element } = setup(); await tick();
+  const state = referenceControls(ctx), gate = deferred(), imports = [];
+  state.generationMode = 'txt2img'; state.single.input_image_id = ''; state.inputImage = null;
+  ctx.request = async (url, init) => { imports.push({ url, init }); return gate.promise; };
+  ctx.promptReverseRender();
+  assert.equal(element('reverseUseInput').hidden, true);
+  const draft = configure(asset('source-photo'));
+  draft.result = 'independent reverse result';
+  ctx.promptReverseRender();
+  assert.equal(elements.reverseUseInput.hidden, false);
+  assert.equal(elements.reverseUseInput.textContent, '用作图生图参考');
+  elements.reverseUseInput.emit('click');
+  assert.equal(await ctx.promptReverseUseInput(), false, 'a pending transfer has one owner');
+  assert.equal(imports.length, 1);
+  assert.equal(imports[0].url, '/api/input-images/from-prompt');
+  assert.equal(imports[0].init.method, 'POST');
+  assert.deepEqual(JSON.parse(imports[0].init.body), { image_id: 'source-photo' });
+  assert.equal(elements.reverseUseInput.disabled, true);
+  assert.match(elements.reverseImageStatus.textContent, /正在保存/);
+  assert.equal(state.generationMode, 'txt2img');
+  assert.equal(state.single.input_image_id, '');
+
+  gate.resolve(referenceAsset('durable-photo')); await tick();
+  assert.equal(state.generationMode, 'img2img');
+  assert.equal(state.inputImage.id, 'durable-photo');
+  assert.equal(state.single.input_image_id, 'durable-photo');
+  assert.equal(ctx.ui.base_mode.value, 'normal');
+  assert.equal(state.single.denoise, .43); assert.equal(state.single.resize_mode, 'pad');
+  assert.equal(ctx.ui.model_name.value, 'selected model');
+  assert.equal(ctx.ui.width.value, 832); assert.equal(ctx.ui.height.value, 1152);
+  assert.equal(elements.single_positive_prompt.value, 'current body');
+  assert.equal(elements.singleNegative.value, 'current negative');
+  assert.equal(draft.imageId, 'source-photo'); assert.equal(draft.result, 'independent reverse result');
+  assert.equal(elements.reverseUseInput.disabled, false);
+  assert.equal(elements.reverseUseInput.textContent, '替换图生图参考');
+  assert.match(elements.reverseImageStatus.textContent, /已用作图生图参考/);
+});
+
+test('failed or malformed reference import keeps the existing image and allows an explicit replacement', async () => {
+  const { ctx, configure, elements } = setup(); await tick();
+  const state = referenceControls(ctx);
+  configure(asset('reverse-photo')); ctx.promptReverseRender();
+  assert.equal(elements.reverseUseInput.textContent, '替换图生图参考');
+  ctx.request = async () => { throw new Error('反推图片已过期'); };
+  assert.equal(await ctx.promptReverseUseInput(), false);
+  assert.match(elements.reverseImageStatus.textContent, /反推图片已过期/);
+  ctx.request = async () => null;
+  assert.equal(await ctx.promptReverseUseInput(), false);
+  assert.match(elements.reverseImageStatus.textContent, /参考图信息无效/);
+  assert.equal(state.single.input_image_id, 'reference-untouched');
+  assert.equal(state.generationMode, 'img2img');
+  assert.equal(state.single.denoise, .43);
+  ctx.request = async () => referenceAsset('replacement');
+  assert.equal(await ctx.promptReverseUseInput(), true);
+  assert.equal(state.single.input_image_id, 'replacement');
+});
+
+test('late reverse image transfer cannot overwrite another context or a newer reference selection', async t => {
+  const cases = [
+    ['profile', ({ ctx }) => { ctx.profile = 'krea2'; }],
+    ['workbench', ({ ctx }) => { ctx.singleWorkbenchState.mode = 'random'; }],
+    ['reverse image', ({ ctx, configure }) => { ctx.promptReverseRemove(); configure(asset('new-image')); }],
+    ['desk tab', ({ ctx }) => { ctx.promptReverseSetMode('rewrite'); ctx.promptReverseSetMode('reverse'); }],
+    ['reference selection', ({ ctx }) => { ctx.singleWorkbenchSetInput(referenceAsset('newer-reference')); }],
+    ['asynchronous history transfer', ({ ctx }) => { ctx.singleWorkbenchState.settingsImportRequest = 1; }],
+  ];
+  for (const [name, change] of cases) await t.test(name, async () => {
+    const ui = setup(); await tick();
+    const { ctx, configure } = ui, state = referenceControls(ctx), gate = deferred();
+    configure(asset('old-image'));
+    let signal;
+    ctx.request = async (_url, init) => { signal = init.signal; return gate.promise; };
+    const pending = ctx.promptReverseUseInput();
+    change(ui);
+    gate.resolve(referenceAsset('late-reference'));
+    assert.equal(await pending, false);
+    assert.equal(state.single.input_image_id, name === 'reference selection' ? 'newer-reference' : 'reference-untouched');
+    if (name === 'reverse image' || name === 'desk tab') assert.equal(signal.aborted, true);
+  });
+});
+
+test('a direct reference upload takes precedence as soon as it starts', async () => {
+  const { ctx, configure } = setup(); await tick();
+  const state = referenceControls(ctx), copied = deferred(), uploaded = deferred();
+  configure(asset('reverse-photo'));
+  ctx.request = () => copied.promise;
+  ctx.fetch = () => uploaded.promise;
+  const transfer = ctx.promptReverseUseInput();
+  const newer = ctx.singleWorkbenchAcceptInput([file('newer.png')]);
+  copied.resolve(referenceAsset('obsolete-reference'));
+  assert.equal(await transfer, false);
+  assert.equal(state.single.input_image_id, 'reference-untouched');
+  uploaded.resolve(response(referenceAsset('newer-reference')));
+  assert.equal(await newer, true);
+  assert.equal(state.single.input_image_id, 'newer-reference');
 });
 
 test('metadata images run the selected models and preserve all three results across profiles and reloads', async () => {

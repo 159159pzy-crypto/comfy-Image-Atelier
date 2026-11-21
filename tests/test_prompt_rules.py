@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from anima_webui.prompt_rules import PromptRuleStore, _split_top_level
+from anima_webui.prompt_rules import PromptRuleStore, _split_top_level, split_anima_hybrid
 from anima_webui.workflow import WorkflowError
 
 
@@ -50,6 +50,13 @@ class PromptRuleStoreTests(unittest.IsolatedAsyncioTestCase):
             {"single_prefix": "Blue_Hair, My_Trigger"}, ["My_Trigger"],
         )
         self.assertEqual(result["fields"]["single_prefix"], "blue hair, My_Trigger")
+
+    def test_blank_lines_in_legacy_tag_blocks_still_normalize(self):
+        result = self.store.normalize_fields({"single_positive_prompt": "BLUE_HAIR\n\nRED_SCARF, Blue_Hair"})
+        self.assertEqual(result["fields"]["single_positive_prompt"], "blue hair, red scarf")
+
+    def test_prose_paragraphs_are_not_reinterpreted_as_hybrid(self):
+        self.assertIsNone(split_anima_hybrid("A bird crosses the sky.\n\nIt carries a paper door."))
 
     def test_prompt_tokens_treat_apostrophes_and_unfinished_quotes_as_prose(self):
         for prose in ("girl's smile", "don't", "artists' style", "James' style", "'unfinished", '"unfinished'):

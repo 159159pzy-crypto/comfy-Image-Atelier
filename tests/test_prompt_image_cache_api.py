@@ -1,11 +1,14 @@
 """HTTP-level retention checks use only isolated files and a fake Comfy client."""
 from __future__ import annotations
 
+import hashlib
 import io
+import random
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
@@ -206,6 +209,73 @@ class PromptImageCacheApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         self.assertTrue((await response.read()).startswith(b"\x89PNG"))
         await self.lease(1, [asset["id"]], status=503)
+
+    async def test_reverse_image_becomes_a_durable_reference_without_model_work(self):
+        asset = await self.upload(parameters="a blue sky\nSteps: 20, Seed: 42")
+        body = await (await self.client.get(asset["image_url"])).read()
+        adopted = await self.json("POST", "/api/input-images/from-prompt", {"image_id": asset["id"]}, status=201)
+        self.assertNotEqual(adopted["id"], asset["id"])
+        self.assertEqual(adopted, {
+            "id": hashlib.sha256(body).hexdigest(), "filename": "blue.png", "width": 24, "height": 16,
+            "content_type": "image/png", "size": len(body), "source_image_id": None,
+            "image_url": f"/api/input-images/{adopted['id']}/image",
+        })
+        self.now += 121
+        self.cache.max_bytes = 0
+        await self.cache.run()
+        await self.json("GET", f"/api/prompt-images/{asset['id']}", status=404)
+        await self.json("POST", "/api/input-images/from-prompt", {"image_id": asset["id"]}, status=404)
+        self.assertEqual(await self.json("GET", f"/api/input-images/{adopted['id']}"), adopted)
+        durable = await self.client.get(adopted["image_url"])
+        self.assertEqual(await durable.read(), body)
+        self.assertEqual(self.service.comfy.submissions, [])
+
+    async def test_reverse_image_adoption_preserves_existing_reference_metadata(self):
+        reference = await self.service.add("input", source_image(), filename="existing.png", source_image_id=42)
+        assets = [self.service.stores["input"].path / f"{reference['id']}{suffix}" for suffix in (".png", ".json")]
+        stat_before = [path.stat().st_mtime_ns for path in assets]
+        asset = await self.upload(parameters="a blue sky")
+        adopted = await self.json("POST", "/api/input-images/from-prompt", {"image_id": asset["id"]}, status=201)
+        self.assertEqual(adopted, reference)
+        self.assertEqual([path.stat().st_mtime_ns for path in assets], stat_before)
+
+    async def test_reverse_image_adoption_can_copy_an_internal_png_above_upload_limit(self):
+        original = io.BytesIO()
+        pixels = random.Random(721).randbytes(128 * 128 * 3)
+        with Image.frombytes("RGB", (128, 128), pixels) as image:
+            image.save(original, format="JPEG", quality=90)
+        body = FormData()
+        body.add_field("image", original.getvalue(), filename="original.jpg", content_type="image/jpeg")
+        asset = await self.json("POST", "/api/prompt-images", data=body, status=201)
+        self.assertLess(original.tell(), asset["size"])
+        with patch("anima_webui.input_images.MAX_IMAGE_BYTES", original.tell()):
+            adopted = await self.json("POST", "/api/input-images/from-prompt", {"image_id": asset["id"]}, status=201)
+            normal_upload = FormData()
+            normal_upload.add_field("image", await (await self.client.get(asset["image_url"])).read(),
+                                    filename="large.png", content_type="image/png")
+            await self.json("POST", "/api/input-images", data=normal_upload, status=400)
+        self.assertEqual(adopted["size"], asset["size"])
+
+    async def test_reverse_image_adoption_rejects_links_and_respects_read_only_precedence(self):
+        endpoint = "/api/input-images/from-prompt"
+        for payload in ({}, {"image_id": None}, {"image_id": "../../outside"}, {"image_id": "f" * 64, "path": "outside"}):
+            await self.json("POST", endpoint, payload, status=400)
+        await self.json("POST", endpoint, {"image_id": "f" * 64}, status=404)
+
+        asset = await self.upload()
+        body = await (await self.client.get(asset["image_url"])).read()
+        destination = hashlib.sha256(body).hexdigest()
+        paths = [self.service.stores[kind].path / f"{identity}{suffix}"
+                 for kind, identity in (("prompt", asset["id"]), ("input", destination)) for suffix in (".png", ".json")]
+        real_is_symlink = Path.is_symlink
+        for path in paths:
+            with self.subTest(path=path), patch.object(Path, "is_symlink", autospec=True,
+                                                        side_effect=lambda value: value == path or real_is_symlink(value)):
+                await self.json("POST", endpoint, {"image_id": asset["id"]}, status=400)
+        self.assertFalse(any(path.exists() for path in paths[2:]))
+        self.history._protect_storage("test protection")
+        await self.json("POST", endpoint, {"image_id": "f" * 64}, status=503)
+        await self.json("POST", endpoint, {"image_id": asset["id"]}, status=503)
 
     async def test_cross_origin_cannot_pin_images(self):
         response = await self.client.put(f"/api/prompt-images/leases/{self.client_id}",

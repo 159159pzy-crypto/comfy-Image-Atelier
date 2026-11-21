@@ -213,6 +213,32 @@ class SingleBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(last["sample_seed"], saved["sample_seed"])
         self.assertEqual(last["single_runtime"]["effective_positive"], saved["single_runtime"]["effective_positive"])
 
+    async def test_anima_hybrid_keeps_the_prose_boundary_through_normalization_and_generation(self):
+        prose = 'Near the window, Original_Tag is printed on her badge. She holds her head high under warm light.'
+        response = await self.client.post("/api/prompt-rules", json={
+            "from": "original_tag", "to": "Green_Coat", "scopes": ["positive"],
+        })
+        self.assertEqual(response.status, 201, await response.text())
+        response = await self.client.post("/api/prompts/normalize", json={
+            "fields": {"single_positive_prompt": f"BLUE_HAIR\r\n\r\nOriginal_Tag, Blue_Hair, My_Trigger\r\n\r\n{prose}"},
+            "managedTriggers": ["My_Trigger"],
+        })
+        self.assertEqual(response.status, 200, await response.text())
+        body = (await response.json())["fields"]["single_positive_prompt"]
+        self.assertEqual(body, f"blue hair, green coat, My_Trigger\n\n{prose}")
+
+        self.comfy.preview_items = [{"filename": "primary.safetensors", "trigger_words": ["My_Trigger", "fine texture"]}]
+        settings = self.settings()
+        settings["loras"] = [{"filename": "primary.safetensors", "enabled": True, "strength": 1.0}]
+        settings["single"].update(prefix="cinematic still", positive_prompt=body, suffix="sunbeam")
+        response = await self.client.post("/api/batches", json=settings)
+        self.assertEqual(response.status, 201, await response.text())
+        await self.manager.wait()
+        expected = f"cinematic still, blue hair, green coat, My_Trigger, sunbeam, fine texture\n\n{prose}"
+        self.assertEqual(self.comfy.submissions[0]["prompt"]["single:primary:positive"]["inputs"]["text"], expected)
+        saved = (await self.app[HISTORY_KEY].list_images())["items"][0]
+        self.assertEqual(saved["single_runtime"]["effective_positive"]["primary"], expected)
+
     async def test_cancel_processing_never_submits_image_and_other_queue_entry_survives(self):
         self.comfy.block = asyncio.Event()
         response = await self.client.post("/api/prompt-jobs", json={"settings": self.settings(True)})

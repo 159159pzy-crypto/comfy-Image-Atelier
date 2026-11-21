@@ -1537,6 +1537,14 @@ def create_app(
         result = await imported_images.add("input", content, filename=record["filename"], source_image_id=image_id)
         return web.json_response(result, status=201)
 
+    async def input_image_from_prompt(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        image_id = body.get("image_id")
+        if set(body) != {"image_id"} or not isinstance(image_id, str):
+            raise WorkflowError("image_id 必须为有效反推图片 ID")
+        result = await imported_images.adopt_prompt(image_id)
+        return web.json_response(result, status=201)
+
     async def input_image_metadata(request: web.Request) -> web.Response:
         return web.json_response(await imported_images.read("input", request.match_info["asset_id"]))
 
@@ -2190,6 +2198,7 @@ def create_app(
     app.router.add_delete("/api/artwork-folders/{folder_id}", delete_artwork_folder)
     app.router.add_post("/api/input-images", upload_input_image)
     app.router.add_post("/api/input-images/from-history", input_image_from_history)
+    app.router.add_post("/api/input-images/from-prompt", input_image_from_prompt)
     app.router.add_get("/api/input-images/{asset_id}/image", input_image_content)
     app.router.add_get("/api/input-images/{asset_id}", input_image_metadata)
     app.router.add_post("/api/prompt-images", upload_prompt_image)

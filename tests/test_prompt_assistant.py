@@ -108,7 +108,12 @@ class PromptAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(data["available"])
         self.assertTrue(data["template_only"])
         self.assertEqual(data["services"][0]["models"], [{"name": "test/model"}])
-        self.assertEqual(data["templates"], [{"id": "expand_custom", "name": "My template", "category": "Personal"}])
+        self.assertEqual(data["templates"][-1], {"id": "expand_custom", "name": "My template", "category": "Personal"})
+        for profile in ("anima", "krea2"):
+            self.assertEqual({item["id"] for item in data["templates"] if item.get("profile") == profile}, {
+                f"builtin:rewrite:{profile}:{purpose}"
+                for purpose in ("cinematic", "fashion-poster", "editorial-illustration", "environment")
+            })
         serialized = json.dumps(data)
         for private in ("secret", "api_key", "base_url", "not exposed", "system instructions"):
             self.assertNotIn(private, serialized)
@@ -140,6 +145,19 @@ class PromptAssistantTests(unittest.IsolatedAsyncioTestCase):
 
     def templates_content(self):
         return self.comfy.templates["expand_custom"]["content"]
+
+    async def test_builtin_uses_profile_specific_contract_without_plugin_templates(self):
+        self.comfy.templates.clear()
+        template_id = "builtin:rewrite:anima:cinematic"
+        response = await self.client.post("/api/prompt-jobs", json=self.request(template_id=template_id))
+        self.assertEqual(response.status, 400)
+        self.assertIn("另一模型档案", (await response.json())["error"])
+
+        job = await self.create(model_profile="anima", template_id=template_id)
+        await self.manager.wait()
+        self.assertEqual((await self.manager.prompt_jobs.get(job["id"]))["status"], "completed")
+        content = self.comfy.submissions[0]["prompt"]["studio_prompt_rewrite"]["inputs"]["custom_rule_content"]
+        self.assertIn("short English sentences for visual relationships", content)
 
     async def test_queued_task_keeps_template_snapshot_and_reports_busy(self):
         self.comfy.block = asyncio.Event()

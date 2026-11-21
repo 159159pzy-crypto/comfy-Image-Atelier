@@ -6,10 +6,11 @@ import io
 import json
 import os
 import re
+import shutil
 import tempfile
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
@@ -18,6 +19,8 @@ from .workflow import WorkflowError
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_IMAGE_PIXELS = 40_000_000
 MAX_METADATA_BYTES = 64 * 1024
+# RGB scanlines, a filter byte per row, and PNG/DEFLATE framing.
+_MAX_NORMALIZED_BYTES = 4 * MAX_IMAGE_PIXELS + 1024 * 1024
 _ASSET_ID = re.compile(r"^[a-f0-9]{64}$")
 
 
@@ -33,14 +36,20 @@ class InputImageStore:
     def _path(self, asset_id: str, suffix: str) -> Path:
         if not isinstance(asset_id, str) or not _ASSET_ID.fullmatch(asset_id):
             raise KeyError(asset_id)
-        return self.path / f"{asset_id}{suffix}"
+        path = self.path / f"{asset_id}{suffix}"
+        if path.is_symlink() or not path.resolve().is_relative_to(self.path.resolve()):
+            raise WorkflowError("导入图片路径超出受管目录")
+        return path
 
     @staticmethod
-    def _write(path: Path, body: bytes) -> None:
+    def _write(path: Path, body: bytes | BinaryIO) -> None:
         descriptor, temporary = tempfile.mkstemp(prefix=".upload-", dir=path.parent)
         try:
             with os.fdopen(descriptor, "wb") as stream:
-                stream.write(body)
+                if isinstance(body, bytes):
+                    stream.write(body)
+                else:
+                    shutil.copyfileobj(body, stream, length=1024 * 1024)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
@@ -81,15 +90,48 @@ class InputImageStore:
         except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as error:
             raise WorkflowError("无法读取输入图片或图片数据已损坏") from error
         pixels = encoded.getvalue()
-        asset_id = hashlib.sha256(pixels).hexdigest()
+        return self._persist(hashlib.sha256(pixels).hexdigest(), pixels, size=len(pixels), width=width,
+                             height=height, filename=filename, source_image_id=source_image_id)
+
+    def adopt_normalized_png(self, path: Path, record: dict[str, Any]) -> dict[str, Any]:
+        """Copy a verified, managed reverse preview without re-encoding its pixels."""
+        width, height, size = record["width"], record["height"], record["size"]
+        with self._processing_lock, path.open("rb") as source:
+            try:
+                if not 0 < size <= _MAX_NORMALIZED_BYTES or os.fstat(source.fileno()).st_size != size:
+                    raise ValueError("invalid normalized PNG size")
+                with Image.open(source) as original:
+                    if (original.format != "PNG" or original.mode != "RGB" or original.size != (width, height)
+                            or getattr(original, "n_frames", 1) != 1):
+                        raise ValueError("invalid normalized PNG")
+                    original.verify()
+                source.seek(0)
+                asset_id = hashlib.file_digest(source, "sha256").hexdigest()
+                source.seek(0)
+            except (OSError, SyntaxError, ValueError, Image.DecompressionBombError) as error:
+                raise WorkflowError("反推图片副本已损坏或无法读取，请重新上传图片") from error
+
+            try:
+                existing = self.get(asset_id)
+            except KeyError:
+                return self._persist(asset_id, source, size=size, width=width, height=height,
+                                     filename=record["filename"], source_image_id=None)
+            with self._path(asset_id, ".png").open("rb") as existing_png:
+                if hashlib.file_digest(existing_png, "sha256").hexdigest() != asset_id:
+                    raise WorkflowError("输入图片记录已损坏或无法读取，请重新上传图片")
+            return existing
+
+    def _persist(self, asset_id: str, pixels: bytes | BinaryIO, *, size: int, width: int, height: int,
+                 filename: str, source_image_id: int | None) -> dict[str, Any]:
         metadata = {
             "id": asset_id, "filename": Path(filename.replace("\\", "/")).name[:240],
             "width": width, "height": height, "content_type": "image/png",
-            "size": len(pixels), "source_image_id": source_image_id,
+            "size": size, "source_image_id": source_image_id,
             "image_url": f"/api/input-images/{asset_id}/image",
         }
-        self._write(self._path(asset_id, ".png"), pixels)
-        self._write(self._path(asset_id, ".json"), json.dumps(metadata, ensure_ascii=False).encode("utf-8"))
+        image_path, record_path = self._path(asset_id, ".png"), self._path(asset_id, ".json")
+        self._write(image_path, pixels)
+        self._write(record_path, json.dumps(metadata, ensure_ascii=False).encode("utf-8"))
         return metadata
 
     def get(self, asset_id: str) -> dict[str, Any]:

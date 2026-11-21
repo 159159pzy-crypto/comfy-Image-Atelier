@@ -158,24 +158,39 @@ def validate_single_settings(value: Any, settings: dict[str, Any]) -> dict[str, 
 
 
 def compose_single_prompt(settings: dict[str, Any]) -> str:
+    from .prompt_rules import ANIMA_HYBRID_SEPARATOR, split_anima_hybrid
+
     s = settings["single"]
-    return ", ".join(str(s.get(k) or "").strip() for k in ("prefix", "positive_prompt", "suffix") if str(s.get(k) or "").strip())
+    prefix, body, suffix = (str(s.get(key) or "").strip() for key in ("prefix", "positive_prompt", "suffix"))
+    hybrid = split_anima_hybrid(body) if settings.get("model_profile", "anima") == "anima" else None
+    if hybrid:
+        tags, prose = hybrid
+        return ANIMA_HYBRID_SEPARATOR.join((", ".join(filter(None, (prefix, tags, suffix))), prose))
+    return ", ".join(filter(None, (prefix, body, suffix)))
 
 
 def effective_single_prompts(settings: dict[str, Any], positive: str) -> dict[str, str]:
     """Append each stack's frozen trigger words once, preserving user prose."""
-    from .prompt_rules import _split_top_level
+    from .prompt_rules import ANIMA_HYBRID_SEPARATOR, _split_top_level, split_anima_hybrid
+
+    hybrid = split_anima_hybrid(positive) if settings.get("model_profile", "anima") == "anima" else None
+    tags, prose = hybrid or (positive, "")
+    existing = {part.casefold() for part in _split_top_level(tags)}
     result = {}
     for name, triggers in (("primary", settings.get("lora_managed_triggers", [])),
                            ("secondary", settings["single"].get("secondary_managed_triggers", []))):
-        seen = {part.strip().casefold() for part in _split_top_level(positive)}
+        seen = existing.copy()
         extra = []
         for word in triggers:
             identity = word.strip().casefold()
             if identity and identity not in seen:
                 extra.append(word.strip())
                 seen.add(identity)
-        result[name] = ", ".join([*([positive] if positive else []), *extra])
+        if not extra:
+            result[name] = positive
+            continue
+        tag_line = ", ".join(filter(None, (tags, *extra)))
+        result[name] = ANIMA_HYBRID_SEPARATOR.join((tag_line, prose)) if hybrid else tag_line
     return result
 
 

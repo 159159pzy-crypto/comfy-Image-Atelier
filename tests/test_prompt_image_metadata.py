@@ -372,6 +372,54 @@ def test_native_anima_tools_multiple_cached_prompt_records(tmp_path):
     assert result["text"] == ""
 
 
+def test_wardrobe_prefers_dedicated_record_and_preserves_matching_graph_parameters(tmp_path):
+    record = {"schema": "anima-v3/pngmeta@1", "plugin": "Comfyui-Anima-Wardrobe-V6", "version": "6.26.0",
+              "positive": "a blue bird", "positive_full": "best quality, a blue bird", "negative": "blur"}
+    data = graph("best quality, a blue bird", seed=17)
+    data["single:positive"]["inputs"]["anima_v4_prompt"] = json.dumps({"positive": "a different bird"})
+    info = {"anima_v4_prompt": record, "anima_v3_prompt": record, "prompt": data}
+    parsed = assert_prompt(tmp_path, image_bytes(info), expected="best quality, a blue bird", format_contains="Wardrobe")
+    assert parsed["parameters"]["seed"] == "17"
+    assert parsed["parameters"]["actual_image_size"] == "32x24"
+    assert parsed["parameters"]["wardrobe_version"] == "6.26.0"
+    assert parsed["warnings"]
+
+
+def test_wardrobe_falls_back_to_legacy_generated_body(tmp_path):
+    info = {"anima_v4_prompt": "{broken", "anima_v3_prompt": {"positive": "a blue bird", "positive_full": "  "}}
+    parsed = assert_prompt(tmp_path, image_bytes(info), negative="", format_contains="Wardrobe")
+    assert "生成正文" in parsed["candidates"][0]["label"]
+
+
+def test_wardrobe_deduplicates_graph_copies_and_keeps_distinct_records(tmp_path):
+    data = graph(seed=17)
+    record = json.dumps({"positive_full": "best quality, a blue bird", "positive": "a blue bird", "negative": "blur"})
+    data["single:positive"]["inputs"]["anima_v4_prompt"] = record
+    data["generator"] = {"class_type": "AnimaV6RandomPrompt", "inputs": {"anima_v3_prompt": record}}
+    data["second"] = {"class_type": "AnimaV6RandomPrompt", "inputs": {"anima_v4_prompt": json.dumps({"positive": "a red bird"})}}
+    parsed = PromptImageStore(tmp_path).add(image_bytes({"prompt": data}))["metadata"]
+    assert parsed["format"] == "Anima Wardrobe"
+    assert parsed["text"] == ""
+    assert {item["text"] for item in parsed["candidates"]} == {"best quality, a blue bird", "a red bird"}
+    assert all("seed" not in item["parameters"] for item in parsed["candidates"])
+
+
+def test_wardrobe_does_not_guess_between_matching_sampler_seeds(tmp_path):
+    data = {**graph(seed=17), **graph(seed=92, suffix="b")}
+    info = {"anima_v4_prompt": {"positive": "a blue bird", "negative": "blur"}, "prompt": data}
+    parsed = assert_prompt(tmp_path, image_bytes(info), format_contains="Wardrobe")
+    assert "seed" not in parsed["parameters"]
+
+
+def test_wardrobe_preserves_native_priority_and_generic_fallback(tmp_path):
+    native = {"resolved_prompt_full": "a blue bird", "frozen_negative_prompt": "blur"}
+    info = {"anima_random_webui": native, "anima_v4_prompt": {"positive": "a red bird"}}
+    assert_prompt(tmp_path, image_bytes(info), format_contains="Anima Random Studio")
+
+    info = {"anima_v4_prompt": {"positive": ["a red bird", 0]}, "anima_v3_prompt": "{broken", "prompt": graph()}
+    assert_prompt(tmp_path, image_bytes(info), format_contains="ComfyUI")
+
+
 @pytest.mark.parametrize("active_secondary", [False, True])
 def test_native_anima_offers_only_distinct_active_effective_pipeline_prompts(tmp_path, active_secondary):
     import copy

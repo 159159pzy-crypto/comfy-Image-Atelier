@@ -1,4 +1,4 @@
-/* Image analysis has its own assets, drafts and jobs; it never changes generation settings. */
+/* Image analysis owns its assets, drafts and jobs. Reference transfer is explicit. */
 const PROMPT_REVERSE_KEY = "anima-studio:prompt-reverse:v2";
 const PROMPT_REVERSE_LEGACY_KEY = "anima-studio:prompt-reverse:v1";
 const PROMPT_REVERSE_METHODS = ["metadata", "vision", "tagger"];
@@ -33,7 +33,7 @@ function promptReverseSetMethod(method, focus = false, profile = currentProfile(
   if (focus) document.getElementById(`reverseMethod-${method}`).focus();
 }
 function promptReverseRuntime(profile = currentProfile()) {
-  return promptReverseState.runtime[profile] ||= { request: 0, restoreRequest: 0, abort: null, uploading: false, timer: null };
+  return promptReverseState.runtime[profile] ||= { request: 0, restoreRequest: 0, abort: null, uploading: false, timer: null, reference: null, referenceStatus: "" };
 }
 function promptReverseLease() {
   if (!promptReverseState.lease) {
@@ -80,10 +80,10 @@ function promptReverseMarkup() {
   return `<div id="promptReversePanel" class="prompt-desk-panel" role="tabpanel" aria-labelledby="promptDeskReverse" hidden>
     <p class="field-hint">添加图片后自动读取元数据。无论是否包含提示词，都可选择视觉 AI 或本地标签，再点击「开始识别」。三种结果分别保留。</p>
     <div id="reverseInputDropZone" class="image-input-zone reverse-input-zone" tabindex="0" role="group" aria-label="提示词反推识别框" aria-describedby="reverseImageStatus">
-      <div class="single-reference-heading"><label class="button ghost compact single-upload-button">＋ 添加反推图片<input id="reverseInputUpload" class="sr-only" type="file" accept="image/png,image/jpeg,image/webp"></label><span id="reverseImageStatus" class="field-hint">拖入图片，或点击此框后粘贴。PNG / JPEG / WebP，最大 20 MiB。</span></div>
+      <div class="single-reference-heading"><label class="button ghost compact single-upload-button">＋ 添加反推图片<input id="reverseInputUpload" class="sr-only" type="file" accept="image/png,image/jpeg,image/webp"></label><span id="reverseImageStatus" class="field-hint" role="status">拖入图片，或点击此框后粘贴。PNG / JPEG / WebP，最大 20 MiB。</span></div>
       <img id="reverseInputPreview" alt="用于提示词反推的图片" hidden>
     </div>
-    <div class="single-inline-actions"><button id="reverseRemove" class="button ghost compact" type="button" hidden>移除图片</button><button id="reverseRefresh" class="button ghost compact" type="button">刷新选项</button></div>
+    <div class="single-inline-actions"><button id="reverseUseInput" class="button ghost compact" type="button" hidden>用作图生图参考</button><button id="reverseRemove" class="button ghost compact" type="button" hidden>移除图片</button><button id="reverseRefresh" class="button ghost compact" type="button">刷新选项</button></div>
     <div class="reverse-method-switch" role="tablist" aria-label="反推方式">${PROMPT_REVERSE_METHODS.map(method => `<button id="reverseMethod-${method}" type="button" role="tab" aria-controls="reverseMethodPanel" aria-selected="${method === "metadata"}" tabindex="${method === "metadata" ? 0 : -1}">${PROMPT_REVERSE_LABELS[method]}</button>`).join("")}</div>
     <div id="reverseMethodPanel" class="reverse-method-panel" role="tabpanel" aria-labelledby="reverseMethod-metadata">
     <p id="reverseMetadataHint" class="field-hint">直接读取原图保存的提示词与参数，无需模型或联网。</p>
@@ -138,7 +138,7 @@ function promptReverseIssue(draft, method = draft.method) {
   const service = (options.services || []).find(item => item.id === draft.service);
   if (!service) return options.reason || "请选择支持图片输入的 AI 服务。";
   if (!(service.models || []).some(item => item.name === draft.model)) return "请选择支持图片输入的模型。";
-  if (!(options.templates || []).some(item => item.id === draft.template)) return "请选择反推系统提示词。";
+  if (!promptAssistantTemplates(options).some(item => item.id === draft.template)) return "请选择反推系统提示词。";
   if (draft.seed !== "random" && (!/^\d{1,20}$/.test(draft.seed) || BigInt(draft.seed) > 18446744073709551615n)) return "固定种子需为 0 到 18446744073709551615 之间的整数。";
   return "";
 }
@@ -202,7 +202,7 @@ function promptReverseRender() {
   get("reverseTaggerOptions").hidden = draft.method !== "tagger";
   promptAssistantSelect("reverseService", options.services || [], draft.service, "选择服务");
   promptAssistantSelect("reverseModel", (service?.models || []).map(item => ({ id: item.name, name: item.name })), draft.model, "选择视觉模型");
-  promptAssistantSelect("reverseTemplate", options.templates || [], draft.template, "选择反推提示词");
+  promptAssistantSelect("reverseTemplate", promptAssistantTemplates(options), draft.template, "选择反推提示词");
   get("reverseSeedMode").value = draft.seed === "random" ? "random" : "fixed";
   get("reverseSeedField").hidden = draft.seed === "random"; get("reverseSeed").value = draft.fixedSeed;
   const tagger = options.methods?.tagger, modelStates = { ready: "已就绪", missing: "待下载", incomplete: "需补全", invalid: "需修复", unverifiable: "目录待确认" };
@@ -217,8 +217,17 @@ function promptReverseRender() {
     const src = `/api/prompt-images/${encodeURIComponent(draft.imageId)}/image`;
     if (image.getAttribute("src") !== src) image.src = src;
   } else image.removeAttribute("src");
-  get("reverseImageStatus").textContent = runtime.uploading ? "正在上传图片并读取元数据…" : draft.image ? `${draft.image.filename} · ${draft.image.width} × ${draft.image.height}` : draft.imageId ? "原图片不可用，请重新添加；已保存的结果仍可查看。" : "拖入图片，或点击此框后粘贴。PNG / JPEG / WebP，最大 20 MiB。";
+  get("reverseImageStatus").textContent = runtime.uploading ? "正在上传图片并读取元数据…"
+    : runtime.reference ? "正在保存图生图参考图…"
+      : draft.image ? runtime.referenceStatus || `${draft.image.filename} · ${draft.image.width} × ${draft.image.height}`
+        : draft.imageId ? "原图片不可用，请重新添加；已保存的结果仍可查看。"
+          : "拖入图片，或点击此框后粘贴。PNG / JPEG / WebP，最大 20 MiB。";
   get("reverseInputDropZone").setAttribute("aria-busy", String(runtime.uploading || draft.busy));
+  const referenceButton = get("reverseUseInput");
+  referenceButton.hidden = !draft.imageId || draft.image?.id !== draft.imageId || runtime.uploading;
+  referenceButton.disabled = Boolean(runtime.reference);
+  referenceButton.setAttribute("aria-busy", String(Boolean(runtime.reference)));
+  referenceButton.textContent = singleWorkbenchState.single?.input_image_id ? "替换图生图参考" : "用作图生图参考";
   get("reverseRemove").hidden = !draft.imageId && !runtime.uploading;
   get("reverseStart").disabled = runtime.uploading || draft.busy || Boolean(promptReverseIssue(draft));
   get("reverseStart").textContent = draft.method === "metadata" ? "提取元数据" : "开始识别";
@@ -248,6 +257,7 @@ function promptReverseSetMode(mode, focus = false) {
   if (changed && typeof StudioMotion !== "undefined") {
     StudioMotion.presence(document.getElementById(mode === "reverse" ? "promptRewritePanel" : "promptReversePanel"), false, { immediate: true });
   }
+  if (changed && mode === "rewrite") Object.values(promptReverseState.runtime).forEach(promptReverseResetReference);
   promptReverseState.mode = mode;
   document.getElementById("reverseInputDropZone").classList.toggle("is-dragging", false);
   promptReversePersist(); promptReverseRender();
@@ -333,8 +343,53 @@ function promptReverseApplyResult(draft, result) {
 function promptReverseInvalidate(profile, { cancel = true } = {}) {
   const draft = promptReverseDraft(profile), runtime = promptReverseRuntime(profile);
   runtime.request++; runtime.abort?.abort(); runtime.abort = null; runtime.uploading = false; clearTimeout(runtime.timer);
+  promptReverseResetReference(runtime);
   if (cancel && draft.jobId) void request(`/api/prompt-jobs/${encodeURIComponent(draft.jobId)}/cancel`, { method: "POST" }).catch(() => {});
   draft.revision++; draft.jobRevision = draft.revision; draft.jobId = ""; draft.busy = false; draft.cancelRequested = false;
+}
+function promptReverseResetReference(runtime) {
+  runtime.reference?.abort();
+  runtime.reference = null;
+  runtime.referenceStatus = "";
+}
+async function promptReverseUseInput() {
+  if (!singleWorkbenchCanReceiveInput() || promptReverseState.mode !== "reverse") return false;
+  const profile = currentProfile(), draft = promptReverseDraft(profile), runtime = promptReverseRuntime(profile);
+  const { imageId } = draft, single = singleWorkbenchState;
+  if (!imageId || draft.image?.id !== imageId || runtime.uploading || runtime.reference) return false;
+  if (single.inputBusy) {
+    runtime.referenceStatus = "当前参考图正在处理，请完成后再试。";
+    promptReverseRender();
+    return false;
+  }
+  const controller = new AbortController(), existingId = single.single.input_image_id;
+  const { inputRequest, settingsImportRequest } = single;
+  runtime.reference = controller;
+  runtime.referenceStatus = "";
+  const current = () => runtime.reference === controller && promptReverseState.drafts[profile] === draft
+    && draft.imageId === imageId && draft.image?.id === imageId && profile === currentProfile()
+    && singleWorkbenchActive() && promptReverseState.mode === "reverse"
+    && single.inputRequest === inputRequest && single.settingsImportRequest === settingsImportRequest
+    && single.single.input_image_id === existingId;
+  promptReverseRender();
+  try {
+    const input = await request("/api/input-images/from-prompt", {
+      method: "POST", body: JSON.stringify({ image_id: imageId }), signal: controller.signal,
+    });
+    if (!current()) return false;
+    if (!input?.id) throw new Error("参考图信息无效，请重新添加图片。");
+    singleWorkbenchSetInput(input);
+    runtime.referenceStatus = "已用作图生图参考。";
+    return true;
+  } catch (error) {
+    if (current()) runtime.referenceStatus = `参考图保存失败：${error.message}`;
+    return false;
+  } finally {
+    if (runtime.reference === controller) {
+      runtime.reference = null;
+      if (profile === currentProfile()) promptReverseRender();
+    }
+  }
 }
 async function promptReverseAcceptInput(files) {
   if (!singleWorkbenchCanReceiveInput() || promptReverseState.mode !== "reverse") return false;
@@ -517,7 +572,7 @@ async function promptReverseRestore(profile, { poll = true } = {}) {
 }
 function promptReverseClear() {
   promptReverseState.epoch++;
-  for (const runtime of Object.values(promptReverseState.runtime)) { runtime.abort?.abort(); clearTimeout(runtime.timer); }
+  for (const runtime of Object.values(promptReverseState.runtime)) { runtime.abort?.abort(); promptReverseResetReference(runtime); clearTimeout(runtime.timer); }
   promptReverseState.drafts = {}; promptReverseState.runtime = {}; promptReverseState.mode = "rewrite";
   localStorage.removeItem(PROMPT_REVERSE_KEY); localStorage.removeItem(PROMPT_REVERSE_LEGACY_KEY); promptReverseRender();
   void promptReverseRenewLease();
@@ -593,6 +648,7 @@ function initializePromptReverse() {
   for (const [id, key] of [["reverseTaggerModel", "model"], ["reverseGeneralThreshold", "general_threshold"], ["reverseCharacterThreshold", "character_threshold"], ["reverseExcludeTags", "exclude_tags"]]) get(id).addEventListener("change", event => promptReverseEditTagger(key, event.target.value));
   get("reverseSeedMode").addEventListener("change", event => promptReverseEditSeed(event.target.value, true));
   get("reverseSeed").addEventListener("input", event => promptReverseEditSeed(event.target.value));
+  get("reverseUseInput").addEventListener("click", () => { void promptReverseUseInput(); });
   for (const [id, callback] of [["reverseRefresh", () => { promptReverseState.optionsPromise = promptReverseLoadOptions(); }], ["reverseStart", () => promptReverseStart()], ["reverseCancel", promptReverseCancel], ["reverseRemove", promptReverseRemove], ["reverseCopy", () => promptReverseCopy()], ["reverseAppend", () => promptReverseAdopt("append")], ["reverseReplace", () => promptReverseAdopt("replace")], ["reverseUndo", () => promptReverseUndo()], ["reverseNegativeCopy", () => promptReverseCopy(true)], ["reverseNegativeReplace", () => promptReverseAdopt("replace", true)], ["reverseNegativeUndo", () => promptReverseUndo(true)]]) get(id).addEventListener("click", callback);
   get("reverseInputUpload").addEventListener("change", event => { const files = Array.from(event.target.files || []); event.target.value = ""; if (files.length) void promptReverseAcceptInput(files); });
   bindImageInputZone(get("reverseInputDropZone"), { canReceive: () => singleWorkbenchCanReceiveInput() && promptReverseState.mode === "reverse", accept: promptReverseAcceptInput });

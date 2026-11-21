@@ -45,11 +45,11 @@ function promptAssistantMarkup() {
     <div class="section-heading prompt-desk-heading"><h2>提示词工作台</h2><div id="promptDeskTabs" class="prompt-desk-switch" role="tablist" aria-label="提示词工作台"><span class="prompt-desk-thumb" aria-hidden="true"></span><button id="promptDeskRewrite" type="button" role="tab" aria-controls="promptRewritePanel" aria-selected="true">重写台</button><button id="promptDeskReverse" type="button" role="tab" aria-controls="promptReversePanel" aria-selected="false" tabindex="-1">反推台</button></div></div>
     <div id="promptRewritePanel" class="prompt-desk-panel" role="tabpanel" aria-labelledby="promptDeskRewrite">
     <div class="single-inline-actions"><button id="rewriteRefresh" class="button ghost compact" type="button">刷新选项</button></div>
-    <p class="field-hint">输入与生图正文独立保存。重写完成后，可编辑预览，再手动追加或替换正文。系统提示词和第三方服务在启动器中管理。</p>
+    <p class="field-hint">选择内置用途或自定义模板。写明要保留的人物、构图和文字，再编辑结果并应用到正文。</p>
     <div class="prompt-assistant-selectors">
       <label class="field"><span>服务</span><select id="rewriteService" aria-describedby="rewriteStatus"></select></label>
       <label class="field"><span>模型</span><select id="rewriteModel"></select></label>
-      <label class="field"><span>系统提示词</span><select id="rewriteTemplate"></select></label>
+      <label class="field"><span>用途或系统提示词</span><select id="rewriteTemplate"></select></label>
     </div>
     <label class="field"><span>重写输入</span><textarea id="rewriteSource" rows="5" maxlength="20000" placeholder="在这里粘贴或编写待处理文本，不会改变当前画面描述。"></textarea></label>
     <div class="single-inline-actions"><button id="rewriteRead" class="button ghost compact" type="button">读取当前正文</button><button id="rewriteStart" class="button primary compact" type="button">开始重写</button><button id="rewriteCancel" class="button ghost compact" type="button" hidden>取消重写</button></div>
@@ -77,14 +77,17 @@ function promptAssistantSelect(id, entries, selected, placeholder) {
   select.replaceChildren(new Option(placeholder, ""), ...values);
   select.value = selected || "";
 }
+function promptAssistantTemplates(options, profile = currentProfile()) {
+  return (options.templates || []).filter(item => !item.profile || item.profile === profile);
+}
 function promptAssistantIssue(draft) {
   const options = promptAssistantState.options;
   if (!options) return "正在读取服务与系统提示词…";
-  if (!options.available) return options.reason || "请先在启动器中配置并保存服务与系统提示词，再刷新选项。";
+  if (!options.available) return options.reason || "请先在启动器中配置提示词服务，再刷新选项。";
   const service = (options.services || []).find(item => item.id === draft.service);
   if (!service) return draft.service ? "所选服务已不可用，请重新选择。" : "请选择服务、模型与系统提示词。";
   if (!(service.models || []).some(item => item.name === draft.model)) return "请选择可用模型。";
-  if (!(options.templates || []).some(item => item.id === draft.template)) return "请选择系统提示词。";
+  if (!promptAssistantTemplates(options).some(item => item.id === draft.template)) return "请选择用途或系统提示词。";
   if (!draft.source.trim()) return "请输入待重写文本，或读取当前正文。";
   return "";
 }
@@ -101,7 +104,7 @@ function promptAssistantRender() {
   promptAssistantSelect("rewriteService", options.services || [], draft.service, "选择服务");
   const service = (options.services || []).find(item => item.id === draft.service);
   promptAssistantSelect("rewriteModel", (service?.models || []).map(item => ({ id: item.name, name: item.name })), draft.model, "选择模型");
-  promptAssistantSelect("rewriteTemplate", options.templates || [], draft.template, "选择系统提示词");
+  promptAssistantSelect("rewriteTemplate", promptAssistantTemplates(options), draft.template, "选择用途或系统提示词");
   document.getElementById("rewriteSource").value = draft.source;
   document.getElementById("rewriteResult").value = draft.result;
   const issue = promptAssistantIssue(draft);

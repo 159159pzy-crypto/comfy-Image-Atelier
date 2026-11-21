@@ -73,6 +73,23 @@ _YEAR_RE = re.compile(r"^(?:year\s+)?((?:19|20)\d{2})$", re.IGNORECASE)
 _WEIGHT_RE = re.compile(r"^\((.*):(-?\d+(?:\.\d+)?)\)$", re.DOTALL)
 _TAG_SHAPE_RE = re.compile(r"^[\w@+\\/\-;' ]+$", re.UNICODE)
 _SENTENCE_PUNCTUATION_RE = re.compile(r"[.!?。！？]")
+_PROMPT_PARAGRAPH_BREAK_RE = re.compile(r"\r?\n(?:[ \t]*\r?\n)+")
+_ENGLISH_SENTENCE_RE = re.compile(r"""[('"“‘]*[A-Z][A-Za-z0-9'’\-]*\s+\S.*[.!?]['"”’)\]]*""", re.DOTALL)
+ANIMA_HYBRID_SEPARATOR = "\n\n"
+
+
+def split_anima_hybrid(value: str) -> tuple[str, str] | None:
+    """Recognize the generated single-image format's explicit prose boundary."""
+    breaks = list(_PROMPT_PARAGRAPH_BREAK_RE.finditer(value))
+    if breaks and _ENGLISH_SENTENCE_RE.fullmatch(value[:breaks[0].start()].strip()):
+        return None
+    for index, boundary in enumerate(breaks):
+        end = breaks[index + 1].start() if index + 1 < len(breaks) else len(value)
+        paragraph = value[boundary.end():end].strip()
+        if _ENGLISH_SENTENCE_RE.fullmatch(paragraph):
+            tags = value[:boundary.start()].rstrip()
+            return (tags, value[boundary.end():]) if tags else None
+    return None
 
 
 def _split_top_level(value: str) -> list[str]:
@@ -340,14 +357,17 @@ class PromptRuleStore(StorageProtection):
                 raise WorkflowError(f"fields.{field} 必须是字符串")
             if len(raw) > 20000:
                 raise WorkflowError(f"fields.{field} 不能超过 20000 个字符")
+            hybrid = split_anima_hybrid(raw) if model_profile == "anima" and field == "single_positive_prompt" else None
             normalized, rules = self.normalize_text(
-                raw,
+                hybrid[0] if hybrid else raw,
                 FIELD_SCOPES[field],
                 artist_field=field == "manual_artist",
-                protected_lora_words=protected if field in {"extra_prompt", "single_prefix"} else [],
+                protected_lora_words=protected if hybrid or field in {"extra_prompt", "single_prefix"} else [],
                 model_profile=model_profile,
                 apply_custom=apply_custom,
             )
+            if hybrid:
+                normalized = ANIMA_HYBRID_SEPARATOR.join(filter(None, (normalized, hybrid[1])))
             result[field] = normalized
             if normalized != raw:
                 changes.append(

@@ -106,6 +106,24 @@ class ImportedImageService:
             # operation as the write, including when the HTTP caller leaves.
             return await self._finish(add())
 
+    async def adopt_prompt(self, asset_id: str) -> dict[str, Any]:
+        async with self._lock:
+            self.history.ensure_writable()
+            source = self._store("prompt", asset_id)
+            destination = self._store("input")
+
+            def transfer() -> dict[str, Any]:
+                path = self._checked_path(source, asset_id)
+                record = source.get(asset_id)
+                return destination.adopt_normalized_png(path, record)
+
+            async def operation() -> dict[str, Any]:
+                result = await self._thread(transfer)
+                await self._register_prompt(asset_id)
+                return result
+
+            return await self._finish(operation())
+
     async def read(self, kind: str, asset_id: str) -> dict[str, Any]:
         async with self._lock:
             store = self._store(kind, asset_id)

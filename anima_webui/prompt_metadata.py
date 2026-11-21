@@ -6,10 +6,14 @@ from typing import Any
 
 from PIL import Image
 
+from ._vendor.sd_prompt_reader.comfyui import parse_comfyui
 from ._vendor.sd_prompt_reader.formats import (
-    MAX_METADATA_BYTES, candidate, object_json, parameters, parse_image, result, safe_parameters,
+    MAX_GRAPH_NODES, MAX_METADATA_BYTES, candidate, object_json, parameters, parse_image, result,
+    safe_parameters, text,
 )
 from .single_workbench import active_lora_pipelines
+
+WARDROBE_KEYS = ("anima_v4_prompt", "anima_v3_prompt")
 
 
 def empty_metadata(*, warning: str = "") -> dict[str, Any]:
@@ -75,6 +79,86 @@ def _native(info: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _wardrobe_candidate(raw: Any, identity: str, image_size: str) -> dict[str, Any] | None:
+    try:
+        record = object_json(raw)
+        full = text(record.get("positive_full"))
+        positive = full or record.get("positive")
+        label = "Wardrobe · 重建正向" if full else "Wardrobe · 生成正文"
+        values = {"actual_image_size": image_size}
+        if isinstance(record.get("version"), str) and record["version"].strip():
+            values["wardrobe_version"] = record["version"].strip()[:100]
+        return candidate(identity, label, positive, record.get("negative"), values)
+    except (ValueError, TypeError, RecursionError):
+        return None
+
+
+def _wardrobe_graph(info: dict[str, Any], *, dedicated_record: bool) -> dict[str, Any]:
+    raw = info.get("prompt")
+    if raw is None or (not dedicated_record and isinstance(raw, str) and not any(key in raw for key in WARDROBE_KEYS)):
+        return {}
+    try:
+        graph = object_json(raw)
+        return graph if len(graph) <= MAX_GRAPH_NODES else {}
+    except (ValueError, TypeError, RecursionError):
+        return {}
+
+
+def _wardrobe(image: Image.Image) -> dict[str, Any] | None:
+    image_size = f"{image.width}x{image.height}"
+    candidates = []
+    for key in WARDROBE_KEYS:
+        if key in image.info:
+            item = _wardrobe_candidate(image.info[key], "wardrobe:0", image_size)
+            if item:
+                candidates.append(item)
+                break
+
+    graph = _wardrobe_graph(image.info, dedicated_record=bool(candidates))
+    if not candidates:
+        # Wardrobe also stores its report inside multiple API graph nodes. Copies
+        # commonly share the same payload even across different encoders.
+        seen = set()
+        for node in graph.values():
+            inputs = node.get("inputs") if isinstance(node, dict) else None
+            if not isinstance(inputs, dict):
+                continue
+            for key in WARDROBE_KEYS:
+                if key not in inputs:
+                    continue
+                item = _wardrobe_candidate(inputs[key], f"wardrobe:{len(candidates)}", image_size)
+                if item:
+                    signature = (item["text"], item["negative"])
+                    if signature not in seen:
+                        seen.add(signature)
+                        candidates.append(item)
+                    break
+    if not candidates:
+        return None
+
+    # Attach sampler parameters only when the graph independently resolves
+    # a unique positive/negative pair matching the Wardrobe record.
+    if graph:
+        try:
+            graph_candidates = parse_comfyui(graph)["candidates"]
+        except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+            graph_candidates = []
+        by_prompt: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for item in graph_candidates:
+            by_prompt.setdefault((item["text"], item["negative"]), []).append(item["parameters"])
+        for item in candidates:
+            matches = by_prompt.get((item["text"], item["negative"]), [])
+            if len(matches) == 1:
+                item["parameters"] = {**matches[0], **item["parameters"]}
+
+    return {
+        "format": "Anima Wardrobe",
+        "candidates": candidates,
+        "parameters": {},
+        "warnings": ["Wardrobe 记录了生成正文和可用的重建文本，可能缺少后续拼接内容或其他工作流分支。"],
+    }
+
+
 def extract_metadata(image: Image.Image) -> dict[str, Any]:
     warnings = []
     total = sum(len(value.encode("utf-8")) if isinstance(value, str) else len(value) if isinstance(value, bytes) else 0
@@ -86,6 +170,8 @@ def extract_metadata(image: Image.Image) -> dict[str, Any]:
     except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
         parsed = None
         warnings.append("Anima 元数据无法完整解析")
+    if not parsed:
+        parsed = _wardrobe(image)
     if not parsed:
         try:
             parsed = parse_image(image)
