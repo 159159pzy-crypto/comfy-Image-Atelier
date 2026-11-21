@@ -203,7 +203,8 @@ test('reference load failure only changes the thumbnail status and late image ev
     detailMain: { append() {} }, detailScroll: { append() {} }, detailDrawerHome: { append() {} },
     detailPositive: { closest: () => label }, detailNegative: { closest: () => label },
     detailSelection: { innerHTML: '', querySelector: selector => selector === '[data-single-prompts]' ? promptHost : reference, querySelectorAll: () => [] },
-    detailImage: { complete: false, naturalWidth: 1024, naturalHeight: 1536, getAttribute: () => '/api/images/7' }, variantButton: {}, variantModes: { querySelectorAll: () => [] },
+    detailImage: { complete: true, naturalWidth: 880, naturalHeight: 700, src: '/api/images/7', currentSrc: '/api/images/6',
+      getAttribute() { return this.src; } }, variantButton: {}, variantModes: { querySelectorAll: () => [] },
     replayDrawer: { querySelector: () => ({}) } };
   ctx.renderSingleDetail(saved);
   assert.doesNotMatch(ctx.ui.detailStats.innerHTML, /a{64}/);
@@ -211,6 +212,13 @@ test('reference load failure only changes the thumbnail status and late image ev
   thumbnail.onerror();
   assert.equal(thumbnail.hidden, true); assert.equal(status.hidden, false);
   assert.equal(ctx.ui.detailStats.innerHTML, params);
+  assert.match(params, /读取中…/);
+  assert.equal(outputSize.textContent, undefined, 'old decoded pixels cannot replace the initial loading label');
+  ctx.ui.detailImage.currentSrc = '/api/images/7';
+  Object.assign(ctx.ui.detailImage, { naturalWidth: 0, naturalHeight: 0 });
+  ctx.ui.detailImage.onerror();
+  assert.equal(outputSize.textContent, '图片不可用');
+  Object.assign(ctx.ui.detailImage, { naturalWidth: 1024, naturalHeight: 1536 });
   ctx.ui.detailImage.onload();
   assert.equal(outputSize.textContent, '1024 × 1536');
   ctx.selectedRecord = { id: 8 };

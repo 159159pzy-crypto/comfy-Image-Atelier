@@ -132,6 +132,7 @@ const ui = Object.fromEntries(
     "detailDialog",
     "closeDialog",
     "detailImage",
+    "detailImageStatus",
     "imagePreviewDialog",
     "closeImagePreview",
     "imagePreviewPrevious",
@@ -2576,9 +2577,10 @@ function card(record, index, historyView = null) {
   button.dataset.recordId = String(record.id);
   button.setAttribute("aria-label", `查看 ${record.filename || "生成结果"}`);
   button.innerHTML = `<img decoding="async" data-thumbnail-url="/api/images/${record.id}/thumbnail" alt="Anima 生成结果"><span class="image-failure" hidden>图片加载失败</span><div class="card-copy"><strong>${escapeHtml(record.filename)}</strong><span>#${record.sequence} · Seed ${record.sample_seed}</span></div>`;
+  DetailImageIntent.bind(button, record.id, () => !artworkFavoritesState.selecting && !document.querySelector("dialog[open]"));
   button.addEventListener("click", () => {
     if (typeof artworkActivateCard === "function" && artworkActivateCard(article.record)) return;
-    openDetail(article.record, { historyView: article.historyView });
+    openDetail(article.record, { historyView: article.historyView, sourceImage: DetailImageIntent.take(article.record.id) });
   });
   article.append(button);
   const retry = document.createElement("button");
@@ -2740,10 +2742,41 @@ async function revealSelectedImageFile() {
   }
 }
 
-function renderDetail(record) {
+function clearDetailImage() {
+  const image = ui.detailImage;
+  if (detailContext) detailContext.imageDecode = null;
+  image.onload = image.onerror = null;
+  image.removeAttribute("src");
+  image.removeAttribute("data-pending");
+  ui.detailImageStatus.hidden = true;
+}
+
+function prepareDetailImage(record, sourceImage) {
+  clearDetailImage();
+  const image = ui.detailImage, status = ui.detailImageStatus, owner = detailContext;
+  image.src = `/api/images/${record.id}`;
+  // The hovered card or single-workbench canvas may already own these decoded pixels.
+  if (sourceImage?.currentSrc === image.src && image.currentSrc === image.src && image.complete && image.naturalWidth) return;
+  image.setAttribute("data-pending", "loading");
+  status.textContent = "正在加载原图…";
+  status.hidden = false;
+  const decode = image.decode();
+  owner.imageDecode = decode;
+  decode.then(() => {
+    if (detailContext?.imageDecode !== decode) return;
+    image.removeAttribute("data-pending");
+    status.hidden = true;
+  }, () => {
+    if (detailContext?.imageDecode !== decode) return;
+    image.setAttribute("data-pending", "error");
+    status.textContent = "原图加载失败";
+  });
+}
+
+function renderDetail(record, sourceImage = null) {
   if (typeof renderArtworkDetail === "function") renderArtworkDetail(record);
   resetRevealImageFile();
-  ui.detailImage.src = `/api/images/${record.id}`;
+  prepareDetailImage(record, sourceImage);
   ui.detailImage.alt = record.filename ? `生成结果：${record.filename}` : "生成结果";
   ui.detailMeta.textContent = `${record.created_at || ""} · ${record.filename || ""}`;
   ui.detailPositive.value = record.positive_prompt || record.resolved_prompt || "";
@@ -2774,25 +2807,25 @@ function renderDetail(record) {
   ui.detailSelection.innerHTML = `<span class="kicker">ACTUAL DRAW</span><div>${SECTIONS.map((section) => `<span><b>${SECTION_META[section].label}</b>${(selected[section] || []).map((item) => escapeHtml(item.title)).join("、") || "未使用"}</span>`).join("")}<span><b>LoRA</b>${loraText}</span></div>${loraRuntimeMarkup(record.lora_runtime)}${typeof resourceResolutionRecordMarkup === "function" ? resourceResolutionRecordMarkup(record) : ""}`;
 }
 
-function updateDetailRecord(record) {
+function updateDetailRecord(record, sourceImage = null) {
   if (typeof closeArtworkPopovers === "function") closeArtworkPopovers({ restoreFocus: false, immediate: true });
   selectedRecord = record;
   ++regenerationRequest;
   regenerationOptions = null;
   closeRegenerationDrawers(false, true);
   if (typeof closeDetailActionPanels === "function") closeDetailActionPanels({ immediate: true });
-  renderDetail(record);
+  renderDetail(record, sourceImage);
   if (detailContext?.origin === "single" && typeof singleGalleryState !== "undefined") singleGalleryState.viewerRecord = record;
 }
-function openDetail(record, { origin = "random", returnFocus = null, historyView = null } = {}) {
+function openDetail(record, { origin = "random", returnFocus = null, historyView = null, sourceImage = null } = {}) {
   if (!record) return;
   if (typeof historyFiltersSuspendPainting === "function") historyFiltersSuspendPainting();
   closeImagePreview({ immediate: true, restoreFocus: false });
   detailContext = { origin, returnFocus: returnFocus || document.activeElement, historyView: historyViewState(historyView) };
   if (typeof showHistoryDetail === "function") showHistoryDetail();
-  updateDetailRecord(record);
+  updateDetailRecord(record, sourceImage);
   updatePreviewNavigation();
-  motionDialog(ui.detailDialog, true);
+  motionDialog(ui.detailDialog, true, { from: { y: 0, scale: 1 }, response: .18 });
 }
 function suppressDetailReturnFocus() {
   if (detailContext) detailContext.returnFocus = null;
@@ -2807,8 +2840,7 @@ function finishDetailClose() {
   resetRevealImageFile();
   const context = detailContext;
   closeImagePreview({ immediate: true, restoreFocus: false });
-  ui.detailImage.onload = ui.detailImage.onerror = null;
-  ui.detailImage.removeAttribute("src");
+  clearDetailImage();
   ++regenerationRequest;
   regenerationOptions = null;
   detailContext = null;

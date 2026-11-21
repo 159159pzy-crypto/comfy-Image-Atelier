@@ -193,13 +193,18 @@ function renderSingleDetail(record) {
     if (thumbnail.complete) updateReference();
   }
   const image = ui.detailImage, expected = `/api/images/${record.id}`;
-  const setSize = () => {
-    if (selectedRecord !== record || image.getAttribute("src") !== expected) return;
-    const target = ui.detailStats.querySelector('[data-detail-value="output-size"] dd');
-    if (target) target.textContent = image.naturalWidth && image.naturalHeight ? `${image.naturalWidth} × ${image.naturalHeight}` : "图片不可用";
+  const outputSize = ui.detailStats.querySelector('[data-detail-value="output-size"] dd');
+  const isCurrent = () => selectedRecord === record && image.getAttribute("src") === expected && image.complete;
+  const showSize = () => {
+    if (isCurrent() && image.currentSrc === image.src && image.naturalWidth > 0 && image.naturalHeight > 0) {
+      outputSize.textContent = `${image.naturalWidth} × ${image.naturalHeight}`;
+    }
   };
-  image.onload = setSize; image.onerror = setSize;
-  if (image.complete) setSize();
+  image.onload = showSize;
+  image.onerror = () => {
+    if (isCurrent() && !image.naturalWidth && (!image.currentSrc || image.currentSrc === image.src)) outputSize.textContent = "图片不可用";
+  };
+  showSize();
   ui.variantButton.textContent = "同提示词变体";
   singleDetailActions(true);
   ui.detailPositive.closest("label").firstChild.textContent = "底图最终有效提示词";

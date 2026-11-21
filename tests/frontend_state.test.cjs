@@ -611,7 +611,9 @@ function galleryContext() {
     console, URL, Map, Set, queueMicrotask,
     document: { getElementById: element }, elements,
     imagePreview: { phase: 'open', context: { kind: 'single', record: null }, navigationRequest: 0, token: 0, preloaded: new Map() },
-    ui: { imagePreviewDialog: { classList: { add() {}, remove() {} } }, imagePreviewImage: { hidden: false, focus() {} }, imagePreviewStatus: {}, detailImage: element('detailImage'), detailDialog: { open: true, showModal() { this.open = true; } } },
+    ui: { imagePreviewDialog: { classList: { add() {}, remove() {} } }, imagePreviewImage: { hidden: false, focus() {} }, imagePreviewStatus: {},
+      detailImage: element('detailImage'), detailImageStatus: element('detailImageStatus'),
+      detailDialog: { open: true, showModal() { this.open = true; } } },
     detailContext: { origin: 'single' }, selectedRecord: null, regenerationRequest: 0, regenerationOptions: {},
     closeRegenerationDrawers() {}, renderDetail() {},
     cancelImagePreviewAnimation() {}, updatePreviewNavigation() {}, announcePreview() {},
@@ -619,6 +621,7 @@ function galleryContext() {
     historyPage: 7, historyItems: [{ id: 999, settings: { workbench: 'random' } }], historyCache: new Map([[7, { untouched: true }]]),
   });
   vm.runInContext(gallerySource, ctx);
+  vm.runInContext(functionSource('clearDetailImage'), ctx);
   vm.runInContext(functionSource('updateDetailRecord'), ctx);
   ctx.state = vm.runInContext('singleGalleryState', ctx);
   ctx.singleGalleryDecode = async () => {};

@@ -17,7 +17,7 @@
   <link rel="stylesheet" href="/static/styles.css?v=20261115-round-controls">
   <link rel="stylesheet" href="/static/single-layout.css?v=20261024-motion">
   <link rel="stylesheet" href="/static/single-details.css?v=20261024-motion">
-  <link rel="stylesheet" href="/static/history-detail.css?v=20261110-delete-choice">
+  <link rel="stylesheet" href="/static/history-detail.css?v=20261120-sharp-detail">
   <link rel="stylesheet" href="/static/history-filters.css?v=20261115-filter-window">
   <link rel="stylesheet" href="/static/character-classification.css?v=20261111-local-classification">
   <link rel="stylesheet" href="/static/artwork-favorites.css?v=20261029-favorites-motion">
@@ -764,7 +764,10 @@
     </header>
     <div class="history-host-body">
     <div id="historyDetailView" class="detail-layout">
-      <figure><img id="detailImage" tabindex="0" role="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="imagePreviewDialog" aria-label="展开全尺寸图片预览" title="点击查看全尺寸图片" alt="生成结果"></figure>
+      <figure>
+        <img id="detailImage" decoding="async" tabindex="0" role="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="imagePreviewDialog" aria-label="展开全尺寸图片预览" title="点击查看全尺寸图片" alt="生成结果">
+        <span id="detailImageStatus" role="status" hidden></span>
+      </figure>
       <div class="detail-copy">
         <header class="detail-header">
           <div><span id="detailMeta" class="kicker"></span></div>
@@ -899,15 +902,16 @@
   <script src="/static/motion.js?v=20261024-motion" defer></script>
   <script src="/static/workbench-parameters.js?v=20261108-experience-v5" defer></script>
   <script src="/static/artwork-thumbnails.js?v=20261114-thumbnail-recovery" defer></script>
+  <script src="/static/detail-image-intent.js?v=20261120-sharp-detail" defer></script>
   <script src="/static/single-layout.js?v=20261114-thumbnail-recovery" defer></script>
-  <script src="/static/single-gallery.js?v=20261028-remove-artwork-management" defer></script>
+  <script src="/static/single-gallery.js?v=20261120-detail-image" defer></script>
   <script src="/static/shared-favorites.js?v=20261030-source-lifecycle" defer></script>
   <script src="/static/prompt-reverse.js?v=20261113-explicit-method" defer></script>
   <script src="/static/prompt-assistant.js?v=20261108-cancel-state" defer></script>
   <script src="/static/single-workbench.js?v=20261112-presets-v3" defer></script>
   <script src="/static/single-input.js?v=20261028-remove-artwork-management" defer></script>
   <script src="/static/single-compatibility.js?v=20261024-single-ui" defer></script>
-  <script src="/static/single-details.js?v=20261110-resource-resolution" defer></script>
+  <script src="/static/single-details.js?v=20261120-detail-image" defer></script>
   <script src="/static/krea-pool.js?v=20261030-source-lifecycle" defer></script>
   <script src="/static/history-detail.js?v=20261115-filter-window" defer></script>
   <script src="/static/history-filter-window.js?v=20261115-filter-window" defer></script>
@@ -919,6 +923,6 @@
   <script src="/static/resource-resolution.js?v=20261110-resource-resolution" defer></script>
   <script src="/static/character-classification.js?v=20261111-local-classification" defer></script>
   <script src="/static/style-preset-manager.js?v=20261115-presets-favorites" defer></script>
-  <script src="/static/app.js?v=20261115-filter-window" defer></script>
+  <script src="/static/app.js?v=20261120-sharp-detail" defer></script>
 </body>
 </html>

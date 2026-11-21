@@ -169,7 +169,12 @@ function singleGalleryOpenDetail() {
   const state = singleGalleryState;
   if (!state.ready || !state.active || state.busy || state.finishingBatch || !state.lastCompleted) return;
   state.imageError = null;
-  openDetail(state.lastCompleted, { origin: "single", returnFocus: singleGalleryElement("singlePreviewOpen") });
+  const image = singleGalleryElement("singlePreviewImage"), expected = `/api/images/${state.lastCompleted.id}`;
+  const originalReady = !state.live && state.canvasSource === expected && image.getAttribute("src") === expected
+    && image.complete && image.currentSrc === image.src && image.naturalWidth > 0 && image.naturalHeight > 0;
+  openDetail(state.lastCompleted, {
+    origin: "single", returnFocus: singleGalleryElement("singlePreviewOpen"), sourceImage: originalReady ? image : null,
+  });
 }
 async function singleGallerySelect(record, { focus = false, navigation = false } = {}) {
   const state = singleGalleryState, context = imagePreview.context;

@@ -52,8 +52,14 @@
 
 /* Metadata keeps its scroll position while actions unfold above the dock. */
 .history-host .detail-layout { display: grid; grid-template-columns: minmax(0, 47%) minmax(0, 1fr); height: 100%; min-height: 0; }
-.history-host .detail-layout figure { height: 100%; min-height: 0; margin: 0; overflow: hidden; background: var(--surface-muted); }
+.history-host .detail-layout figure { position: relative; height: 100%; min-height: 0; margin: 0; overflow: hidden; background: var(--surface-muted); }
 .history-host .detail-layout figure img { width: 100%; height: 100%; object-fit: cover; object-position: center; }
+#detailImage[data-pending] { opacity: 0; }
+.detail-layout figure:has(#detailImage[data-pending]:focus-visible) { outline: 3px solid var(--accent); outline-offset: -3px; }
+#detailImageStatus { position: absolute; bottom: 12px; left: 12px; padding: 5px 10px; border-radius: var(--r-sm); color: var(--text); background: var(--chrome-solid); font-size: 12px; pointer-events: none; }
+#detailImage[data-pending="loading"] + #detailImageStatus { animation: detail-loading-hint 180ms step-end; }
+@keyframes detail-loading-hint { from { opacity: 0; } to { opacity: 1; } }
+#detailImage.image-preview-source-hidden + #detailImageStatus { visibility: hidden; }
 .history-host .detail-copy { display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; min-width: 0; min-height: 0; padding: 0; overflow: hidden; }
 .history-host .detail-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 64px; margin: 0; padding: 10px 20px; border-bottom: 1px solid var(--separator); }
 .history-host .detail-header > div { min-width: 0; }

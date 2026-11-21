@@ -46,6 +46,31 @@ function setup(extra = {}) {
   return { ctx, state, elements, image, decodes, revoked, requests, running, live };
 }
 
+test('opening single detail reuses only the loaded canvas original for the current record', () => {
+  const reopened = [];
+  const h = setup({ openDetail: (item, options) => reopened.push({ item, ...options }) });
+  const open = () => {
+    h.ctx.singleGalleryOpenDetail();
+    const options = reopened.at(-1);
+    assert.equal(options.item, h.state.lastCompleted);
+    assert.equal(options.returnFocus, h.elements.get('singlePreviewOpen'));
+    return options.sourceImage;
+  };
+  Object.assign(h.image, { complete: true, currentSrc: h.image.src, naturalWidth: 1024, naturalHeight: 1536 });
+  assert.equal(open(), h.image);
+  h.image.complete = false;
+  assert.equal(open(), null);
+  h.image.complete = true;
+  h.image.currentSrc = '/api/images/99';
+  assert.equal(open(), null);
+  h.image.currentSrc = h.image.src;
+  h.state.lastCompleted = record(2);
+  assert.equal(open(), null);
+  h.live();
+  h.image.currentSrc = h.image.src;
+  assert.equal(open(), null);
+});
+
 test('independent rewrite tasks leave the image canvas and history unchanged throughout their lifecycle', async () => {
   const h = setup();
   const previous = h.state.lastCompleted;

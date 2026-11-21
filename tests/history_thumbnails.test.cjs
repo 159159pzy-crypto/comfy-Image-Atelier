@@ -48,6 +48,7 @@ function setup() {
     document: { createElement: element }, escapeHtml: value => String(value || ''), openDetail: record => opened.push(record),
     ui: { gallery, emptyState: empty, pageLabel: {}, prevPage: {}, nextPage: {}, historyCount: {} },
     config: {}, historyDirty: true, historyPage: 1, historyPages: 1, historyItems: [], historyCache: new Map(), updatePreviewNavigation() {},
+    DetailImageIntent: { bind() {}, take() { return null; } },
     ArtworkThumbnails: { attach: (...args) => attachments.push(args), remove: article => removed.push(article), refresh() {} },
   });
   load(ctx, 'historyViewState', 'card', 'cacheHistoryPage', 'renderHistoryPage');
@@ -118,14 +119,16 @@ test('unchanged refresh preserves image nodes and focus targets; metadata and cl
 
 test('details load the original for both workbenches and release it only after the dialog closes', () => {
   const image = element('img');
+  image.decode = async () => {};
   const negativeLabel = { firstChild: { textContent: '' } };
   const ctx = vm.createContext({
-    ui: { detailImage: image, detailDialog: { open: true }, detailMeta: {}, detailPositive: {}, detailNegative: { closest: () => negativeLabel }, detailStats: {}, detailSelection: {} },
+    ui: { detailImage: image, detailImageStatus: element('span'),
+      detailDialog: { open: true }, detailMeta: {}, detailPositive: {}, detailNegative: { closest: () => negativeLabel }, detailStats: {}, detailSelection: {} },
     resetRevealImageFile() {}, renderSingleDetail() {}, resetSingleDetail() {}, closeRegenerationDrawers() {},
     normalizeSettings: settings => ({ ...settings, loras: [] }), SECTIONS: [], escapeHtml: String,
     detailContext: { origin: 'random' }, closeImagePreview() {}, regenerationRequest: 0, regenerationOptions: {}, document: { querySelector: () => null },
   });
-  load(ctx, 'loraRuntimeMarkup', 'renderDetail', 'finishDetailClose');
+  load(ctx, 'loraRuntimeMarkup', 'clearDetailImage', 'prepareDetailImage', 'renderDetail', 'finishDetailClose');
   for (const zero of [true, false]) {
     const item = record(7); item.settings.zero_negative = zero; item.negative_prompt = 'original negative';
     ctx.renderDetail(item);
@@ -134,6 +137,8 @@ test('details load the original for both workbenches and release it only after t
     assert.match(ctx.ui.detailStats.innerHTML, zero ? /<dd>置零<\/dd>/ : /<dd>使用负面提示词<\/dd>/);
   }
   for (const workbench of ['random', 'single']) {
+    ctx.detailContext = { origin: workbench };
+    ctx.ui.detailDialog.open = true;
     ctx.renderDetail(record(7, workbench));
     assert.equal(image.src, '/api/images/7');
     image.onload = image.onerror = () => {};
@@ -144,6 +149,7 @@ test('details load the original for both workbenches and release it only after t
     assert.equal(image.src, '');
     assert.equal(image.onload, null);
     assert.equal(image.onerror, null);
-    ctx.ui.detailDialog.open = true;
+    assert.equal(image.getAttribute('data-pending'), null);
+    assert.equal(ctx.ui.detailImageStatus.hidden, true);
   }
 });

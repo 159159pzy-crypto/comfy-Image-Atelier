@@ -201,6 +201,7 @@ test('closing the last deleted record restores focus to the active source when i
   const ctx = vm.createContext({
     ui: {
       detailDialog: { open: false }, detailImage: { removeAttribute() {} },
+      detailImageStatus: {},
       gallery: { querySelector: () => null },
       prevPage: { disabled: true, focus() { throw new Error('Cannot restore focus to a disabled pager'); } },
     },
@@ -209,6 +210,7 @@ test('closing the last deleted record restores focus to the active source when i
     resetRevealImageFile() {}, closeImagePreview() {}, closeRegenerationDrawers() {}, resetHistoryDetail() {},
     document: { querySelector: selector => selector === '#historyWorkbenchFilter [aria-checked="true"]' ? source : null },
   });
+  install(ctx, 'clearDetailImage');
   install(ctx, 'finishDetailClose');
   ctx.finishDetailClose();
   assert.equal(focused.target, source);
