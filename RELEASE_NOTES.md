@@ -1,44 +1,25 @@
-# Comfy Image Atelier 1.7.0 — 启动器引导与作品库筛选
+# Comfy Image Atelier 1.8.0 — 提示词创作与参考图复用
 
-发布日期：**2026-11-15**。
+在单图工作台，可以从一句构想开始扩写，也可以让视觉 AI 描述参考图的构图，再把同一张图带入图生图。已有 ComfyUI 整合包的用户可通过 Windows 启动器只读接入现有服务。
 
-本版改进首次安装、已有环境导入与 ComfyUI 更新恢复，新增作品内容筛选、风格预设资料库和本地角色标签分类，并改善缩略图、LoRA 与资源检查体验。
+## 提示词与参考图
 
-## 安装、依赖与更新
+- **按用途重写。** 可选电影分镜、时装海报、创意插画和场景概念设计。Anima 将英文标签与人物动作、空间关系分段，整理标签和添加 LoRA 触发词时保留描述段。Krea 2 则生成连贯的英文描述。
+- **按构图反推。** 视觉 AI 新增「构图保真」，优先描述裁切、机位、主体的相对位置、大小与遮挡。点「用作图生图参考」即可将反推图片带入单图工作台，提示词仍可独立编辑和应用。
+- **导入 Wardrobe V6 的 PNG。** 元数据提取优先使用重建正向，缺失时回退到生成正文。对于多分支工作流，提取结果可能只覆盖部分分支。
 
-- **六步向导更清楚。** 可连续选择功能后统一「检查所选内容」，提前检查 Python 版本、位数和依赖，明确展示待补齐的包、节点、运行文件及保存位置。选择改变后须重新确认，重开仍保留配置缺项；提示词助手区分未安装、稍后配置和已配置。已有环境可先连接，再到工作台配置生成资源。
-- **功能按需准备。** 模型页可预览并「一键准备完整功能」，下载、依赖和运行检查使用同一选择。新建默认准备 Anima 基础三件套与双采样所需的 Sesqui，SeedVR2 等增强功能继续选装；3B 与 7B Sharp 共用 VAE。像素高清的新下载入口统一为 4x AnimeSharp，已有 Remacri、共享模型和旧冻结任务继续保留。
-- **依赖检查更准确。** 新装、导入与修复统一读取工作台实际依赖，检查版本及递归依赖，兼容没有 pip 的独立 Python；修复旧工作台可编辑安装登记冲突和受管 SAM2 误报。节点更新按本次已有节点准备资源，避免额外要求未选择的 Sesqui 或 Triton。
-- **ComfyUI 更新可恢复。** 展示当前与目标稳定版本，检查后固定目标；采用轻量恢复点，准备阶段支持暂停和缓存续用，失败后恢复源码与相关配置，并提供更新依赖修复。保留 GPU 包版本、模型、用户数据和旧恢复记录；核心启动验证与插件完整运行检查分别进行。
+## 启动器与作品详情
 
-## 作品库与日常整理
+- **接入已有 ComfyUI。** 默认只读连接由原整合包启动的服务，通过独立 Python 准备工作台。选择允许补齐时，可先预览涉及的节点和依赖，启动器在修复前建立备份。
+- **从中断处继续配置。** 向导支持选择系统代理、直连或自定义 HTTP 代理。依赖安装中断后可重新核对已有内容并继续，完成页可稍后返回，也可试生成一张 512 × 512 图片并在工作台历史中查看。
+- **打开作品看原图。** 作品库和单图工作台会提前准备即将打开的原图，待解码后显示。快速翻图时，详情跟随当前选中的作品。README 增加了八种放大修复流程的同区域细节对比。
 
-- **内容筛选。** 在右侧抽屉按历史正向提示词、五类词池、当前分组和人物属性组合包含／排除作品；结果、分页和详情翻图使用同一查询，条件在本机浏览器保存。大分支按可见范围加载，关闭后释放控件并记住浏览位置。
-- **跨页批量删除。** 支持跨页、跨来源选择，保留「只删除记录／同时删除原图」确认和共享原图保护；部分失败时仅保留失败项供重试。
-- **风格预设资料库。** 新增搜索、收藏、分组、标签、批量整理与自定义封面，支持卡片／列表切换。应用时按字段选择是否携带尺寸、放大修复、图生图和单图前后缀，保留当前正文、提示词池、AI 处理及设备设置；改善焦点、输入法和收藏操作的稳定性。
-- **本地角色分类。** 结合已有词库与标签表区分触发词和特征，未知或冲突内容可人工确认；贯通三种标签模式、导入预览、编辑与保存，旧数据备份后升级。
-- **加载与识别修复。** 缩略图优先加载可见作品，增加失败重试及 1 GiB 容量缓存；加快 LoRA 查询和收藏，修复封面恢复，以及带元数据图片无法继续使用视觉 AI／本地标签反推的问题。
+## Windows x64 下载与升级
 
-## 生成与历史兼容
+- 日常安装或覆盖升级，推荐下载 `AnimaRandomStudio-Setup-win-x64.exe`。升级前请等待生成队列空闲并退出启动器。
+- 下载 `AnimaRandomStudio.exe` 可直接运行，`AnimaRandomStudio-portable-win-x64.zip` 内含同一份 EXE。
+- `SHA256SUMS.txt` 列出三个程序附件的 SHA-256，`build-info.json` 记录版本、构建来源和工作台载荷哈希。
 
-- 新任务使用 **v5 流程**，像素高清的缩图比例和算法始终生效；v2–v4 历史沿用原执行规则，载入旧设置不自动升级。
-- 新增默认关闭的「负向条件零化」，保留负面提示词文本。新建与恢复默认时，Anima 使用 30 步／CFG 4／`er_sde + simple`，Krea 2 Turbo 使用 8 步／CFG 1／`euler + simple`；已保存的明确参数不自动覆盖。
-- 正常生成及停止后的清理只清显存缓存并执行垃圾回收，保留模型加载和执行结果缓存。停止状态分别显示本地停止、ComfyUI 取消确认与清理结果。
+标签发布流程包含 Windows 和 Linux 回归测试、Chromium 工作台交互测试、依赖审计、Windows 启动器打包与隔离安装、修复、卸载检查。硬件上的生成结果取决于所选模型、节点和设备。[GitHub Actions](https://github.com/159159pzy-crypto/comfy-Image-Atelier/actions/workflows/launcher.yml)
 
-## 下载与升级
-
-首次打开 Windows 启动器前，可用 PowerShell 的 `Get-FileHash -Algorithm SHA256 .\AnimaRandomStudio.exe` 与对应版本的 `SHA256SUMS.txt` 核对文件。安装版请换成安装程序的文件名。若双击后窗口没有出现，请检查当前用户的 TEMP 目录是否可写、所在盘是否有空间，并查看 Windows 安全中心的「保护历史记录」或安全软件的隔离记录。TEMP 受限时可在启动前设置 `DOTNET_BUNDLE_EXTRACT_BASE_DIR`，指向自己有写入权限的本地目录。签名信息可在文件属性的「数字签名」中查看。[Windows 启动器说明](launcher/README.md)
-
-- **推荐安装版**：`AnimaRandomStudio-Setup-win-x64.exe`，支持覆盖已有安装。
-- **单文件版**：`AnimaRandomStudio.exe`；`AnimaRandomStudio-portable-win-x64.zip` 仅包含同一份 EXE。
-- `SHA256SUMS.txt` 用于校验三个程序附件，`build-info.json` 记录版本、来源提交和载荷哈希。GitHub 的 Source code 附件为开发源码，不含 EXE 或模型。
-- 升级前等待队列空闲、退出启动器并备份数据。沿用原 EXE 文件名、安装标识与用户数据目录；旧仓库版本需从本仓库手动下载安装一次。
-- 软件升级不自动升级已有 ComfyUI 或节点。使用新版阶段清理需要当前环境提供 KJNodes `VRAM_Debug`；若提示缺失，更新 ComfyUI-KJNodes 并重启。停止清理扩展由启动器随工作台更新，需正常重启 ComfyUI 后生效。
-
-## 验证范围
-
-发布前功能提交已通过 GitHub 的 Windows／Linux、Python 3.11／3.13 回归、Chromium 交互测试、依赖审计，以及 Windows 启动器构建、包体校验和隔离安装／修复／卸载检查。1.7.0 标签重新执行同一发布流程，全部通过后才公开附件，结果可在 [GitHub Actions](https://github.com/159159pzy-crypto/comfy-Image-Atelier/actions/workflows/launcher.yml) 查看。
-
-本地另已完成相关 .NET 回归、独立无 pip 环境依赖安装和浅／深色、小窗口、键盘及状态恢复的原生向导检查。本版未重新完成完整新机冷安装或 GPU 生图闭环，不把历史硬件验收当成本版实测，也不声明所有模型、插件和显卡均已验证。
-
-[完整更新日志](https://github.com/159159pzy-crypto/comfy-Image-Atelier/blob/1.7.0/CHANGELOG.md) · [使用指南](https://github.com/159159pzy-crypto/comfy-Image-Atelier/blob/1.7.0/docs/guide.md) · [启动器说明](https://github.com/159159pzy-crypto/comfy-Image-Atelier/blob/1.7.0/launcher/README.md)
+[使用指南](https://github.com/159159pzy-crypto/comfy-Image-Atelier/blob/1.8.0/docs/guide.md) · [Windows 启动器说明](https://github.com/159159pzy-crypto/comfy-Image-Atelier/blob/1.8.0/launcher/README.md) · [完整更新日志](https://github.com/159159pzy-crypto/comfy-Image-Atelier/blob/1.8.0/CHANGELOG.md)

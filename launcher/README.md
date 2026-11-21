@@ -2,7 +2,7 @@
 
 ## 安装与使用
 
-当前版本说明为 **1.7.0**，正式安装包及发布状态以 [GitHub Releases](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases) 为准。软件由 Anima Random Studio 更名，旧仓库版本用户需从新仓库手动下载一次，之后启动器从新仓库检查正式 Release。为兼容现有安装与用户数据，保留 EXE 文件名、安装标识和数据目录。**推荐下载 `AnimaRandomStudio-Setup-win-x64.exe` 安装**，也可直接下载 `AnimaRandomStudio.exe` 运行。`AnimaRandomStudio-portable-win-x64.zip` 仅包含同一份 EXE。源码 ZIP 不包含 EXE。运行依赖自动提取到用户缓存，EXE 旁无需 DLL 或资源文件。
+当前版本为 **1.8.0**。**推荐下载 `AnimaRandomStudio-Setup-win-x64.exe` 安装**，也可直接下载 `AnimaRandomStudio.exe` 运行。便携 ZIP 内含同一份 EXE，运行依赖自动提取到用户缓存。软件由 Anima Random Studio 更名，沿用原有 EXE 文件名、安装标识和数据目录。旧仓库版本用户需手动下载一次，之后可由启动器检查正式更新。[GitHub Releases](https://github.com/159159pzy-crypto/comfy-Image-Atelier/releases)
 
 安装版默认按用户安装到 `%LOCALAPPDATA%/Programs/AnimaRandomStudio`，也可选择其他位置；创建开始菜单入口，可选桌面快捷方式；卸载保留用户数据、模型和环境。
 
@@ -34,11 +34,11 @@
 
 新安装计划记录功能集合，节点、运行文件、下载量和检查范围使用同一选择。旧暂停任务继续使用原先冻结的文件、版本和必需项，不因升级自动增加 SeedVR2 等选装下载。
 
-## 1.7.0 更新与验证范围
+## 1.8.0 更新与验证范围
 
-本版改进六步新手向导、实际依赖检查和完整功能准备，增加 ComfyUI 稳定版更新、轻量恢复点与更新依赖修复。工作台新增作品库内容筛选、风格预设资料库与本地角色标签分类，并改进缩略图及 LoRA 加载。启动器继续提供单文件版、安装版和便携 ZIP，沿用已有环境与数据目录。
+向导默认只读连接由原整合包启动的 ComfyUI，在独立 Python 中准备工作台。选择允许修复时，先预览影响范围并建立备份。高级下载设置支持选择网络模式，完成页支持试生成一张 512 × 512 图片并在工作台历史中查看结果。
 
-本版的发布检查与验证边界见[发行说明](../RELEASE_NOTES.md)。下列 1.5.1 记录仅作为该版本的安装验收历史，不代表 1.7.0 已重新完成这些 GPU 和新机安装测试。
+本版的发布检查见[发行说明](../RELEASE_NOTES.md)。下节记录的是 1.5.1 的安装验收。
 
 ### 1.5.1 安装修复与历史验证
 
